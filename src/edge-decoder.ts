@@ -212,7 +212,7 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
   let currentY = NaN;
   let startX = NaN;  // Track path start for auto-close
   let startY = NaN;
-  const EPSILON = 0.01; // Tolerance for coordinate comparison
+  const EPSILON = 0.5; // Tolerance for coordinate comparison (in pixels)
   const MAX_COORD = 200000; // Maximum reasonable coordinate value (10000 pixels in twips)
 
   while (i < tokens.length) {
@@ -461,12 +461,17 @@ export function parseEdge(edgeElement: globalThis.Element): Edge {
   const fillStyle1 = edgeElement.getAttribute('fillStyle1');
   const strokeStyle = edgeElement.getAttribute('strokeStyle');
   // Edge data can be in either 'edges' or 'cubics' attribute
-  const edgesAttr = edgeElement.getAttribute('edges') || edgeElement.getAttribute('cubics') || '';
+  const edgesAttr = edgeElement.getAttribute('edges') || '';
+  const cubicsAttr = edgeElement.getAttribute('cubics') || '';
+
+  // Use cubics if available (higher fidelity), otherwise use edges
+  const dataAttr = cubicsAttr || edgesAttr;
+  const commands = decodeEdges(dataAttr);
 
   return {
     fillStyle0: fillStyle0 ? parseInt(fillStyle0) : undefined,
     fillStyle1: fillStyle1 ? parseInt(fillStyle1) : undefined,
     strokeStyle: strokeStyle ? parseInt(strokeStyle) : undefined,
-    commands: decodeEdges(edgesAttr)
+    commands
   };
 }
