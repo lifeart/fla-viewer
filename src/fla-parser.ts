@@ -388,23 +388,26 @@ export class FLAParser {
     const elementsContainer = frame.querySelector(':scope > elements');
     if (!elementsContainer) return elements;
 
+    // Identity matrix as the starting parent transform
+    const identityMatrix: Matrix = { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 };
+
     // Parse direct children in document order to preserve z-ordering
     for (const child of elementsContainer.children) {
       switch (child.tagName) {
         case 'DOMSymbolInstance':
-          elements.push(this.parseSymbolInstance(child));
+          elements.push(this.parseSymbolInstance(child, identityMatrix));
           break;
         case 'DOMShape':
-          elements.push(this.parseShape(child));
+          elements.push(this.parseShape(child, identityMatrix));
           break;
         case 'DOMGroup':
-          this.parseGroupMembers(child, elements);
+          this.parseGroupMembers(child, elements, identityMatrix);
           break;
         case 'DOMVideoInstance':
           elements.push(this.parseVideoInstance(child));
           break;
         case 'DOMBitmapInstance':
-          elements.push(this.parseBitmapInstance(child));
+          elements.push(this.parseBitmapInstance(child, identityMatrix));
           break;
       }
     }
@@ -412,45 +415,64 @@ export class FLAParser {
     return elements;
   }
 
-  private parseGroupMembers(group: globalThis.Element, elements: DisplayElement[]): void {
+  private parseGroupMembers(group: globalThis.Element, elements: DisplayElement[], parentMatrix: Matrix): void {
     const members = group.querySelector(':scope > members');
     if (!members) return;
 
-    // XFL stores each element's matrix in GLOBAL coordinates, not relative to parent groups.
-    // Groups are organizational containers for the editor - their matrices should NOT be
-    // composed with child matrices. Each child uses its own matrix directly.
+    // Get the group's own matrix and compose with parent
+    const groupMatrix = this.parseMatrix(group.querySelector(':scope > matrix > Matrix'));
+    const composedMatrix = this.composeMatrices(parentMatrix, groupMatrix);
 
     // Parse children in document order to preserve z-ordering
     for (const child of members.children) {
       switch (child.tagName) {
         case 'DOMShape':
-          elements.push(this.parseShape(child));
+          elements.push(this.parseShape(child, composedMatrix));
           break;
         case 'DOMGroup':
-          this.parseGroupMembers(child, elements);
+          this.parseGroupMembers(child, elements, composedMatrix);
           break;
         case 'DOMSymbolInstance':
-          elements.push(this.parseSymbolInstance(child));
+          elements.push(this.parseSymbolInstance(child, composedMatrix));
           break;
         case 'DOMVideoInstance':
           elements.push(this.parseVideoInstance(child));
           break;
         case 'DOMBitmapInstance':
-          elements.push(this.parseBitmapInstance(child));
+          elements.push(this.parseBitmapInstance(child, composedMatrix));
           break;
       }
     }
   }
 
+  // Compose two matrices: result = parent * child
+  private composeMatrices(parent: Matrix, child: Matrix): Matrix {
+    return {
+      a: parent.a * child.a + parent.c * child.b,
+      b: parent.b * child.a + parent.d * child.b,
+      c: parent.a * child.c + parent.c * child.d,
+      d: parent.b * child.c + parent.d * child.d,
+      tx: parent.a * child.tx + parent.c * child.ty + parent.tx,
+      ty: parent.b * child.tx + parent.d * child.ty + parent.ty
+    };
+  }
 
-  private parseSymbolInstance(el: globalThis.Element): SymbolInstance {
+
+  private parseSymbolInstance(el: globalThis.Element, parentMatrix?: Matrix): SymbolInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const symbolType = (el.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
     const loop = (el.getAttribute('loop') || 'loop') as 'loop' | 'play once' | 'single frame';
     const firstFrame = el.getAttribute('firstFrame');
 
-    const matrix = this.parseMatrix(el.querySelector('matrix > Matrix'));
+    const matrixEl = el.querySelector('matrix > Matrix');
+    let matrix = this.parseMatrix(matrixEl);
     const transformationPoint = this.parsePoint(el.querySelector('transformationPoint > Point'));
+
+    // Only apply parent matrix if element has NO matrix of its own
+    // (Flash stores final transforms on elements that have them)
+    if (!matrixEl && parentMatrix && !this.isIdentityMatrix(parentMatrix)) {
+      matrix = parentMatrix;
+    }
 
     // Parse 3D center point if present
     const centerPoint3DX = el.getAttribute('centerPoint3DX');
@@ -471,6 +493,10 @@ export class FLAParser {
     };
   }
 
+  private isIdentityMatrix(m: Matrix): boolean {
+    return m.a === 1 && m.b === 0 && m.c === 0 && m.d === 1 && m.tx === 0 && m.ty === 0;
+  }
+
   private parseVideoInstance(el: globalThis.Element): VideoInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const frameRight = el.getAttribute('frameRight');
@@ -487,9 +513,15 @@ export class FLAParser {
     };
   }
 
-  private parseBitmapInstance(el: globalThis.Element): BitmapInstance {
+  private parseBitmapInstance(el: globalThis.Element, parentMatrix?: Matrix): BitmapInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
-    const matrix = this.parseMatrix(el.querySelector('matrix > Matrix'));
+    const matrixEl = el.querySelector('matrix > Matrix');
+    let matrix = this.parseMatrix(matrixEl);
+
+    // Only apply parent matrix if element has NO matrix of its own
+    if (!matrixEl && parentMatrix && !this.isIdentityMatrix(parentMatrix)) {
+      matrix = parentMatrix;
+    }
 
     return {
       type: 'bitmap',
@@ -498,8 +530,14 @@ export class FLAParser {
     };
   }
 
-  private parseShape(el: globalThis.Element): Shape {
-    const matrix = this.parseMatrix(el.querySelector('matrix > Matrix'));
+  private parseShape(el: globalThis.Element, parentMatrix?: Matrix): Shape {
+    const matrixEl = el.querySelector('matrix > Matrix');
+    let matrix = this.parseMatrix(matrixEl);
+
+    // Only apply parent matrix if element has NO matrix of its own
+    if (!matrixEl && parentMatrix && !this.isIdentityMatrix(parentMatrix)) {
+      matrix = parentMatrix;
+    }
     const fills = this.parseFills(el);
     const strokes = this.parseStrokes(el);
     const edges = this.parseShapeEdges(el);
