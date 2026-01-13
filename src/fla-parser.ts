@@ -27,17 +27,23 @@ import { decodeEdges } from './edge-decoder';
 // Debug flag - enabled via ?debug=true URL parameter
 const DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
 
+export type ProgressCallback = (message: string) => void;
+
 export class FLAParser {
   private zip: JSZip | null = null;
   private symbolCache: Map<string, Symbol> = new Map();
   private parser = new DOMParser();
 
-  async parse(file: File): Promise<FLADocument> {
+  async parse(file: File, onProgress?: ProgressCallback): Promise<FLADocument> {
+    const progress = onProgress || (() => {});
+
     // Try to load ZIP, handling potentially corrupted files
+    progress('Extracting archive...');
     try {
       this.zip = await JSZip.loadAsync(file);
     } catch (e) {
       // Some FLA files have minor corruption - try to repair by truncating
+      progress('Repairing archive...');
       const arrayBuffer = await file.arrayBuffer();
       const repaired = await this.tryRepairZip(arrayBuffer);
       if (repaired) {
@@ -49,6 +55,7 @@ export class FLAParser {
     this.symbolCache.clear();
 
     // Parse main document
+    progress('Parsing document...');
     const domDocXml = await this.getFileContent('DOMDocument.xml');
     if (!domDocXml) {
       throw new Error('Invalid FLA file: DOMDocument.xml not found');
@@ -64,15 +71,18 @@ export class FLAParser {
     const backgroundColor = root.getAttribute('backgroundColor') || '#FFFFFF';
 
     // Parse symbol references and load them
-    await this.loadSymbols(root);
+    await this.loadSymbols(root, progress);
 
     // Parse bitmap items from media section and load images
+    progress('Loading images...');
     const bitmaps = await this.parseBitmaps(root);
 
     // Parse sound items from media section and load audio
+    progress('Loading audio...');
     const sounds = await this.parseSounds(root);
 
     // Parse main timeline (pass dimensions for camera detection)
+    progress('Building timeline...');
     const timelines = this.parseTimelines(root, width, height);
 
     return {
@@ -159,19 +169,17 @@ export class FLAParser {
     return await file.async('string');
   }
 
-  private async loadSymbols(root: Element): Promise<void> {
-    // First, try loading from Include references
-    const includes = root.querySelectorAll('symbols > Include');
+  private async loadSymbols(root: Element, progress: ProgressCallback): Promise<void> {
+    // Collect all symbol files to load
+    const symbolFiles: { path: string; filename: string }[] = [];
 
+    // First, collect from Include references
+    const includes = root.querySelectorAll('symbols > Include');
     for (const inc of includes) {
       const href = inc.getAttribute('href');
-      if (!href) continue;
-
-      // Load symbol XML from LIBRARY folder
-      const symbolXml = await this.getFileContent(`LIBRARY/${href}`);
-      if (!symbolXml) continue;
-
-      await this.parseAndCacheSymbol(symbolXml, href);
+      if (href) {
+        symbolFiles.push({ path: `LIBRARY/${href}`, filename: href });
+      }
     }
 
     // Also scan all XML files in LIBRARY folder directly (handles encoding issues)
@@ -183,10 +191,22 @@ export class FLAParser {
       if (DEBUG) console.log(`Found ${libraryFiles.length} XML files in LIBRARY folder`);
 
       for (const path of libraryFiles) {
-        const symbolXml = await this.getFileContent(path);
-        if (!symbolXml) continue;
-
         const filename = path.replace('LIBRARY/', '');
+        // Avoid duplicates
+        if (!symbolFiles.some(f => f.filename === filename)) {
+          symbolFiles.push({ path, filename });
+        }
+      }
+    }
+
+    // Load symbols with progress
+    const total = symbolFiles.length;
+    for (let i = 0; i < total; i++) {
+      const { path, filename } = symbolFiles[i];
+      progress(`Loading symbols... (${i + 1}/${total})`);
+
+      const symbolXml = await this.getFileContent(path);
+      if (symbolXml) {
         await this.parseAndCacheSymbol(symbolXml, filename);
       }
     }

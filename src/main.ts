@@ -34,6 +34,7 @@ class FLAViewerApp {
   private cameraLayerInfo: HTMLElement;
   private videoControls: HTMLElement;
   private audioControls: HTMLElement;
+  private loadingText: HTMLElement;
 
   constructor() {
     this.parser = new FLAParser();
@@ -65,6 +66,7 @@ class FLAViewerApp {
     this.cameraLayerInfo = document.getElementById('camera-layer-info')!;
     this.videoControls = document.getElementById('video-controls')!;
     this.audioControls = document.getElementById('audio-controls')!;
+    this.loadingText = document.getElementById('loading-text')!;
 
     this.setupEventListeners();
   }
@@ -352,15 +354,21 @@ class FLAViewerApp {
       this.dropZone.classList.add('hidden');
       this.loading.classList.add('active');
       this.viewer.classList.remove('active');
+      this.loadingText.textContent = 'Loading...';
 
-      // Parse FLA file
-      const doc = await this.parser.parse(file);
+      // Parse FLA file with progress updates
+      const doc = await this.parser.parse(file, (message) => {
+        this.loadingText.textContent = message;
+      });
       this.currentDoc = doc;
 
       // Create player and wait for fonts to load
+      this.loadingText.textContent = 'Loading fonts...';
       this.player = new FLAPlayer(this.canvas);
       await this.player.setDocument(doc);
       this.player.onStateUpdate((state) => this.updateUI(state));
+
+      this.loadingText.textContent = 'Preparing...';
 
       // Update info panel
       const totalFrames = this.player.getState().totalFrames;
