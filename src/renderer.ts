@@ -820,7 +820,7 @@ export class FLARenderer {
 
     // Build fill paths by sorting edges into connected chains
     const fillPaths = new Map<number, Path2D>();
-    const EPSILON = 0.5;
+    const EPSILON = 1.0; // Increased tolerance for edge connections
 
     for (const [styleIndex, contributions] of fillEdgeContributions) {
       const path = new Path2D();
@@ -828,13 +828,28 @@ export class FLARenderer {
 
       let currentX = NaN;
       let currentY = NaN;
+      let subpathStartX = NaN;
+      let subpathStartY = NaN;
 
-      for (const contrib of sortedContributions) {
-        // Check if we need to move to the start of this contribution
-        if (Number.isNaN(currentX) ||
+      for (let i = 0; i < sortedContributions.length; i++) {
+        const contrib = sortedContributions[i];
+        const isNewSubpath = Number.isNaN(currentX) ||
             Math.abs(contrib.startX - currentX) > EPSILON ||
-            Math.abs(contrib.startY - currentY) > EPSILON) {
+            Math.abs(contrib.startY - currentY) > EPSILON;
+
+        // Before starting a new subpath, check if current subpath should be closed
+        if (isNewSubpath && !Number.isNaN(subpathStartX)) {
+          // Check if we're back at the start of the current subpath
+          if (Math.abs(currentX - subpathStartX) <= EPSILON &&
+              Math.abs(currentY - subpathStartY) <= EPSILON) {
+            path.closePath();
+          }
+        }
+
+        if (isNewSubpath) {
           path.moveTo(contrib.startX, contrib.startY);
+          subpathStartX = contrib.startX;
+          subpathStartY = contrib.startY;
         }
 
         // Add commands (skip the first moveTo since we handled positioning)
@@ -845,6 +860,13 @@ export class FLARenderer {
 
         currentX = contrib.endX;
         currentY = contrib.endY;
+      }
+
+      // Close final subpath if it returns to start
+      if (!Number.isNaN(subpathStartX) &&
+          Math.abs(currentX - subpathStartX) <= EPSILON &&
+          Math.abs(currentY - subpathStartY) <= EPSILON) {
+        path.closePath();
       }
 
       fillPaths.set(styleIndex, path);
@@ -1030,34 +1052,43 @@ export class FLARenderer {
 
     // Greedily find connected contributions
     while (used.size < contributions.length) {
-      let foundNext = false;
+      let bestIdx = -1;
+      let bestDist = Infinity;
 
-      // Look for a contribution that starts where the current one ends
+      // Look for the BEST (closest) contribution that starts where the current one ends
       for (let i = 0; i < contributions.length; i++) {
         if (used.has(i)) continue;
 
         const candidate = contributions[i];
         const dx = Math.abs(candidate.startX - current.endX);
         const dy = Math.abs(candidate.startY - current.endY);
+        const dist = dx + dy; // Manhattan distance
 
-        if (dx <= epsilon && dy <= epsilon) {
-          result.push(candidate);
-          used.add(i);
-          current = candidate;
-          foundNext = true;
-          break;
+        if (dx <= epsilon && dy <= epsilon && dist < bestDist) {
+          bestDist = dist;
+          bestIdx = i;
         }
       }
 
-      // If no direct continuation found, start a new chain with any unused contribution
-      if (!foundNext) {
+      if (bestIdx >= 0) {
+        // Found a connection
+        current = contributions[bestIdx];
+        result.push(current);
+        used.add(bestIdx);
+      } else {
+        // No direct continuation found - start a new chain
+        let newChainIdx = -1;
         for (let i = 0; i < contributions.length; i++) {
           if (!used.has(i)) {
-            current = contributions[i];
-            result.push(current);
-            used.add(i);
+            newChainIdx = i;
             break;
           }
+        }
+
+        if (newChainIdx >= 0) {
+          current = contributions[newChainIdx];
+          result.push(current);
+          used.add(newChainIdx);
         }
       }
     }
