@@ -261,10 +261,9 @@ export class FLAParser {
   }
 
   private detectCameraLayer(layers: Layer[], docWidth?: number, docHeight?: number): number | undefined {
-    // Generic camera layer detection based on multiple criteria:
-    // 1. Layer contains a single symbol instance
-    // 2. Symbol's transformation point is close to document center
-    // 3. Additional heuristics: guide layer, hidden, locked, or specific naming
+    // Generic camera layer detection based on STRICT criteria:
+    // Camera layers are typically guide layers or hidden reference layers with centered symbols
+    // Note: Being "locked" alone is NOT enough - many background layers are locked
 
     if (!docWidth || !docHeight) return undefined;
 
@@ -280,10 +279,13 @@ export class FLAParser {
       const element = firstFrame.elements[0];
       if (element.type !== 'symbol') continue;
 
-      // Check various indicators that this might be a camera/reference layer
+      // Check for explicit camera layer indicators
       const isGuideLayer = layer.layerType === 'guide';
-      const isHiddenReference = !layer.visible && layer.outline;
-      const isLocked = layer.locked;
+      const isHiddenOrOutline = !layer.visible || layer.outline;
+
+      // Only consider guide layers or hidden/outline layers as camera candidates
+      // Do NOT use "locked" as a criterion - too many false positives
+      if (!isGuideLayer && !isHiddenOrOutline) continue;
 
       // Check if transformation point is near document center
       let isNearCenter = false;
@@ -297,14 +299,8 @@ export class FLAParser {
         isNearCenter = dx < tolerance && dy < tolerance;
       }
 
-      // Detect as camera layer if it meets STRICT criteria:
-      // - It's explicitly a guide layer with transformation near center, OR
-      // - It's a hidden reference layer with transformation near center, OR
-      // - It's locked AND has transformation point near center
-      // Note: We do NOT use name-based detection for camera transforms to avoid false positives
-      const isCameraCandidate = isGuideLayer || isHiddenReference || isLocked;
-      if (isCameraCandidate && isNearCenter) {
-        if (DEBUG) console.log(`Detected camera layer: "${layer.name}" at index ${i} (guide=${isGuideLayer}, hidden=${isHiddenReference}, locked=${isLocked}, nearCenter=${isNearCenter})`);
+      if (isNearCenter) {
+        if (DEBUG) console.log(`Detected camera layer: "${layer.name}" at index ${i} (guide=${isGuideLayer}, hiddenOrOutline=${isHiddenOrOutline}, nearCenter=${isNearCenter})`);
         return i;
       }
     }
@@ -313,59 +309,38 @@ export class FLAParser {
   }
 
   // Detect all reference layers that should not be rendered (camera frames, guides, etc.)
-  detectReferenceLayers(layers: Layer[], docWidth?: number, docHeight?: number): Set<number> {
+  // Note: Be conservative - only filter layers that are CLEARLY reference layers
+  // to avoid accidentally hiding legitimate content layers
+  detectReferenceLayers(layers: Layer[], _docWidth?: number, _docHeight?: number): Set<number> {
     const referenceLayers = new Set<number>();
 
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i];
       const layerNameLower = layer.name.toLowerCase();
 
-      // Always skip guide and folder layers
+      // Always skip guide and folder layers (explicit layer types)
       if (layer.layerType === 'guide' || layer.layerType === 'folder') {
         referenceLayers.add(i);
         continue;
       }
 
-      // Skip common camera/frame reference layer names
-      // These are typically viewport frames not meant to be rendered
+      // Skip camera/frame reference layers only if they have additional indicators
+      // that they're not meant to be rendered (hidden, outline view, etc.)
       const isCameraRefName = layerNameLower === 'ramka' ||
                               layerNameLower === 'camera' ||
-                              layerNameLower === 'frame' ||
                               layerNameLower === 'cam' ||
                               layerNameLower === 'viewport';
-      if (isCameraRefName) {
+
+      // Only filter by name if the layer is also hidden or using outline view
+      // This prevents filtering legitimate content layers that happen to have these names
+      if (isCameraRefName && (!layer.visible || layer.outline)) {
         referenceLayers.add(i);
         continue;
       }
-
-      // Skip layers with no frames
-      if (layer.frames.length === 0) continue;
-
-      const firstFrame = layer.frames[0];
-
-      // Check for single-symbol layers that look like camera/frame references
-      if (firstFrame.elements.length === 1) {
-        const element = firstFrame.elements[0];
-
-        if (element.type === 'symbol' && docWidth && docHeight) {
-          // Check if transformation point suggests a viewport frame
-          if (element.transformationPoint) {
-            const centerX = docWidth / 2;
-            const centerY = docHeight / 2;
-            const tolerance = Math.max(docWidth, docHeight) * 0.2; // 20% tolerance
-
-            const dx = Math.abs(element.transformationPoint.x - centerX);
-            const dy = Math.abs(element.transformationPoint.y - centerY);
-            const isNearCenter = dx < tolerance && dy < tolerance;
-
-            // If locked and near center, likely a camera frame
-            if (layer.locked && isNearCenter) {
-              referenceLayers.add(i);
-            }
-          }
-        }
-      }
     }
+
+    // Note: Removed the locked && isNearCenter heuristic as it was too aggressive
+    // and incorrectly filtered legitimate background layers
 
     return referenceLayers;
   }
