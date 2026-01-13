@@ -31,8 +31,18 @@ export async function exportVideo(
 
   // Create offscreen canvas for rendering
   const canvas = new OffscreenCanvas(width, height);
-  const renderer = new FLARenderer(canvas as unknown as HTMLCanvasElement);
-  await renderer.setDocument(doc);
+
+  // Create a minimal mock canvas for OffscreenCanvas compatibility
+  const mockCanvas = {
+    width,
+    height,
+    style: { width: '', height: '' },
+    getContext: (type: string) => canvas.getContext(type as '2d'),
+    getBoundingClientRect: () => ({ left: 0, top: 0, width, height }),
+  } as unknown as HTMLCanvasElement;
+
+  const renderer = new FLARenderer(mockCanvas);
+  await renderer.setDocument(doc, true); // true = skip resize
 
   // Calculate frame duration in microseconds
   const frameDurationMicros = Math.round(1_000_000 / frameRate);

@@ -65,7 +65,7 @@ export class FLARenderer {
       throw new Error('Failed to get 2D context');
     }
     this.ctx = ctx;
-    this.dpr = window.devicePixelRatio || 1;
+    this.dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
   }
 
   enableDebugMode(): void {
@@ -313,20 +313,28 @@ export class FLARenderer {
     return result;
   }
 
-  async setDocument(doc: FLADocument): Promise<void> {
+  async setDocument(doc: FLADocument, skipResize: boolean = false): Promise<void> {
     this.doc = doc;
-    this.dpr = window.devicePixelRatio || 1;
+    this.dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
 
     // Clear state from previous document
     this.missingSymbols.clear();
     this.loadedFonts.clear();
     this.loadingFonts.clear();
 
-    // Update canvas size
-    this.updateCanvasSize();
+    // Update canvas size (skip for offscreen rendering)
+    if (!skipResize) {
+      this.updateCanvasSize();
+    } else {
+      // For offscreen rendering, use 1:1 scale
+      this.scale = 1;
+      this.dpr = 1;
+    }
 
-    // Preload all fonts used in the document
-    await this.preloadDocumentFonts(doc);
+    // Preload all fonts used in the document (skip for offscreen)
+    if (!skipResize) {
+      await this.preloadDocumentFonts(doc);
+    }
 
     // Pre-compute shape paths asynchronously to warm up cache
     this.precomputeShapePaths(doc);
