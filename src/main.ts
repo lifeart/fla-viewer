@@ -493,6 +493,8 @@ class FLAViewerApp {
 
         if (progress.stage === 'encoding') {
           this.exportStatus.textContent = `Encoding frame ${progress.currentFrame} / ${progress.totalFrames}`;
+        } else if (progress.stage === 'encoding-audio') {
+          this.exportStatus.textContent = 'Encoding audio...';
         } else {
           this.exportStatus.textContent = 'Finalizing video...';
         }
