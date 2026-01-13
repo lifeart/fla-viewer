@@ -332,15 +332,20 @@ export class FLARenderer {
       const isFolderLayer = layer.layerType === 'folder' || layerTypeLower === 'folder';
 
       // Also skip layers that appear to be camera/frame reference layers
-      // These are often named "ramka", "camera", "frame" and marked invisible
+      // These are typically named "ramka", "camera", "frame" and are not meant to be rendered
+      // "ramka" is Russian for "frame" and commonly used as camera reference in Flash animations
       const layerNameLower = layer.name.toLowerCase();
-      const isCameraRefName = layerNameLower === 'ramka' ||
-                              layerNameLower === 'camera' ||
-                              layerNameLower === 'frame' ||
-                              layerNameLower === 'cam';
-      const isHiddenCameraRef = !layer.visible && isCameraRefName;
+      const isCameraRefLayer = layerNameLower === 'ramka' ||
+                               layerNameLower === 'camera' ||
+                               layerNameLower === 'frame' ||
+                               layerNameLower === 'cam';
 
-      if (isGuideLayer || isFolderLayer || isHiddenCameraRef) {
+      // Debug: log guide/hidden layers info
+      if (layerNameLower === 'ramka' || layerNameLower === 'video' || isGuideLayer || !layer.visible) {
+        console.log(`[DEBUG] Layer check: name="${layer.name}", layerType="${layer.layerType}", visible=${layer.visible}, isGuideLayer=${isGuideLayer}, isFolderLayer=${isFolderLayer}, isCameraRefLayer=${isCameraRefLayer}, will skip=${isGuideLayer || isFolderLayer || isCameraRefLayer}`);
+      }
+
+      if (isGuideLayer || isFolderLayer || isCameraRefLayer) {
         continue;
       }
 
