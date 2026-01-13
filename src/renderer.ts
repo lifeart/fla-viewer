@@ -7,6 +7,7 @@ import type {
   SymbolInstance,
   VideoInstance,
   BitmapInstance,
+  TextInstance,
   Shape,
   Matrix,
   FillStyle,
@@ -21,7 +22,7 @@ import type {
 const DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
 
 interface DebugElement {
-  type: 'shape' | 'symbol' | 'bitmap' | 'video';
+  type: 'shape' | 'symbol' | 'bitmap' | 'video' | 'text';
   element: DisplayElement;
   path: Path2D;
   transform: DOMMatrix;
@@ -993,6 +994,8 @@ export class FLARenderer {
       this.renderVideoInstance(element, depth);
     } else if (element.type === 'bitmap') {
       this.renderBitmapInstance(element, depth);
+    } else if (element.type === 'text') {
+      this.renderTextInstance(element, depth);
     }
   }
 
@@ -1158,6 +1161,66 @@ export class FLARenderer {
       // No bitmap info, draw small placeholder
       ctx.fillStyle = '#555555';
       ctx.fillRect(0, 0, 100, 100);
+    }
+
+    ctx.restore();
+  }
+
+  private renderTextInstance(text: TextInstance, depth: number = 0): void {
+    const ctx = this.ctx;
+    ctx.save();
+
+    // Apply transformation
+    this.applyMatrix(text.matrix);
+
+    // Create path for hit testing (text bounding box)
+    if (this.debugMode) {
+      const path = new Path2D();
+      path.rect(text.left, 0, text.width, text.height);
+      this.debugElements.push({
+        type: 'text',
+        element: text,
+        path,
+        transform: ctx.getTransform(),
+        depth,
+        parentPath: [...this.debugSymbolPath]
+      });
+    }
+
+    // Render each text run
+    let yOffset = 0;
+    for (const run of text.textRuns) {
+      // Build font string
+      const fontStyle = run.italic ? 'italic ' : '';
+      const fontWeight = run.bold ? 'bold ' : '';
+      const fontSize = run.size;
+      const fontFace = run.face || 'sans-serif';
+      ctx.font = `${fontStyle}${fontWeight}${fontSize}px "${fontFace}", sans-serif`;
+      ctx.fillStyle = run.fillColor;
+
+      // Set text alignment
+      ctx.textBaseline = 'top';
+      let xPos = text.left;
+      if (run.alignment === 'center') {
+        ctx.textAlign = 'center';
+        xPos = text.left + text.width / 2;
+      } else if (run.alignment === 'right') {
+        ctx.textAlign = 'right';
+        xPos = text.left + text.width;
+      } else {
+        ctx.textAlign = 'left';
+      }
+
+      // Split by line breaks and render each line
+      const lines = run.characters.split(/\r|\n/);
+      const lineHeight = run.lineHeight || run.size * 1.2;
+
+      for (const line of lines) {
+        if (line.length > 0) {
+          ctx.fillText(line, xPos, yOffset);
+        }
+        yOffset += lineHeight;
+      }
     }
 
     ctx.restore();

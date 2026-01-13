@@ -8,6 +8,8 @@ import type {
   SymbolInstance,
   VideoInstance,
   BitmapInstance,
+  TextInstance,
+  TextRun,
   Shape,
   Matrix,
   FillStyle,
@@ -476,6 +478,11 @@ export class FLAParser {
         case 'DOMBitmapInstance':
           elements.push(this.parseBitmapInstance(child, identityMatrix));
           break;
+        case 'DOMStaticText':
+        case 'DOMDynamicText':
+        case 'DOMInputText':
+          elements.push(this.parseTextInstance(child, identityMatrix));
+          break;
       }
     }
 
@@ -509,6 +516,11 @@ export class FLAParser {
           break;
         case 'DOMBitmapInstance':
           elements.push(this.parseBitmapInstance(child, composedMatrix));
+          break;
+        case 'DOMStaticText':
+        case 'DOMDynamicText':
+        case 'DOMInputText':
+          elements.push(this.parseTextInstance(child, composedMatrix));
           break;
       }
     }
@@ -599,6 +611,58 @@ export class FLAParser {
       type: 'bitmap',
       libraryItemName,
       matrix
+    };
+  }
+
+  private parseTextInstance(el: globalThis.Element, composedMatrix?: Matrix): TextInstance {
+    const matrixEl = el.querySelector(':scope > matrix > Matrix');
+    let matrix: Matrix;
+
+    if (matrixEl) {
+      matrix = this.parseMatrix(matrixEl);
+    } else {
+      matrix = composedMatrix || this.parseMatrix(null);
+    }
+
+    const left = parseFloat(el.getAttribute('left') || '0');
+    const width = parseFloat(el.getAttribute('width') || '100');
+    const height = parseFloat(el.getAttribute('height') || '20');
+
+    const textRuns: TextRun[] = [];
+    const textRunElements = el.querySelectorAll('textRuns > DOMTextRun');
+
+    for (const runEl of textRunElements) {
+      const charactersEl = runEl.querySelector('characters');
+      const characters = charactersEl?.textContent || '';
+
+      const attrsEl = runEl.querySelector('textAttrs > DOMTextAttrs');
+      const alignment = (attrsEl?.getAttribute('alignment') || 'left') as TextRun['alignment'];
+      const size = parseFloat(attrsEl?.getAttribute('size') || '12');
+      const lineHeight = parseFloat(attrsEl?.getAttribute('lineHeight') || String(size));
+      const face = attrsEl?.getAttribute('face') || undefined;
+      const fillColor = attrsEl?.getAttribute('fillColor') || '#000000';
+      const bold = attrsEl?.getAttribute('bold') === 'true';
+      const italic = attrsEl?.getAttribute('italic') === 'true';
+
+      textRuns.push({
+        characters,
+        alignment,
+        size,
+        lineHeight,
+        face,
+        fillColor,
+        bold,
+        italic
+      });
+    }
+
+    return {
+      type: 'text',
+      matrix,
+      left,
+      width,
+      height,
+      textRuns
     };
   }
 

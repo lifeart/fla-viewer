@@ -59,7 +59,7 @@ export interface Point {
   y: number;
 }
 
-export type DisplayElement = SymbolInstance | Shape | VideoInstance | BitmapInstance;
+export type DisplayElement = SymbolInstance | Shape | VideoInstance | BitmapInstance | TextInstance;
 
 export interface SymbolInstance {
   type: 'symbol';
@@ -85,6 +85,26 @@ export interface BitmapInstance {
   type: 'bitmap';
   libraryItemName: string;
   matrix: Matrix;
+}
+
+export interface TextInstance {
+  type: 'text';
+  matrix: Matrix;
+  left: number;
+  width: number;
+  height: number;
+  textRuns: TextRun[];
+}
+
+export interface TextRun {
+  characters: string;
+  alignment?: 'left' | 'center' | 'right' | 'justify';
+  size: number;
+  lineHeight?: number;
+  face?: string;
+  fillColor: string;
+  bold?: boolean;
+  italic?: boolean;
 }
 
 export interface Shape {

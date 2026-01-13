@@ -64,10 +64,10 @@ Outputs production files to `dist/`
 | DOMVideoInstance | Partial | Placeholder rendering |
 | Camera Layer | Supported | Auto-detected via non-rendering layer + centered symbol |
 | Motion Tweens | Supported | Linear and eased interpolation |
+| DOMStaticText | Supported | Multi-line text with font, size, color, alignment |
 | Shape Tweens | Not supported | - |
 | Masks | Not supported | - |
 | Filters | Not supported | - |
-| Text | Not supported | - |
 
 ## Architecture
 
@@ -104,7 +104,7 @@ See [AGENTS.md](./AGENTS.md) for detailed format documentation.
 - No mask layers
 - No filters (drop shadow, blur, etc.)
 - No ActionScript support
-- No text rendering
+- Custom fonts may not render correctly (falls back to sans-serif)
 
 ## License
 
