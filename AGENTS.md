@@ -463,19 +463,31 @@ Decodes to:
 | LinearGradient | GradientEntry children | Gradient colors |
 | DOMVideoInstance | `libraryItemName`, `frameRight`, `frameBottom` | Video placeholder |
 
-### Ignored Attributes (intentionally skipped)
+### Ignored Attributes (intentionally skipped - editor state)
 
 | Element | Attribute | Reason |
 |---------|-----------|--------|
 | Include | `loadImmediate`, `itemIcon`, `lastModified` | Editor metadata |
-| DOMLayer | `autoNamed`, `animationType` | Editor state |
-| DOMFrame | `motionTweenSnap`, `motionTweenRotate` | Advanced tweening (not implemented) |
-| DOMFrame | `hasCustomEase`, `motionTweenScale` | Advanced tweening |
-| DOMShape | `isFloating`, `objectSpaceBounds` | Editor state |
-| SolidStroke | all attributes | Stroke rendering not implemented |
-| filters | all | Filter effects not implemented |
-| blendMode | all | Blend modes not implemented |
-| Color (transform) | `alphaMultiplier`, offsets | Color transform partial |
+| DOMLayer | `autoNamed`, `current`, `isSelected`, `useOutlineView` | Editor state |
+| DOMShape | `isFloating`, `objectSpaceBounds`, `selected` | Editor state |
+| DOMShape | `isDrawingObject` | Drawing object mode (rare) |
+| DOMSymbolInstance | `selected` | Editor selection state |
+| DOMGroup | `selected` | Editor selection state |
+
+### Not Implemented (affects rendering)
+
+| Element | Attribute | Impact |
+|---------|-----------|--------|
+| DOMSymbolInstance | `centerPoint3DX`, `centerPoint3DY` | 3D transform center point |
+| DOMFrame | `motionTweenSnap`, `motionTweenRotate`, `motionTweenScale` | Advanced tween options |
+| DOMFrame | `hasCustomEase` | Flag only (CustomEase points are parsed) |
+| SolidStroke | `weight`, `scaleMode`, `caps`, `joints` | Stroke rendering |
+| DashedStroke | `scaleMode` | Dashed stroke rendering |
+| DOMBitmapItem | all | Bitmap assets |
+| DOMBitmapInstance | all | Bitmap instances |
+| filters | all | Filter effects (drop shadow, blur, etc.) |
+| blendMode | all | Blend modes |
+| Color (transform) | `alphaMultiplier`, offsets | Color transform (partial support) |
 
 ---
 
