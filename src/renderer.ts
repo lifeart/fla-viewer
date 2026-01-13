@@ -820,7 +820,7 @@ export class FLARenderer {
 
     // Build fill paths by sorting edges into connected chains
     const fillPaths = new Map<number, Path2D>();
-    const EPSILON = 1.0; // Increased tolerance for edge connections
+    const EPSILON = 1.0; // Tolerance for edge connections
 
     for (const [styleIndex, contributions] of fillEdgeContributions) {
       const path = new Path2D();
@@ -837,13 +837,16 @@ export class FLARenderer {
             Math.abs(contrib.startX - currentX) > EPSILON ||
             Math.abs(contrib.startY - currentY) > EPSILON;
 
-        // Before starting a new subpath, check if current subpath should be closed
+        // Before starting a new subpath, close the current one
         if (isNewSubpath && !Number.isNaN(subpathStartX)) {
-          // Check if we're back at the start of the current subpath
-          if (Math.abs(currentX - subpathStartX) <= EPSILON &&
-              Math.abs(currentY - subpathStartY) <= EPSILON) {
-            path.closePath();
+          // Always close the previous subpath - either we're at the start or we need to draw back
+          const atStart = Math.abs(currentX - subpathStartX) <= EPSILON &&
+                          Math.abs(currentY - subpathStartY) <= EPSILON;
+          if (!atStart) {
+            // Draw line back to start to close the gap
+            path.lineTo(subpathStartX, subpathStartY);
           }
+          path.closePath();
         }
 
         if (isNewSubpath) {
@@ -862,10 +865,14 @@ export class FLARenderer {
         currentY = contrib.endY;
       }
 
-      // Close final subpath if it returns to start
-      if (!Number.isNaN(subpathStartX) &&
-          Math.abs(currentX - subpathStartX) <= EPSILON &&
-          Math.abs(currentY - subpathStartY) <= EPSILON) {
+      // Close final subpath
+      if (!Number.isNaN(subpathStartX)) {
+        const atStart = Math.abs(currentX - subpathStartX) <= EPSILON &&
+                        Math.abs(currentY - subpathStartY) <= EPSILON;
+        if (!atStart) {
+          // Draw line back to start to close the gap
+          path.lineTo(subpathStartX, subpathStartY);
+        }
         path.closePath();
       }
 
@@ -905,7 +912,8 @@ export class FLARenderer {
       const fill = fillStyles.get(styleIndex);
       if (fill) {
         ctx.fillStyle = this.getFillStyle(fill);
-        ctx.fill(path, 'evenodd');
+        // Use nonzero fill rule - evenodd can create holes with overlapping subpaths
+        ctx.fill(path, 'nonzero');
       }
     }
 
