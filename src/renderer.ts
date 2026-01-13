@@ -633,16 +633,102 @@ export class FLARenderer {
       return fill.color;
     }
 
-    // For gradients, create a simple approximation
-    if ((fill.type === 'linear' || fill.type === 'radial') && fill.gradient) {
-      const gradient = fill.gradient;
-      if (gradient.length > 0) {
-        // Use the first color as a fallback
-        return gradient[0].color;
-      }
+    // Handle gradient fills
+    if (fill.type === 'linear' && fill.gradient && fill.gradient.length > 0) {
+      return this.createLinearGradient(fill);
+    }
+
+    if (fill.type === 'radial' && fill.gradient && fill.gradient.length > 0) {
+      return this.createRadialGradient(fill);
     }
 
     return '#000000';
+  }
+
+  private createLinearGradient(fill: FillStyle): CanvasGradient | string {
+    if (!fill.gradient || fill.gradient.length === 0) {
+      return fill.gradient?.[0]?.color || '#000000';
+    }
+
+    // Flash gradient coordinate system: gradients span from -819.2 to 819.2 in local space
+    // (16384 twips / 20 = 819.2 pixels)
+    const GRADIENT_SIZE = 819.2;
+
+    // Base gradient line: from (-GRADIENT_SIZE, 0) to (GRADIENT_SIZE, 0)
+    let x0 = -GRADIENT_SIZE;
+    let y0 = 0;
+    let x1 = GRADIENT_SIZE;
+    let y1 = 0;
+
+    // Apply gradient matrix to transform the base line
+    if (fill.matrix) {
+      const m = fill.matrix;
+      // Transform start point
+      const nx0 = m.a * x0 + m.c * y0 + m.tx;
+      const ny0 = m.b * x0 + m.d * y0 + m.ty;
+      // Transform end point
+      const nx1 = m.a * x1 + m.c * y1 + m.tx;
+      const ny1 = m.b * x1 + m.d * y1 + m.ty;
+
+      x0 = nx0;
+      y0 = ny0;
+      x1 = nx1;
+      y1 = ny1;
+    }
+
+    const gradient = this.ctx.createLinearGradient(x0, y0, x1, y1);
+
+    // Add color stops
+    for (const entry of fill.gradient) {
+      const color = entry.alpha < 1
+        ? this.colorWithAlpha(entry.color, entry.alpha)
+        : entry.color;
+      gradient.addColorStop(Math.max(0, Math.min(1, entry.ratio)), color);
+    }
+
+    return gradient;
+  }
+
+  private createRadialGradient(fill: FillStyle): CanvasGradient | string {
+    if (!fill.gradient || fill.gradient.length === 0) {
+      return fill.gradient?.[0]?.color || '#000000';
+    }
+
+    // Flash radial gradient: circle centered at (0, 0) with radius 819.2
+    const GRADIENT_SIZE = 819.2;
+
+    // For radial gradients, we need to transform the gradient space
+    // The matrix transforms the unit circle to an ellipse
+    // Canvas radial gradients don't support ellipses directly, so we use an approximation
+
+    let cx = 0;
+    let cy = 0;
+    let radius = GRADIENT_SIZE;
+
+    if (fill.matrix) {
+      const m = fill.matrix;
+      // Transform center point
+      cx = m.tx;
+      cy = m.ty;
+
+      // Calculate average scale for radius
+      // The scale is derived from the matrix elements
+      const scaleX = Math.sqrt(m.a * m.a + m.b * m.b);
+      const scaleY = Math.sqrt(m.c * m.c + m.d * m.d);
+      radius = GRADIENT_SIZE * ((scaleX + scaleY) / 2);
+    }
+
+    const gradient = this.ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+
+    // Add color stops
+    for (const entry of fill.gradient) {
+      const color = entry.alpha < 1
+        ? this.colorWithAlpha(entry.color, entry.alpha)
+        : entry.color;
+      gradient.addColorStop(Math.max(0, Math.min(1, entry.ratio)), color);
+    }
+
+    return gradient;
   }
 
   private colorWithAlpha(color: string, alpha: number): string {
