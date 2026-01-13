@@ -41,6 +41,7 @@ export class FLARenderer {
   private hiddenLayers: Set<number> = new Set();
   private layerOrder: 'forward' | 'reverse' = 'reverse';
   private nestedLayerOrder: 'forward' | 'reverse' = 'reverse';
+  private elementOrder: 'forward' | 'reverse' = 'forward';
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -217,6 +218,10 @@ export class FLARenderer {
 
   setNestedLayerOrder(order: 'forward' | 'reverse'): void {
     this.nestedLayerOrder = order;
+  }
+
+  setElementOrder(order: 'forward' | 'reverse'): void {
+    this.elementOrder = order;
   }
 
   setDocument(doc: FLADocument): void {
@@ -403,7 +408,12 @@ export class FLARenderer {
     // Check if we need to interpolate (tween)
     const nextKeyframe = this.findNextKeyframe(layer.frames, frame);
 
-    for (let elementIndex = 0; elementIndex < frame.elements.length; elementIndex++) {
+    // Render elements based on elementOrder setting
+    const elementIndices = this.elementOrder === 'reverse'
+      ? [...Array(frame.elements.length).keys()].reverse()
+      : [...Array(frame.elements.length).keys()];
+
+    for (const elementIndex of elementIndices) {
       const element = frame.elements[elementIndex];
       if (frame.tweenType === 'motion' && nextKeyframe && nextKeyframe.elements.length > 0) {
         // Calculate interpolation progress

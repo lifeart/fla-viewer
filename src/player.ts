@@ -151,4 +151,9 @@ export class FLAPlayer {
     this.renderer.setNestedLayerOrder(order);
     this.render();
   }
+
+  setElementOrder(order: 'forward' | 'reverse'): void {
+    this.renderer.setElementOrder(order);
+    this.render();
+  }
 }

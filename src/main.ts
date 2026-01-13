@@ -26,6 +26,7 @@ class FLAViewerApp {
   private layerList: HTMLElement;
   private layerOrderSelect: HTMLSelectElement;
   private nestedOrderSelect: HTMLSelectElement;
+  private elementOrderSelect: HTMLSelectElement;
 
   constructor() {
     this.parser = new FLAParser();
@@ -49,6 +50,7 @@ class FLAViewerApp {
     this.layerList = document.getElementById('layer-list')!;
     this.layerOrderSelect = document.getElementById('layer-order-select') as HTMLSelectElement;
     this.nestedOrderSelect = document.getElementById('nested-order-select') as HTMLSelectElement;
+    this.elementOrderSelect = document.getElementById('element-order-select') as HTMLSelectElement;
 
     this.setupEventListeners();
   }
@@ -103,6 +105,11 @@ class FLAViewerApp {
     // Nested layer order change
     this.nestedOrderSelect.addEventListener('change', () => {
       this.player?.setNestedLayerOrder(this.nestedOrderSelect.value as 'forward' | 'reverse');
+    });
+
+    // Element order change
+    this.elementOrderSelect.addEventListener('change', () => {
+      this.player?.setElementOrder(this.elementOrderSelect.value as 'forward' | 'reverse');
     });
 
     // Keyboard controls
