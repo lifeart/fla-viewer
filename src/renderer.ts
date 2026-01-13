@@ -324,10 +324,23 @@ export class FLARenderer {
         continue;
       }
 
-      // Skip guide/folder layers
-      // Note: layer.visible is an editor UI setting (eye icon), not runtime visibility
-      // All non-guide/folder layers should render regardless of the visible attribute
-      if (layer.layerType === 'guide' || layer.layerType === 'folder') {
+      // Skip guide/folder layers and invisible layers
+      // Guide layers are reference/construction layers not meant for output
+      // Folder layers are organizational only
+      const layerTypeLower = (layer.layerType as string)?.toLowerCase() || '';
+      const isGuideLayer = layer.layerType === 'guide' || layerTypeLower === 'guide';
+      const isFolderLayer = layer.layerType === 'folder' || layerTypeLower === 'folder';
+
+      // Also skip layers that appear to be camera/frame reference layers
+      // These are often named "ramka", "camera", "frame" and marked invisible
+      const layerNameLower = layer.name.toLowerCase();
+      const isCameraRefName = layerNameLower === 'ramka' ||
+                              layerNameLower === 'camera' ||
+                              layerNameLower === 'frame' ||
+                              layerNameLower === 'cam';
+      const isHiddenCameraRef = !layer.visible && isCameraRefName;
+
+      if (isGuideLayer || isFolderLayer || isHiddenCameraRef) {
         continue;
       }
 
