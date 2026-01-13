@@ -1,5 +1,6 @@
 import { FLAParser } from './fla-parser';
 import { FLAPlayer } from './player';
+import { exportVideo, downloadBlob, isWebCodecsSupported } from './video-exporter';
 import type { PlayerState, FLADocument } from './types';
 
 class FLAViewerApp {
@@ -35,6 +36,13 @@ class FLAViewerApp {
   private videoControls: HTMLElement;
   private audioControls: HTMLElement;
   private loadingText: HTMLElement;
+  private downloadBtn: HTMLButtonElement;
+  private exportModal: HTMLElement;
+  private exportProgressFill: HTMLElement;
+  private exportStatus: HTMLElement;
+  private exportCancelBtn: HTMLButtonElement;
+  private exportCancelled: boolean = false;
+  private currentFileName: string = 'animation';
 
   constructor() {
     this.parser = new FLAParser();
@@ -67,6 +75,11 @@ class FLAViewerApp {
     this.videoControls = document.getElementById('video-controls')!;
     this.audioControls = document.getElementById('audio-controls')!;
     this.loadingText = document.getElementById('loading-text')!;
+    this.downloadBtn = document.getElementById('download-btn') as HTMLButtonElement;
+    this.exportModal = document.getElementById('export-modal')!;
+    this.exportProgressFill = document.getElementById('export-progress-fill')!;
+    this.exportStatus = document.getElementById('export-status')!;
+    this.exportCancelBtn = document.getElementById('export-cancel-btn') as HTMLButtonElement;
 
     this.setupEventListeners();
   }
@@ -112,6 +125,10 @@ class FLAViewerApp {
     // Fullscreen
     this.fullscreenBtn.addEventListener('click', () => this.toggleFullscreen());
     document.addEventListener('fullscreenchange', () => this.updateFullscreenButton());
+
+    // Download/Export
+    this.downloadBtn.addEventListener('click', () => this.startExport());
+    this.exportCancelBtn.addEventListener('click', () => this.cancelExport());
 
     // Timeline scrubbing
     this.timeline.addEventListener('click', (e) => {
@@ -401,6 +418,14 @@ class FLAViewerApp {
         this.audioControls.classList.add('hidden');
       }
 
+      // Show download button if WebCodecs supported and has multiple frames
+      this.currentFileName = file.name.replace(/\.fla$/i, '');
+      if (isWebCodecsSupported() && hasMultipleFrames) {
+        this.downloadBtn.classList.remove('hidden');
+      } else {
+        this.downloadBtn.classList.add('hidden');
+      }
+
       // Reset follow camera state for new file
       this.followCameraCheckbox.checked = false;
       this.updateCameraInfo();
@@ -443,6 +468,51 @@ class FLAViewerApp {
       ? (state.currentFrame / (state.totalFrames - 1)) * 100
       : 0;
     this.timelineProgress.style.width = `${progress}%`;
+  }
+
+  private async startExport(): Promise<void> {
+    if (!this.currentDoc) return;
+
+    // Pause playback during export
+    this.player?.pause();
+
+    // Show export modal
+    this.exportCancelled = false;
+    this.exportModal.classList.add('active');
+    this.exportProgressFill.style.width = '0%';
+    this.exportStatus.textContent = 'Preparing...';
+
+    try {
+      const blob = await exportVideo(this.currentDoc, (progress) => {
+        if (this.exportCancelled) {
+          throw new Error('Export cancelled');
+        }
+
+        const percent = (progress.currentFrame / progress.totalFrames) * 100;
+        this.exportProgressFill.style.width = `${percent}%`;
+
+        if (progress.stage === 'encoding') {
+          this.exportStatus.textContent = `Encoding frame ${progress.currentFrame} / ${progress.totalFrames}`;
+        } else {
+          this.exportStatus.textContent = 'Finalizing video...';
+        }
+      });
+
+      if (!this.exportCancelled) {
+        downloadBlob(blob, `${this.currentFileName}.mp4`);
+      }
+    } catch (error) {
+      if ((error as Error).message !== 'Export cancelled') {
+        console.error('Export failed:', error);
+        alert('Export failed: ' + (error as Error).message);
+      }
+    } finally {
+      this.exportModal.classList.remove('active');
+    }
+  }
+
+  private cancelExport(): void {
+    this.exportCancelled = true;
   }
 }
 

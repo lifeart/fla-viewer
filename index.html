@@ -569,6 +569,79 @@
       padding: 1px 4px;
       border-radius: 3px;
     }
+
+    /* Export Modal */
+    .export-modal {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.8);
+      z-index: 1000;
+    }
+
+    .export-modal.active {
+      display: flex;
+    }
+
+    .export-content {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 24px 32px;
+      min-width: 320px;
+      text-align: center;
+    }
+
+    .export-header {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 20px;
+      color: var(--text-primary);
+    }
+
+    .export-progress-bar {
+      height: 8px;
+      background: var(--bg-tertiary);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 12px;
+    }
+
+    .export-progress-fill {
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+      transition: width 0.1s ease-out;
+    }
+
+    .export-status {
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-bottom: 20px;
+    }
+
+    .export-cancel-btn {
+      background: transparent;
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      padding: 8px 24px;
+      border-radius: var(--border-radius);
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.15s;
+    }
+
+    .export-cancel-btn:hover {
+      background: var(--bg-tertiary);
+      border-color: var(--accent);
+    }
+
+    /* Download button hidden state */
+    .transport-btn.hidden {
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -593,6 +666,17 @@
         <div class="loading-content">
           <div class="spinner"></div>
           <span id="loading-text">Loading...</span>
+        </div>
+      </div>
+
+      <div class="export-modal" id="export-modal">
+        <div class="export-content">
+          <div class="export-header">Exporting Video</div>
+          <div class="export-progress-bar">
+            <div class="export-progress-fill" id="export-progress-fill"></div>
+          </div>
+          <div class="export-status" id="export-status">Encoding frame 1 / 1</div>
+          <button class="export-cancel-btn" id="export-cancel-btn">Cancel</button>
         </div>
       </div>
 
@@ -672,6 +756,10 @@
               <input type="range" id="volume-slider" min="0" max="100" value="100" title="Volume">
             </div>
           </div>
+
+          <button class="transport-btn" id="download-btn" title="Download as MP4">
+            <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+          </button>
 
           <button class="transport-btn" id="debug-btn" title="Debug Panel (D)">
             <svg viewBox="0 0 24 24"><path d="M20 8h-2.81c-.45-.78-1.07-1.45-1.82-1.96L17 4.41 15.59 3l-2.17 2.17C12.96 5.06 12.49 5 12 5c-.49 0-.96.06-1.41.17L8.41 3 7 4.41l1.62 1.63C7.88 6.55 7.26 7.22 6.81 8H4v2h2.09c-.05.33-.09.66-.09 1v1H4v2h2v1c0 .34.04.67.09 1H4v2h2.81c1.04 1.79 2.97 3 5.19 3s4.15-1.21 5.19-3H20v-2h-2.09c.05-.33.09-.66.09-1v-1h2v-2h-2v-1c0-.34-.04-.67-.09-1H20V8zm-6 8h-4v-2h4v2zm0-4h-4v-2h4v2z"/></svg>
