@@ -17,14 +17,15 @@ export class FLAPlayer {
     this.renderer = new FLARenderer(canvas);
   }
 
-  setDocument(doc: FLADocument): void {
+  async setDocument(doc: FLADocument): Promise<void> {
     // Cancel any ongoing animation before setting new document
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);
       this.animationId = null;
     }
 
-    this.renderer.setDocument(doc);
+    // Wait for renderer to set up document (including font preloading)
+    await this.renderer.setDocument(doc);
 
     // Get total frames from main timeline
     const totalFrames = doc.timelines[0]?.totalFrames || 1;

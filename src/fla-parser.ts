@@ -643,6 +643,9 @@ export class FLAParser {
       const fillColor = attrsEl?.getAttribute('fillColor') || '#000000';
       const bold = attrsEl?.getAttribute('bold') === 'true';
       const italic = attrsEl?.getAttribute('italic') === 'true';
+      const letterSpacing = attrsEl?.getAttribute('letterSpacing')
+        ? parseFloat(attrsEl.getAttribute('letterSpacing')!)
+        : undefined;
 
       textRuns.push({
         characters,
@@ -652,7 +655,8 @@ export class FLAParser {
         face,
         fillColor,
         bold,
-        italic
+        italic,
+        letterSpacing
       });
     }
 

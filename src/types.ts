@@ -105,6 +105,7 @@ export interface TextRun {
   fillColor: string;
   bold?: boolean;
   italic?: boolean;
+  letterSpacing?: number;
 }
 
 export interface Shape {

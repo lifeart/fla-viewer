@@ -266,9 +266,9 @@ class FLAViewerApp {
       const doc = await this.parser.parse(file);
       this.currentDoc = doc;
 
-      // Create player
+      // Create player and wait for fonts to load
       this.player = new FLAPlayer(this.canvas);
-      this.player.setDocument(doc);
+      await this.player.setDocument(doc);
       this.player.onStateUpdate((state) => this.updateUI(state));
 
       // Update info panel

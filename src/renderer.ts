@@ -313,18 +313,110 @@ export class FLARenderer {
     return result;
   }
 
-  setDocument(doc: FLADocument): void {
+  async setDocument(doc: FLADocument): Promise<void> {
     this.doc = doc;
     this.dpr = window.devicePixelRatio || 1;
 
     // Clear state from previous document
     this.missingSymbols.clear();
+    this.loadedFonts.clear();
+    this.loadingFonts.clear();
 
     // Update canvas size
     this.updateCanvasSize();
 
+    // Preload all fonts used in the document
+    await this.preloadDocumentFonts(doc);
+
     // Pre-compute shape paths asynchronously to warm up cache
     this.precomputeShapePaths(doc);
+  }
+
+  // Collect all fonts used in the document and preload them
+  private async preloadDocumentFonts(doc: FLADocument): Promise<void> {
+    const fontsToLoad = new Set<string>();
+
+    // Scan main timeline
+    for (const timeline of doc.timelines) {
+      this.collectFontsFromTimeline(timeline, fontsToLoad);
+    }
+
+    // Scan all symbols
+    for (const symbol of doc.symbols.values()) {
+      this.collectFontsFromTimeline(symbol.timeline, fontsToLoad);
+    }
+
+    if (fontsToLoad.size === 0) return;
+
+    if (DEBUG) {
+      console.log('Fonts to preload:', Array.from(fontsToLoad));
+    }
+
+    // Load all fonts in parallel
+    const loadPromises: Promise<void>[] = [];
+    for (const fontName of fontsToLoad) {
+      const googleFontId = this.googleFonts[fontName];
+      if (googleFontId && !this.loadedFonts.has(fontName)) {
+        loadPromises.push(
+          this.loadGoogleFont(fontName, googleFontId)
+            .then(() => {
+              this.loadedFonts.add(fontName);
+              if (DEBUG) console.log(`Font loaded: ${fontName}`);
+            })
+            .catch((err) => {
+              console.warn(`Failed to load font ${fontName}:`, err);
+            })
+        );
+      }
+    }
+
+    // Wait for all fonts to load (with timeout)
+    if (loadPromises.length > 0) {
+      await Promise.race([
+        Promise.all(loadPromises),
+        new Promise<void>(resolve => setTimeout(resolve, 3000)) // 3 second timeout
+      ]);
+    }
+  }
+
+  // Collect font names from a timeline
+  private collectFontsFromTimeline(timeline: Timeline, fonts: Set<string>): void {
+    for (const layer of timeline.layers) {
+      for (const frame of layer.frames) {
+        for (const element of frame.elements) {
+          if (element.type === 'text') {
+            for (const run of element.textRuns) {
+              if (run.face) {
+                const webFontName = this.getWebFontName(run.face);
+                if (webFontName) {
+                  fonts.add(webFontName);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Get web font name from FLA font name (without triggering load)
+  private getWebFontName(flaFontName: string): string | null {
+    const fontMap: Record<string, string> = {
+      'PressStart2P-Regular': 'Press Start 2P',
+      'PressStart2P': 'Press Start 2P',
+    };
+
+    if (fontMap[flaFontName]) {
+      return fontMap[flaFontName];
+    }
+
+    for (const [key, value] of Object.entries(fontMap)) {
+      if (flaFontName.startsWith(key) || key.startsWith(flaFontName)) {
+        return value;
+      }
+    }
+
+    return null;
   }
 
   // Recalculate and update canvas size based on current settings
@@ -1194,36 +1286,207 @@ export class FLARenderer {
       const fontStyle = run.italic ? 'italic ' : '';
       const fontWeight = run.bold ? 'bold ' : '';
       const fontSize = run.size;
-      const fontFace = run.face || 'sans-serif';
-      ctx.font = `${fontStyle}${fontWeight}${fontSize}px "${fontFace}", sans-serif`;
+      // Map FLA font names to web font names
+      const fontFace = this.mapFontName(run.face || 'sans-serif');
+      ctx.font = `${fontStyle}${fontWeight}${fontSize}px ${fontFace}, sans-serif`;
       ctx.fillStyle = run.fillColor;
-
-      // Set text alignment
       ctx.textBaseline = 'top';
-      let xPos = text.left;
-      if (run.alignment === 'center') {
-        ctx.textAlign = 'center';
-        xPos = text.left + text.width / 2;
-      } else if (run.alignment === 'right') {
-        ctx.textAlign = 'right';
-        xPos = text.left + text.width;
-      } else {
-        ctx.textAlign = 'left';
-      }
 
-      // Split by line breaks and render each line
-      const lines = run.characters.split(/\r|\n/);
+      // Split by line breaks first
+      const paragraphs = run.characters.split(/\r|\n/);
       const lineHeight = run.lineHeight || run.size * 1.2;
 
-      for (const line of lines) {
-        if (line.length > 0) {
-          ctx.fillText(line, xPos, yOffset);
+      // Letter spacing (default 0, can be negative to compress)
+      const letterSpacing = run.letterSpacing || 0;
+
+      for (const paragraph of paragraphs) {
+        if (paragraph.length === 0) {
+          yOffset += lineHeight;
+          continue;
         }
-        yOffset += lineHeight;
+
+        // Word wrap within text.width
+        const wrappedLines = this.wrapText(ctx, paragraph, text.width, letterSpacing);
+
+        for (const line of wrappedLines) {
+          // Calculate line width for alignment
+          const lineWidth = this.measureTextWidth(ctx, line, letterSpacing);
+
+          // Calculate x position based on alignment
+          let xPos = text.left;
+          if (run.alignment === 'center') {
+            xPos = text.left + (text.width - lineWidth) / 2;
+          } else if (run.alignment === 'right') {
+            xPos = text.left + text.width - lineWidth;
+          }
+
+          // Render with letter spacing
+          this.renderTextWithSpacing(ctx, line, xPos, yOffset, letterSpacing);
+          yOffset += lineHeight;
+        }
       }
     }
 
     ctx.restore();
+  }
+
+  // Word wrap text to fit within maxWidth
+  private wrapText(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    maxWidth: number,
+    letterSpacing: number
+  ): string[] {
+    const words = text.split(' ');
+    const lines: string[] = [];
+    let currentLine = '';
+
+    for (const word of words) {
+      const testLine = currentLine ? currentLine + ' ' + word : word;
+      const testWidth = this.measureTextWidth(ctx, testLine, letterSpacing);
+
+      if (testWidth > maxWidth && currentLine) {
+        lines.push(currentLine);
+        currentLine = word;
+      } else {
+        currentLine = testLine;
+      }
+    }
+
+    if (currentLine) {
+      lines.push(currentLine);
+    }
+
+    return lines.length > 0 ? lines : [''];
+  }
+
+  // Measure text width including letter spacing
+  private measureTextWidth(ctx: CanvasRenderingContext2D, text: string, letterSpacing: number): number {
+    if (letterSpacing === 0) {
+      return ctx.measureText(text).width;
+    }
+    // For custom letter spacing, measure each character
+    let width = 0;
+    for (let i = 0; i < text.length; i++) {
+      width += ctx.measureText(text[i]).width;
+      if (i < text.length - 1) {
+        width += letterSpacing;
+      }
+    }
+    return width;
+  }
+
+  // Render text character by character with letter spacing
+  private renderTextWithSpacing(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    x: number,
+    y: number,
+    letterSpacing: number
+  ): void {
+    if (letterSpacing === 0) {
+      ctx.fillText(text, x, y);
+      return;
+    }
+    // Render each character with spacing
+    let currentX = x;
+    for (let i = 0; i < text.length; i++) {
+      ctx.fillText(text[i], currentX, y);
+      currentX += ctx.measureText(text[i]).width + letterSpacing;
+    }
+  }
+
+  // Track loaded fonts to avoid duplicate loading
+  private loadedFonts = new Set<string>();
+  private loadingFonts = new Map<string, Promise<void>>();
+
+  // Google Fonts that can be loaded dynamically
+  private googleFonts: Record<string, string> = {
+    'Press Start 2P': 'Press+Start+2P',
+  };
+
+  // Map FLA font names to web-compatible font names
+  private mapFontName(flaFontName: string): string {
+    // Common font name mappings from FLA to web fonts
+    const fontMap: Record<string, string> = {
+      'PressStart2P-Regular': 'Press Start 2P',
+      'PressStart2P': 'Press Start 2P',
+      'Arial': 'Arial',
+      'Arial-BoldMT': 'Arial',
+      'ArialMT': 'Arial',
+      'Times New Roman': 'Times New Roman',
+      'TimesNewRomanPSMT': 'Times New Roman',
+      'Courier New': 'Courier New',
+      'CourierNewPSMT': 'Courier New',
+      'Verdana': 'Verdana',
+      'Georgia': 'Georgia',
+      'Impact': 'Impact',
+      'Comic Sans MS': 'Comic Sans MS',
+    };
+
+    // Check for exact match
+    if (fontMap[flaFontName]) {
+      const webFontName = fontMap[flaFontName];
+      this.ensureFontLoaded(webFontName);
+      return `"${webFontName}"`;
+    }
+
+    // Try to find partial match (font family without style suffix)
+    for (const [key, value] of Object.entries(fontMap)) {
+      if (flaFontName.startsWith(key) || key.startsWith(flaFontName)) {
+        this.ensureFontLoaded(value);
+        return `"${value}"`;
+      }
+    }
+
+    // Return quoted font name as-is
+    return `"${flaFontName}"`;
+  }
+
+  // Dynamically load a font if it's a Google Font
+  private ensureFontLoaded(fontName: string): void {
+    // Skip if already loaded or loading
+    if (this.loadedFonts.has(fontName) || this.loadingFonts.has(fontName)) {
+      return;
+    }
+
+    // Check if it's a Google Font we can load
+    const googleFontId = this.googleFonts[fontName];
+    if (!googleFontId) {
+      return; // Not a known Google Font, skip
+    }
+
+    // Start loading the font
+    const loadPromise = this.loadGoogleFont(fontName, googleFontId);
+    this.loadingFonts.set(fontName, loadPromise);
+
+    loadPromise.then(() => {
+      this.loadedFonts.add(fontName);
+      this.loadingFonts.delete(fontName);
+      if (DEBUG) {
+        console.log(`Font loaded: ${fontName}`);
+      }
+    }).catch((err) => {
+      console.warn(`Failed to load font ${fontName}:`, err);
+      this.loadingFonts.delete(fontName);
+    });
+  }
+
+  // Load a Google Font dynamically
+  private async loadGoogleFont(fontName: string, googleFontId: string): Promise<void> {
+    const url = `https://fonts.googleapis.com/css2?family=${googleFontId}&display=swap`;
+
+    // Create and inject stylesheet link
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = url;
+    document.head.appendChild(link);
+
+    // Wait for font to be ready
+    return document.fonts.ready.then(() => {
+      // Check if the font is actually available
+      return document.fonts.load(`16px "${fontName}"`).then(() => {});
+    });
   }
 
   private renderShape(shape: Shape, depth: number = 0): void {
