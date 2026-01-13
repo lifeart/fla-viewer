@@ -1,116 +1,198 @@
 # FLA Viewer
 
-A web-based viewer and player for Adobe Animate/Flash Professional FLA files.
+[![Deploy to GitHub Pages](https://github.com/lifeart/fla-viewer/actions/workflows/deploy.yml/badge.svg)](https://github.com/lifeart/fla-viewer/actions/workflows/deploy.yml)
+[![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](https://opensource.org/licenses/ISC)
+
+A modern web-based viewer and player for Adobe Animate/Flash Professional FLA files. No plugins required — runs entirely in the browser.
+
+**[Live Demo](https://lifeart.github.io/fla-viewer/)**
+
+---
 
 ## Features
 
-- **FLA File Parsing**: Reads FLA/XFL format files (ZIP archives containing XML)
-- **Timeline Playback**: Play, pause, and scrub through animations
-- **Shape Rendering**: Solid fills, gradients (basic), strokes, and vector shapes
-- **Edge Path Processing**: Advanced edge connection with gap tolerance, segment splitting, and chain sorting
-- **Symbol Support**: Graphic symbols with nested timelines
-- **Motion Tweens**: Interpolated animations with easing
-- **Group Support**: Nested shape groups (DOMGroup)
-- **Video Placeholders**: DOMVideoInstance elements rendered as placeholders
-- **Bitmap Support**: Full bitmap rendering with automatic image extraction from FLA
-- **Text Rendering**: Static/dynamic text with word wrapping, alignment, and Google Fonts support
-- **Audio Support**: Stream sound playback synced to timeline with seek support
-- **Camera Support**: Simulated camera pan/zoom via viewport layer detection with follow mode
-- **Reference Layer Detection**: Automatic detection and filtering of guide/folder/camera layers
+| Feature | Description |
+|---------|-------------|
+| **FLA Parsing** | Reads FLA/XFL format (ZIP archives with XML) |
+| **Timeline Playback** | Play, pause, scrub, and frame-by-frame navigation |
+| **Vector Shapes** | Solid fills, linear/radial gradients, strokes |
+| **Symbols** | Graphic, MovieClip, and Button symbols with nesting |
+| **Motion Tweens** | Interpolated animations with easing support |
+| **Bitmaps** | Full image rendering from embedded PNGs/JPGs |
+| **Text** | Static/dynamic text with word wrap and Google Fonts |
+| **Audio** | Stream sound synced to timeline with volume control |
+| **Camera** | Auto-detected camera layers with follow mode |
 
-## Getting Started
+---
 
-### Prerequisites
+## Quick Start
 
-- Node.js 18+
-- npm or yarn
+### Try Online
 
-### Installation
+Visit the **[Live Demo](https://lifeart.github.io/fla-viewer/)** and drag & drop any `.fla` file.
+
+### Run Locally
 
 ```bash
+# Clone the repository
+git clone https://github.com/lifeart/fla-viewer.git
+cd fla-viewer
+
+# Install dependencies
 npm install
-```
 
-### Development
-
-```bash
+# Start development server
 npm run dev
 ```
 
-Opens the development server at `http://localhost:5173`
+Open `http://localhost:3000` in your browser.
 
-### Build
+### Build for Production
 
 ```bash
 npm run build
 ```
 
-Outputs production files to `dist/`
+Output files will be in the `dist/` folder.
 
-## Usage
+---
 
-1. Open the application in a browser
-2. Click "Choose File" or drag and drop a `.fla` file
-3. Use the playback controls to navigate the timeline:
-   - Play/Pause button
-   - Frame slider
-   - Frame counter display
+## Keyboard Shortcuts
 
-## Supported FLA Elements
+| Key | Action |
+|-----|--------|
+| `Space` | Play / Pause |
+| `←` | Previous frame |
+| `→` | Next frame |
+| `Home` | Go to first frame |
+| `End` | Go to last frame |
+| `D` | Toggle debug panel |
+| `M` | Mute / Unmute |
+| `F` | Toggle fullscreen |
+
+---
+
+## Embedding
+
+FLA Viewer can be embedded in your website using an iframe. Add `?embed=true` to enable embed mode, which hides the header for a cleaner look.
+
+### Basic Embed
+
+```html
+<iframe
+  src="https://lifeart.github.io/fla-viewer/?embed=true"
+  width="800"
+  height="600"
+  frameborder="0"
+  allowfullscreen>
+</iframe>
+```
+
+### Responsive Embed
+
+```html
+<div style="position: relative; width: 100%; padding-bottom: 56.25%; height: 0; overflow: hidden;">
+  <iframe
+    src="https://lifeart.github.io/fla-viewer/?embed=true"
+    style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0;"
+    allowfullscreen>
+  </iframe>
+</div>
+```
+
+### Self-Hosted Embed
+
+To host your own instance:
+
+1. Build the project: `npm run build`
+2. Deploy the `dist/` folder to your server
+3. Use your own URL in the iframe
+
+```html
+<iframe
+  src="https://your-domain.com/fla-viewer/?embed=true"
+  width="800"
+  height="600"
+  frameborder="0"
+  allowfullscreen>
+</iframe>
+```
+
+---
+
+## Supported Elements
 
 | Element | Status | Notes |
-|---------|--------|-------|
-| DOMSymbolInstance | Supported | Graphic, MovieClip, Button types |
-| DOMShape | Supported | Fills, edges, transforms |
-| DOMGroup | Supported | Nested groups and shapes |
-| DOMBitmapInstance | Supported | Full image rendering from embedded PNGs/JPGs |
-| DOMVideoInstance | Partial | Placeholder rendering |
-| Camera Layer | Supported | Auto-detected + follow camera mode |
-| Motion Tweens | Supported | Linear and eased interpolation |
-| DOMStaticText | Supported | Word wrap, alignment, Google Fonts |
-| DOMDynamicText | Supported | Same as static text |
-| DOMSoundItem | Supported | Stream sync with timeline |
-| Shape Tweens | Not supported | - |
-| Masks | Not supported | - |
-| Filters | Not supported | - |
+|---------|:------:|-------|
+| DOMSymbolInstance | :white_check_mark: | Graphic, MovieClip, Button |
+| DOMShape | :white_check_mark: | Fills, strokes, transforms |
+| DOMGroup | :white_check_mark: | Nested groups |
+| DOMBitmapInstance | :white_check_mark: | PNG, JPG, GIF |
+| DOMStaticText | :white_check_mark: | Word wrap, alignment |
+| DOMDynamicText | :white_check_mark: | Same as static |
+| DOMSoundItem | :white_check_mark: | Stream sync |
+| Motion Tweens | :white_check_mark: | Linear + eased |
+| Camera Layer | :white_check_mark: | Auto-detect + follow |
+| DOMVideoInstance | :warning: | Placeholder only |
+| Shape Tweens | :x: | Not supported |
+| Masks | :x: | Not supported |
+| Filters | :x: | Not supported |
+| ActionScript | :x: | Not supported |
+
+---
 
 ## Architecture
 
 ```
 src/
-├── main.ts          # Application entry point and UI
-├── fla-parser.ts    # ZIP extraction and XML parsing
-├── edge-decoder.ts  # XFL edge path format decoder
-├── renderer.ts      # Canvas 2D rendering engine
-├── player.ts        # Timeline playback controller
+├── main.ts          # Application entry & UI
+├── fla-parser.ts    # ZIP extraction & XML parsing
+├── edge-decoder.ts  # XFL edge path decoder
+├── renderer.ts      # Canvas 2D rendering
+├── player.ts        # Timeline playback
 └── types.ts         # TypeScript interfaces
 ```
 
-### Key Components
+### How It Works
 
-- **FLAParser**: Extracts and parses FLA files, loads symbols from LIBRARY folder
-- **FLARenderer**: Renders frames to HTML5 Canvas using 2D context
-- **FLAPlayer**: Controls timeline playback with requestAnimationFrame
+1. **FLAParser** extracts the ZIP archive and parses XML documents
+2. **FLARenderer** draws frames to an HTML5 Canvas
+3. **FLAPlayer** controls playback timing with `requestAnimationFrame`
+
+---
 
 ## FLA/XFL Format
 
 FLA files are ZIP archives containing:
-- `DOMDocument.xml` - Main document with timelines
-- `LIBRARY/*.xml` - Symbol definitions
-- `bin/` - Binary data (bitmaps, video)
+
+```
+├── DOMDocument.xml    # Main document structure
+├── LIBRARY/           # Symbol definitions (.xml)
+└── bin/               # Binary assets (images, audio)
+```
 
 See [AGENTS.md](./AGENTS.md) for detailed format documentation.
+
+---
 
 ## Known Limitations
 
 - Video elements show placeholder only (no FLV playback)
-- Radial/linear gradients render with basic support
-- No bitmap fills in shapes (solid bitmaps work)
+- Gradients have basic support
+- No bitmap fills in shapes
 - No mask layers
 - No filters (drop shadow, blur, glow, etc.)
-- No ActionScript support
-- Font support limited to Google Fonts mappings (falls back to sans-serif)
+- No ActionScript execution
+- Fonts fall back to system fonts if not in Google Fonts
+
+---
+
+## Contributing
+
+Contributions are welcome! Feel free to open issues or submit pull requests.
+
+---
 
 ## License
 
-ISC
+[ISC](LICENSE) © lifeart
