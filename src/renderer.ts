@@ -17,6 +17,9 @@ import type {
   PathCommand
 } from './types';
 
+// Debug flag - enabled via ?debug=true URL parameter
+const DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
+
 interface DebugElement {
   type: 'shape' | 'symbol' | 'bitmap' | 'video';
   element: DisplayElement;
@@ -27,6 +30,13 @@ interface DebugElement {
   fillStyles?: Map<number, FillStyle>;
   strokeStyles?: Map<number, StrokeStyle>;
   edges?: Edge[];
+}
+
+// Cache for computed shape paths (avoids recomputing every frame)
+interface CachedShapePaths {
+  fillPaths: Map<number, Path2D>;
+  strokePaths: Map<number, Path2D>;
+  combinedPath: Path2D;
 }
 
 export class FLARenderer {
@@ -43,6 +53,7 @@ export class FLARenderer {
   private layerOrder: 'forward' | 'reverse' = 'reverse';
   private nestedLayerOrder: 'forward' | 'reverse' = 'reverse';
   private elementOrder: 'forward' | 'reverse' = 'forward';
+  private shapePathCache = new WeakMap<Shape, CachedShapePaths>();
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -252,9 +263,79 @@ export class FLARenderer {
     this.canvas.style.width = `${displayWidth}px`;
     this.canvas.style.height = `${displayHeight}px`;
 
-    console.log('Document size:', doc.width, 'x', doc.height);
-    console.log('Canvas size:', this.canvas.width, 'x', this.canvas.height);
-    console.log('Scale:', this.scale, 'DPR:', this.dpr);
+    if (DEBUG) {
+      console.log('Document size:', doc.width, 'x', doc.height);
+      console.log('Canvas size:', this.canvas.width, 'x', this.canvas.height);
+      console.log('Scale:', this.scale, 'DPR:', this.dpr);
+    }
+
+    // Pre-compute shape paths asynchronously to warm up cache
+    this.precomputeShapePaths(doc);
+  }
+
+  // Pre-compute all shape paths in the background to warm up cache
+  private precomputeShapePaths(doc: FLADocument): void {
+    const shapes = this.collectAllShapes(doc);
+    if (shapes.length === 0) return;
+
+    if (DEBUG) {
+      console.log(`Pre-computing ${shapes.length} shapes...`);
+    }
+
+    // Process shapes in batches to avoid blocking UI
+    const BATCH_SIZE = 10;
+    let index = 0;
+
+    const processBatch = () => {
+      const end = Math.min(index + BATCH_SIZE, shapes.length);
+      for (let i = index; i < end; i++) {
+        this.getOrComputeShapePaths(shapes[i]);
+      }
+      index = end;
+
+      if (index < shapes.length) {
+        // Use requestIdleCallback if available, otherwise setTimeout
+        if ('requestIdleCallback' in window) {
+          (window as Window & { requestIdleCallback: (cb: () => void) => void }).requestIdleCallback(processBatch);
+        } else {
+          setTimeout(processBatch, 0);
+        }
+      } else if (DEBUG) {
+        console.log(`Pre-computed ${shapes.length} shapes`);
+      }
+    };
+
+    // Start processing after a short delay to not block initial render
+    setTimeout(processBatch, 16);
+  }
+
+  // Collect all shapes from document (main timeline + all symbols)
+  private collectAllShapes(doc: FLADocument): Shape[] {
+    const shapes: Shape[] = [];
+
+    const processTimeline = (timeline: Timeline) => {
+      for (const layer of timeline.layers) {
+        for (const frame of layer.frames) {
+          for (const element of frame.elements) {
+            if (element.type === 'shape') {
+              shapes.push(element);
+            }
+          }
+        }
+      }
+    };
+
+    // Process main timeline
+    for (const timeline of doc.timelines) {
+      processTimeline(timeline);
+    }
+
+    // Process all symbols
+    for (const symbol of doc.symbols.values()) {
+      processTimeline(symbol.timeline);
+    }
+
+    return shapes;
   }
 
   renderFrame(frameIndex: number): void {
@@ -779,172 +860,9 @@ export class FLARenderer {
       strokeStyles.set(stroke.index, stroke);
     }
 
-    // Combined path for hit testing
-    const combinedPath = new Path2D();
-
-    // First, collect all edge contributions for each fill style
-    // Each edge can contribute to fillStyle0 (reversed) and/or fillStyle1 (forward)
-    const fillEdgeContributions = new Map<number, { commands: PathCommand[], startX: number, startY: number, endX: number, endY: number }[]>();
-
-    for (const edge of shape.edges) {
-      // Add to combined path for hit testing
-      const path = this.edgeToPath(edge);
-      combinedPath.addPath(path);
-
-      // Split edge commands into segments (at internal MoveTo commands that create gaps)
-      // Each segment between MoveTos becomes a separate contribution
-      const segments: PathCommand[][] = [];
-      let currentSegment: PathCommand[] = [];
-      let lastEndX = NaN;
-      let lastEndY = NaN;
-      const SPLIT_EPSILON = 0.5; // Only split if MoveTo is more than this far from previous end
-
-      for (const cmd of edge.commands) {
-        if (cmd.type === 'M') {
-          // Check if this MoveTo is at a significantly different position
-          const isContinuous = !Number.isNaN(lastEndX) &&
-            Math.abs(cmd.x - lastEndX) <= SPLIT_EPSILON &&
-            Math.abs(cmd.y - lastEndY) <= SPLIT_EPSILON;
-
-          if (isContinuous) {
-            // Redundant MoveTo at same position - just add it to current segment
-            currentSegment.push(cmd);
-          } else {
-            // MoveTo creates a gap - start new segment
-            if (currentSegment.length > 0) {
-              const hasDrawing = currentSegment.some(c => c.type !== 'M');
-              if (hasDrawing) {
-                segments.push(currentSegment);
-              }
-            }
-            currentSegment = [cmd];
-          }
-          lastEndX = cmd.x;
-          lastEndY = cmd.y;
-        } else {
-          currentSegment.push(cmd);
-          if ('x' in cmd && Number.isFinite(cmd.x)) {
-            lastEndX = cmd.x;
-            lastEndY = cmd.y;
-          }
-        }
-      }
-      // Don't forget the last segment
-      if (currentSegment.length > 0) {
-        const hasDrawing = currentSegment.some(c => c.type !== 'M');
-        if (hasDrawing) {
-          segments.push(currentSegment);
-        }
-      }
-
-      // Process each segment as a separate contribution
-      for (const segmentCmds of segments) {
-        const startPoint = this.getFirstPoint(segmentCmds);
-        const endPoint = this.getLastPoint(segmentCmds);
-        if (!startPoint || !endPoint) continue;
-
-        // Handle fillStyle1 (forward direction)
-        if (edge.fillStyle1 !== undefined) {
-          if (!fillEdgeContributions.has(edge.fillStyle1)) {
-            fillEdgeContributions.set(edge.fillStyle1, []);
-          }
-          fillEdgeContributions.get(edge.fillStyle1)!.push({
-            commands: segmentCmds,
-            startX: startPoint.x,
-            startY: startPoint.y,
-            endX: endPoint.x,
-            endY: endPoint.y
-          });
-        }
-
-        // Handle fillStyle0 (reversed direction - for left-side fill)
-        if (edge.fillStyle0 !== undefined && edge.fillStyle0 !== edge.fillStyle1) {
-          if (!fillEdgeContributions.has(edge.fillStyle0)) {
-            fillEdgeContributions.set(edge.fillStyle0, []);
-          }
-          const reversedCmds = this.reverseCommands(segmentCmds);
-          fillEdgeContributions.get(edge.fillStyle0)!.push({
-            commands: reversedCmds,
-            startX: endPoint.x,
-            startY: endPoint.y,
-            endX: startPoint.x,
-            endY: startPoint.y
-          });
-        }
-      }
-    }
-
-    // Build fill paths by sorting edges into connected chains
-    const fillPaths = new Map<number, Path2D>();
-    const EPSILON = 8.0; // Tolerance for edge connections (some FLA files have gaps up to 8px)
-
-    for (const [styleIndex, contributions] of fillEdgeContributions) {
-      const path = new Path2D();
-      const sortedContributions = this.sortEdgeContributions(contributions, EPSILON);
-
-      let currentX = NaN;
-      let currentY = NaN;
-      let subpathStartX = NaN;
-      let subpathStartY = NaN;
-
-      for (let i = 0; i < sortedContributions.length; i++) {
-        const contrib = sortedContributions[i];
-        const isNewSubpath = Number.isNaN(currentX) ||
-            Math.abs(contrib.startX - currentX) > EPSILON ||
-            Math.abs(contrib.startY - currentY) > EPSILON;
-
-        // Before starting a new subpath, close the current one
-        if (isNewSubpath && !Number.isNaN(subpathStartX)) {
-          // Always close the previous subpath - either we're at the start or we need to draw back
-          const atStart = Math.abs(currentX - subpathStartX) <= EPSILON &&
-                          Math.abs(currentY - subpathStartY) <= EPSILON;
-          if (!atStart) {
-            // Draw line back to start to close the gap
-            path.lineTo(subpathStartX, subpathStartY);
-          }
-          path.closePath();
-        }
-
-        if (isNewSubpath) {
-          path.moveTo(contrib.startX, contrib.startY);
-          subpathStartX = contrib.startX;
-          subpathStartY = contrib.startY;
-        }
-
-        // Add commands (skip the first moveTo since we handled positioning)
-        for (const cmd of contrib.commands) {
-          if (cmd.type === 'M') continue; // Skip moveTo, we handled it
-          this.addCommandToPath(path, cmd);
-        }
-
-        currentX = contrib.endX;
-        currentY = contrib.endY;
-      }
-
-      // Close final subpath
-      if (!Number.isNaN(subpathStartX)) {
-        const atStart = Math.abs(currentX - subpathStartX) <= EPSILON &&
-                        Math.abs(currentY - subpathStartY) <= EPSILON;
-        if (!atStart) {
-          // Draw line back to start to close the gap
-          path.lineTo(subpathStartX, subpathStartY);
-        }
-        path.closePath();
-      }
-
-      fillPaths.set(styleIndex, path);
-    }
-
-    // Handle strokes separately (they don't need sorting)
-    const strokePaths = new Map<number, Path2D>();
-    for (const edge of shape.edges) {
-      if (edge.strokeStyle !== undefined) {
-        if (!strokePaths.has(edge.strokeStyle)) {
-          strokePaths.set(edge.strokeStyle, new Path2D());
-        }
-        strokePaths.get(edge.strokeStyle)!.addPath(this.edgeToPath(edge));
-      }
-    }
+    // Get cached paths or compute them
+    const cached = this.getOrComputeShapePaths(shape);
+    const { fillPaths, strokePaths, combinedPath } = cached;
 
     // Capture debug element before rendering
     if (this.debugMode) {
@@ -988,6 +906,171 @@ export class FLARenderer {
     }
 
     ctx.restore();
+  }
+
+  // Compute and cache shape paths (expensive operation done once per shape)
+  private getOrComputeShapePaths(shape: Shape): CachedShapePaths {
+    // Check cache first
+    const cached = this.shapePathCache.get(shape);
+    if (cached) {
+      return cached;
+    }
+
+    // Compute paths (this is the expensive part)
+    const combinedPath = new Path2D();
+    const fillEdgeContributions = new Map<number, { commands: PathCommand[], startX: number, startY: number, endX: number, endY: number }[]>();
+
+    for (const edge of shape.edges) {
+      // Add to combined path for hit testing
+      const path = this.edgeToPath(edge);
+      combinedPath.addPath(path);
+
+      // Split edge commands into segments (at internal MoveTo commands that create gaps)
+      const segments: PathCommand[][] = [];
+      let currentSegment: PathCommand[] = [];
+      let lastEndX = NaN;
+      let lastEndY = NaN;
+      const SPLIT_EPSILON = 0.5;
+
+      for (const cmd of edge.commands) {
+        if (cmd.type === 'M') {
+          const isContinuous = !Number.isNaN(lastEndX) &&
+            Math.abs(cmd.x - lastEndX) <= SPLIT_EPSILON &&
+            Math.abs(cmd.y - lastEndY) <= SPLIT_EPSILON;
+
+          if (isContinuous) {
+            currentSegment.push(cmd);
+          } else {
+            if (currentSegment.length > 0) {
+              const hasDrawing = currentSegment.some(c => c.type !== 'M');
+              if (hasDrawing) {
+                segments.push(currentSegment);
+              }
+            }
+            currentSegment = [cmd];
+          }
+          lastEndX = cmd.x;
+          lastEndY = cmd.y;
+        } else {
+          currentSegment.push(cmd);
+          if ('x' in cmd && Number.isFinite(cmd.x)) {
+            lastEndX = cmd.x;
+            lastEndY = cmd.y;
+          }
+        }
+      }
+      if (currentSegment.length > 0) {
+        const hasDrawing = currentSegment.some(c => c.type !== 'M');
+        if (hasDrawing) {
+          segments.push(currentSegment);
+        }
+      }
+
+      // Process each segment as a separate contribution
+      for (const segmentCmds of segments) {
+        const startPoint = this.getFirstPoint(segmentCmds);
+        const endPoint = this.getLastPoint(segmentCmds);
+        if (!startPoint || !endPoint) continue;
+
+        if (edge.fillStyle1 !== undefined) {
+          if (!fillEdgeContributions.has(edge.fillStyle1)) {
+            fillEdgeContributions.set(edge.fillStyle1, []);
+          }
+          fillEdgeContributions.get(edge.fillStyle1)!.push({
+            commands: segmentCmds,
+            startX: startPoint.x,
+            startY: startPoint.y,
+            endX: endPoint.x,
+            endY: endPoint.y
+          });
+        }
+
+        if (edge.fillStyle0 !== undefined && edge.fillStyle0 !== edge.fillStyle1) {
+          if (!fillEdgeContributions.has(edge.fillStyle0)) {
+            fillEdgeContributions.set(edge.fillStyle0, []);
+          }
+          const reversedCmds = this.reverseCommands(segmentCmds);
+          fillEdgeContributions.get(edge.fillStyle0)!.push({
+            commands: reversedCmds,
+            startX: endPoint.x,
+            startY: endPoint.y,
+            endX: startPoint.x,
+            endY: startPoint.y
+          });
+        }
+      }
+    }
+
+    // Build fill paths by sorting edges into connected chains
+    const fillPaths = new Map<number, Path2D>();
+    const EPSILON = 8.0;
+
+    for (const [styleIndex, contributions] of fillEdgeContributions) {
+      const path = new Path2D();
+      const sortedContributions = this.sortEdgeContributions(contributions, EPSILON);
+
+      let currentX = NaN;
+      let currentY = NaN;
+      let subpathStartX = NaN;
+      let subpathStartY = NaN;
+
+      for (let i = 0; i < sortedContributions.length; i++) {
+        const contrib = sortedContributions[i];
+        const isNewSubpath = Number.isNaN(currentX) ||
+            Math.abs(contrib.startX - currentX) > EPSILON ||
+            Math.abs(contrib.startY - currentY) > EPSILON;
+
+        if (isNewSubpath && !Number.isNaN(subpathStartX)) {
+          const atStart = Math.abs(currentX - subpathStartX) <= EPSILON &&
+                          Math.abs(currentY - subpathStartY) <= EPSILON;
+          if (!atStart) {
+            path.lineTo(subpathStartX, subpathStartY);
+          }
+          path.closePath();
+        }
+
+        if (isNewSubpath) {
+          path.moveTo(contrib.startX, contrib.startY);
+          subpathStartX = contrib.startX;
+          subpathStartY = contrib.startY;
+        }
+
+        for (const cmd of contrib.commands) {
+          if (cmd.type === 'M') continue;
+          this.addCommandToPath(path, cmd);
+        }
+
+        currentX = contrib.endX;
+        currentY = contrib.endY;
+      }
+
+      if (!Number.isNaN(subpathStartX)) {
+        const atStart = Math.abs(currentX - subpathStartX) <= EPSILON &&
+                        Math.abs(currentY - subpathStartY) <= EPSILON;
+        if (!atStart) {
+          path.lineTo(subpathStartX, subpathStartY);
+        }
+        path.closePath();
+      }
+
+      fillPaths.set(styleIndex, path);
+    }
+
+    // Handle strokes separately (they don't need sorting)
+    const strokePaths = new Map<number, Path2D>();
+    for (const edge of shape.edges) {
+      if (edge.strokeStyle !== undefined) {
+        if (!strokePaths.has(edge.strokeStyle)) {
+          strokePaths.set(edge.strokeStyle, new Path2D());
+        }
+        strokePaths.get(edge.strokeStyle)!.addPath(this.edgeToPath(edge));
+      }
+    }
+
+    // Cache the result
+    const result: CachedShapePaths = { fillPaths, strokePaths, combinedPath };
+    this.shapePathCache.set(shape, result);
+    return result;
   }
 
   private edgeToPath(edge: Edge): Path2D {

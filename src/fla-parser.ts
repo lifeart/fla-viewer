@@ -20,7 +20,8 @@ import type {
 } from './types';
 import { decodeEdges } from './edge-decoder';
 
-// XFL namespace (for reference)
+// Debug flag - enabled via ?debug=true URL parameter
+const DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
 
 export class FLAParser {
   private zip: JSZip | null = null;
@@ -109,7 +110,7 @@ export class FLAParser {
       try {
         const trimmedBuffer = buffer.slice(0, expectedEnd);
         const zip = await JSZip.loadAsync(trimmedBuffer);
-        console.log(`ZIP repaired by trimming to EOCD boundary`);
+        if (DEBUG) console.log(`ZIP repaired by trimming to EOCD boundary`);
         return zip;
       } catch {
         // Continue to other repair methods
@@ -131,7 +132,7 @@ export class FLAParser {
         patchedView.setUint32(eocdOffset + 12, actualCdSize, true);
 
         const zip = await JSZip.loadAsync(patched.buffer);
-        console.log(`ZIP repaired by patching CD size: ${cdSize} -> ${actualCdSize}`);
+        if (DEBUG) console.log(`ZIP repaired by patching CD size: ${cdSize} -> ${actualCdSize}`);
         return zip;
       } catch (e) {
         console.warn('CD size patch failed:', e);
@@ -171,7 +172,7 @@ export class FLAParser {
         path => path.startsWith('LIBRARY/') && path.endsWith('.xml')
       );
 
-      console.log(`Found ${libraryFiles.length} XML files in LIBRARY folder`);
+      if (DEBUG) console.log(`Found ${libraryFiles.length} XML files in LIBRARY folder`);
 
       for (const path of libraryFiles) {
         const symbolXml = await this.getFileContent(path);
@@ -182,10 +183,11 @@ export class FLAParser {
       }
     }
 
-    console.log(`Loaded ${this.symbolCache.size} symbols`);
-    // Log first few symbol names for debugging
-    const symbolNames = Array.from(this.symbolCache.keys()).slice(0, 10);
-    console.log('Symbol names (first 10):', symbolNames.map(n => JSON.stringify(n)));
+    if (DEBUG) {
+      console.log(`Loaded ${this.symbolCache.size} symbols`);
+      const symbolNames = Array.from(this.symbolCache.keys()).slice(0, 10);
+      console.log('Symbol names (first 10):', symbolNames.map(n => JSON.stringify(n)));
+    }
   }
 
   private async parseAndCacheSymbol(symbolXml: string, filename: string): Promise<void> {
@@ -302,7 +304,7 @@ export class FLAParser {
       // Note: We do NOT use name-based detection for camera transforms to avoid false positives
       const isCameraCandidate = isGuideLayer || isHiddenReference || isLocked;
       if (isCameraCandidate && isNearCenter) {
-        console.log(`Detected camera layer: "${layer.name}" at index ${i} (guide=${isGuideLayer}, hidden=${isHiddenReference}, locked=${isLocked}, nearCenter=${isNearCenter})`);
+        if (DEBUG) console.log(`Detected camera layer: "${layer.name}" at index ${i} (guide=${isGuideLayer}, hidden=${isHiddenReference}, locked=${isLocked}, nearCenter=${isNearCenter})`);
         return i;
       }
     }
