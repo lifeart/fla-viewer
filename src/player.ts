@@ -1,8 +1,16 @@
-import type { FLADocument, PlayerState } from './types';
+import type { FLADocument, PlayerState, FrameSound, SoundItem } from './types';
 import { FLARenderer } from './renderer';
+
+interface StreamSound {
+  sound: FrameSound;
+  soundItem: SoundItem;
+  startFrame: number;
+  duration: number; // in frames
+}
 
 export class FLAPlayer {
   private renderer: FLARenderer;
+  private doc: FLADocument | null = null;
   private state: PlayerState = {
     playing: false,
     currentFrame: 0,
@@ -12,6 +20,11 @@ export class FLAPlayer {
   private animationId: number | null = null;
   private lastFrameTime: number = 0;
   private onStateChange: ((state: PlayerState) => void) | null = null;
+
+  // Audio playback
+  private audioContext: AudioContext | null = null;
+  private activeAudioSource: AudioBufferSourceNode | null = null;
+  private streamSounds: StreamSound[] = [];
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new FLARenderer(canvas);
@@ -23,6 +36,11 @@ export class FLAPlayer {
       cancelAnimationFrame(this.animationId);
       this.animationId = null;
     }
+
+    // Stop any playing audio
+    this.stopAudio();
+
+    this.doc = doc;
 
     // Wait for renderer to set up document (including font preloading)
     await this.renderer.setDocument(doc);
@@ -37,8 +55,33 @@ export class FLAPlayer {
       fps: doc.frameRate
     };
 
+    // Find stream sounds in the timeline
+    this.findStreamSounds();
+
     this.render();
     this.notifyStateChange();
+  }
+
+  private findStreamSounds(): void {
+    this.streamSounds = [];
+    if (!this.doc || !this.doc.timelines[0]) return;
+
+    const timeline = this.doc.timelines[0];
+    for (const layer of timeline.layers) {
+      for (const frame of layer.frames) {
+        if (frame.sound && frame.sound.sync === 'stream') {
+          const soundItem = this.doc.sounds.get(frame.sound.name);
+          if (soundItem && soundItem.audioData) {
+            this.streamSounds.push({
+              sound: frame.sound,
+              soundItem,
+              startFrame: frame.index,
+              duration: frame.duration
+            });
+          }
+        }
+      }
+    }
   }
 
   onStateUpdate(callback: (state: PlayerState) => void): void {
@@ -54,12 +97,14 @@ export class FLAPlayer {
 
     this.state.playing = true;
     this.lastFrameTime = performance.now();
+    this.startAudio();
     this.animate();
     this.notifyStateChange();
   }
 
   pause(): void {
     this.state.playing = false;
+    this.stopAudio();
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);
       this.animationId = null;
@@ -72,6 +117,72 @@ export class FLAPlayer {
     this.state.currentFrame = 0;
     this.render();
     this.notifyStateChange();
+  }
+
+  private startAudio(): void {
+    if (this.streamSounds.length === 0) return;
+
+    // Initialize AudioContext on first use (requires user interaction)
+    if (!this.audioContext) {
+      this.audioContext = new AudioContext();
+    }
+
+    // Resume context if suspended (autoplay policy)
+    if (this.audioContext.state === 'suspended') {
+      this.audioContext.resume();
+    }
+
+    // Find stream sound that covers current frame
+    const currentFrame = this.state.currentFrame;
+    for (const stream of this.streamSounds) {
+      const endFrame = stream.startFrame + stream.duration;
+      if (currentFrame >= stream.startFrame && currentFrame < endFrame) {
+        this.playStreamSound(stream, currentFrame);
+        break;
+      }
+    }
+  }
+
+  private playStreamSound(stream: StreamSound, fromFrame: number): void {
+    if (!this.audioContext || !stream.soundItem.audioData) return;
+
+    // Stop any currently playing audio
+    this.stopAudio();
+
+    const audioBuffer = stream.soundItem.audioData;
+    const fps = this.state.fps;
+
+    // Calculate audio start position
+    // inPoint44 is the start offset in the original audio (in samples at 44kHz)
+    const inPointSeconds = (stream.sound.inPoint44 || 0) / 44100;
+
+    // Calculate how far into the sound we should be based on current frame
+    const framesIntoSound = fromFrame - stream.startFrame;
+    const timeIntoSound = framesIntoSound / fps;
+
+    const audioOffset = inPointSeconds + timeIntoSound;
+
+    // Don't play if offset is beyond the audio
+    if (audioOffset >= audioBuffer.duration) return;
+
+    // Create source and play
+    const source = this.audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(this.audioContext.destination);
+    this.activeAudioSource = source;
+
+    source.start(0, audioOffset);
+  }
+
+  private stopAudio(): void {
+    if (this.activeAudioSource) {
+      try {
+        this.activeAudioSource.stop();
+      } catch {
+        // Ignore errors if already stopped
+      }
+      this.activeAudioSource = null;
+    }
   }
 
   nextFrame(): void {
@@ -89,7 +200,14 @@ export class FLAPlayer {
   }
 
   goToFrame(frame: number): void {
+    const wasPlaying = this.state.playing;
     this.state.currentFrame = Math.max(0, Math.min(frame, this.state.totalFrames - 1));
+
+    // Restart audio at new position if playing
+    if (wasPlaying) {
+      this.startAudio();
+    }
+
     this.render();
     this.notifyStateChange();
   }
@@ -110,7 +228,14 @@ export class FLAPlayer {
 
     if (elapsed >= frameInterval) {
       this.lastFrameTime = now - (elapsed % frameInterval);
+      const prevFrame = this.state.currentFrame;
       this.state.currentFrame = (this.state.currentFrame + 1) % this.state.totalFrames;
+
+      // Restart audio when looping back to beginning
+      if (this.state.currentFrame < prevFrame) {
+        this.startAudio();
+      }
+
       this.render();
       this.notifyStateChange();
     }

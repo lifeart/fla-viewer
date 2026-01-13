@@ -8,6 +8,7 @@ export interface FLADocument {
   timelines: Timeline[];
   symbols: Map<string, Symbol>;
   bitmaps: Map<string, BitmapItem>;
+  sounds: Map<string, SoundItem>;
 }
 
 export interface BitmapItem {
@@ -17,6 +18,14 @@ export interface BitmapItem {
   height: number; // In pixels
   sourceExternalFilepath?: string;
   imageData?: HTMLImageElement; // Loaded image (if available)
+}
+
+export interface SoundItem {
+  name: string;
+  href: string; // Filename in archive
+  format?: string; // e.g., "44kHz 16bit Stereo"
+  sampleCount?: number;
+  audioData?: AudioBuffer; // Loaded audio (if available)
 }
 
 export interface Timeline {
@@ -46,6 +55,15 @@ export interface Frame {
   acceleration?: number;
   elements: DisplayElement[];
   tweens?: Tween[];
+  sound?: FrameSound;
+}
+
+export interface FrameSound {
+  name: string; // Reference to SoundItem name
+  sync: 'event' | 'start' | 'stop' | 'stream';
+  inPoint44?: number; // Start point in samples at 44kHz
+  outPoint44?: number; // End point in samples at 44kHz
+  loopCount?: number;
 }
 
 export interface Tween {

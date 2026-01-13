@@ -14,6 +14,7 @@ A web-based viewer and player for Adobe Animate/Flash Professional FLA files.
 - **Video Placeholders**: DOMVideoInstance elements rendered as placeholders
 - **Bitmap Support**: Full bitmap rendering with automatic image extraction from FLA
 - **Text Rendering**: Static/dynamic text with word wrapping, alignment, and Google Fonts support
+- **Audio Support**: Stream sound playback synced to timeline with seek support
 - **Camera Support**: Simulated camera pan/zoom via viewport layer detection with follow mode
 - **Reference Layer Detection**: Automatic detection and filtering of guide/folder/camera layers
 
@@ -68,6 +69,7 @@ Outputs production files to `dist/`
 | Motion Tweens | Supported | Linear and eased interpolation |
 | DOMStaticText | Supported | Word wrap, alignment, Google Fonts |
 | DOMDynamicText | Supported | Same as static text |
+| DOMSoundItem | Supported | Stream sync with timeline |
 | Shape Tweens | Not supported | - |
 | Masks | Not supported | - |
 | Filters | Not supported | - |

@@ -4,6 +4,7 @@ import type {
   Timeline,
   Layer,
   Frame,
+  FrameSound,
   DisplayElement,
   SymbolInstance,
   VideoInstance,
@@ -16,6 +17,7 @@ import type {
   StrokeStyle,
   Symbol,
   BitmapItem,
+  SoundItem,
   Point,
   Tween,
   Edge
@@ -67,6 +69,9 @@ export class FLAParser {
     // Parse bitmap items from media section and load images
     const bitmaps = await this.parseBitmaps(root);
 
+    // Parse sound items from media section and load audio
+    const sounds = await this.parseSounds(root);
+
     // Parse main timeline (pass dimensions for camera detection)
     const timelines = this.parseTimelines(root, width, height);
 
@@ -77,7 +82,8 @@ export class FLAParser {
       backgroundColor,
       timelines,
       symbols: this.symbolCache,
-      bitmaps
+      bitmaps,
+      sounds
     };
   }
 
@@ -409,6 +415,9 @@ export class FLAParser {
       const elements = this.parseElements(frameEl);
       const tweens = this.parseTweens(frameEl);
 
+      // Parse sound reference
+      const sound = this.parseFrameSound(frameEl);
+
       frames.push({
         index,
         duration,
@@ -416,11 +425,32 @@ export class FLAParser {
         tweenType: tweenType || 'none',
         acceleration: acceleration ? parseInt(acceleration) : undefined,
         elements,
-        tweens
+        tweens,
+        sound
       });
     }
 
     return frames;
+  }
+
+  private parseFrameSound(frame: globalThis.Element): FrameSound | undefined {
+    const soundName = frame.getAttribute('soundName');
+    if (!soundName) return undefined;
+
+    const soundSync = (frame.getAttribute('soundSync') || 'event') as FrameSound['sync'];
+    const inPoint44 = frame.getAttribute('inPoint44');
+    const outPoint44 = frame.getAttribute('outPoint44');
+    const loopCount = frame.getAttribute('soundLoopMode') === 'loop'
+      ? parseInt(frame.getAttribute('soundLoop') || '1')
+      : undefined;
+
+    return {
+      name: soundName,
+      sync: soundSync,
+      inPoint44: inPoint44 ? parseInt(inPoint44) : undefined,
+      outPoint44: outPoint44 ? parseInt(outPoint44) : undefined,
+      loopCount
+    };
   }
 
   private parseTweens(frame: globalThis.Element): Tween[] {
@@ -906,6 +936,86 @@ export class FLAParser {
       }
     } finally {
       URL.revokeObjectURL(url);
+    }
+  }
+
+  private audioContext: AudioContext | null = null;
+
+  private async parseSounds(root: globalThis.Element): Promise<Map<string, SoundItem>> {
+    const sounds = new Map<string, SoundItem>();
+    const soundElements = root.querySelectorAll('media > DOMSoundItem');
+
+    const loadPromises: Promise<void>[] = [];
+
+    for (const soundEl of soundElements) {
+      const name = soundEl.getAttribute('name') || '';
+      const href = soundEl.getAttribute('href') || name;
+      const format = soundEl.getAttribute('format') || undefined;
+      const sampleCount = soundEl.getAttribute('sampleCount')
+        ? parseInt(soundEl.getAttribute('sampleCount')!)
+        : undefined;
+
+      const soundItem: SoundItem = {
+        name,
+        href,
+        format,
+        sampleCount
+      };
+
+      sounds.set(name, soundItem);
+
+      // Load actual audio data from ZIP
+      loadPromises.push(this.loadSoundAudio(soundItem));
+    }
+
+    // Wait for all sounds to load
+    await Promise.all(loadPromises);
+
+    return sounds;
+  }
+
+  private async loadSoundAudio(soundItem: SoundItem): Promise<void> {
+    if (!this.zip) return;
+
+    // Initialize AudioContext lazily
+    if (!this.audioContext) {
+      this.audioContext = new AudioContext();
+    }
+
+    // Try to find the audio in LIBRARY folder
+    const possiblePaths = [
+      `LIBRARY/${soundItem.href}`,
+      soundItem.href,
+      `library/${soundItem.href}`,
+    ];
+
+    let audioData: ArrayBuffer | null = null;
+
+    for (const path of possiblePaths) {
+      const file = this.zip.file(path);
+      if (file) {
+        audioData = await file.async('arraybuffer');
+        break;
+      }
+    }
+
+    if (!audioData) {
+      if (DEBUG) {
+        console.warn(`Sound file not found: ${soundItem.href}`);
+      }
+      return;
+    }
+
+    try {
+      // Decode audio data
+      soundItem.audioData = await this.audioContext.decodeAudioData(audioData);
+      if (DEBUG) {
+        console.log(`Loaded sound: ${soundItem.name}, duration: ${soundItem.audioData.duration.toFixed(2)}s`);
+      }
+    } catch (e) {
+      if (DEBUG) {
+        console.warn(`Failed to decode audio: ${soundItem.href}`, e);
+      }
     }
   }
 
