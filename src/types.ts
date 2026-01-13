@@ -63,6 +63,8 @@ export interface VideoInstance {
   type: 'video';
   libraryItemName: string;
   matrix: Matrix;
+  width: number;
+  height: number;
 }
 
 export interface Shape {

@@ -6,6 +6,7 @@ import type {
   Frame,
   DisplayElement,
   SymbolInstance,
+  VideoInstance,
   Shape,
   Matrix,
   FillStyle,
@@ -344,6 +345,12 @@ export class FLAParser {
       this.parseGroupMembers(group, elements);
     }
 
+    // Parse video instances
+    const videoInstances = elementsContainer.querySelectorAll(':scope > DOMVideoInstance');
+    for (const video of videoInstances) {
+      elements.push(this.parseVideoInstance(video));
+    }
+
     return elements;
   }
 
@@ -387,6 +394,22 @@ export class FLAParser {
       transformationPoint,
       loop,
       firstFrame: firstFrame ? parseInt(firstFrame) : undefined
+    };
+  }
+
+  private parseVideoInstance(el: globalThis.Element): VideoInstance {
+    const libraryItemName = el.getAttribute('libraryItemName') || '';
+    const frameRight = el.getAttribute('frameRight');
+    const frameBottom = el.getAttribute('frameBottom');
+    const matrix = this.parseMatrix(el.querySelector('matrix > Matrix'));
+
+    return {
+      type: 'video',
+      libraryItemName,
+      matrix,
+      // frameRight/frameBottom are in twips (1/20 of a pixel)
+      width: frameRight ? parseInt(frameRight) / 20 : 320,
+      height: frameBottom ? parseInt(frameBottom) / 20 : 240
     };
   }
 

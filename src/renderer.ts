@@ -5,6 +5,7 @@ import type {
   Frame,
   DisplayElement,
   SymbolInstance,
+  VideoInstance,
   Shape,
   Matrix,
   FillStyle,
@@ -253,6 +254,8 @@ export class FLARenderer {
       this.renderSymbolInstance(element, depth);
     } else if (element.type === 'shape') {
       this.renderShape(element);
+    } else if (element.type === 'video') {
+      this.renderVideoInstance(element);
     }
   }
 
@@ -280,6 +283,38 @@ export class FLARenderer {
 
     // Render symbol's timeline
     this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
+
+    ctx.restore();
+  }
+
+  private renderVideoInstance(video: VideoInstance): void {
+    const ctx = this.ctx;
+    ctx.save();
+
+    // Apply transformation
+    this.applyMatrix(video.matrix);
+
+    // Render placeholder rectangle for video
+    ctx.fillStyle = '#333333';
+    ctx.fillRect(0, 0, video.width, video.height);
+
+    // Draw video icon/indicator
+    ctx.strokeStyle = '#666666';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(0, 0, video.width, video.height);
+
+    // Draw play button triangle
+    const centerX = video.width / 2;
+    const centerY = video.height / 2;
+    const size = Math.min(video.width, video.height) * 0.2;
+
+    ctx.fillStyle = '#888888';
+    ctx.beginPath();
+    ctx.moveTo(centerX - size / 2, centerY - size);
+    ctx.lineTo(centerX - size / 2, centerY + size);
+    ctx.lineTo(centerX + size, centerY);
+    ctx.closePath();
+    ctx.fill();
 
     ctx.restore();
   }
