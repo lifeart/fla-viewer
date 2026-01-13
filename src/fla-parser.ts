@@ -404,60 +404,33 @@ export class FLAParser {
     return elements;
   }
 
-  private parseGroupMembers(group: globalThis.Element, elements: DisplayElement[], parentMatrix?: Matrix): void {
+  private parseGroupMembers(group: globalThis.Element, elements: DisplayElement[]): void {
     const members = group.querySelector(':scope > members');
     if (!members) return;
 
-    // Get the group's own matrix
-    const groupMatrix = this.parseMatrix(group.querySelector(':scope > matrix > Matrix'));
-
-    // Compose with parent matrix if provided
-    const composedMatrix = parentMatrix
-      ? this.multiplyMatrices(parentMatrix, groupMatrix)
-      : groupMatrix;
-
-    // Check if this group has a non-identity transform
-    const hasTransform = composedMatrix.a !== 1 || composedMatrix.b !== 0 ||
-                         composedMatrix.c !== 0 || composedMatrix.d !== 1 ||
-                         composedMatrix.tx !== 0 || composedMatrix.ty !== 0;
+    // XFL stores each element's matrix in GLOBAL coordinates, not relative to parent groups.
+    // Groups are organizational containers for the editor - their matrices should NOT be
+    // composed with child matrices. Each child uses its own matrix directly.
 
     // Parse children in document order to preserve z-ordering
     for (const child of members.children) {
       switch (child.tagName) {
-        case 'DOMShape': {
-          const parsedShape = this.parseShape(child);
-          if (hasTransform) {
-            parsedShape.matrix = this.multiplyMatrices(composedMatrix, parsedShape.matrix);
-          }
-          elements.push(parsedShape);
+        case 'DOMShape':
+          elements.push(this.parseShape(child));
           break;
-        }
         case 'DOMGroup':
-          this.parseGroupMembers(child, elements, composedMatrix);
+          this.parseGroupMembers(child, elements);
           break;
-        case 'DOMSymbolInstance': {
-          const parsedInstance = this.parseSymbolInstance(child);
-          if (hasTransform) {
-            parsedInstance.matrix = this.multiplyMatrices(composedMatrix, parsedInstance.matrix);
-          }
-          elements.push(parsedInstance);
+        case 'DOMSymbolInstance':
+          elements.push(this.parseSymbolInstance(child));
           break;
-        }
+        case 'DOMVideoInstance':
+          elements.push(this.parseVideoInstance(child));
+          break;
       }
     }
   }
 
-  // Multiply two affine transformation matrices
-  private multiplyMatrices(m1: Matrix, m2: Matrix): Matrix {
-    return {
-      a: m1.a * m2.a + m1.c * m2.b,
-      b: m1.b * m2.a + m1.d * m2.b,
-      c: m1.a * m2.c + m1.c * m2.d,
-      d: m1.b * m2.c + m1.d * m2.d,
-      tx: m1.a * m2.tx + m1.c * m2.ty + m1.tx,
-      ty: m1.b * m2.tx + m1.d * m2.ty + m1.ty
-    };
-  }
 
   private parseSymbolInstance(el: globalThis.Element): SymbolInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
