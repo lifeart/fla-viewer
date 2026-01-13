@@ -35,6 +35,11 @@ export class FLARenderer {
 
   setDocument(doc: FLADocument): void {
     this.doc = doc;
+    this.dpr = window.devicePixelRatio || 1;
+
+    // Clear state from previous document
+    this.missingSymbols.clear();
+    this.logCount = 0;
 
     // Calculate scale to fit canvas while maintaining aspect ratio
     const maxWidth = Math.min(window.innerWidth - 100, 1920);
@@ -44,11 +49,17 @@ export class FLARenderer {
     const scaleY = maxHeight / doc.height;
     this.scale = Math.min(scaleX, scaleY, 1);
 
-    // Set canvas size (simple approach without DPR for debugging)
-    this.canvas.width = doc.width * this.scale;
-    this.canvas.height = doc.height * this.scale;
-    this.canvas.style.width = '';
-    this.canvas.style.height = '';
+    // Calculate CSS display size
+    const displayWidth = doc.width * this.scale;
+    const displayHeight = doc.height * this.scale;
+
+    // Set canvas buffer size (scaled by DPR for crisp rendering)
+    this.canvas.width = displayWidth * this.dpr;
+    this.canvas.height = displayHeight * this.dpr;
+
+    // Set CSS display size
+    this.canvas.style.width = `${displayWidth}px`;
+    this.canvas.style.height = `${displayHeight}px`;
 
     console.log('Document size:', doc.width, 'x', doc.height);
     console.log('Canvas size:', this.canvas.width, 'x', this.canvas.height);
@@ -65,8 +76,9 @@ export class FLARenderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-    // Apply content scale
-    ctx.setTransform(this.scale, 0, 0, this.scale, 0, 0);
+    // Apply DPR and content scale together
+    const combinedScale = this.scale * this.dpr;
+    ctx.setTransform(combinedScale, 0, 0, combinedScale, 0, 0);
 
     // Fill with background color
     ctx.fillStyle = doc.backgroundColor;
@@ -188,7 +200,8 @@ export class FLARenderer {
     // Check if we need to interpolate (tween)
     const nextKeyframe = this.findNextKeyframe(layer.frames, frame);
 
-    for (const element of frame.elements) {
+    for (let elementIndex = 0; elementIndex < frame.elements.length; elementIndex++) {
+      const element = frame.elements[elementIndex];
       if (frame.tweenType === 'motion' && nextKeyframe && nextKeyframe.elements.length > 0) {
         // Calculate interpolation progress
         const progress = this.calculateTweenProgress(
@@ -199,10 +212,11 @@ export class FLARenderer {
           frame.tweens
         );
 
-        const nextDisplayElement = nextKeyframe.elements[0];
-        this.renderDisplayElementWithTween(element, nextDisplayElement, progress, depth);
+        // Match corresponding element by index, fallback to first if not available
+        const nextDisplayElement = nextKeyframe.elements[elementIndex] || nextKeyframe.elements[0];
+        this.renderDisplayElementWithTween(element, nextDisplayElement, progress, depth, frameIndex);
       } else {
-        this.renderDisplayElement(element, depth);
+        this.renderDisplayElement(element, depth, frameIndex);
       }
     }
   }
@@ -234,7 +248,8 @@ export class FLARenderer {
     tweens?: Tween[]
   ): number {
     const frameOffset = frameIndex - startFrame.index;
-    let progress = frameOffset / startFrame.duration;
+    // Guard against division by zero (duration should never be 0, but protect anyway)
+    let progress = startFrame.duration > 0 ? frameOffset / startFrame.duration : 0;
 
     // Apply easing
     if (tweens && tweens.length > 0) {
@@ -304,7 +319,7 @@ export class FLARenderer {
     return 3 * mt2 * (p1 - p0) + 6 * mt * t * (p2 - p1) + 3 * t2 * (p3 - p2);
   }
 
-  private renderDisplayElementWithTween(element: DisplayElement, nextDisplayElement: DisplayElement, progress: number, depth: number): void {
+  private renderDisplayElementWithTween(element: DisplayElement, nextDisplayElement: DisplayElement, progress: number, depth: number, parentFrameIndex: number): void {
     if (element.type === 'symbol' && nextDisplayElement.type === 'symbol') {
       // Interpolate matrix transforms
       const startMatrix = element.matrix;
@@ -337,9 +352,9 @@ export class FLARenderer {
         centerPoint3D: interpolatedCenterPoint3D
       };
 
-      this.renderDisplayElement(tweenedDisplayElement, depth);
+      this.renderDisplayElement(tweenedDisplayElement, depth, parentFrameIndex);
     } else {
-      this.renderDisplayElement(element, depth);
+      this.renderDisplayElement(element, depth, parentFrameIndex);
     }
   }
 
@@ -347,9 +362,9 @@ export class FLARenderer {
     return a + (b - a) * t;
   }
 
-  private renderDisplayElement(element: DisplayElement, depth: number): void {
+  private renderDisplayElement(element: DisplayElement, depth: number, parentFrameIndex: number): void {
     if (element.type === 'symbol') {
-      this.renderSymbolInstance(element, depth);
+      this.renderSymbolInstance(element, depth, parentFrameIndex);
     } else if (element.type === 'shape') {
       this.renderShape(element);
     } else if (element.type === 'video') {
@@ -361,7 +376,7 @@ export class FLARenderer {
 
   private logCount = 0;
   private missingSymbols = new Set<string>();
-  private renderSymbolInstance(instance: SymbolInstance, depth: number): void {
+  private renderSymbolInstance(instance: SymbolInstance, depth: number, parentFrameIndex: number): void {
     if (!this.doc) return;
 
     const symbol = this.doc.symbols.get(instance.libraryItemName);
@@ -398,7 +413,26 @@ export class FLARenderer {
     }
 
     // Calculate which frame to render based on symbol's loop mode
-    let symbolFrame = instance.firstFrame || 0;
+    const firstFrame = instance.firstFrame || 0;
+    // Ensure totalSymbolFrames is at least 1 to avoid division by zero
+    const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
+    let symbolFrame: number;
+
+    switch (instance.loop) {
+      case 'single frame':
+        // Always show firstFrame
+        symbolFrame = firstFrame;
+        break;
+      case 'play once':
+        // Play from firstFrame, stop at last frame
+        symbolFrame = Math.min(firstFrame + parentFrameIndex, totalSymbolFrames - 1);
+        break;
+      case 'loop':
+      default:
+        // Loop through symbol's frames starting from firstFrame
+        symbolFrame = (firstFrame + parentFrameIndex) % totalSymbolFrames;
+        break;
+    }
 
     // Render symbol's timeline
     this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
@@ -627,9 +661,23 @@ export class FLARenderer {
     // Convert hex color to rgba
     if (color.startsWith('#')) {
       const hex = color.substring(1);
-      const r = parseInt(hex.substring(0, 2), 16);
-      const g = parseInt(hex.substring(2, 4), 16);
-      const b = parseInt(hex.substring(4, 6), 16);
+      let r: number, g: number, b: number;
+
+      if (hex.length === 3) {
+        // #RGB format - expand to #RRGGBB
+        r = parseInt(hex[0] + hex[0], 16);
+        g = parseInt(hex[1] + hex[1], 16);
+        b = parseInt(hex[2] + hex[2], 16);
+      } else if (hex.length >= 6) {
+        // #RRGGBB or #RRGGBBAA format
+        r = parseInt(hex.substring(0, 2), 16);
+        g = parseInt(hex.substring(2, 4), 16);
+        b = parseInt(hex.substring(4, 6), 16);
+      } else {
+        // Invalid format, return as-is
+        return color;
+      }
+
       return `rgba(${r}, ${g}, ${b}, ${alpha})`;
     }
     return color;

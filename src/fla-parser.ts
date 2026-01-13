@@ -53,9 +53,9 @@ export class FLAParser {
     const root = doc.documentElement;
 
     // Get document properties
-    const width = parseFloat(root.getAttribute('width') || '550');
-    const height = parseFloat(root.getAttribute('height') || '400');
-    const frameRate = parseFloat(root.getAttribute('frameRate') || '24');
+    const width = parseFloat(root.getAttribute('width') || '550') || 550;
+    const height = parseFloat(root.getAttribute('height') || '400') || 400;
+    const frameRate = parseFloat(root.getAttribute('frameRate') || '24') || 24;
     const backgroundColor = root.getAttribute('backgroundColor') || '#FFFFFF';
 
     // Parse symbol references and load them
@@ -331,7 +331,8 @@ export class FLAParser {
 
     for (const frameEl of frameElements) {
       const index = parseInt(frameEl.getAttribute('index') || '0');
-      const duration = parseInt(frameEl.getAttribute('duration') || '1');
+      // Duration must be at least 1 to avoid division by zero in tween calculations
+      const duration = Math.max(1, parseInt(frameEl.getAttribute('duration') || '1') || 1);
       const keyMode = parseInt(frameEl.getAttribute('keyMode') || '0');
       const tweenType = frameEl.getAttribute('tweenType') as 'motion' | 'shape' | undefined;
       const acceleration = frameEl.getAttribute('acceleration');
@@ -685,13 +686,21 @@ export class FLAParser {
       return { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 };
     }
 
+    // parseFloat on empty string returns NaN, so we need to handle that
+    const a = parseFloat(el.getAttribute('a') || '1');
+    const b = parseFloat(el.getAttribute('b') || '0');
+    const c = parseFloat(el.getAttribute('c') || '0');
+    const d = parseFloat(el.getAttribute('d') || '1');
+    const tx = parseFloat(el.getAttribute('tx') || '0');
+    const ty = parseFloat(el.getAttribute('ty') || '0');
+
     return {
-      a: parseFloat(el.getAttribute('a') || '1'),
-      b: parseFloat(el.getAttribute('b') || '0'),
-      c: parseFloat(el.getAttribute('c') || '0'),
-      d: parseFloat(el.getAttribute('d') || '1'),
-      tx: parseFloat(el.getAttribute('tx') || '0'),
-      ty: parseFloat(el.getAttribute('ty') || '0')
+      a: Number.isFinite(a) ? a : 1,
+      b: Number.isFinite(b) ? b : 0,
+      c: Number.isFinite(c) ? c : 0,
+      d: Number.isFinite(d) ? d : 1,
+      tx: Number.isFinite(tx) ? tx : 0,
+      ty: Number.isFinite(ty) ? ty : 0
     };
   }
 
@@ -700,9 +709,12 @@ export class FLAParser {
       return { x: 0, y: 0 };
     }
 
+    const x = parseFloat(el.getAttribute('x') || '0');
+    const y = parseFloat(el.getAttribute('y') || '0');
+
     return {
-      x: parseFloat(el.getAttribute('x') || '0'),
-      y: parseFloat(el.getAttribute('y') || '0')
+      x: Number.isFinite(x) ? x : 0,
+      y: Number.isFinite(y) ? y : 0
     };
   }
 }

@@ -18,6 +18,12 @@ export class FLAPlayer {
   }
 
   setDocument(doc: FLADocument): void {
+    // Cancel any ongoing animation before setting new document
+    if (this.animationId !== null) {
+      cancelAnimationFrame(this.animationId);
+      this.animationId = null;
+    }
+
     this.renderer.setDocument(doc);
 
     // Get total frames from main timeline
@@ -97,7 +103,9 @@ export class FLAPlayer {
 
     const now = performance.now();
     const elapsed = now - this.lastFrameTime;
-    const frameInterval = 1000 / this.state.fps;
+    // Guard against fps <= 0 which would cause division by zero or negative intervals
+    const fps = Math.max(1, this.state.fps);
+    const frameInterval = 1000 / fps;
 
     if (elapsed >= frameInterval) {
       this.lastFrameTime = now - (elapsed % frameInterval);
