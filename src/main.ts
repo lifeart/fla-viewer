@@ -1,10 +1,11 @@
 import { FLAParser } from './fla-parser';
 import { FLAPlayer } from './player';
-import type { PlayerState } from './types';
+import type { PlayerState, FLADocument, Layer } from './types';
 
 class FLAViewerApp {
   private parser: FLAParser;
   private player: FLAPlayer | null = null;
+  private currentDoc: FLADocument | null = null;
 
   // DOM elements
   private dropZone: HTMLElement;
@@ -21,6 +22,10 @@ class FLAViewerApp {
   private timelineProgress: HTMLElement;
   private frameInfo: HTMLElement;
   private infoPanel: HTMLElement;
+  private debugPanel: HTMLElement;
+  private layerList: HTMLElement;
+  private layerOrderSelect: HTMLSelectElement;
+  private nestedOrderSelect: HTMLSelectElement;
 
   constructor() {
     this.parser = new FLAParser();
@@ -40,6 +45,10 @@ class FLAViewerApp {
     this.timelineProgress = document.getElementById('timeline-progress')!;
     this.frameInfo = document.getElementById('frame-info')!;
     this.infoPanel = document.getElementById('info-panel')!;
+    this.debugPanel = document.getElementById('debug-panel')!;
+    this.layerList = document.getElementById('layer-list')!;
+    this.layerOrderSelect = document.getElementById('layer-order-select') as HTMLSelectElement;
+    this.nestedOrderSelect = document.getElementById('nested-order-select') as HTMLSelectElement;
 
     this.setupEventListeners();
   }
@@ -85,6 +94,17 @@ class FLAViewerApp {
       this.player?.seekToProgress(progress);
     });
 
+    // Layer order change
+    this.layerOrderSelect.addEventListener('change', () => {
+      this.player?.setLayerOrder(this.layerOrderSelect.value as 'forward' | 'reverse');
+      this.populateLayerList();
+    });
+
+    // Nested layer order change
+    this.nestedOrderSelect.addEventListener('change', () => {
+      this.player?.setNestedLayerOrder(this.nestedOrderSelect.value as 'forward' | 'reverse');
+    });
+
     // Keyboard controls
     document.addEventListener('keydown', (e) => {
       if (!this.player) return;
@@ -115,6 +135,7 @@ class FLAViewerApp {
   }
 
   private debugMode: boolean = false;
+  private hiddenLayers: Set<number> = new Set();
 
   private toggleDebug(): void {
     if (!this.player) return;
@@ -123,9 +144,59 @@ class FLAViewerApp {
     if (this.debugMode) {
       this.player.enableDebugMode();
       this.debugBtn.classList.add('active');
+      this.debugPanel.classList.add('active');
+      this.populateLayerList();
     } else {
       this.player.disableDebugMode();
       this.debugBtn.classList.remove('active');
+      this.debugPanel.classList.remove('active');
+    }
+  }
+
+  private populateLayerList(): void {
+    if (!this.currentDoc || !this.currentDoc.timelines[0]) return;
+
+    const layers = this.currentDoc.timelines[0].layers;
+    const isReverse = this.layerOrderSelect.value === 'reverse';
+
+    this.layerList.innerHTML = '';
+
+    // Create layer items in render order
+    const indices = isReverse
+      ? [...Array(layers.length).keys()].reverse()
+      : [...Array(layers.length).keys()];
+
+    let renderOrder = 1;
+    for (const i of indices) {
+      const layer = layers[i];
+      const div = document.createElement('div');
+      div.className = 'layer-item';
+      if (layer.layerType === 'folder') div.className += ' folder';
+      if (layer.layerType === 'guide') div.className += ' guide';
+
+      const isRenderable = layer.layerType !== 'guide' && layer.layerType !== 'folder';
+      const orderNum = isRenderable ? renderOrder++ : '-';
+
+      div.innerHTML = `
+        <input type="checkbox" ${this.hiddenLayers.has(i) ? '' : 'checked'} data-layer="${i}" ${!isRenderable ? 'disabled' : ''}>
+        <span class="layer-index">#${i}</span>
+        <span class="layer-color" style="background: ${layer.color}"></span>
+        <span class="layer-name">${layer.name}</span>
+        ${layer.parentLayerIndex !== undefined ? `<span class="layer-parent">(in ${layer.parentLayerIndex})</span>` : ''}
+        ${isRenderable ? `<span class="render-order-indicator">${orderNum}</span>` : ''}
+      `;
+
+      const checkbox = div.querySelector('input') as HTMLInputElement;
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) {
+          this.hiddenLayers.delete(i);
+        } else {
+          this.hiddenLayers.add(i);
+        }
+        this.player?.setHiddenLayers(this.hiddenLayers);
+      });
+
+      this.layerList.appendChild(div);
     }
   }
 
@@ -143,6 +214,7 @@ class FLAViewerApp {
 
       // Parse FLA file
       const doc = await this.parser.parse(file);
+      this.currentDoc = doc;
 
       // Create player
       this.player = new FLAPlayer(this.canvas);

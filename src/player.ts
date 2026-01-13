@@ -136,4 +136,19 @@ export class FLAPlayer {
   disableDebugMode(): void {
     this.renderer.disableDebugMode();
   }
+
+  setHiddenLayers(hiddenLayers: Set<number>): void {
+    this.renderer.setHiddenLayers(hiddenLayers);
+    this.render();
+  }
+
+  setLayerOrder(order: 'forward' | 'reverse'): void {
+    this.renderer.setLayerOrder(order);
+    this.render();
+  }
+
+  setNestedLayerOrder(order: 'forward' | 'reverse'): void {
+    this.renderer.setNestedLayerOrder(order);
+    this.render();
+  }
 }

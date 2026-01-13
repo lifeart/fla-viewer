@@ -162,6 +162,97 @@
     .info-panel strong {
       color: #fff;
     }
+    .debug-panel {
+      display: none;
+      position: fixed;
+      right: 10px;
+      top: 60px;
+      width: 280px;
+      max-height: calc(100vh - 80px);
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 8px;
+      overflow: hidden;
+      z-index: 1000;
+    }
+    .debug-panel.active {
+      display: flex;
+      flex-direction: column;
+    }
+    .debug-panel-header {
+      padding: 10px 12px;
+      background: #0f3460;
+      font-weight: 500;
+      font-size: 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .debug-panel-header select {
+      background: #16213e;
+      color: #fff;
+      border: 1px solid #e94560;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 11px;
+    }
+    .debug-panel-content {
+      overflow-y: auto;
+      flex: 1;
+      padding: 8px;
+    }
+    .layer-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 6px;
+      font-size: 12px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .layer-item:hover {
+      background: rgba(233, 69, 96, 0.2);
+    }
+    .layer-item.folder {
+      color: #4FC3F7;
+      font-style: italic;
+    }
+    .layer-item.guide {
+      color: #888;
+      text-decoration: line-through;
+    }
+    .layer-item input[type="checkbox"] {
+      cursor: pointer;
+    }
+    .layer-item .layer-index {
+      color: #888;
+      font-size: 10px;
+      min-width: 20px;
+    }
+    .layer-item .layer-color {
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+      flex-shrink: 0;
+    }
+    .layer-item .layer-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .layer-item .layer-parent {
+      color: #888;
+      font-size: 10px;
+    }
+    .render-order-indicator {
+      background: #e94560;
+      color: white;
+      font-size: 9px;
+      padding: 1px 4px;
+      border-radius: 3px;
+      margin-left: 4px;
+    }
   </style>
 </head>
 <body>
@@ -196,6 +287,28 @@
         <button id="debug-btn" title="Toggle debug mode (D)">Debug</button>
       </div>
       <div class="info-panel" id="info-panel"></div>
+    </div>
+
+    <div class="debug-panel" id="debug-panel">
+      <div class="debug-panel-header">
+        <div>
+          <div style="margin-bottom: 4px;">
+            <span>Main: </span>
+            <select id="layer-order-select" style="width: 100px;">
+              <option value="reverse">Reverse</option>
+              <option value="forward">Forward</option>
+            </select>
+          </div>
+          <div>
+            <span>Nested: </span>
+            <select id="nested-order-select" style="width: 100px;">
+              <option value="reverse">Reverse</option>
+              <option value="forward">Forward</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="debug-panel-content" id="layer-list"></div>
     </div>
   </main>
   <script type="module" src="/src/main.ts"></script>

@@ -38,6 +38,9 @@ export class FLARenderer {
   private debugElements: DebugElement[] = [];
   private debugSymbolPath: string[] = [];  // Current symbol hierarchy for debug
   private clickHandler: ((e: MouseEvent) => void) | null = null;
+  private hiddenLayers: Set<number> = new Set();
+  private layerOrder: 'forward' | 'reverse' = 'reverse';
+  private nestedLayerOrder: 'forward' | 'reverse' = 'reverse';
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -204,6 +207,18 @@ export class FLARenderer {
     console.log('Debug mode disabled');
   }
 
+  setHiddenLayers(hiddenLayers: Set<number>): void {
+    this.hiddenLayers = new Set(hiddenLayers);
+  }
+
+  setLayerOrder(order: 'forward' | 'reverse'): void {
+    this.layerOrder = order;
+  }
+
+  setNestedLayerOrder(order: 'forward' | 'reverse'): void {
+    this.nestedLayerOrder = order;
+  }
+
   setDocument(doc: FLADocument): void {
     this.doc = doc;
     this.dpr = window.devicePixelRatio || 1;
@@ -284,13 +299,22 @@ export class FLARenderer {
       }
     }
 
-    // Render layers in reverse order (bottom to top in Flash = high index to low index)
-    // In Flash, layer 0 is at the top of the layer list and renders ON TOP (last)
-    for (let i = timeline.layers.length - 1; i >= 0; i--) {
+    // Render layers based on layerOrder setting (main) or nestedLayerOrder (nested symbols)
+    const order = depth === 0 ? this.layerOrder : this.nestedLayerOrder;
+    const indices = order === 'reverse'
+      ? [...Array(timeline.layers.length).keys()].reverse()  // [len-1, len-2, ..., 0]
+      : [...Array(timeline.layers.length).keys()];           // [0, 1, ..., len-1]
+
+    for (const i of indices) {
       const layer = timeline.layers[i];
 
       // Skip camera layer (it's a reference, not rendered content)
       if (i === timeline.cameraLayerIndex) {
+        continue;
+      }
+
+      // Skip hidden layers (only for main timeline, depth 0)
+      if (depth === 0 && this.hiddenLayers.has(i)) {
         continue;
       }
 
@@ -372,6 +396,9 @@ export class FLARenderer {
     // Find the frame at the current index
     const frame = this.findFrameAtIndex(layer.frames, frameIndex);
     if (!frame) return;
+
+    // Track keyframe start for symbol loop calculations
+    this.currentKeyframeStart = frame.index;
 
     // Check if we need to interpolate (tween)
     const nextKeyframe = this.findNextKeyframe(layer.frames, frame);
@@ -556,7 +583,9 @@ export class FLARenderer {
   }
 
   private missingSymbols = new Set<string>();
-  private renderSymbolInstance(instance: SymbolInstance, depth: number, _parentFrameIndex: number): void {
+  private currentKeyframeStart: number = 0;  // Track keyframe start for loop calculation
+
+  private renderSymbolInstance(instance: SymbolInstance, depth: number, parentFrameIndex: number): void {
     if (!this.doc) return;
 
     const symbol = this.doc.symbols.get(instance.libraryItemName);
@@ -588,7 +617,8 @@ export class FLARenderer {
     // Calculate which frame to render based on symbol type and loop mode
     // In Flash:
     // - 'single frame': Always shows the specified firstFrame
-    // - 'graphic' with 'loop'/'play once': Internal timeline syncs with parent timeline
+    // - 'graphic' with 'loop': Internal timeline advances with parent, loops when done
+    // - 'graphic' with 'play once': Internal timeline advances, stops at last frame
     // - 'movieclip': Internal timeline plays independently (not fully supported)
     const firstFrame = instance.firstFrame || 0;
     const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
@@ -597,11 +627,14 @@ export class FLARenderer {
     if (instance.loop === 'single frame') {
       // Always show the specified firstFrame
       symbolFrame = firstFrame % totalSymbolFrames;
+    } else if (instance.loop === 'loop') {
+      // Sync with parent timeline: advance from firstFrame based on parent frame offset
+      const frameOffset = parentFrameIndex - this.currentKeyframeStart;
+      symbolFrame = (firstFrame + frameOffset) % totalSymbolFrames;
     } else {
-      // For both 'loop' and 'play once', just use firstFrame
-      // The animator typically sets firstFrame at each keyframe to control which frame shows
-      // More advanced sync with parent timeline causes jumping artifacts
-      symbolFrame = firstFrame % totalSymbolFrames;
+      // 'play once' - advance but clamp at last frame
+      const frameOffset = parentFrameIndex - this.currentKeyframeStart;
+      symbolFrame = Math.min(firstFrame + frameOffset, totalSymbolFrames - 1);
     }
 
     // Render symbol's timeline
