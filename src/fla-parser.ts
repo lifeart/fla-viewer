@@ -143,6 +143,7 @@ export class FLAParser {
   }
 
   private async loadSymbols(root: Element): Promise<void> {
+    // First, try loading from Include references
     const includes = root.querySelectorAll('symbols > Include');
 
     for (const inc of includes) {
@@ -153,33 +154,60 @@ export class FLAParser {
       const symbolXml = await this.getFileContent(`LIBRARY/${href}`);
       if (!symbolXml) continue;
 
-      try {
-        const symbolDoc = this.parser.parseFromString(symbolXml, 'text/xml');
-        const symbolRoot = symbolDoc.documentElement;
+      await this.parseAndCacheSymbol(symbolXml, href);
+    }
 
-        if (symbolRoot.tagName === 'DOMSymbolItem') {
-          const name = symbolRoot.getAttribute('name') || href.replace('.xml', '');
-          const itemID = symbolRoot.getAttribute('itemID') || '';
-          const symbolType = (symbolRoot.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
+    // Also scan all XML files in LIBRARY folder directly (handles encoding issues)
+    if (this.zip) {
+      const libraryFiles = Object.keys(this.zip.files).filter(
+        path => path.startsWith('LIBRARY/') && path.endsWith('.xml')
+      );
 
-          // Parse symbol's timeline
-          const timelines = this.parseTimelines(symbolRoot);
-          const timeline = timelines[0] || {
-            name: name,
-            layers: [],
-            totalFrames: 1
-          };
+      console.log(`Found ${libraryFiles.length} XML files in LIBRARY folder`);
 
-          this.symbolCache.set(name, {
-            name,
-            itemID,
-            symbolType,
-            timeline
-          });
-        }
-      } catch (e) {
-        console.warn(`Failed to parse symbol: ${href}`, e);
+      for (const path of libraryFiles) {
+        const symbolXml = await this.getFileContent(path);
+        if (!symbolXml) continue;
+
+        const filename = path.replace('LIBRARY/', '');
+        await this.parseAndCacheSymbol(symbolXml, filename);
       }
+    }
+
+    console.log(`Loaded ${this.symbolCache.size} symbols`);
+  }
+
+  private async parseAndCacheSymbol(symbolXml: string, filename: string): Promise<void> {
+    try {
+      const symbolDoc = this.parser.parseFromString(symbolXml, 'text/xml');
+      const symbolRoot = symbolDoc.documentElement;
+
+      if (symbolRoot.tagName === 'DOMSymbolItem') {
+        const name = symbolRoot.getAttribute('name') || filename.replace('.xml', '');
+
+        // Skip if already cached
+        if (this.symbolCache.has(name)) return;
+
+        const itemID = symbolRoot.getAttribute('itemID') || '';
+        const symbolType = (symbolRoot.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
+
+        // Parse symbol's timeline
+        const timelines = this.parseTimelines(symbolRoot);
+        const timeline = timelines[0] || {
+          name: name,
+          layers: [],
+          totalFrames: 1
+        };
+
+        this.symbolCache.set(name, {
+          name,
+          itemID,
+          symbolType,
+          timeline
+        });
+      }
+    } catch (e) {
+      console.warn(`Failed to parse symbol: ${filename}`, e);
     }
   }
 
@@ -298,19 +326,48 @@ export class FLAParser {
     const elementsContainer = frame.querySelector(':scope > elements');
     if (!elementsContainer) return elements;
 
-    // Parse symbol instances
+    // Parse symbol instances (direct children and nested in groups)
     const symbolInstances = elementsContainer.querySelectorAll('DOMSymbolInstance');
     for (const inst of symbolInstances) {
       elements.push(this.parseSymbolInstance(inst));
     }
 
-    // Parse shapes
-    const shapes = elementsContainer.querySelectorAll('DOMShape');
+    // Parse shapes (direct children only, not nested in groups)
+    const directShapes = elementsContainer.querySelectorAll(':scope > DOMShape');
+    for (const shape of directShapes) {
+      elements.push(this.parseShape(shape));
+    }
+
+    // Parse DOMGroup elements and extract shapes from their members
+    const groups = elementsContainer.querySelectorAll(':scope > DOMGroup');
+    for (const group of groups) {
+      this.parseGroupMembers(group, elements);
+    }
+
+    return elements;
+  }
+
+  private parseGroupMembers(group: globalThis.Element, elements: DisplayElement[]): void {
+    const members = group.querySelector(':scope > members');
+    if (!members) return;
+
+    // Parse shapes inside the group
+    const shapes = members.querySelectorAll(':scope > DOMShape');
     for (const shape of shapes) {
       elements.push(this.parseShape(shape));
     }
 
-    return elements;
+    // Parse nested groups recursively
+    const nestedGroups = members.querySelectorAll(':scope > DOMGroup');
+    for (const nestedGroup of nestedGroups) {
+      this.parseGroupMembers(nestedGroup, elements);
+    }
+
+    // Parse symbol instances inside groups
+    const symbolInstances = members.querySelectorAll(':scope > DOMSymbolInstance');
+    for (const inst of symbolInstances) {
+      elements.push(this.parseSymbolInstance(inst));
+    }
   }
 
   private parseSymbolInstance(el: globalThis.Element): SymbolInstance {

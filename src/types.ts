@@ -127,7 +127,8 @@ export type PathCommand =
   | { type: 'M'; x: number; y: number }
   | { type: 'L'; x: number; y: number }
   | { type: 'Q'; cx: number; cy: number; x: number; y: number }
-  | { type: 'C'; c1x: number; c1y: number; c2x: number; c2y: number; x: number; y: number };
+  | { type: 'C'; c1x: number; c1y: number; c2x: number; c2y: number; x: number; y: number }
+  | { type: 'Z' }; // Close path
 
 export interface Symbol {
   name: string;

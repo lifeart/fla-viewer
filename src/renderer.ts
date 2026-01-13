@@ -301,6 +301,11 @@ export class FLARenderer {
     const fillPaths = new Map<number, Path2D>();
 
     for (const edge of shape.edges) {
+      // Skip stroke-only edges (no fill styles defined)
+      if (edge.fillStyle0 === undefined && edge.fillStyle1 === undefined) {
+        continue;
+      }
+
       const path = this.edgeToPath(edge);
 
       // Handle fillStyle1 (right side fill)
@@ -338,12 +343,17 @@ export class FLARenderer {
     const path = new Path2D();
     let currentX = NaN;
     let currentY = NaN;
-    const EPSILON = 0.001;
+    const EPSILON = 0.5; // Tolerance for considering points as same
 
     for (const cmd of edge.commands) {
+      // Skip commands with invalid coordinates
+      if ('x' in cmd && (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y))) {
+        continue;
+      }
+
       switch (cmd.type) {
         case 'M':
-          // Skip redundant moveTo to current position (but always do first moveTo)
+          // Skip redundant moveTo to same position
           if (Number.isNaN(currentX) || Math.abs(cmd.x - currentX) > EPSILON || Math.abs(cmd.y - currentY) > EPSILON) {
             path.moveTo(cmd.x, cmd.y);
           }
@@ -351,19 +361,28 @@ export class FLARenderer {
           currentY = cmd.y;
           break;
         case 'L':
-          path.lineTo(cmd.x, cmd.y);
+          // Only draw line if it's not to the same point
+          if (Math.abs(cmd.x - currentX) > EPSILON || Math.abs(cmd.y - currentY) > EPSILON) {
+            path.lineTo(cmd.x, cmd.y);
+          }
           currentX = cmd.x;
           currentY = cmd.y;
           break;
         case 'Q':
+          if (!Number.isFinite(cmd.cx) || !Number.isFinite(cmd.cy)) continue;
           path.quadraticCurveTo(cmd.cx, cmd.cy, cmd.x, cmd.y);
           currentX = cmd.x;
           currentY = cmd.y;
           break;
         case 'C':
+          if (!Number.isFinite(cmd.c1x) || !Number.isFinite(cmd.c1y) ||
+              !Number.isFinite(cmd.c2x) || !Number.isFinite(cmd.c2y)) continue;
           path.bezierCurveTo(cmd.c1x, cmd.c1y, cmd.c2x, cmd.c2y, cmd.x, cmd.y);
           currentX = cmd.x;
           currentY = cmd.y;
+          break;
+        case 'Z':
+          path.closePath();
           break;
       }
     }

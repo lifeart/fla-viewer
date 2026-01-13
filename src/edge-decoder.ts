@@ -158,7 +158,8 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
       }
 
       case '/': {
-        // Close path
+        // Close path - emit Z command
+        commands.push({ type: 'Z' });
         i++;
         break;
       }
