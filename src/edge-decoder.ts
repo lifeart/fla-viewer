@@ -104,6 +104,29 @@ function tokenize(edgeStr: string): string[] {
       continue;
     }
 
+    // Handle '(' followed by coordinates then ';' - alternate cubic format
+    // e.g., (38316,17220; -> '(' '38316' '17220' ';'
+    if (char === '(') {
+      if (current.trim()) {
+        tokens.push(current.trim());
+      }
+      tokens.push('(');
+      current = '';
+      i++;
+      continue;
+    }
+
+    // Semicolon after anchor point in alternate cubic format
+    if (char === ';') {
+      if (current.trim()) {
+        tokens.push(current.trim());
+      }
+      tokens.push(';');
+      current = '';
+      i++;
+      continue;
+    }
+
     // Single-character command tokens
     if (char === '!' || char === '|' || char === '[' || char === '/' || char === 'S' || char === 'q' || char === 'Q') {
       if (current.trim()) {
@@ -198,7 +221,7 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
       }
 
       case '(;': {
-        // Start of cubic bezier segment
+        // Start of cubic bezier segment (standard format)
         // Format: (; c1x,c1y c2x,c2y ex,ey [more curves...] [q/Q quadratic approx...] );
         i++;
 
@@ -209,7 +232,7 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
             const nextTokens = [tokens[i], tokens[i+1], tokens[i+2], tokens[i+3], tokens[i+4], tokens[i+5]];
             // Check if these look like coordinates (not commands)
             const allCoords = nextTokens.every(t =>
-              !['!', '|', '[', '/', 'S', 'q', 'Q', '(;', ');'].includes(t)
+              !['!', '|', '[', '/', 'S', 'q', 'Q', '(;', ');', '(', ';'].includes(t)
             );
 
             if (allCoords) {
@@ -228,6 +251,54 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
             break;
           }
         }
+        break;
+      }
+
+      case '(': {
+        // Alternate cubic format: (anchorX,anchorY; c1x,c1y c2x,c2y ex,ey...);
+        // The '(' is followed by anchor coordinates, then ';', then cubic data
+        i++;
+
+        // Skip anchor coordinates until we hit ';'
+        while (i < tokens.length && tokens[i] !== ';') {
+          i++;
+        }
+
+        // Skip the ';' token
+        if (i < tokens.length && tokens[i] === ';') {
+          i++;
+        }
+
+        // Now parse cubic bezier curves (same as '(;' case)
+        while (i < tokens.length && tokens[i] !== 'q' && tokens[i] !== 'Q' && tokens[i] !== ');') {
+          if (i + 5 < tokens.length) {
+            const nextTokens = [tokens[i], tokens[i+1], tokens[i+2], tokens[i+3], tokens[i+4], tokens[i+5]];
+            const allCoords = nextTokens.every(t =>
+              !['!', '|', '[', '/', 'S', 'q', 'Q', '(;', ');', '(', ';'].includes(t)
+            );
+
+            if (allCoords) {
+              const c1x = decodeCoord(tokens[i]);
+              const c1y = decodeCoord(tokens[i + 1]);
+              const c2x = decodeCoord(tokens[i + 2]);
+              const c2y = decodeCoord(tokens[i + 3]);
+              const x = decodeCoord(tokens[i + 4]);
+              const y = decodeCoord(tokens[i + 5]);
+              commands.push({ type: 'C', c1x, c1y, c2x, c2y, x, y });
+              i += 6;
+            } else {
+              break;
+            }
+          } else {
+            break;
+          }
+        }
+        break;
+      }
+
+      case ';': {
+        // Standalone semicolon - should have been handled in '(' case, skip
+        i++;
         break;
       }
 

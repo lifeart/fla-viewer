@@ -383,54 +383,80 @@ export class FLAParser {
     const elementsContainer = frame.querySelector(':scope > elements');
     if (!elementsContainer) return elements;
 
-    // Parse symbol instances (direct children and nested in groups)
-    const symbolInstances = elementsContainer.querySelectorAll('DOMSymbolInstance');
-    for (const inst of symbolInstances) {
-      elements.push(this.parseSymbolInstance(inst));
-    }
-
-    // Parse shapes (direct children only, not nested in groups)
-    const directShapes = elementsContainer.querySelectorAll(':scope > DOMShape');
-    for (const shape of directShapes) {
-      elements.push(this.parseShape(shape));
-    }
-
-    // Parse DOMGroup elements and extract shapes from their members
-    const groups = elementsContainer.querySelectorAll(':scope > DOMGroup');
-    for (const group of groups) {
-      this.parseGroupMembers(group, elements);
-    }
-
-    // Parse video instances
-    const videoInstances = elementsContainer.querySelectorAll(':scope > DOMVideoInstance');
-    for (const video of videoInstances) {
-      elements.push(this.parseVideoInstance(video));
+    // Parse direct children in document order to preserve z-ordering
+    for (const child of elementsContainer.children) {
+      switch (child.tagName) {
+        case 'DOMSymbolInstance':
+          elements.push(this.parseSymbolInstance(child));
+          break;
+        case 'DOMShape':
+          elements.push(this.parseShape(child));
+          break;
+        case 'DOMGroup':
+          this.parseGroupMembers(child, elements);
+          break;
+        case 'DOMVideoInstance':
+          elements.push(this.parseVideoInstance(child));
+          break;
+      }
     }
 
     return elements;
   }
 
-  private parseGroupMembers(group: globalThis.Element, elements: DisplayElement[]): void {
+  private parseGroupMembers(group: globalThis.Element, elements: DisplayElement[], parentMatrix?: Matrix): void {
     const members = group.querySelector(':scope > members');
     if (!members) return;
 
-    // Parse shapes inside the group
-    const shapes = members.querySelectorAll(':scope > DOMShape');
-    for (const shape of shapes) {
-      elements.push(this.parseShape(shape));
-    }
+    // Get the group's own matrix
+    const groupMatrix = this.parseMatrix(group.querySelector(':scope > matrix > Matrix'));
 
-    // Parse nested groups recursively
-    const nestedGroups = members.querySelectorAll(':scope > DOMGroup');
-    for (const nestedGroup of nestedGroups) {
-      this.parseGroupMembers(nestedGroup, elements);
-    }
+    // Compose with parent matrix if provided
+    const composedMatrix = parentMatrix
+      ? this.multiplyMatrices(parentMatrix, groupMatrix)
+      : groupMatrix;
 
-    // Parse symbol instances inside groups
-    const symbolInstances = members.querySelectorAll(':scope > DOMSymbolInstance');
-    for (const inst of symbolInstances) {
-      elements.push(this.parseSymbolInstance(inst));
+    // Check if this group has a non-identity transform
+    const hasTransform = composedMatrix.a !== 1 || composedMatrix.b !== 0 ||
+                         composedMatrix.c !== 0 || composedMatrix.d !== 1 ||
+                         composedMatrix.tx !== 0 || composedMatrix.ty !== 0;
+
+    // Parse children in document order to preserve z-ordering
+    for (const child of members.children) {
+      switch (child.tagName) {
+        case 'DOMShape': {
+          const parsedShape = this.parseShape(child);
+          if (hasTransform) {
+            parsedShape.matrix = this.multiplyMatrices(composedMatrix, parsedShape.matrix);
+          }
+          elements.push(parsedShape);
+          break;
+        }
+        case 'DOMGroup':
+          this.parseGroupMembers(child, elements, composedMatrix);
+          break;
+        case 'DOMSymbolInstance': {
+          const parsedInstance = this.parseSymbolInstance(child);
+          if (hasTransform) {
+            parsedInstance.matrix = this.multiplyMatrices(composedMatrix, parsedInstance.matrix);
+          }
+          elements.push(parsedInstance);
+          break;
+        }
+      }
     }
+  }
+
+  // Multiply two affine transformation matrices
+  private multiplyMatrices(m1: Matrix, m2: Matrix): Matrix {
+    return {
+      a: m1.a * m2.a + m1.c * m2.b,
+      b: m1.b * m2.a + m1.d * m2.b,
+      c: m1.a * m2.c + m1.c * m2.d,
+      d: m1.b * m2.c + m1.d * m2.d,
+      tx: m1.a * m2.tx + m1.c * m2.ty + m1.tx,
+      ty: m1.b * m2.tx + m1.d * m2.ty + m1.ty
+    };
   }
 
   private parseSymbolInstance(el: globalThis.Element): SymbolInstance {

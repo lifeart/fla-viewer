@@ -306,9 +306,11 @@ Decodes to:
 - [x] **Group Support**: DOMGroup elements with nested members
   - Recursive parsing of nested groups
   - Shapes and symbols within groups
+  - Group matrix transforms applied to children
 
 - [x] **Cubic Bezier Edges**: Support for `cubics` attribute on Edge elements
   - Parses cubic bezier curves with control points
+  - Supports both `(;...)` and `(anchor;...)` formats
   - Preferred over `edges` (quadratic) when both present
   - Ignores quadratic approximation data (q/Q tokens)
 
