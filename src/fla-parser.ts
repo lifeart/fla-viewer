@@ -540,7 +540,8 @@ export class FLAParser {
   }
 
   private parseShape(el: globalThis.Element, composedMatrix?: Matrix): Shape {
-    const matrixEl = el.querySelector('matrix > Matrix');
+    // Use :scope to only look for direct child matrix, not gradient matrices inside fills
+    const matrixEl = el.querySelector(':scope > matrix > Matrix');
     let matrix: Matrix;
 
     if (matrixEl) {
