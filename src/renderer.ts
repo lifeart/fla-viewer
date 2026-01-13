@@ -17,6 +17,7 @@ import type {
   Point,
   PathCommand
 } from './types';
+import { getWithNormalizedPath } from './path-utils';
 
 // Debug flag - enabled via ?debug=true URL parameter
 const DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -1105,7 +1106,7 @@ export class FLARenderer {
   private renderSymbolInstance(instance: SymbolInstance, depth: number, parentFrameIndex: number): void {
     if (!this.doc) return;
 
-    const symbol = this.doc.symbols.get(instance.libraryItemName);
+    const symbol = getWithNormalizedPath(this.doc.symbols, instance.libraryItemName);
     if (!symbol) {
       // Log missing symbols only once
       if (!this.missingSymbols.has(instance.libraryItemName)) {
@@ -1229,7 +1230,7 @@ export class FLARenderer {
     this.applyMatrix(bitmap.matrix);
 
     // Look up bitmap item from library
-    const bitmapItem = this.doc.bitmaps.get(bitmap.libraryItemName);
+    const bitmapItem = getWithNormalizedPath(this.doc.bitmaps, bitmap.libraryItemName);
 
     // Create path for hit testing
     if (this.debugMode) {

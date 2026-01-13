@@ -23,6 +23,12 @@ import type {
   Edge
 } from './types';
 import { decodeEdges } from './edge-decoder';
+import {
+  normalizePath,
+  setWithNormalizedPath,
+  hasWithNormalizedPath,
+  getFilename
+} from './path-utils';
 
 // Debug flag - enabled via ?debug=true URL parameter
 const DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -169,33 +175,86 @@ export class FLAParser {
     return await file.async('string');
   }
 
+  /**
+   * Find a file in the ZIP archive, handling path separator differences.
+   * Tries multiple path variations and falls back to filename search.
+   */
+  private async findFileData(href: string, folder: string = 'LIBRARY'): Promise<ArrayBuffer | null> {
+    if (!this.zip) return null;
+
+    const normalizedHref = normalizePath(href);
+
+    // Build list of paths to try
+    const pathsToTry = [
+      `${folder}/${normalizedHref}`,
+      normalizedHref,
+      `${folder.toLowerCase()}/${normalizedHref}`,
+      `${folder}/${href}`,
+      href,
+    ];
+
+    // Try each path with both forward and backslash variants
+    for (const path of pathsToTry) {
+      let file = this.zip.file(path);
+      if (!file) {
+        file = this.zip.file(path.replace(/\//g, '\\'));
+      }
+      if (file) {
+        return await file.async('arraybuffer');
+      }
+    }
+
+    // Fallback: search all files for matching filename
+    const filename = getFilename(normalizedHref);
+    const allFiles = Object.keys(this.zip.files);
+    for (const filepath of allFiles) {
+      const fileBasename = getFilename(filepath);
+      if (fileBasename === filename) {
+        const file = this.zip.file(filepath);
+        if (file && !file.dir) {
+          return await file.async('arraybuffer');
+        }
+      }
+    }
+
+    return null;
+  }
+
   private async loadSymbols(root: Element, progress: ProgressCallback): Promise<void> {
-    // Collect all symbol files to load
+    // Collect all symbol files to load (using Set with normalized paths to avoid duplicates)
+    const seenPaths = new Set<string>();
     const symbolFiles: { path: string; filename: string }[] = [];
+
+    const addSymbolFile = (path: string, filename: string) => {
+      const normalizedFilename = normalizePath(filename);
+      if (!seenPaths.has(normalizedFilename)) {
+        seenPaths.add(normalizedFilename);
+        symbolFiles.push({ path, filename });
+      }
+    };
 
     // First, collect from Include references
     const includes = root.querySelectorAll('symbols > Include');
     for (const inc of includes) {
       const href = inc.getAttribute('href');
       if (href) {
-        symbolFiles.push({ path: `LIBRARY/${href}`, filename: href });
+        addSymbolFile(`LIBRARY/${href}`, href);
       }
     }
 
     // Also scan all XML files in LIBRARY folder directly (handles encoding issues)
     if (this.zip) {
       const libraryFiles = Object.keys(this.zip.files).filter(
-        path => path.startsWith('LIBRARY/') && path.endsWith('.xml')
+        path => (path.startsWith('LIBRARY/') || path.startsWith('LIBRARY\\')) &&
+                (path.toLowerCase().endsWith('.xml'))
       );
 
       if (DEBUG) console.log(`Found ${libraryFiles.length} XML files in LIBRARY folder`);
 
       for (const path of libraryFiles) {
-        const filename = path.replace('LIBRARY/', '');
-        // Avoid duplicates
-        if (!symbolFiles.some(f => f.filename === filename)) {
-          symbolFiles.push({ path, filename });
-        }
+        const normalizedPath = normalizePath(path);
+        const filename = normalizedPath.replace('LIBRARY/', '');
+        addSymbolFile(path, filename);
       }
     }
 
@@ -224,10 +283,11 @@ export class FLAParser {
       const symbolRoot = symbolDoc.documentElement;
 
       if (symbolRoot.tagName === 'DOMSymbolItem') {
-        const name = symbolRoot.getAttribute('name') || filename.replace('.xml', '');
+        const rawName = symbolRoot.getAttribute('name') || filename.replace('.xml', '');
+        const name = normalizePath(rawName);
 
         // Skip if already cached
-        if (this.symbolCache.has(name)) return;
+        if (hasWithNormalizedPath(this.symbolCache, rawName)) return;
 
         const itemID = symbolRoot.getAttribute('itemID') || '';
         const symbolType = (symbolRoot.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
@@ -240,12 +300,10 @@ export class FLAParser {
           totalFrames: 1
         };
 
-        this.symbolCache.set(name, {
-          name,
-          itemID,
-          symbolType,
-          timeline
-        });
+        const symbol: Symbol = { name, itemID, symbolType, timeline };
+
+        // Store with both normalized and original names
+        setWithNormalizedPath(this.symbolCache, rawName, symbol);
       }
     } catch (e) {
       console.warn(`Failed to parse symbol: ${filename}`, e);
@@ -883,8 +941,9 @@ export class FLAParser {
     const loadPromises: Promise<void>[] = [];
 
     for (const bitmapEl of bitmapElements) {
-      const name = bitmapEl.getAttribute('name') || '';
-      const href = bitmapEl.getAttribute('href') || name;
+      const rawName = bitmapEl.getAttribute('name') || '';
+      const name = normalizePath(rawName);
+      const href = bitmapEl.getAttribute('href') || rawName;
       const frameRight = bitmapEl.getAttribute('frameRight');
       const frameBottom = bitmapEl.getAttribute('frameBottom');
       const sourceExternalFilepath = bitmapEl.getAttribute('sourceExternalFilepath') || undefined;
@@ -901,7 +960,8 @@ export class FLAParser {
         sourceExternalFilepath
       };
 
-      bitmaps.set(name, bitmapItem);
+      // Store with both normalized and original names
+      setWithNormalizedPath(bitmaps, rawName, bitmapItem);
 
       // Load actual image data from ZIP
       loadPromises.push(this.loadBitmapImage(bitmapItem));
@@ -914,26 +974,7 @@ export class FLAParser {
   }
 
   private async loadBitmapImage(bitmapItem: BitmapItem): Promise<void> {
-    if (!this.zip) return;
-
-    // Try to find the image in LIBRARY folder
-    const possiblePaths = [
-      `LIBRARY/${bitmapItem.href}`,
-      bitmapItem.href,
-      `library/${bitmapItem.href}`,
-    ];
-
-    let imageData: ArrayBuffer | null = null;
-    let foundPath = '';
-
-    for (const path of possiblePaths) {
-      const file = this.zip.file(path);
-      if (file) {
-        imageData = await file.async('arraybuffer');
-        foundPath = path;
-        break;
-      }
-    }
+    const imageData = await this.findFileData(bitmapItem.href);
 
     if (!imageData) {
       if (DEBUG) {
@@ -943,13 +984,10 @@ export class FLAParser {
     }
 
     // Determine MIME type from extension
-    const ext = bitmapItem.href.toLowerCase().split('.').pop();
-    let mimeType = 'image/png';
-    if (ext === 'jpg' || ext === 'jpeg') {
-      mimeType = 'image/jpeg';
-    } else if (ext === 'gif') {
-      mimeType = 'image/gif';
-    }
+    const ext = getFilename(bitmapItem.href).toLowerCase().split('.').pop();
+    const mimeType = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg'
+                   : ext === 'gif' ? 'image/gif'
+                   : 'image/png';
 
     // Create blob and load as image
     const blob = new Blob([imageData], { type: mimeType });
@@ -959,7 +997,7 @@ export class FLAParser {
       const img = new Image();
       await new Promise<void>((resolve, reject) => {
         img.onload = () => resolve();
-        img.onerror = () => reject(new Error(`Failed to load image: ${foundPath}`));
+        img.onerror = () => reject(new Error(`Failed to load image: ${bitmapItem.href}`));
         img.src = url;
       });
       bitmapItem.imageData = img;
@@ -1008,29 +1046,12 @@ export class FLAParser {
   }
 
   private async loadSoundAudio(soundItem: SoundItem): Promise<void> {
-    if (!this.zip) return;
-
     // Initialize AudioContext lazily
     if (!this.audioContext) {
       this.audioContext = new AudioContext();
     }
 
-    // Try to find the audio in LIBRARY folder
-    const possiblePaths = [
-      `LIBRARY/${soundItem.href}`,
-      soundItem.href,
-      `library/${soundItem.href}`,
-    ];
-
-    let audioData: ArrayBuffer | null = null;
-
-    for (const path of possiblePaths) {
-      const file = this.zip.file(path);
-      if (file) {
-        audioData = await file.async('arraybuffer');
-        break;
-      }
-    }
+    const audioData = await this.findFileData(soundItem.href);
 
     if (!audioData) {
       if (DEBUG) {
@@ -1040,7 +1061,6 @@ export class FLAParser {
     }
 
     try {
-      // Decode audio data
       soundItem.audioData = await this.audioContext.decodeAudioData(audioData);
       if (DEBUG) {
         console.log(`Loaded sound: ${soundItem.name}, duration: ${soundItem.audioData.duration.toFixed(2)}s`);
