@@ -6,6 +6,7 @@ import type {
   DisplayElement,
   SymbolInstance,
   VideoInstance,
+  BitmapInstance,
   Shape,
   Matrix,
   FillStyle,
@@ -353,15 +354,26 @@ export class FLARenderer {
       this.renderShape(element);
     } else if (element.type === 'video') {
       this.renderVideoInstance(element);
+    } else if (element.type === 'bitmap') {
+      this.renderBitmapInstance(element);
     }
   }
 
   private logCount = 0;
+  private missingSymbols = new Set<string>();
   private renderSymbolInstance(instance: SymbolInstance, depth: number): void {
     if (!this.doc) return;
 
     const symbol = this.doc.symbols.get(instance.libraryItemName);
-    if (!symbol) return;
+    if (!symbol) {
+      // Log missing symbols only once
+      if (!this.missingSymbols.has(instance.libraryItemName)) {
+        this.missingSymbols.add(instance.libraryItemName);
+        console.warn('Missing symbol:', JSON.stringify(instance.libraryItemName),
+          'Available:', Array.from(this.doc.symbols.keys()).slice(0, 5).map(k => JSON.stringify(k)));
+      }
+      return;
+    }
 
     // Debug: log first few symbol transforms
     if (this.logCount < 5 && depth === 0) {
@@ -422,6 +434,37 @@ export class FLARenderer {
     ctx.lineTo(centerX + size, centerY);
     ctx.closePath();
     ctx.fill();
+
+    ctx.restore();
+  }
+
+  private renderBitmapInstance(bitmap: BitmapInstance): void {
+    if (!this.doc) return;
+
+    const ctx = this.ctx;
+    ctx.save();
+
+    // Apply transformation
+    this.applyMatrix(bitmap.matrix);
+
+    // Look up bitmap item from library
+    const bitmapItem = this.doc.bitmaps.get(bitmap.libraryItemName);
+
+    if (bitmapItem && bitmapItem.imageData) {
+      // If we have loaded image data, draw it
+      ctx.drawImage(bitmapItem.imageData, 0, 0, bitmapItem.width, bitmapItem.height);
+    } else if (bitmapItem) {
+      // Draw placeholder with bitmap dimensions
+      ctx.fillStyle = '#555555';
+      ctx.fillRect(0, 0, bitmapItem.width, bitmapItem.height);
+      ctx.strokeStyle = '#777777';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(0, 0, bitmapItem.width, bitmapItem.height);
+    } else {
+      // No bitmap info, draw small placeholder
+      ctx.fillStyle = '#555555';
+      ctx.fillRect(0, 0, 100, 100);
+    }
 
     ctx.restore();
   }

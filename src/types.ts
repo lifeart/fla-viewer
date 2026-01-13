@@ -58,7 +58,7 @@ export interface Point {
   y: number;
 }
 
-export type DisplayElement = SymbolInstance | Shape | VideoInstance;
+export type DisplayElement = SymbolInstance | Shape | VideoInstance | BitmapInstance;
 
 export interface SymbolInstance {
   type: 'symbol';
@@ -78,6 +78,12 @@ export interface VideoInstance {
   matrix: Matrix;
   width: number;
   height: number;
+}
+
+export interface BitmapInstance {
+  type: 'bitmap';
+  libraryItemName: string;
+  matrix: Matrix;
 }
 
 export interface Shape {

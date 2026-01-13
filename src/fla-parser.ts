@@ -7,6 +7,7 @@ import type {
   DisplayElement,
   SymbolInstance,
   VideoInstance,
+  BitmapInstance,
   Shape,
   Matrix,
   FillStyle,
@@ -182,6 +183,9 @@ export class FLAParser {
     }
 
     console.log(`Loaded ${this.symbolCache.size} symbols`);
+    // Log first few symbol names for debugging
+    const symbolNames = Array.from(this.symbolCache.keys()).slice(0, 10);
+    console.log('Symbol names (first 10):', symbolNames.map(n => JSON.stringify(n)));
   }
 
   private async parseAndCacheSymbol(symbolXml: string, filename: string): Promise<void> {
@@ -398,6 +402,9 @@ export class FLAParser {
         case 'DOMVideoInstance':
           elements.push(this.parseVideoInstance(child));
           break;
+        case 'DOMBitmapInstance':
+          elements.push(this.parseBitmapInstance(child));
+          break;
       }
     }
 
@@ -426,6 +433,9 @@ export class FLAParser {
           break;
         case 'DOMVideoInstance':
           elements.push(this.parseVideoInstance(child));
+          break;
+        case 'DOMBitmapInstance':
+          elements.push(this.parseBitmapInstance(child));
           break;
       }
     }
@@ -473,6 +483,17 @@ export class FLAParser {
       // frameRight/frameBottom are in twips (1/20 of a pixel)
       width: frameRight ? parseInt(frameRight) / 20 : 320,
       height: frameBottom ? parseInt(frameBottom) / 20 : 240
+    };
+  }
+
+  private parseBitmapInstance(el: globalThis.Element): BitmapInstance {
+    const libraryItemName = el.getAttribute('libraryItemName') || '';
+    const matrix = this.parseMatrix(el.querySelector('matrix > Matrix'));
+
+    return {
+      type: 'bitmap',
+      libraryItemName,
+      matrix
     };
   }
 
