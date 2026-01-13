@@ -649,15 +649,13 @@ export class FLARenderer {
         ty: this.lerp(startMatrix.ty, endMatrix.ty, progress)
       };
 
-      // Interpolate firstFrame for smooth internal animation during tweens
-      const startFirstFrame = element.firstFrame || 0;
-      const endFirstFrame = nextDisplayElement.firstFrame || 0;
-      const interpolatedFirstFrame = Math.round(this.lerp(startFirstFrame, endFirstFrame, progress));
-
+      // Note: Do NOT interpolate firstFrame - it's an offset for the keyframe start,
+      // and frameOffset in renderSymbolInstance already handles animation progress.
+      // Interpolating firstFrame would cause double-counting and "lagging" animation.
       const tweenedDisplayElement: SymbolInstance = {
         ...element,
-        matrix: interpolatedMatrix,
-        firstFrame: interpolatedFirstFrame
+        matrix: interpolatedMatrix
+        // firstFrame stays as element.firstFrame (the keyframe's starting offset)
       };
 
       this.renderDisplayElement(tweenedDisplayElement, depth, parentFrameIndex);
@@ -716,18 +714,26 @@ export class FLARenderer {
 
     // Calculate which frame to render based on symbol type and loop mode
     // In Flash:
-    // - 'single frame': Always shows the specified firstFrame
-    // - 'graphic' with 'loop': Internal timeline advances with parent, loops when done
-    // - 'graphic' with 'play once': Internal timeline advances, stops at last frame
-    // - 'movieclip': Internal timeline plays independently (not fully supported)
+    // - Graphic symbols: sync with parent timeline based on loop mode
+    //   - 'single frame': Always shows the specified firstFrame
+    //   - 'loop': Internal timeline advances with parent, loops when done
+    //   - 'play once': Internal timeline advances, stops at last frame
+    // - MovieClip symbols: play their own timeline independently (use 'play once' for static rendering)
+    // - Button symbols: show first frame (up state)
     const firstFrame = instance.firstFrame || 0;
     const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
     let symbolFrame: number;
 
-    if (instance.loop === 'single frame') {
+    // MovieClips and Buttons play independently from parent timeline
+    // For static rendering without ActionScript, treat them as 'play once'
+    const effectiveLoop = (instance.symbolType === 'movieclip' || instance.symbolType === 'button')
+      ? 'play once'
+      : instance.loop;
+
+    if (effectiveLoop === 'single frame') {
       // Always show the specified firstFrame
       symbolFrame = firstFrame % totalSymbolFrames;
-    } else if (instance.loop === 'loop') {
+    } else if (effectiveLoop === 'loop') {
       // Sync with parent timeline: advance from firstFrame based on parent frame offset
       const frameOffset = parentFrameIndex - this.currentKeyframeStart;
       symbolFrame = (firstFrame + frameOffset) % totalSymbolFrames;
