@@ -151,10 +151,14 @@ Camera movement in FLA files is often simulated using a "ramka" (frame) layer:
 </DOMLayer>
 ```
 
-The camera layer contains a symbol that represents the viewport. Detection criteria:
-1. Layer is non-rendering: `layerType="guide"` OR (`visible="false"` AND `outline="true"`)
-2. Layer contains exactly one symbol instance
-3. Symbol's transformation point is near document center (within 15% tolerance)
+The camera layer contains a symbol that represents the viewport. Detection criteria (ALL must be met):
+1. **Layer name** indicates camera: `ramka`, `camera`, `cam`, `viewport`, or contains "camera"/"viewport"
+2. **Layer is non-rendering**: `layerType="guide"` OR `visible="false"` OR `outline="true"`
+3. **Single symbol**: Layer contains exactly one symbol instance in its first frame
+4. **Centered transformation point**: Symbol's transformation point is near document center
+   - Uses **per-axis tolerances**: 15% of width for X, 15% of height for Y
+   - Important for non-square aspect ratios (e.g., 3840x1080 ultrawide)
+   - Example: For 3840x1080, toleranceX=576px, toleranceY=162px
 
 To render content from the camera's perspective:
 1. Detect camera layer using the criteria above
