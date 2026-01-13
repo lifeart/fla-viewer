@@ -235,7 +235,9 @@ Groups contain multiple shapes or symbol instances as members:
 
 ### Edge Path Encoding
 
-The `edges` attribute uses a specialized encoding:
+Edge elements can have either `edges` attribute (quadratic curves) or `cubics` attribute (cubic bezier curves). When both are present, `cubics` is preferred as it provides higher fidelity.
+
+#### Quadratic Format (`edges` attribute)
 
 | Command | Syntax | Description |
 |---------|--------|-------------|
@@ -245,15 +247,34 @@ The `edges` attribute uses a specialized encoding:
 | `/` | `/` | ClosePath |
 | `S` | `Sn` | Style change indicator (followed by style index) |
 
+#### Cubic Format (`cubics` attribute)
+
+| Command | Syntax | Description |
+|---------|--------|-------------|
+| `!` | `!x y` | MoveTo (same as edges) |
+| `(;` | `(;c1x,c1y c2x,c2y ex,ey ...` | Start cubic segment |
+| *(coords)* | `c1x,c1y c2x,c2y ex,ey` | Cubic bezier (ctrl1, ctrl2, end) |
+| `q`/`Q` | `qx y` or `Qx y` | Quadratic approximation (ignored) |
+| `);` | `);` | End cubic segment |
+
+Example cubics string:
+```
+!-232 8085(;-251,8170 -267,8255 -281,8340q-232 8085Q-260 8212);
+```
+Decodes to:
+1. MoveTo(-232/20, 8085/20) = MoveTo(-11.6, 404.25)
+2. CubicCurveTo(c1: -251/20,8170/20, c2: -267/20,8255/20, end: -281/20,8340/20)
+3. (q/Q tokens are quadratic approximations, skipped when cubics data is available)
+
 #### Coordinate Encoding
 
 Coordinates can be:
-- **Decimal**: `100.5`, `-200.25`
+- **Decimal**: `100.5`, `-200.25` (in TWIPS, divide by 20 for pixels)
 - **Hex-encoded**: `#XX.YY` where XX is hex integer, YY is hex fraction
   - Example: `#D0.3A` = 208 + (58/256) = 208.2265625
   - Signed values use two's complement for values > 0x7FFF
 
-#### Example Edge String
+#### Example Edge String (quadratic)
 ```
 !-226.5 229.5[-257.90625 #D0.3A -285 176!-285 176[-335 117 -341 40
 ```
@@ -285,6 +306,11 @@ Decodes to:
 - [x] **Group Support**: DOMGroup elements with nested members
   - Recursive parsing of nested groups
   - Shapes and symbols within groups
+
+- [x] **Cubic Bezier Edges**: Support for `cubics` attribute on Edge elements
+  - Parses cubic bezier curves with control points
+  - Preferred over `edges` (quadratic) when both present
+  - Ignores quadratic approximation data (q/Q tokens)
 
 ---
 
@@ -407,6 +433,49 @@ Decodes to:
   - JSDoc comments for public methods
   - Usage examples
   - Browser compatibility notes
+
+---
+
+## Attribute Reference
+
+### Handled Attributes
+
+| Element | Attribute | Usage |
+|---------|-----------|-------|
+| DOMDocument | `width`, `height` | Canvas dimensions |
+| DOMDocument | `frameRate` | Playback speed |
+| DOMDocument | `backgroundColor` | Canvas background |
+| DOMLayer | `name`, `color`, `visible`, `locked` | Layer metadata |
+| DOMLayer | `layerType` | normal/guide/folder detection |
+| DOMLayer | `outline` | Camera layer detection |
+| DOMLayer | `parentLayerIndex` | Folder hierarchy |
+| DOMFrame | `index`, `duration`, `keyMode` | Frame timing |
+| DOMFrame | `tweenType`, `acceleration` | Motion tween |
+| DOMSymbolInstance | `libraryItemName`, `symbolType` | Symbol reference |
+| DOMSymbolInstance | `loop`, `firstFrame` | Playback mode |
+| Matrix | `a`, `b`, `c`, `d`, `tx`, `ty` | 2D transforms |
+| Point | `x`, `y` | Coordinates |
+| Edge | `fillStyle0`, `fillStyle1`, `strokeStyle` | Style indices |
+| Edge | `edges` | Quadratic path data |
+| Edge | `cubics` | Cubic bezier path data |
+| FillStyle | `index` | Style reference |
+| SolidColor | `color`, `alpha` | Fill color |
+| LinearGradient | GradientEntry children | Gradient colors |
+| DOMVideoInstance | `libraryItemName`, `frameRight`, `frameBottom` | Video placeholder |
+
+### Ignored Attributes (intentionally skipped)
+
+| Element | Attribute | Reason |
+|---------|-----------|--------|
+| Include | `loadImmediate`, `itemIcon`, `lastModified` | Editor metadata |
+| DOMLayer | `autoNamed`, `animationType` | Editor state |
+| DOMFrame | `motionTweenSnap`, `motionTweenRotate` | Advanced tweening (not implemented) |
+| DOMFrame | `hasCustomEase`, `motionTweenScale` | Advanced tweening |
+| DOMShape | `isFloating`, `objectSpaceBounds` | Editor state |
+| SolidStroke | all attributes | Stroke rendering not implemented |
+| filters | all | Filter effects not implemented |
+| blendMode | all | Blend modes not implemented |
+| Color (transform) | `alphaMultiplier`, offsets | Color transform partial |
 
 ---
 

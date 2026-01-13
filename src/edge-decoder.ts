@@ -11,6 +11,11 @@ import type { PathCommand, Edge } from './types';
  * - Coordinates can be decimal or hex-encoded (prefixed with #)
  * - Hex format: #XX.YY where XX is signed integer (variable width), YY is fractional
  * - All coordinates are in TWIPS (1/20 of a pixel)
+ *
+ * Cubics format (alternative):
+ * - ! = moveTo (same)
+ * - (; c1x,c1y c2x,c2y ex,ey ... ); = cubic bezier curve
+ * - q/Q followed by coords = quadratic approximation (ignored, we use cubic)
  */
 
 // Scale factor - XFL uses TWIPS (1/20 of a pixel)
@@ -73,24 +78,65 @@ function decodeCoord(value: string): number {
 function tokenize(edgeStr: string): string[] {
   const tokens: string[] = [];
   let current = '';
+  let i = 0;
 
-  for (let i = 0; i < edgeStr.length; i++) {
+  while (i < edgeStr.length) {
     const char = edgeStr[i];
 
-    if (char === '!' || char === '|' || char === '[' || char === '/' || char === 'S') {
+    // Check for two-character tokens first
+    if (char === '(' && i + 1 < edgeStr.length && edgeStr[i + 1] === ';') {
+      if (current.trim()) {
+        tokens.push(current.trim());
+      }
+      tokens.push('(;');
+      current = '';
+      i += 2;
+      continue;
+    }
+
+    if (char === ')' && i + 1 < edgeStr.length && edgeStr[i + 1] === ';') {
+      if (current.trim()) {
+        tokens.push(current.trim());
+      }
+      tokens.push(');');
+      current = '';
+      i += 2;
+      continue;
+    }
+
+    // Single-character command tokens
+    if (char === '!' || char === '|' || char === '[' || char === '/' || char === 'S' || char === 'q' || char === 'Q') {
       if (current.trim()) {
         tokens.push(current.trim());
       }
       tokens.push(char);
       current = '';
-    } else if (char === ' ' || char === '\n' || char === '\r' || char === '\t') {
+      i++;
+      continue;
+    }
+
+    // Whitespace separates tokens
+    if (char === ' ' || char === '\n' || char === '\r' || char === '\t') {
       if (current.trim()) {
         tokens.push(current.trim());
       }
       current = '';
-    } else {
-      current += char;
+      i++;
+      continue;
     }
+
+    // Comma separates coordinates within cubics format
+    if (char === ',') {
+      if (current.trim()) {
+        tokens.push(current.trim());
+      }
+      current = '';
+      i++;
+      continue;
+    }
+
+    current += char;
+    i++;
   }
 
   if (current.trim()) {
@@ -148,6 +194,58 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
         } else {
           i++;
         }
+        break;
+      }
+
+      case '(;': {
+        // Start of cubic bezier segment
+        // Format: (; c1x,c1y c2x,c2y ex,ey [more curves...] [q/Q quadratic approx...] );
+        i++;
+
+        // Parse cubic bezier curves until we hit q, Q, or );
+        while (i < tokens.length && tokens[i] !== 'q' && tokens[i] !== 'Q' && tokens[i] !== ');') {
+          // Need 6 coordinates for a cubic: c1x, c1y, c2x, c2y, x, y
+          if (i + 5 < tokens.length) {
+            const nextTokens = [tokens[i], tokens[i+1], tokens[i+2], tokens[i+3], tokens[i+4], tokens[i+5]];
+            // Check if these look like coordinates (not commands)
+            const allCoords = nextTokens.every(t =>
+              !['!', '|', '[', '/', 'S', 'q', 'Q', '(;', ');'].includes(t)
+            );
+
+            if (allCoords) {
+              const c1x = decodeCoord(tokens[i]);
+              const c1y = decodeCoord(tokens[i + 1]);
+              const c2x = decodeCoord(tokens[i + 2]);
+              const c2y = decodeCoord(tokens[i + 3]);
+              const x = decodeCoord(tokens[i + 4]);
+              const y = decodeCoord(tokens[i + 5]);
+              commands.push({ type: 'C', c1x, c1y, c2x, c2y, x, y });
+              i += 6;
+            } else {
+              break;
+            }
+          } else {
+            break;
+          }
+        }
+        break;
+      }
+
+      case 'q':
+      case 'Q': {
+        // Quadratic approximation in cubics format - skip along with following coordinates
+        // These come after the cubic data and before );
+        // Skip until we hit );
+        i++;
+        while (i < tokens.length && tokens[i] !== ');' && tokens[i] !== '!') {
+          i++;
+        }
+        break;
+      }
+
+      case ');': {
+        // End of cubic bezier segment
+        i++;
         break;
       }
 

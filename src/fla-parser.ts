@@ -549,13 +549,17 @@ export class FLAParser {
       const fillStyle0 = edgeEl.getAttribute('fillStyle0');
       const fillStyle1 = edgeEl.getAttribute('fillStyle1');
       const strokeStyle = edgeEl.getAttribute('strokeStyle');
-      const edgesAttr = edgeEl.getAttribute('edges') || '';
+
+      // Check for cubics attribute first (cubic bezier), fallback to edges (quadratic)
+      const cubicsAttr = edgeEl.getAttribute('cubics');
+      const edgesAttr = edgeEl.getAttribute('edges');
+      const pathData = cubicsAttr || edgesAttr || '';
 
       edges.push({
         fillStyle0: fillStyle0 ? parseInt(fillStyle0) : undefined,
         fillStyle1: fillStyle1 ? parseInt(fillStyle1) : undefined,
         strokeStyle: strokeStyle ? parseInt(strokeStyle) : undefined,
-        commands: decodeEdges(edgesAttr)
+        commands: decodeEdges(pathData)
       });
     }
 
