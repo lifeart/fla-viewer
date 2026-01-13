@@ -1,0 +1,183 @@
+import { FLAParser } from './fla-parser';
+import { FLAPlayer } from './player';
+import type { PlayerState } from './types';
+
+class FLAViewerApp {
+  private parser: FLAParser;
+  private player: FLAPlayer | null = null;
+
+  // DOM elements
+  private dropZone: HTMLElement;
+  private fileInput: HTMLInputElement;
+  private loading: HTMLElement;
+  private viewer: HTMLElement;
+  private canvas: HTMLCanvasElement;
+  private playBtn: HTMLButtonElement;
+  private stopBtn: HTMLButtonElement;
+  private prevBtn: HTMLButtonElement;
+  private nextBtn: HTMLButtonElement;
+  private timeline: HTMLElement;
+  private timelineProgress: HTMLElement;
+  private frameInfo: HTMLElement;
+  private infoPanel: HTMLElement;
+
+  constructor() {
+    this.parser = new FLAParser();
+
+    // Get DOM elements
+    this.dropZone = document.getElementById('drop-zone')!;
+    this.fileInput = document.getElementById('file-input') as HTMLInputElement;
+    this.loading = document.getElementById('loading')!;
+    this.viewer = document.getElementById('viewer')!;
+    this.canvas = document.getElementById('stage') as HTMLCanvasElement;
+    this.playBtn = document.getElementById('play-btn') as HTMLButtonElement;
+    this.stopBtn = document.getElementById('stop-btn') as HTMLButtonElement;
+    this.prevBtn = document.getElementById('prev-btn') as HTMLButtonElement;
+    this.nextBtn = document.getElementById('next-btn') as HTMLButtonElement;
+    this.timeline = document.getElementById('timeline')!;
+    this.timelineProgress = document.getElementById('timeline-progress')!;
+    this.frameInfo = document.getElementById('frame-info')!;
+    this.infoPanel = document.getElementById('info-panel')!;
+
+    this.setupEventListeners();
+  }
+
+  private setupEventListeners(): void {
+    // File drop zone
+    this.dropZone.addEventListener('click', () => this.fileInput.click());
+    this.dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      this.dropZone.classList.add('dragover');
+    });
+    this.dropZone.addEventListener('dragleave', () => {
+      this.dropZone.classList.remove('dragover');
+    });
+    this.dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      this.dropZone.classList.remove('dragover');
+      const files = e.dataTransfer?.files;
+      if (files && files.length > 0) {
+        this.loadFile(files[0]);
+      }
+    });
+
+    // File input
+    this.fileInput.addEventListener('change', () => {
+      const files = this.fileInput.files;
+      if (files && files.length > 0) {
+        this.loadFile(files[0]);
+      }
+    });
+
+    // Player controls
+    this.playBtn.addEventListener('click', () => this.togglePlay());
+    this.stopBtn.addEventListener('click', () => this.player?.stop());
+    this.prevBtn.addEventListener('click', () => this.player?.prevFrame());
+    this.nextBtn.addEventListener('click', () => this.player?.nextFrame());
+
+    // Timeline scrubbing
+    this.timeline.addEventListener('click', (e) => {
+      const rect = this.timeline.getBoundingClientRect();
+      const progress = (e.clientX - rect.left) / rect.width;
+      this.player?.seekToProgress(progress);
+    });
+
+    // Keyboard controls
+    document.addEventListener('keydown', (e) => {
+      if (!this.player) return;
+
+      switch (e.key) {
+        case ' ':
+          e.preventDefault();
+          this.togglePlay();
+          break;
+        case 'ArrowLeft':
+          this.player.prevFrame();
+          break;
+        case 'ArrowRight':
+          this.player.nextFrame();
+          break;
+        case 'Home':
+          this.player.goToFrame(0);
+          break;
+        case 'End':
+          this.player.goToFrame(this.player.getState().totalFrames - 1);
+          break;
+      }
+    });
+  }
+
+  private async loadFile(file: File): Promise<void> {
+    if (!file.name.toLowerCase().endsWith('.fla')) {
+      alert('Please select a valid FLA file');
+      return;
+    }
+
+    try {
+      // Show loading state
+      this.dropZone.style.display = 'none';
+      this.loading.classList.add('active');
+      this.viewer.classList.remove('active');
+
+      // Parse FLA file
+      const doc = await this.parser.parse(file);
+
+      // Create player
+      this.player = new FLAPlayer(this.canvas);
+      this.player.setDocument(doc);
+      this.player.onStateUpdate((state) => this.updateUI(state));
+
+      // Update info panel
+      this.infoPanel.innerHTML = `
+        <strong>File:</strong> ${file.name} |
+        <strong>Size:</strong> ${doc.width}x${doc.height} |
+        <strong>FPS:</strong> ${doc.frameRate} |
+        <strong>Frames:</strong> ${this.player.getState().totalFrames} |
+        <strong>Symbols:</strong> ${doc.symbols.size}
+      `;
+
+      // Show viewer
+      this.loading.classList.remove('active');
+      this.viewer.classList.add('active');
+
+      // Update initial state
+      this.updateUI(this.player.getState());
+
+    } catch (error) {
+      console.error('Failed to load FLA file:', error);
+      alert('Failed to load FLA file: ' + (error as Error).message);
+      this.loading.classList.remove('active');
+      this.dropZone.style.display = 'block';
+    }
+  }
+
+  private togglePlay(): void {
+    if (!this.player) return;
+
+    const state = this.player.getState();
+    if (state.playing) {
+      this.player.pause();
+    } else {
+      this.player.play();
+    }
+  }
+
+  private updateUI(state: PlayerState): void {
+    // Update play button text
+    this.playBtn.textContent = state.playing ? 'Pause' : 'Play';
+
+    // Update frame info
+    this.frameInfo.textContent = `Frame ${state.currentFrame + 1}/${state.totalFrames}`;
+
+    // Update timeline progress
+    const progress = state.totalFrames > 1
+      ? (state.currentFrame / (state.totalFrames - 1)) * 100
+      : 0;
+    this.timelineProgress.style.width = `${progress}%`;
+  }
+}
+
+// Initialize app when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+  new FLAViewerApp();
+});

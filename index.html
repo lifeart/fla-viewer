@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FLA Viewer</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 16px;
+      background: #16213e;
+      border-bottom: 1px solid #0f3460;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 500;
+    }
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    .drop-zone {
+      border: 2px dashed #0f3460;
+      border-radius: 12px;
+      padding: 60px 40px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.3s;
+      background: rgba(15, 52, 96, 0.3);
+      margin-bottom: 20px;
+    }
+    .drop-zone:hover, .drop-zone.dragover {
+      border-color: #e94560;
+      background: rgba(233, 69, 96, 0.1);
+    }
+    .drop-zone p {
+      margin-bottom: 10px;
+      font-size: 1.1rem;
+    }
+    .drop-zone small {
+      color: #888;
+    }
+    #file-input {
+      display: none;
+    }
+    .viewer-container {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      width: 100%;
+      max-width: 1920px;
+    }
+    .viewer-container.active {
+      display: flex;
+    }
+    .canvas-wrapper {
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+    #stage {
+      display: block;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-top: 20px;
+      padding: 16px 24px;
+      background: #16213e;
+      border-radius: 8px;
+    }
+    .controls button {
+      background: #e94560;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: background 0.2s;
+    }
+    .controls button:hover {
+      background: #ff6b6b;
+    }
+    .controls button:disabled {
+      background: #555;
+      cursor: not-allowed;
+    }
+    .timeline {
+      flex: 1;
+      height: 8px;
+      background: #0f3460;
+      border-radius: 4px;
+      cursor: pointer;
+      position: relative;
+      min-width: 300px;
+    }
+    .timeline-progress {
+      height: 100%;
+      background: #e94560;
+      border-radius: 4px;
+      width: 0%;
+      transition: width 0.05s linear;
+    }
+    .frame-info {
+      font-size: 14px;
+      color: #888;
+      min-width: 100px;
+      text-align: right;
+    }
+    .loading {
+      display: none;
+      align-items: center;
+      gap: 12px;
+      padding: 20px;
+    }
+    .loading.active {
+      display: flex;
+    }
+    .spinner {
+      width: 24px;
+      height: 24px;
+      border: 3px solid #0f3460;
+      border-top-color: #e94560;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .info-panel {
+      margin-top: 20px;
+      padding: 16px;
+      background: #16213e;
+      border-radius: 8px;
+      font-size: 14px;
+      color: #aaa;
+    }
+    .info-panel strong {
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>FLA Viewer</h1>
+  </header>
+  <main>
+    <div class="drop-zone" id="drop-zone">
+      <p>Drop FLA file here or click to browse</p>
+      <small>Supports Adobe Animate/Flash FLA files</small>
+      <input type="file" id="file-input" accept=".fla">
+    </div>
+
+    <div class="loading" id="loading">
+      <div class="spinner"></div>
+      <span>Loading FLA file...</span>
+    </div>
+
+    <div class="viewer-container" id="viewer">
+      <div class="canvas-wrapper">
+        <canvas id="stage"></canvas>
+      </div>
+      <div class="controls">
+        <button id="play-btn">Play</button>
+        <button id="stop-btn">Stop</button>
+        <button id="prev-btn">&lt;</button>
+        <button id="next-btn">&gt;</button>
+        <div class="timeline" id="timeline">
+          <div class="timeline-progress" id="timeline-progress"></div>
+        </div>
+        <div class="frame-info" id="frame-info">Frame 1/1</div>
+      </div>
+      <div class="info-panel" id="info-panel"></div>
+    </div>
+  </main>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

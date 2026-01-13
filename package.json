@@ -1,0 +1,22 @@
+{
+  "name": "fla-viewer",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "keywords": ["fla", "flash", "animate", "viewer", "player"],
+  "author": "",
+  "license": "ISC",
+  "description": "Web-based FLA file viewer and player",
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.7"
+  }
+}
