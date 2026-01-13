@@ -42,6 +42,7 @@ export class FLARenderer {
   private layerOrder: 'forward' | 'reverse' = 'reverse';
   private nestedLayerOrder: 'forward' | 'reverse' = 'reverse';
   private elementOrder: 'forward' | 'reverse' = 'forward';
+  private _gradientLogCount: number = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -267,6 +268,9 @@ export class FLARenderer {
       this.debugElements = [];
       this.debugSymbolPath = [];
     }
+
+    // Reset gradient log counter for each frame
+    this._gradientLogCount = 0;
 
     // Fully reset canvas state
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -755,6 +759,9 @@ export class FLARenderer {
     const ctx = this.ctx;
     ctx.save();
 
+    // Store shape matrix for gradient coordinate transformation
+    this._currentShapeMatrix = shape.matrix;
+
     // Apply shape's transformation matrix
     this.applyMatrix(shape.matrix);
 
@@ -782,8 +789,9 @@ export class FLARenderer {
       combinedPath.addPath(path);
 
       // Handle fills
+      // In Flash: fillStyle0 = left side (needs reversed path), fillStyle1 = right side (normal)
       if (edge.fillStyle0 !== undefined || edge.fillStyle1 !== undefined) {
-        // Handle fillStyle1 (right side fill)
+        // Handle fillStyle1 (right side fill) - use path as-is
         if (edge.fillStyle1 !== undefined) {
           if (!fillPaths.has(edge.fillStyle1)) {
             fillPaths.set(edge.fillStyle1, new Path2D());
@@ -791,12 +799,13 @@ export class FLARenderer {
           fillPaths.get(edge.fillStyle1)!.addPath(path);
         }
 
-        // Handle fillStyle0 (left side fill)
+        // Handle fillStyle0 (left side fill) - use reversed path for correct winding
         if (edge.fillStyle0 !== undefined && edge.fillStyle0 !== edge.fillStyle1) {
           if (!fillPaths.has(edge.fillStyle0)) {
             fillPaths.set(edge.fillStyle0, new Path2D());
           }
-          fillPaths.get(edge.fillStyle0)!.addPath(path);
+          const reversedPath = this.reverseEdgePath(edge);
+          fillPaths.get(edge.fillStyle0)!.addPath(reversedPath);
         }
       }
 
@@ -848,6 +857,9 @@ export class FLARenderer {
         ctx.stroke(path);
       }
     }
+
+    // Clear shape matrix
+    this._currentShapeMatrix = null;
 
     ctx.restore();
   }
@@ -903,6 +915,51 @@ export class FLARenderer {
     return path;
   }
 
+  // Reverse the path direction for fillStyle0 (left-side fill)
+  private reverseEdgePath(edge: Edge): Path2D {
+    const path = new Path2D();
+    const commands = edge.commands;
+
+    if (commands.length === 0) return path;
+
+    // Build list of points and their types, then traverse in reverse
+    const points: { x: number; y: number; type: string; cx?: number; cy?: number; c1x?: number; c1y?: number; c2x?: number; c2y?: number }[] = [];
+
+    for (const cmd of commands) {
+      if (cmd.type === 'M' || cmd.type === 'L') {
+        points.push({ x: cmd.x, y: cmd.y, type: cmd.type });
+      } else if (cmd.type === 'Q') {
+        points.push({ x: cmd.x, y: cmd.y, type: 'Q', cx: cmd.cx, cy: cmd.cy });
+      } else if (cmd.type === 'C') {
+        points.push({ x: cmd.x, y: cmd.y, type: 'C', c1x: cmd.c1x, c1y: cmd.c1y, c2x: cmd.c2x, c2y: cmd.c2y });
+      }
+    }
+
+    if (points.length === 0) return path;
+
+    // Start from the last point
+    const lastPoint = points[points.length - 1];
+    path.moveTo(lastPoint.x, lastPoint.y);
+
+    // Traverse backwards
+    for (let i = points.length - 1; i > 0; i--) {
+      const current = points[i];
+      const prev = points[i - 1];
+
+      if (current.type === 'L' || current.type === 'M') {
+        path.lineTo(prev.x, prev.y);
+      } else if (current.type === 'Q' && current.cx !== undefined && current.cy !== undefined) {
+        // Quadratic curve - control point stays the same, just swap endpoints
+        path.quadraticCurveTo(current.cx, current.cy, prev.x, prev.y);
+      } else if (current.type === 'C' && current.c1x !== undefined) {
+        // Cubic curve - swap control points order
+        path.bezierCurveTo(current.c2x!, current.c2y!, current.c1x, current.c1y!, prev.x, prev.y);
+      }
+    }
+
+    return path;
+  }
+
   private getFillStyle(fill: FillStyle): string | CanvasGradient {
     if (fill.type === 'solid' && fill.color) {
       if (fill.alpha !== undefined && fill.alpha < 1) {
@@ -923,6 +980,9 @@ export class FLARenderer {
     return '#000000';
   }
 
+  // Store current shape matrix for gradient coordinate transformation
+  private _currentShapeMatrix: Matrix | null = null;
+
   private createLinearGradient(fill: FillStyle): CanvasGradient | string {
     if (!fill.gradient || fill.gradient.length === 0) {
       return fill.gradient?.[0]?.color || '#000000';
@@ -932,26 +992,54 @@ export class FLARenderer {
     // (16384 twips / 20 = 819.2 pixels)
     const GRADIENT_SIZE = 819.2;
 
-    // Base gradient line: from (-GRADIENT_SIZE, 0) to (GRADIENT_SIZE, 0)
-    let x0 = -GRADIENT_SIZE;
-    let y0 = 0;
-    let x1 = GRADIENT_SIZE;
-    let y1 = 0;
+    let x0: number, y0: number, x1: number, y1: number;
 
-    // Apply gradient matrix to transform the base line
     if (fill.matrix) {
       const m = fill.matrix;
-      // Transform start point
-      const nx0 = m.a * x0 + m.c * y0 + m.tx;
-      const ny0 = m.b * x0 + m.d * y0 + m.ty;
-      // Transform end point
-      const nx1 = m.a * x1 + m.c * y1 + m.tx;
-      const ny1 = m.b * x1 + m.d * y1 + m.ty;
+      // The gradient matrix is in DOCUMENT space, but we're rendering in SHAPE-LOCAL space
+      // (because shape.matrix has already been applied to the context)
+      // We need to transform gradient coordinates by the INVERSE of shape.matrix
 
-      x0 = nx0;
-      y0 = ny0;
-      x1 = nx1;
-      y1 = ny1;
+      // First, calculate gradient endpoints in document space
+      // Base gradient is horizontal from (-GRADIENT_SIZE, 0) to (GRADIENT_SIZE, 0)
+      let gx0 = m.a * (-GRADIENT_SIZE) + m.tx;
+      let gy0 = m.b * (-GRADIENT_SIZE) + m.ty;
+      let gx1 = m.a * GRADIENT_SIZE + m.tx;
+      let gy1 = m.b * GRADIENT_SIZE + m.ty;
+
+      // Transform from document space to shape-local space using inverse of shape.matrix
+      if (this._currentShapeMatrix) {
+        const sm = this._currentShapeMatrix;
+        const det = sm.a * sm.d - sm.b * sm.c;
+        if (Math.abs(det) > 0.0001) {
+          // Calculate inverse matrix components
+          const invDet = 1 / det;
+          const invA = sm.d * invDet;
+          const invB = -sm.b * invDet;
+          const invC = -sm.c * invDet;
+          const invD = sm.a * invDet;
+          const invTx = (sm.c * sm.ty - sm.d * sm.tx) * invDet;
+          const invTy = (sm.b * sm.tx - sm.a * sm.ty) * invDet;
+
+          // Transform gradient endpoints to shape-local space
+          x0 = invA * gx0 + invC * gy0 + invTx;
+          y0 = invB * gx0 + invD * gy0 + invTy;
+          x1 = invA * gx1 + invC * gy1 + invTx;
+          y1 = invB * gx1 + invD * gy1 + invTy;
+        } else {
+          // Degenerate matrix, use original coordinates
+          x0 = gx0; y0 = gy0; x1 = gx1; y1 = gy1;
+        }
+      } else {
+        // No shape matrix, use document space coordinates directly
+        x0 = gx0; y0 = gy0; x1 = gx1; y1 = gy1;
+      }
+    } else {
+      // Default horizontal gradient
+      x0 = -GRADIENT_SIZE;
+      y0 = 0;
+      x1 = GRADIENT_SIZE;
+      y1 = 0;
     }
 
     const gradient = this.ctx.createLinearGradient(x0, y0, x1, y1);
@@ -975,25 +1063,49 @@ export class FLARenderer {
     // Flash radial gradient: circle centered at (0, 0) with radius 819.2
     const GRADIENT_SIZE = 819.2;
 
-    // For radial gradients, we need to transform the gradient space
-    // The matrix transforms the unit circle to an ellipse
-    // Canvas radial gradients don't support ellipses directly, so we use an approximation
-
     let cx = 0;
     let cy = 0;
     let radius = GRADIENT_SIZE;
 
     if (fill.matrix) {
       const m = fill.matrix;
-      // Transform center point
-      cx = m.tx;
-      cy = m.ty;
+      // Gradient center in document space
+      let gcx = m.tx;
+      let gcy = m.ty;
 
       // Calculate average scale for radius
-      // The scale is derived from the matrix elements
       const scaleX = Math.sqrt(m.a * m.a + m.b * m.b);
       const scaleY = Math.sqrt(m.c * m.c + m.d * m.d);
-      radius = GRADIENT_SIZE * ((scaleX + scaleY) / 2);
+      let gradientRadius = GRADIENT_SIZE * ((scaleX + scaleY) / 2);
+
+      // Transform from document space to shape-local space
+      if (this._currentShapeMatrix) {
+        const sm = this._currentShapeMatrix;
+        const det = sm.a * sm.d - sm.b * sm.c;
+        if (Math.abs(det) > 0.0001) {
+          const invDet = 1 / det;
+          const invA = sm.d * invDet;
+          const invB = -sm.b * invDet;
+          const invC = -sm.c * invDet;
+          const invD = sm.a * invDet;
+          const invTx = (sm.c * sm.ty - sm.d * sm.tx) * invDet;
+          const invTy = (sm.b * sm.tx - sm.a * sm.ty) * invDet;
+
+          // Transform center point
+          cx = invA * gcx + invC * gcy + invTx;
+          cy = invB * gcx + invD * gcy + invTy;
+
+          // Scale the radius by the inverse of shape matrix scale
+          const shapeScaleX = Math.sqrt(sm.a * sm.a + sm.b * sm.b);
+          const shapeScaleY = Math.sqrt(sm.c * sm.c + sm.d * sm.d);
+          const avgShapeScale = (shapeScaleX + shapeScaleY) / 2;
+          radius = avgShapeScale > 0.0001 ? gradientRadius / avgShapeScale : gradientRadius;
+        } else {
+          cx = gcx; cy = gcy; radius = gradientRadius;
+        }
+      } else {
+        cx = gcx; cy = gcy; radius = gradientRadius;
+      }
     }
 
     const gradient = this.ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
