@@ -492,6 +492,11 @@ export class FLARenderer {
     const frame = this.findFrameAtIndex(layer.frames, frameIndex);
     if (!frame) return;
 
+    // Note: Reference layer filtering (camera frames, guides, etc.) is handled
+    // in renderTimeline() using timeline.referenceLayers which is populated
+    // by detectReferenceLayers() during parsing. That logic is more accurate
+    // because it considers both layer name AND visibility/outline status.
+
     // Track keyframe start for symbol loop calculations
     this.currentKeyframeStart = frame.index;
 

@@ -261,14 +261,29 @@ export class FLAParser {
   }
 
   private detectCameraLayer(layers: Layer[], docWidth?: number, docHeight?: number): number | undefined {
-    // Generic camera layer detection based on STRICT criteria:
-    // Camera layers are typically guide layers or hidden reference layers with centered symbols
-    // Note: Being "locked" alone is NOT enough - many background layers are locked
+    // Camera layer detection based on STRICT criteria:
+    // Camera layers must have ALL of:
+    // 1. A camera-related name (ramka, camera, cam, viewport)
+    // 2. Be a guide layer OR hidden/outline layer
+    // 3. Have exactly one symbol element centered in the document
+    //
+    // This is very conservative to avoid false positives that shift the viewport incorrectly
 
     if (!docWidth || !docHeight) return undefined;
 
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i];
+      const layerNameLower = layer.name.toLowerCase();
+
+      // REQUIRED: Layer name must indicate it's a camera/viewport layer
+      const isCameraName = layerNameLower === 'ramka' ||
+                           layerNameLower === 'camera' ||
+                           layerNameLower === 'cam' ||
+                           layerNameLower === 'viewport' ||
+                           layerNameLower.includes('camera') ||
+                           layerNameLower.includes('viewport');
+
+      if (!isCameraName) continue;
 
       // Check if layer has frames with elements
       if (layer.frames.length === 0) continue;
@@ -284,19 +299,21 @@ export class FLAParser {
       const isHiddenOrOutline = !layer.visible || layer.outline;
 
       // Only consider guide layers or hidden/outline layers as camera candidates
-      // Do NOT use "locked" as a criterion - too many false positives
       if (!isGuideLayer && !isHiddenOrOutline) continue;
 
       // Check if transformation point is near document center
+      // Use per-axis tolerances to handle non-square aspect ratios correctly
       let isNearCenter = false;
       if (element.transformationPoint) {
         const centerX = docWidth / 2;
         const centerY = docHeight / 2;
-        const tolerance = Math.max(docWidth, docHeight) * 0.15; // 15% tolerance
+        // Use 15% of each dimension separately
+        const toleranceX = docWidth * 0.15;
+        const toleranceY = docHeight * 0.15;
 
         const dx = Math.abs(element.transformationPoint.x - centerX);
         const dy = Math.abs(element.transformationPoint.y - centerY);
-        isNearCenter = dx < tolerance && dy < tolerance;
+        isNearCenter = dx < toleranceX && dy < toleranceY;
       }
 
       if (isNearCenter) {
