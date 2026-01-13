@@ -42,7 +42,9 @@ export interface Layer {
   visible: boolean;
   locked: boolean;
   outline: boolean; // Editor-only outline view (not rendered)
-  layerType?: 'normal' | 'guide' | 'folder';
+  transparent?: boolean; // Layer has transparency/onion-skin enabled
+  alphaPercent?: number; // Layer alpha percentage (0-100)
+  layerType?: 'normal' | 'guide' | 'folder' | 'camera';
   parentLayerIndex?: number;
   frames: Frame[];
 }

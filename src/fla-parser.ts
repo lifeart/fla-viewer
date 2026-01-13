@@ -343,22 +343,30 @@ export class FLAParser {
       const layer = layers[i];
       const layerNameLower = layer.name.toLowerCase();
 
-      // Always skip guide and folder layers (explicit layer types)
-      if (layer.layerType === 'guide' || layer.layerType === 'folder') {
+      // Always skip guide, folder, and camera layers (explicit layer types)
+      if (layer.layerType === 'guide' || layer.layerType === 'folder' || layer.layerType === 'camera') {
+        referenceLayers.add(i);
+        continue;
+      }
+
+      // Skip transparent reference layers (used for tracing/onion-skinning)
+      // These are layers with transparency enabled and low alpha, meant as reference only
+      if (layer.transparent && layer.alphaPercent !== undefined && layer.alphaPercent < 50) {
+        if (DEBUG) console.log(`Skipping transparent reference layer: "${layer.name}" at index ${i} (alpha=${layer.alphaPercent}%)`);
         referenceLayers.add(i);
         continue;
       }
 
       // Skip camera/frame reference layers only if they have additional indicators
-      // that they're not meant to be rendered (hidden, outline view, etc.)
+      // that they're not meant to be rendered (outline view, etc.)
       const isCameraRefName = layerNameLower === 'ramka' ||
                               layerNameLower === 'camera' ||
                               layerNameLower === 'cam' ||
                               layerNameLower === 'viewport';
 
-      // Only filter by name if the layer is also hidden or using outline view
+      // Only filter by name if the layer is also using outline view
       // This prevents filtering legitimate content layers that happen to have these names
-      if (isCameraRefName && (!layer.visible || layer.outline)) {
+      if (isCameraRefName && layer.outline) {
         referenceLayers.add(i);
         continue;
       }
@@ -380,7 +388,10 @@ export class FLAParser {
       const visible = layerEl.getAttribute('visible') !== 'false';
       const locked = layerEl.getAttribute('locked') === 'true';
       const outline = layerEl.getAttribute('outline') === 'true';
-      const layerType = layerEl.getAttribute('layerType') as 'normal' | 'guide' | 'folder' | undefined;
+      const transparent = layerEl.getAttribute('transparent') === 'true';
+      const alphaPercentAttr = layerEl.getAttribute('alphaPercent');
+      const alphaPercent = alphaPercentAttr ? parseInt(alphaPercentAttr) : undefined;
+      const layerType = layerEl.getAttribute('layerType') as 'normal' | 'guide' | 'folder' | 'camera' | undefined;
       const parentLayerIndex = layerEl.getAttribute('parentLayerIndex');
 
       const frames = this.parseFrames(layerEl);
@@ -391,6 +402,8 @@ export class FLAParser {
         visible,
         locked,
         outline,
+        transparent,
+        alphaPercent,
         layerType: layerType || 'normal',
         parentLayerIndex: parentLayerIndex ? parseInt(parentLayerIndex) : undefined,
         frames
