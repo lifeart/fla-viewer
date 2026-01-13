@@ -12,8 +12,9 @@ A web-based viewer and player for Adobe Animate/Flash Professional FLA files.
 - **Motion Tweens**: Interpolated animations with easing
 - **Group Support**: Nested shape groups (DOMGroup)
 - **Video Placeholders**: DOMVideoInstance elements rendered as placeholders
-- **Bitmap Support**: Bitmap items with placeholder rendering
-- **Camera Support**: Simulated camera pan/zoom via viewport layer detection
+- **Bitmap Support**: Full bitmap rendering with automatic image extraction from FLA
+- **Text Rendering**: Static/dynamic text with word wrapping, alignment, and Google Fonts support
+- **Camera Support**: Simulated camera pan/zoom via viewport layer detection with follow mode
 - **Reference Layer Detection**: Automatic detection and filtering of guide/folder/camera layers
 
 ## Getting Started
@@ -61,10 +62,12 @@ Outputs production files to `dist/`
 | DOMSymbolInstance | Supported | Graphic, MovieClip, Button types |
 | DOMShape | Supported | Fills, edges, transforms |
 | DOMGroup | Supported | Nested groups and shapes |
+| DOMBitmapInstance | Supported | Full image rendering from embedded PNGs/JPGs |
 | DOMVideoInstance | Partial | Placeholder rendering |
-| Camera Layer | Supported | Auto-detected via non-rendering layer + centered symbol |
+| Camera Layer | Supported | Auto-detected + follow camera mode |
 | Motion Tweens | Supported | Linear and eased interpolation |
-| DOMStaticText | Supported | Multi-line text with font, size, color, alignment |
+| DOMStaticText | Supported | Word wrap, alignment, Google Fonts |
+| DOMDynamicText | Supported | Same as static text |
 | Shape Tweens | Not supported | - |
 | Masks | Not supported | - |
 | Filters | Not supported | - |
@@ -99,12 +102,12 @@ See [AGENTS.md](./AGENTS.md) for detailed format documentation.
 ## Known Limitations
 
 - Video elements show placeholder only (no FLV playback)
-- Gradients use first color as fallback
-- No bitmap fills (placeholder only)
+- Radial/linear gradients render with basic support
+- No bitmap fills in shapes (solid bitmaps work)
 - No mask layers
-- No filters (drop shadow, blur, etc.)
+- No filters (drop shadow, blur, glow, etc.)
 - No ActionScript support
-- Custom fonts may not render correctly (falls back to sans-serif)
+- Font support limited to Google Fonts mappings (falls back to sans-serif)
 
 ## License
 

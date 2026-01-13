@@ -64,8 +64,8 @@ export class FLAParser {
     // Parse symbol references and load them
     await this.loadSymbols(root);
 
-    // Parse bitmap items from media section
-    const bitmaps = this.parseBitmaps(root);
+    // Parse bitmap items from media section and load images
+    const bitmaps = await this.parseBitmaps(root);
 
     // Parse main timeline (pass dimensions for camera detection)
     const timelines = this.parseTimelines(root, width, height);
@@ -813,9 +813,11 @@ export class FLAParser {
     return strokes;
   }
 
-  private parseBitmaps(root: globalThis.Element): Map<string, BitmapItem> {
+  private async parseBitmaps(root: globalThis.Element): Promise<Map<string, BitmapItem>> {
     const bitmaps = new Map<string, BitmapItem>();
     const bitmapElements = root.querySelectorAll('media > DOMBitmapItem');
+
+    const loadPromises: Promise<void>[] = [];
 
     for (const bitmapEl of bitmapElements) {
       const name = bitmapEl.getAttribute('name') || '';
@@ -828,16 +830,83 @@ export class FLAParser {
       const width = frameRight ? parseInt(frameRight) / 20 : 0;
       const height = frameBottom ? parseInt(frameBottom) / 20 : 0;
 
-      bitmaps.set(name, {
+      const bitmapItem: BitmapItem = {
         name,
         href,
         width,
         height,
         sourceExternalFilepath
-      });
+      };
+
+      bitmaps.set(name, bitmapItem);
+
+      // Load actual image data from ZIP
+      loadPromises.push(this.loadBitmapImage(bitmapItem));
     }
 
+    // Wait for all images to load
+    await Promise.all(loadPromises);
+
     return bitmaps;
+  }
+
+  private async loadBitmapImage(bitmapItem: BitmapItem): Promise<void> {
+    if (!this.zip) return;
+
+    // Try to find the image in LIBRARY folder
+    const possiblePaths = [
+      `LIBRARY/${bitmapItem.href}`,
+      bitmapItem.href,
+      `library/${bitmapItem.href}`,
+    ];
+
+    let imageData: ArrayBuffer | null = null;
+    let foundPath = '';
+
+    for (const path of possiblePaths) {
+      const file = this.zip.file(path);
+      if (file) {
+        imageData = await file.async('arraybuffer');
+        foundPath = path;
+        break;
+      }
+    }
+
+    if (!imageData) {
+      if (DEBUG) {
+        console.warn(`Bitmap image not found: ${bitmapItem.href}`);
+      }
+      return;
+    }
+
+    // Determine MIME type from extension
+    const ext = bitmapItem.href.toLowerCase().split('.').pop();
+    let mimeType = 'image/png';
+    if (ext === 'jpg' || ext === 'jpeg') {
+      mimeType = 'image/jpeg';
+    } else if (ext === 'gif') {
+      mimeType = 'image/gif';
+    }
+
+    // Create blob and load as image
+    const blob = new Blob([imageData], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+
+    try {
+      const img = new Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error(`Failed to load image: ${foundPath}`));
+        img.src = url;
+      });
+      bitmapItem.imageData = img;
+    } catch (e) {
+      if (DEBUG) {
+        console.warn(`Failed to load bitmap: ${bitmapItem.href}`, e);
+      }
+    } finally {
+      URL.revokeObjectURL(url);
+    }
   }
 
   private parseShapeEdges(shape: globalThis.Element): Edge[] {
