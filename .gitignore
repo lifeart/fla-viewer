@@ -1,3 +1,6 @@
 node_modules/
 sample/
 dist/
+coverage/
+src/__tests__/__screenshots__/
+.env
