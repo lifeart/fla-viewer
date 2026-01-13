@@ -415,31 +415,35 @@ export class FLAParser {
     return elements;
   }
 
-  private parseGroupMembers(group: globalThis.Element, elements: DisplayElement[], parentMatrix: Matrix): void {
+  private parseGroupMembers(group: globalThis.Element, elements: DisplayElement[], ancestorMatrix: Matrix): void {
     const members = group.querySelector(':scope > members');
     if (!members) return;
 
-    // Get the group's own matrix and compose with parent
+    // Get the group's own matrix and compose with ancestors for nested groups
     const groupMatrix = this.parseMatrix(group.querySelector(':scope > matrix > Matrix'));
-    const composedMatrix = this.composeMatrices(parentMatrix, groupMatrix);
+    const composedMatrix = this.composeMatrices(ancestorMatrix, groupMatrix);
 
     // Parse children in document order to preserve z-ordering
+    // Pass both ancestorMatrix and composedMatrix:
+    // - Elements WITH their own matrix: compose with ancestorMatrix (element already has parent's transform)
+    // - Elements WITHOUT matrix: use composedMatrix (element at identity within parent's coordinate space)
     for (const child of members.children) {
       switch (child.tagName) {
         case 'DOMShape':
-          elements.push(this.parseShape(child, composedMatrix));
+          elements.push(this.parseShape(child, ancestorMatrix, composedMatrix));
           break;
         case 'DOMGroup':
+          // Pass composedMatrix - nested groups need full chain
           this.parseGroupMembers(child, elements, composedMatrix);
           break;
         case 'DOMSymbolInstance':
-          elements.push(this.parseSymbolInstance(child, composedMatrix));
+          elements.push(this.parseSymbolInstance(child, ancestorMatrix, composedMatrix));
           break;
         case 'DOMVideoInstance':
           elements.push(this.parseVideoInstance(child));
           break;
         case 'DOMBitmapInstance':
-          elements.push(this.parseBitmapInstance(child, composedMatrix));
+          elements.push(this.parseBitmapInstance(child, ancestorMatrix, composedMatrix));
           break;
       }
     }
@@ -458,20 +462,25 @@ export class FLAParser {
   }
 
 
-  private parseSymbolInstance(el: globalThis.Element, parentMatrix?: Matrix): SymbolInstance {
+  private parseSymbolInstance(el: globalThis.Element, ancestorMatrix?: Matrix, composedMatrix?: Matrix): SymbolInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const symbolType = (el.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
     const loop = (el.getAttribute('loop') || 'loop') as 'loop' | 'play once' | 'single frame';
     const firstFrame = el.getAttribute('firstFrame');
 
     const matrixEl = el.querySelector('matrix > Matrix');
-    let matrix = this.parseMatrix(matrixEl);
+    let matrix: Matrix;
     const transformationPoint = this.parsePoint(el.querySelector('transformationPoint > Point'));
 
-    // Only apply parent matrix if element has NO matrix of its own
-    // (Flash stores final transforms on elements that have them)
-    if (!matrixEl && parentMatrix && !this.isIdentityMatrix(parentMatrix)) {
-      matrix = parentMatrix;
+    if (matrixEl) {
+      // Element has its own matrix - compose with ancestorMatrix (grandparents)
+      matrix = this.parseMatrix(matrixEl);
+      if (ancestorMatrix && !this.isIdentityMatrix(ancestorMatrix)) {
+        matrix = this.composeMatrices(ancestorMatrix, matrix);
+      }
+    } else {
+      // Element has NO matrix - use composedMatrix (full ancestor chain)
+      matrix = composedMatrix || this.parseMatrix(null);
     }
 
     // Parse 3D center point if present
@@ -513,14 +522,20 @@ export class FLAParser {
     };
   }
 
-  private parseBitmapInstance(el: globalThis.Element, parentMatrix?: Matrix): BitmapInstance {
+  private parseBitmapInstance(el: globalThis.Element, ancestorMatrix?: Matrix, composedMatrix?: Matrix): BitmapInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const matrixEl = el.querySelector('matrix > Matrix');
-    let matrix = this.parseMatrix(matrixEl);
+    let matrix: Matrix;
 
-    // Only apply parent matrix if element has NO matrix of its own
-    if (!matrixEl && parentMatrix && !this.isIdentityMatrix(parentMatrix)) {
-      matrix = parentMatrix;
+    if (matrixEl) {
+      // Element has its own matrix - compose with ancestorMatrix (grandparents)
+      matrix = this.parseMatrix(matrixEl);
+      if (ancestorMatrix && !this.isIdentityMatrix(ancestorMatrix)) {
+        matrix = this.composeMatrices(ancestorMatrix, matrix);
+      }
+    } else {
+      // Element has NO matrix - use composedMatrix (full ancestor chain)
+      matrix = composedMatrix || this.parseMatrix(null);
     }
 
     return {
@@ -530,13 +545,21 @@ export class FLAParser {
     };
   }
 
-  private parseShape(el: globalThis.Element, parentMatrix?: Matrix): Shape {
+  private parseShape(el: globalThis.Element, ancestorMatrix?: Matrix, composedMatrix?: Matrix): Shape {
     const matrixEl = el.querySelector('matrix > Matrix');
-    let matrix = this.parseMatrix(matrixEl);
+    let matrix: Matrix;
 
-    // Only apply parent matrix if element has NO matrix of its own
-    if (!matrixEl && parentMatrix && !this.isIdentityMatrix(parentMatrix)) {
-      matrix = parentMatrix;
+    if (matrixEl) {
+      // Shape has its own matrix - compose with ancestorMatrix (grandparents)
+      // Shape's matrix likely already includes immediate parent's transform
+      matrix = this.parseMatrix(matrixEl);
+      if (ancestorMatrix && !this.isIdentityMatrix(ancestorMatrix)) {
+        matrix = this.composeMatrices(ancestorMatrix, matrix);
+      }
+    } else {
+      // Shape has NO matrix - use composedMatrix (full ancestor chain)
+      // Shape is at identity position within parent's coordinate space
+      matrix = composedMatrix || this.parseMatrix(null);
     }
     const fills = this.parseFills(el);
     const strokes = this.parseStrokes(el);
