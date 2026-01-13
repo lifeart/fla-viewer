@@ -312,6 +312,20 @@ Decodes to:
   - Preferred over `edges` (quadratic) when both present
   - Ignores quadratic approximation data (q/Q tokens)
 
+- [x] **Stroke Rendering**: SolidStroke and DashedStroke support
+  - Parses stroke weight, color, caps, and joints
+  - Renders stroked paths after fills
+  - Supports stroke styles per edge
+
+- [x] **3D Center Point**: centerPoint3DX/Y on symbol instances
+  - Parses 3D transformation center points
+  - Applies transforms around center point
+  - Interpolates center point during tweens
+
+- [x] **Bitmap Items**: DOMBitmapItem parsing from media section
+  - Parses bitmap dimensions and references
+  - Infrastructure for future BitmapFill support
+
 ---
 
 ## Remaining TODOs
@@ -322,11 +336,6 @@ Decodes to:
   - Parse `tweenType="shape"` frames
   - Interpolate edge paths between shapes
   - Handle fill color transitions
-
-- [ ] **Stroke Rendering**: Add stroke/outline support
-  - Parse `<strokes>` and `<StrokeStyle>` elements
-  - Implement line caps and joins (round, square, bevel, miter)
-  - Variable stroke width support
 
 - [ ] **Gradient Fills**: Proper gradient rendering
   - Linear gradients with matrix transform
@@ -453,6 +462,7 @@ Decodes to:
 | DOMFrame | `tweenType`, `acceleration` | Motion tween |
 | DOMSymbolInstance | `libraryItemName`, `symbolType` | Symbol reference |
 | DOMSymbolInstance | `loop`, `firstFrame` | Playback mode |
+| DOMSymbolInstance | `centerPoint3DX`, `centerPoint3DY` | 3D transform center |
 | Matrix | `a`, `b`, `c`, `d`, `tx`, `ty` | 2D transforms |
 | Point | `x`, `y` | Coordinates |
 | Edge | `fillStyle0`, `fillStyle1`, `strokeStyle` | Style indices |
@@ -461,6 +471,10 @@ Decodes to:
 | FillStyle | `index` | Style reference |
 | SolidColor | `color`, `alpha` | Fill color |
 | LinearGradient | GradientEntry children | Gradient colors |
+| StrokeStyle | `index` | Style reference |
+| SolidStroke | `weight`, `caps`, `joints` | Stroke properties |
+| SolidStroke/fill | `SolidColor` | Stroke color |
+| DOMBitmapItem | `name`, `href`, `frameRight`, `frameBottom` | Bitmap metadata |
 | DOMVideoInstance | `libraryItemName`, `frameRight`, `frameBottom` | Video placeholder |
 
 ### Ignored Attributes (intentionally skipped - editor state)
@@ -478,13 +492,12 @@ Decodes to:
 
 | Element | Attribute | Impact |
 |---------|-----------|--------|
-| DOMSymbolInstance | `centerPoint3DX`, `centerPoint3DY` | 3D transform center point |
-| DOMFrame | `motionTweenSnap`, `motionTweenRotate`, `motionTweenScale` | Advanced tween options |
-| DOMFrame | `hasCustomEase` | Flag only (CustomEase points are parsed) |
-| SolidStroke | `weight`, `scaleMode`, `caps`, `joints` | Stroke rendering |
-| DashedStroke | `scaleMode` | Dashed stroke rendering |
-| DOMBitmapItem | all | Bitmap assets |
-| DOMBitmapInstance | all | Bitmap instances |
+| DOMFrame | `motionTweenRotate`, `motionTweenScale` | Advanced tween rotation/scale |
+| DOMFrame | `motionTweenSnap` | Snapping (editor behavior) |
+| SolidStroke | `scaleMode` | Stroke scale mode |
+| DashedStroke | `scaleMode` | Dashed stroke scale mode |
+| DOMBitmapInstance | all | Bitmap instances (not in samples) |
+| BitmapFill | all | Bitmap fills (not in samples) |
 | filters | all | Filter effects (drop shadow, blur, etc.) |
 | blendMode | all | Blend modes |
 | Color (transform) | `alphaMultiplier`, offsets | Color transform (partial support) |

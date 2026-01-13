@@ -10,7 +10,9 @@ import type {
   Shape,
   Matrix,
   FillStyle,
+  StrokeStyle,
   Symbol,
+  BitmapItem,
   Point,
   Tween,
   Edge
@@ -58,6 +60,9 @@ export class FLAParser {
     // Parse symbol references and load them
     await this.loadSymbols(root);
 
+    // Parse bitmap items from media section
+    const bitmaps = this.parseBitmaps(root);
+
     // Parse main timeline (pass dimensions for camera detection)
     const timelines = this.parseTimelines(root, width, height);
 
@@ -67,7 +72,8 @@ export class FLAParser {
       frameRate,
       backgroundColor,
       timelines,
-      symbols: this.symbolCache
+      symbols: this.symbolCache,
+      bitmaps
     };
   }
 
@@ -436,12 +442,20 @@ export class FLAParser {
     const matrix = this.parseMatrix(el.querySelector('matrix > Matrix'));
     const transformationPoint = this.parsePoint(el.querySelector('transformationPoint > Point'));
 
+    // Parse 3D center point if present
+    const centerPoint3DX = el.getAttribute('centerPoint3DX');
+    const centerPoint3DY = el.getAttribute('centerPoint3DY');
+    const centerPoint3D = (centerPoint3DX || centerPoint3DY)
+      ? { x: parseFloat(centerPoint3DX || '0'), y: parseFloat(centerPoint3DY || '0') }
+      : undefined;
+
     return {
       type: 'symbol',
       libraryItemName,
       symbolType,
       matrix,
       transformationPoint,
+      centerPoint3D,
       loop,
       firstFrame: firstFrame ? parseInt(firstFrame) : undefined
     };
@@ -466,13 +480,14 @@ export class FLAParser {
   private parseShape(el: globalThis.Element): Shape {
     const matrix = this.parseMatrix(el.querySelector('matrix > Matrix'));
     const fills = this.parseFills(el);
+    const strokes = this.parseStrokes(el);
     const edges = this.parseShapeEdges(el);
 
     return {
       type: 'shape',
       matrix,
       fills,
-      strokes: [],
+      strokes,
       edges
     };
   }
@@ -539,6 +554,85 @@ export class FLAParser {
     }
 
     return entries;
+  }
+
+  private parseStrokes(shape: globalThis.Element): StrokeStyle[] {
+    const strokes: StrokeStyle[] = [];
+    const strokeElements = shape.querySelectorAll('strokes > StrokeStyle');
+
+    for (const strokeEl of strokeElements) {
+      const index = parseInt(strokeEl.getAttribute('index') || '1');
+
+      // Check for SolidStroke
+      const solidStroke = strokeEl.querySelector('SolidStroke');
+      if (solidStroke) {
+        const weight = parseFloat(solidStroke.getAttribute('weight') || '1');
+        const caps = (solidStroke.getAttribute('caps') || 'round') as 'none' | 'round' | 'square';
+        const joints = (solidStroke.getAttribute('joints') || 'round') as 'miter' | 'round' | 'bevel';
+
+        // Get stroke color from nested fill > SolidColor
+        const solidColor = solidStroke.querySelector('fill > SolidColor');
+        const color = solidColor?.getAttribute('color') || '#000000';
+
+        strokes.push({
+          index,
+          color,
+          weight,
+          caps,
+          joints
+        });
+        continue;
+      }
+
+      // Check for DashedStroke (treat similar to SolidStroke for now)
+      const dashedStroke = strokeEl.querySelector('DashedStroke');
+      if (dashedStroke) {
+        const weight = parseFloat(dashedStroke.getAttribute('weight') || '1');
+        const caps = (dashedStroke.getAttribute('caps') || 'round') as 'none' | 'round' | 'square';
+        const joints = (dashedStroke.getAttribute('joints') || 'round') as 'miter' | 'round' | 'bevel';
+
+        const solidColor = dashedStroke.querySelector('fill > SolidColor');
+        const color = solidColor?.getAttribute('color') || '#000000';
+
+        strokes.push({
+          index,
+          color,
+          weight,
+          caps,
+          joints
+        });
+        continue;
+      }
+    }
+
+    return strokes;
+  }
+
+  private parseBitmaps(root: globalThis.Element): Map<string, BitmapItem> {
+    const bitmaps = new Map<string, BitmapItem>();
+    const bitmapElements = root.querySelectorAll('media > DOMBitmapItem');
+
+    for (const bitmapEl of bitmapElements) {
+      const name = bitmapEl.getAttribute('name') || '';
+      const href = bitmapEl.getAttribute('href') || name;
+      const frameRight = bitmapEl.getAttribute('frameRight');
+      const frameBottom = bitmapEl.getAttribute('frameBottom');
+      const sourceExternalFilepath = bitmapEl.getAttribute('sourceExternalFilepath') || undefined;
+
+      // Dimensions are in twips (1/20 of a pixel)
+      const width = frameRight ? parseInt(frameRight) / 20 : 0;
+      const height = frameBottom ? parseInt(frameBottom) / 20 : 0;
+
+      bitmaps.set(name, {
+        name,
+        href,
+        width,
+        height,
+        sourceExternalFilepath
+      });
+    }
+
+    return bitmaps;
   }
 
   private parseShapeEdges(shape: globalThis.Element): Edge[] {

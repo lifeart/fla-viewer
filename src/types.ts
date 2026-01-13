@@ -7,6 +7,16 @@ export interface FLADocument {
   backgroundColor: string;
   timelines: Timeline[];
   symbols: Map<string, Symbol>;
+  bitmaps: Map<string, BitmapItem>;
+}
+
+export interface BitmapItem {
+  name: string;
+  href: string; // Filename in archive
+  width: number; // In pixels
+  height: number; // In pixels
+  sourceExternalFilepath?: string;
+  imageData?: HTMLImageElement; // Loaded image (if available)
 }
 
 export interface Timeline {
@@ -56,6 +66,7 @@ export interface SymbolInstance {
   symbolType: 'graphic' | 'movieclip' | 'button';
   matrix: Matrix;
   transformationPoint: Point;
+  centerPoint3D?: Point; // 3D transformation center point
   loop: 'loop' | 'play once' | 'single frame';
   firstFrame?: number;
   colorTransform?: ColorTransform;

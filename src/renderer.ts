@@ -9,6 +9,7 @@ import type {
   Shape,
   Matrix,
   FillStyle,
+  StrokeStyle,
   Edge,
   Tween,
   Point
@@ -317,9 +318,22 @@ export class FLARenderer {
         ty: this.lerp(startMatrix.ty, endMatrix.ty, progress)
       };
 
+      // Interpolate centerPoint3D if present on either element
+      let interpolatedCenterPoint3D = element.centerPoint3D;
+      if (element.centerPoint3D && nextDisplayElement.centerPoint3D) {
+        interpolatedCenterPoint3D = {
+          x: this.lerp(element.centerPoint3D.x, nextDisplayElement.centerPoint3D.x, progress),
+          y: this.lerp(element.centerPoint3D.y, nextDisplayElement.centerPoint3D.y, progress)
+        };
+      } else if (nextDisplayElement.centerPoint3D && !element.centerPoint3D) {
+        // Fade in centerPoint3D
+        interpolatedCenterPoint3D = nextDisplayElement.centerPoint3D;
+      }
+
       const tweenedDisplayElement: SymbolInstance = {
         ...element,
-        matrix: interpolatedMatrix
+        matrix: interpolatedMatrix,
+        centerPoint3D: interpolatedCenterPoint3D
       };
 
       this.renderDisplayElement(tweenedDisplayElement, depth);
@@ -358,8 +372,18 @@ export class FLARenderer {
     const ctx = this.ctx;
     ctx.save();
 
-    // Apply transformation
-    this.applyMatrix(instance.matrix);
+    // If centerPoint3D is present, apply transformation around that point
+    if (instance.centerPoint3D) {
+      // Translate so centerPoint3D becomes the origin
+      ctx.translate(instance.centerPoint3D.x, instance.centerPoint3D.y);
+      // Apply the transformation matrix
+      this.applyMatrix(instance.matrix);
+      // Translate back
+      ctx.translate(-instance.centerPoint3D.x, -instance.centerPoint3D.y);
+    } else {
+      // Apply transformation normally
+      this.applyMatrix(instance.matrix);
+    }
 
     // Calculate which frame to render based on symbol's loop mode
     let symbolFrame = instance.firstFrame || 0;
@@ -415,42 +439,70 @@ export class FLARenderer {
       fillStyles.set(fill.index, fill);
     }
 
+    // Build stroke style lookup
+    const strokeStyles = new Map<number, StrokeStyle>();
+    for (const stroke of shape.strokes) {
+      strokeStyles.set(stroke.index, stroke);
+    }
+
     // Group edges by fill style and combine paths
     const fillPaths = new Map<number, Path2D>();
+    // Group edges by stroke style
+    const strokePaths = new Map<number, Path2D>();
 
     for (const edge of shape.edges) {
-      // Skip stroke-only edges (no fill styles defined)
-      if (edge.fillStyle0 === undefined && edge.fillStyle1 === undefined) {
-        continue;
-      }
-
       const path = this.edgeToPath(edge);
 
-      // Handle fillStyle1 (right side fill)
-      if (edge.fillStyle1 !== undefined) {
-        if (!fillPaths.has(edge.fillStyle1)) {
-          fillPaths.set(edge.fillStyle1, new Path2D());
+      // Handle fills
+      if (edge.fillStyle0 !== undefined || edge.fillStyle1 !== undefined) {
+        // Handle fillStyle1 (right side fill)
+        if (edge.fillStyle1 !== undefined) {
+          if (!fillPaths.has(edge.fillStyle1)) {
+            fillPaths.set(edge.fillStyle1, new Path2D());
+          }
+          fillPaths.get(edge.fillStyle1)!.addPath(path);
         }
-        fillPaths.get(edge.fillStyle1)!.addPath(path);
+
+        // Handle fillStyle0 (left side fill)
+        if (edge.fillStyle0 !== undefined && edge.fillStyle0 !== edge.fillStyle1) {
+          if (!fillPaths.has(edge.fillStyle0)) {
+            fillPaths.set(edge.fillStyle0, new Path2D());
+          }
+          fillPaths.get(edge.fillStyle0)!.addPath(path);
+        }
       }
 
-      // Handle fillStyle0 (left side fill)
-      if (edge.fillStyle0 !== undefined && edge.fillStyle0 !== edge.fillStyle1) {
-        if (!fillPaths.has(edge.fillStyle0)) {
-          fillPaths.set(edge.fillStyle0, new Path2D());
+      // Handle strokes
+      if (edge.strokeStyle !== undefined) {
+        if (!strokePaths.has(edge.strokeStyle)) {
+          strokePaths.set(edge.strokeStyle, new Path2D());
         }
-        fillPaths.get(edge.fillStyle0)!.addPath(path);
+        strokePaths.get(edge.strokeStyle)!.addPath(path);
       }
     }
 
     // Render filled paths - sort by style index for consistent ordering
-    const sortedStyles = Array.from(fillPaths.entries()).sort((a, b) => a[0] - b[0]);
+    const sortedFillStyles = Array.from(fillPaths.entries()).sort((a, b) => a[0] - b[0]);
 
-    for (const [styleIndex, path] of sortedStyles) {
+    for (const [styleIndex, path] of sortedFillStyles) {
       const fill = fillStyles.get(styleIndex);
       if (fill) {
         ctx.fillStyle = this.getFillStyle(fill);
         ctx.fill(path, 'evenodd');
+      }
+    }
+
+    // Render stroked paths
+    const sortedStrokeStyles = Array.from(strokePaths.entries()).sort((a, b) => a[0] - b[0]);
+
+    for (const [styleIndex, path] of sortedStrokeStyles) {
+      const stroke = strokeStyles.get(styleIndex);
+      if (stroke) {
+        ctx.strokeStyle = stroke.color;
+        ctx.lineWidth = stroke.weight;
+        ctx.lineCap = stroke.caps === 'none' ? 'butt' : stroke.caps || 'round';
+        ctx.lineJoin = stroke.joints || 'round';
+        ctx.stroke(path);
       }
     }
 
