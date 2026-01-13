@@ -6,12 +6,15 @@ A web-based viewer and player for Adobe Animate/Flash Professional FLA files.
 
 - **FLA File Parsing**: Reads FLA/XFL format files (ZIP archives containing XML)
 - **Timeline Playback**: Play, pause, and scrub through animations
-- **Shape Rendering**: Solid fills, gradients (basic), and vector shapes
+- **Shape Rendering**: Solid fills, gradients (basic), strokes, and vector shapes
+- **Edge Path Processing**: Advanced edge connection with gap tolerance, segment splitting, and chain sorting
 - **Symbol Support**: Graphic symbols with nested timelines
 - **Motion Tweens**: Interpolated animations with easing
 - **Group Support**: Nested shape groups (DOMGroup)
 - **Video Placeholders**: DOMVideoInstance elements rendered as placeholders
+- **Bitmap Support**: Bitmap items with placeholder rendering
 - **Camera Support**: Simulated camera pan/zoom via viewport layer detection
+- **Reference Layer Detection**: Automatic detection and filtering of guide/folder/camera layers
 
 ## Getting Started
 
@@ -97,9 +100,11 @@ See [AGENTS.md](./AGENTS.md) for detailed format documentation.
 
 - Video elements show placeholder only (no FLV playback)
 - Gradients use first color as fallback
-- No stroke rendering
-- No bitmap fills
+- No bitmap fills (placeholder only)
+- No mask layers
+- No filters (drop shadow, blur, etc.)
 - No ActionScript support
+- No text rendering
 
 ## License
 

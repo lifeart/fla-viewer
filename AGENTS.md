@@ -319,6 +319,21 @@ Decodes to:
   - Renders stroked paths after fills
   - Supports stroke styles per edge
 
+- [x] **Edge Path Processing**: Advanced shape path building
+  - **Edge sorting algorithm**: Connects edges into proper chains for fill rendering
+  - **Segment splitting**: Splits edges at internal MoveTo commands to handle disconnected segments
+  - **Gap tolerance (EPSILON)**: 8px tolerance for edge connections (handles gaps in source data)
+  - **Loop closing detection**: Extended 24px tolerance to find closing contributions for loops
+  - **Auto-close paths**: Draws lineTo back to subpath start when chains don't close naturally
+  - Uses 'nonzero' fill rule for proper winding
+
+- [x] **Reference Layer Detection**: Automatic filtering of non-renderable layers
+  - Detects by layer type: `guide`, `folder`
+  - Detects by name: `ramka`, `camera`, `frame`, `cam`, `viewport`
+  - Detects by structure: locked layers with single symbol near document center
+  - Stores in `timeline.referenceLayers` (Set) for efficient lookup
+  - Skipped during rendering to avoid visual artifacts
+
 - [x] **3D Center Point**: centerPoint3DX/Y on symbol instances
   - Parses 3D transformation center points
   - Applies transforms around center point
@@ -457,7 +472,7 @@ Decodes to:
 | DOMDocument | `frameRate` | Playback speed |
 | DOMDocument | `backgroundColor` | Canvas background |
 | DOMLayer | `name`, `color`, `visible`, `locked` | Layer metadata |
-| DOMLayer | `layerType` | normal/guide/folder detection |
+| DOMLayer | `layerType` | normal/guide/folder detection, reference layer filtering |
 | DOMLayer | `outline` | Camera layer detection |
 | DOMLayer | `parentLayerIndex` | Folder hierarchy |
 | DOMFrame | `index`, `duration`, `keyMode` | Frame timing |
@@ -506,14 +521,45 @@ Decodes to:
 
 ---
 
+## Internal Data Structures
+
+### Timeline
+```typescript
+interface Timeline {
+  name: string;
+  layers: Layer[];
+  totalFrames: number;
+  cameraLayerIndex?: number;      // Index of detected camera layer
+  referenceLayers: Set<number>;   // Indices of non-renderable layers (guide/folder/camera)
+}
+```
+
+### Edge Contribution (for fill path building)
+```typescript
+interface EdgeContribution {
+  commands: PathCommand[];
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+}
+```
+
+Edge contributions are collected per fill style, then sorted into connected chains using:
+1. Greedy connection (find closest next segment within EPSILON)
+2. Loop closing (find segment that closes back to chain start with extended tolerance)
+3. Auto-close (draw lineTo back to start when chain doesn't close naturally)
+
+---
+
 ## File References
 
 | File | Purpose |
 |------|---------|
 | `src/types.ts` | TypeScript interfaces for FLA data structures |
-| `src/fla-parser.ts` | ZIP extraction and XML parsing |
-| `src/edge-decoder.ts` | XFL edge path format decoder |
-| `src/renderer.ts` | Canvas 2D rendering engine |
+| `src/fla-parser.ts` | ZIP extraction, XML parsing, reference layer detection |
+| `src/edge-decoder.ts` | XFL edge path format decoder (quadratic and cubic) |
+| `src/renderer.ts` | Canvas 2D rendering engine, edge sorting, path building |
 | `src/player.ts` | Timeline playback controller |
 | `src/main.ts` | Application entry point and UI |
 
