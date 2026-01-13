@@ -392,13 +392,14 @@ export class FLAParser {
     const identityMatrix: Matrix = { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 };
 
     // Parse direct children in document order to preserve z-ordering
+    // For direct frame elements: composedMatrix is identity, no groupMatrix (undefined)
     for (const child of elementsContainer.children) {
       switch (child.tagName) {
         case 'DOMSymbolInstance':
-          elements.push(this.parseSymbolInstance(child, identityMatrix));
+          elements.push(this.parseSymbolInstance(child, identityMatrix, undefined));
           break;
         case 'DOMShape':
-          elements.push(this.parseShape(child, identityMatrix));
+          elements.push(this.parseShape(child, identityMatrix, undefined));
           break;
         case 'DOMGroup':
           this.parseGroupMembers(child, elements, identityMatrix);
@@ -407,7 +408,7 @@ export class FLAParser {
           elements.push(this.parseVideoInstance(child));
           break;
         case 'DOMBitmapInstance':
-          elements.push(this.parseBitmapInstance(child, identityMatrix));
+          elements.push(this.parseBitmapInstance(child, identityMatrix, undefined));
           break;
       }
     }
@@ -424,26 +425,27 @@ export class FLAParser {
     const composedMatrix = this.composeMatrices(ancestorMatrix, groupMatrix);
 
     // Parse children in document order to preserve z-ordering
-    // Pass both ancestorMatrix and composedMatrix:
-    // - Elements WITH their own matrix: compose with ancestorMatrix (element already has parent's transform)
+    // Pass composedMatrix and groupMatrix:
+    // - Elements WITH matrix matching groupMatrix: it's a copy, use composedMatrix directly
+    // - Elements WITH different matrix: local transform, compose with composedMatrix
     // - Elements WITHOUT matrix: use composedMatrix (element at identity within parent's coordinate space)
     for (const child of members.children) {
       switch (child.tagName) {
         case 'DOMShape':
-          elements.push(this.parseShape(child, ancestorMatrix, composedMatrix));
+          elements.push(this.parseShape(child, composedMatrix, groupMatrix));
           break;
         case 'DOMGroup':
           // Pass composedMatrix - nested groups need full chain
           this.parseGroupMembers(child, elements, composedMatrix);
           break;
         case 'DOMSymbolInstance':
-          elements.push(this.parseSymbolInstance(child, ancestorMatrix, composedMatrix));
+          elements.push(this.parseSymbolInstance(child, composedMatrix, groupMatrix));
           break;
         case 'DOMVideoInstance':
           elements.push(this.parseVideoInstance(child));
           break;
         case 'DOMBitmapInstance':
-          elements.push(this.parseBitmapInstance(child, ancestorMatrix, composedMatrix));
+          elements.push(this.parseBitmapInstance(child, composedMatrix, groupMatrix));
           break;
       }
     }
@@ -462,7 +464,7 @@ export class FLAParser {
   }
 
 
-  private parseSymbolInstance(el: globalThis.Element, ancestorMatrix?: Matrix, composedMatrix?: Matrix): SymbolInstance {
+  private parseSymbolInstance(el: globalThis.Element, composedMatrix?: Matrix, groupMatrix?: Matrix): SymbolInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const symbolType = (el.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
     const loop = (el.getAttribute('loop') || 'loop') as 'loop' | 'play once' | 'single frame';
@@ -473,10 +475,18 @@ export class FLAParser {
     const transformationPoint = this.parsePoint(el.querySelector('transformationPoint > Point'));
 
     if (matrixEl) {
-      // Element has its own matrix - compose with ancestorMatrix (grandparents)
-      matrix = this.parseMatrix(matrixEl);
-      if (ancestorMatrix && !this.isIdentityMatrix(ancestorMatrix)) {
-        matrix = this.composeMatrices(ancestorMatrix, matrix);
+      const elementMatrix = this.parseMatrix(matrixEl);
+      // Check if element's matrix is a copy of the parent group's matrix
+      if (groupMatrix && this.matricesEqual(elementMatrix, groupMatrix)) {
+        // It's a copy - use composedMatrix which already includes the group's transform
+        matrix = composedMatrix || elementMatrix;
+      } else {
+        // Different matrix - it's a local transform, compose with parent
+        if (composedMatrix && !this.isIdentityMatrix(composedMatrix)) {
+          matrix = this.composeMatrices(composedMatrix, elementMatrix);
+        } else {
+          matrix = elementMatrix;
+        }
       }
     } else {
       // Element has NO matrix - use composedMatrix (full ancestor chain)
@@ -506,6 +516,10 @@ export class FLAParser {
     return m.a === 1 && m.b === 0 && m.c === 0 && m.d === 1 && m.tx === 0 && m.ty === 0;
   }
 
+  private matricesEqual(a: Matrix, b: Matrix): boolean {
+    return a.a === b.a && a.b === b.b && a.c === b.c && a.d === b.d && a.tx === b.tx && a.ty === b.ty;
+  }
+
   private parseVideoInstance(el: globalThis.Element): VideoInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const frameRight = el.getAttribute('frameRight');
@@ -522,16 +536,24 @@ export class FLAParser {
     };
   }
 
-  private parseBitmapInstance(el: globalThis.Element, ancestorMatrix?: Matrix, composedMatrix?: Matrix): BitmapInstance {
+  private parseBitmapInstance(el: globalThis.Element, composedMatrix?: Matrix, groupMatrix?: Matrix): BitmapInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const matrixEl = el.querySelector('matrix > Matrix');
     let matrix: Matrix;
 
     if (matrixEl) {
-      // Element has its own matrix - compose with ancestorMatrix (grandparents)
-      matrix = this.parseMatrix(matrixEl);
-      if (ancestorMatrix && !this.isIdentityMatrix(ancestorMatrix)) {
-        matrix = this.composeMatrices(ancestorMatrix, matrix);
+      const elementMatrix = this.parseMatrix(matrixEl);
+      // Check if element's matrix is a copy of the parent group's matrix
+      if (groupMatrix && this.matricesEqual(elementMatrix, groupMatrix)) {
+        // It's a copy - use composedMatrix which already includes the group's transform
+        matrix = composedMatrix || elementMatrix;
+      } else {
+        // Different matrix - it's a local transform, compose with parent
+        if (composedMatrix && !this.isIdentityMatrix(composedMatrix)) {
+          matrix = this.composeMatrices(composedMatrix, elementMatrix);
+        } else {
+          matrix = elementMatrix;
+        }
       }
     } else {
       // Element has NO matrix - use composedMatrix (full ancestor chain)
@@ -545,16 +567,23 @@ export class FLAParser {
     };
   }
 
-  private parseShape(el: globalThis.Element, ancestorMatrix?: Matrix, composedMatrix?: Matrix): Shape {
+  private parseShape(el: globalThis.Element, composedMatrix?: Matrix, groupMatrix?: Matrix): Shape {
     const matrixEl = el.querySelector('matrix > Matrix');
     let matrix: Matrix;
 
     if (matrixEl) {
-      // Shape has its own matrix - compose with ancestorMatrix (grandparents)
-      // Shape's matrix likely already includes immediate parent's transform
-      matrix = this.parseMatrix(matrixEl);
-      if (ancestorMatrix && !this.isIdentityMatrix(ancestorMatrix)) {
-        matrix = this.composeMatrices(ancestorMatrix, matrix);
+      const elementMatrix = this.parseMatrix(matrixEl);
+      // Check if element's matrix is a copy of the parent group's matrix
+      if (groupMatrix && this.matricesEqual(elementMatrix, groupMatrix)) {
+        // It's a copy - use composedMatrix which already includes the group's transform
+        matrix = composedMatrix || elementMatrix;
+      } else {
+        // Different matrix - it's a local transform, compose with parent
+        if (composedMatrix && !this.isIdentityMatrix(composedMatrix)) {
+          matrix = this.composeMatrices(composedMatrix, elementMatrix);
+        } else {
+          matrix = elementMatrix;
+        }
       }
     } else {
       // Shape has NO matrix - use composedMatrix (full ancestor chain)
