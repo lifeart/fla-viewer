@@ -121,14 +121,11 @@ export class FLARenderer {
         continue;
       }
 
-      // Skip invisible layers and guide/folder layers
-      if (!layer.visible || layer.layerType === 'guide' || layer.layerType === 'folder') {
+      // Skip guide/folder layers
+      // Note: layer.visible is an editor UI setting (eye icon), not runtime visibility
+      // All non-guide/folder layers should render regardless of the visible attribute
+      if (layer.layerType === 'guide' || layer.layerType === 'folder') {
         continue;
-      }
-
-      // Debug: log layer rendering order at root level
-      if (depth === 0 && this.logCount < 20) {
-        console.log(`Rendering layer ${i}: "${layer.name}" (type: ${layer.layerType || 'normal'})`);
       }
 
       this.renderLayer(layer, frameIndex, depth);
@@ -401,10 +398,10 @@ export class FLARenderer {
       return;
     }
 
-    // Debug: log first few symbol transforms
-    if (this.logCount < 5 && depth === 0) {
-      console.log('Symbol:', instance.libraryItemName, 'Matrix:', instance.matrix);
-      this.logCount++;
+    // Debug: log symbol rendering details
+    if (instance.libraryItemName === 'aero' || (this.logCount < 5 && depth === 0)) {
+      console.log(`Symbol: "${instance.libraryItemName}" at depth=${depth}, firstFrame=${instance.firstFrame || 0}, symbolFrame will be=${(instance.firstFrame || 0) % Math.max(1, symbol.timeline.totalFrames)}, totalSymbolFrames=${symbol.timeline.totalFrames}`);
+      if (depth === 0) this.logCount++;
     }
 
     const ctx = this.ctx;
