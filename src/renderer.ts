@@ -13,7 +13,8 @@ import type {
   StrokeStyle,
   Edge,
   Tween,
-  Point
+  Point,
+  PathCommand
 } from './types';
 
 interface DebugElement {
@@ -770,36 +771,45 @@ export class FLARenderer {
       strokeStyles.set(stroke.index, stroke);
     }
 
-    // Group edges by fill style and combine paths
+    // Group edges by fill style and build continuous paths
+    // Track current position for each fill style to connect edges properly
     const fillPaths = new Map<number, Path2D>();
+    const fillPositions = new Map<number, { x: number; y: number }>();
     // Group edges by stroke style
     const strokePaths = new Map<number, Path2D>();
     // Combined path for hit testing
     const combinedPath = new Path2D();
 
+    const EPSILON = 0.5;
+
     for (const edge of shape.edges) {
       const path = this.edgeToPath(edge);
       combinedPath.addPath(path);
 
-      // Handle fills
-      // In Flash: fillStyle0 = left side (needs reversed path), fillStyle1 = right side (normal)
-      if (edge.fillStyle0 !== undefined || edge.fillStyle1 !== undefined) {
-        // Handle fillStyle1 (right side fill) - use path as-is
-        if (edge.fillStyle1 !== undefined) {
-          if (!fillPaths.has(edge.fillStyle1)) {
-            fillPaths.set(edge.fillStyle1, new Path2D());
-          }
-          fillPaths.get(edge.fillStyle1)!.addPath(path);
+      // Handle fills - build continuous paths by connecting edges
+      if (edge.fillStyle1 !== undefined) {
+        if (!fillPaths.has(edge.fillStyle1)) {
+          fillPaths.set(edge.fillStyle1, new Path2D());
         }
+        const fillPath = fillPaths.get(edge.fillStyle1)!;
+        const pos = fillPositions.get(edge.fillStyle1);
+        this.appendEdgeToPath(fillPath, edge.commands, pos, EPSILON);
+        // Update position to end of this edge
+        const lastCmd = this.getLastPoint(edge.commands);
+        if (lastCmd) fillPositions.set(edge.fillStyle1, lastCmd);
+      }
 
-        // Handle fillStyle0 (left side fill) - use reversed path for correct winding
-        if (edge.fillStyle0 !== undefined && edge.fillStyle0 !== edge.fillStyle1) {
-          if (!fillPaths.has(edge.fillStyle0)) {
-            fillPaths.set(edge.fillStyle0, new Path2D());
-          }
-          const reversedPath = this.reverseEdgePath(edge);
-          fillPaths.get(edge.fillStyle0)!.addPath(reversedPath);
+      // Handle fillStyle0 (left side fill) - use reversed commands
+      if (edge.fillStyle0 !== undefined && edge.fillStyle0 !== edge.fillStyle1) {
+        if (!fillPaths.has(edge.fillStyle0)) {
+          fillPaths.set(edge.fillStyle0, new Path2D());
         }
+        const fillPath = fillPaths.get(edge.fillStyle0)!;
+        const pos = fillPositions.get(edge.fillStyle0);
+        const reversedCmds = this.reverseCommands(edge.commands);
+        this.appendEdgeToPath(fillPath, reversedCmds, pos, EPSILON);
+        const lastCmd = this.getLastPoint(reversedCmds);
+        if (lastCmd) fillPositions.set(edge.fillStyle0, lastCmd);
       }
 
       // Handle strokes
@@ -948,6 +958,113 @@ export class FLARenderer {
     }
 
     return path;
+  }
+
+  // Append edge commands to a path, connecting to previous position if possible
+  private appendEdgeToPath(
+    path: Path2D,
+    commands: PathCommand[],
+    currentPos: { x: number; y: number } | undefined,
+    epsilon: number
+  ): void {
+    let isFirst = true;
+    let lastX = currentPos?.x ?? NaN;
+    let lastY = currentPos?.y ?? NaN;
+
+    for (const cmd of commands) {
+      if ('x' in cmd && (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y))) {
+        continue;
+      }
+
+      switch (cmd.type) {
+        case 'M':
+          // Skip moveTo if we're already at this position (connecting edges)
+          if (isFirst && currentPos &&
+              Math.abs(cmd.x - currentPos.x) <= epsilon &&
+              Math.abs(cmd.y - currentPos.y) <= epsilon) {
+            // Already at position, skip moveTo to maintain continuity
+          } else {
+            path.moveTo(cmd.x, cmd.y);
+          }
+          lastX = cmd.x;
+          lastY = cmd.y;
+          isFirst = false;
+          break;
+        case 'L':
+          path.lineTo(cmd.x, cmd.y);
+          lastX = cmd.x;
+          lastY = cmd.y;
+          isFirst = false;
+          break;
+        case 'Q':
+          if (Number.isFinite(cmd.cx) && Number.isFinite(cmd.cy)) {
+            path.quadraticCurveTo(cmd.cx, cmd.cy, cmd.x, cmd.y);
+          }
+          lastX = cmd.x;
+          lastY = cmd.y;
+          isFirst = false;
+          break;
+        case 'C':
+          if (Number.isFinite(cmd.c1x) && Number.isFinite(cmd.c1y) &&
+              Number.isFinite(cmd.c2x) && Number.isFinite(cmd.c2y)) {
+            path.bezierCurveTo(cmd.c1x, cmd.c1y, cmd.c2x, cmd.c2y, cmd.x, cmd.y);
+          }
+          lastX = cmd.x;
+          lastY = cmd.y;
+          isFirst = false;
+          break;
+        case 'Z':
+          path.closePath();
+          break;
+      }
+    }
+  }
+
+  // Get the last point from a command list
+  private getLastPoint(commands: PathCommand[]): { x: number; y: number } | null {
+    for (let i = commands.length - 1; i >= 0; i--) {
+      const cmd = commands[i];
+      if ('x' in cmd && Number.isFinite(cmd.x) && Number.isFinite(cmd.y)) {
+        return { x: cmd.x, y: cmd.y };
+      }
+    }
+    return null;
+  }
+
+  // Reverse commands for fillStyle0 (left-side fill)
+  private reverseCommands(commands: PathCommand[]): PathCommand[] {
+    const points: { x: number; y: number; type: string; cx?: number; cy?: number; c1x?: number; c1y?: number; c2x?: number; c2y?: number }[] = [];
+
+    for (const cmd of commands) {
+      if (cmd.type === 'M' || cmd.type === 'L') {
+        points.push({ x: cmd.x, y: cmd.y, type: cmd.type });
+      } else if (cmd.type === 'Q') {
+        points.push({ x: cmd.x, y: cmd.y, type: 'Q', cx: cmd.cx, cy: cmd.cy });
+      } else if (cmd.type === 'C') {
+        points.push({ x: cmd.x, y: cmd.y, type: 'C', c1x: cmd.c1x, c1y: cmd.c1y, c2x: cmd.c2x, c2y: cmd.c2y });
+      }
+    }
+
+    if (points.length === 0) return [];
+
+    const result: PathCommand[] = [];
+    const lastPoint = points[points.length - 1];
+    result.push({ type: 'M', x: lastPoint.x, y: lastPoint.y });
+
+    for (let i = points.length - 1; i > 0; i--) {
+      const current = points[i];
+      const prev = points[i - 1];
+
+      if (current.type === 'L' || current.type === 'M') {
+        result.push({ type: 'L', x: prev.x, y: prev.y });
+      } else if (current.type === 'Q' && current.cx !== undefined && current.cy !== undefined) {
+        result.push({ type: 'Q', cx: current.cx, cy: current.cy, x: prev.x, y: prev.y });
+      } else if (current.type === 'C' && current.c1x !== undefined) {
+        result.push({ type: 'C', c1x: current.c2x!, c1y: current.c2y!, c2x: current.c1x, c2y: current.c1y!, x: prev.x, y: prev.y });
+      }
+    }
+
+    return result;
   }
 
   private getFillStyle(fill: FillStyle): string | CanvasGradient {

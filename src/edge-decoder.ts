@@ -97,6 +97,10 @@ function tokenize(edgeStr: string): string[] {
   let current = '';
   let i = 0;
 
+  // Helper to check if a character is a command token
+  const isCommandChar = (c: string) =>
+    c === '!' || c === '|' || c === '[' || c === '/' || c === 'S' || c === 'q' || c === 'Q';
+
   while (i < edgeStr.length) {
     const char = edgeStr[i];
 
@@ -154,8 +158,8 @@ function tokenize(edgeStr: string): string[] {
       continue;
     }
 
-    // Single-character command tokens
-    if (char === '!' || char === '|' || char === '[' || char === '/' || char === 'S' || char === 'q' || char === 'Q') {
+    // Single-character command tokens - split even when attached to numbers
+    if (isCommandChar(char)) {
       if (current.trim()) {
         tokens.push(current.trim());
       }
@@ -202,11 +206,6 @@ const DEBUG_EDGES = false;
 export function decodeEdges(edgeStr: string): PathCommand[] {
   const commands: PathCommand[] = [];
   const tokens = tokenize(edgeStr);
-
-  if (DEBUG_EDGES && edgeStr.length > 0) {
-    console.log('Edge string:', edgeStr.substring(0, 200));
-    console.log('Tokens:', tokens.slice(0, 30));
-  }
 
   let i = 0;
   let currentX = NaN;
@@ -445,6 +444,14 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
     }
   }
 
+  if (DEBUG_EDGES && commands.length > 0) {
+    const qCount = commands.filter(c => c.type === 'Q').length;
+    const cCount = commands.filter(c => c.type === 'C').length;
+    const lCount = commands.filter(c => c.type === 'L').length;
+    const mCount = commands.filter(c => c.type === 'M').length;
+    console.log(`Commands: M=${mCount} L=${lCount} Q=${qCount} C=${cCount}`);
+  }
+
   return commands;
 }
 
@@ -453,7 +460,8 @@ export function parseEdge(edgeElement: globalThis.Element): Edge {
   const fillStyle0 = edgeElement.getAttribute('fillStyle0');
   const fillStyle1 = edgeElement.getAttribute('fillStyle1');
   const strokeStyle = edgeElement.getAttribute('strokeStyle');
-  const edgesAttr = edgeElement.getAttribute('edges') || '';
+  // Edge data can be in either 'edges' or 'cubics' attribute
+  const edgesAttr = edgeElement.getAttribute('edges') || edgeElement.getAttribute('cubics') || '';
 
   return {
     fillStyle0: fillStyle0 ? parseInt(fillStyle0) : undefined,
