@@ -16,12 +16,28 @@ import type {
   Point
 } from './types';
 
+interface DebugElement {
+  type: 'shape' | 'symbol' | 'bitmap' | 'video';
+  element: DisplayElement;
+  path: Path2D;
+  transform: DOMMatrix;
+  depth: number;
+  parentPath: string[];  // Symbol hierarchy path
+  fillStyles?: Map<number, FillStyle>;
+  strokeStyles?: Map<number, StrokeStyle>;
+  edges?: Edge[];
+}
+
 export class FLARenderer {
   private ctx: CanvasRenderingContext2D;
   private doc: FLADocument | null = null;
   private canvas: HTMLCanvasElement;
   private scale: number = 1;
   private dpr: number = 1;
+  private debugMode: boolean = false;
+  private debugElements: DebugElement[] = [];
+  private debugSymbolPath: string[] = [];  // Current symbol hierarchy for debug
+  private clickHandler: ((e: MouseEvent) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -31,6 +47,161 @@ export class FLARenderer {
     }
     this.ctx = ctx;
     this.dpr = window.devicePixelRatio || 1;
+  }
+
+  enableDebugMode(): void {
+    if (this.debugMode) return;
+    this.debugMode = true;
+
+    this.clickHandler = (e: MouseEvent) => {
+      const rect = this.canvas.getBoundingClientRect();
+      // Convert click position from CSS pixels to canvas buffer coordinates
+      // This properly handles any scaling between CSS display size and canvas buffer size
+      const scaleX = this.canvas.width / rect.width;
+      const scaleY = this.canvas.height / rect.height;
+      const canvasX = (e.clientX - rect.left) * scaleX;
+      const canvasY = (e.clientY - rect.top) * scaleY;
+
+      // Convert to document coordinates (remove the base scale applied during rendering)
+      const combinedScale = this.scale * this.dpr;
+      const docX = canvasX / combinedScale;
+      const docY = canvasY / combinedScale;
+
+      console.log(`Click at doc coords: (${docX.toFixed(1)}, ${docY.toFixed(1)}), canvas: (${canvasX.toFixed(1)}, ${canvasY.toFixed(1)}), tracking ${this.debugElements.length} elements`);
+
+      // Find all elements under the click point (from top to bottom)
+      const hitElements: DebugElement[] = [];
+
+      // Save current transform and reset to identity for hit testing
+      this.ctx.save();
+      this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+      for (const debugEl of this.debugElements) {
+        // The stored transform includes the base combinedScale, so we use canvas coordinates
+        // and transform them to local element coordinates
+        const inverse = debugEl.transform.inverse();
+        const localX = inverse.a * canvasX + inverse.c * canvasY + inverse.e;
+        const localY = inverse.b * canvasX + inverse.d * canvasY + inverse.f;
+
+        // Test if point is in path (path is in local coordinates)
+        // Use 'evenodd' fill rule to match rendering
+        if (this.ctx.isPointInPath(debugEl.path, localX, localY, 'evenodd')) {
+          hitElements.push(debugEl);
+        }
+      }
+
+      this.ctx.restore();
+
+      if (hitElements.length > 0) {
+        // Sort by depth (deepest first - top of visual stack) and get the topmost one
+        hitElements.sort((a, b) => b.depth - a.depth);
+        const el = hitElements[0];
+
+        const pathStr = el.parentPath.length > 0 ? el.parentPath.join(' > ') : '(root)';
+        console.group(`${el.type.toUpperCase()} in ${pathStr}`);
+        console.log('Path:', el.parentPath.length > 0 ? el.parentPath : ['(root timeline)']);
+        console.log('Element:', el.element);
+        console.log('Transform:', {
+          a: el.transform.a.toFixed(4),
+          b: el.transform.b.toFixed(4),
+          c: el.transform.c.toFixed(4),
+          d: el.transform.d.toFixed(4),
+          tx: el.transform.e.toFixed(2),
+          ty: el.transform.f.toFixed(2)
+        });
+
+        if (el.type === 'shape') {
+          const shape = el.element as Shape;
+          console.log('Fill Styles:', el.fillStyles ? Object.fromEntries(el.fillStyles) : {});
+          console.log('Stroke Styles:', el.strokeStyles ? Object.fromEntries(el.strokeStyles) : {});
+          console.log('Shape Matrix:', shape.matrix);
+
+          // Only show edges with out-of-bounds coordinates
+          const BOUNDS = 10000; // Reasonable max coordinate
+          const isOutOfBounds = (v: number) => !Number.isFinite(v) || Math.abs(v) > BOUNDS;
+
+          const badEdges: { index: number; edge: Edge; badCommands: string[] }[] = [];
+          el.edges?.forEach((edge, i) => {
+            const badCommands: string[] = [];
+            edge.commands.forEach((cmd, j) => {
+              if (cmd.type === 'M' || cmd.type === 'L') {
+                if (isOutOfBounds(cmd.x) || isOutOfBounds(cmd.y)) {
+                  badCommands.push(`${j}: ${cmd.type} ${cmd.x.toFixed(2)}, ${cmd.y.toFixed(2)}`);
+                }
+              } else if (cmd.type === 'Q') {
+                if (isOutOfBounds(cmd.x) || isOutOfBounds(cmd.y) || isOutOfBounds(cmd.cx) || isOutOfBounds(cmd.cy)) {
+                  badCommands.push(`${j}: Q cx=${cmd.cx.toFixed(2)}, cy=${cmd.cy.toFixed(2)} -> ${cmd.x.toFixed(2)}, ${cmd.y.toFixed(2)}`);
+                }
+              } else if (cmd.type === 'C') {
+                if (isOutOfBounds(cmd.x) || isOutOfBounds(cmd.y) ||
+                    isOutOfBounds(cmd.c1x) || isOutOfBounds(cmd.c1y) ||
+                    isOutOfBounds(cmd.c2x) || isOutOfBounds(cmd.c2y)) {
+                  badCommands.push(`${j}: C c1=(${cmd.c1x.toFixed(2)}, ${cmd.c1y.toFixed(2)}) c2=(${cmd.c2x.toFixed(2)}, ${cmd.c2y.toFixed(2)}) -> ${cmd.x.toFixed(2)}, ${cmd.y.toFixed(2)}`);
+                }
+              }
+            });
+            if (badCommands.length > 0) {
+              badEdges.push({ index: i, edge, badCommands });
+            }
+          });
+
+          console.log(`Edges: ${el.edges?.length || 0} total, ${badEdges.length} with out-of-bounds coords (>${BOUNDS})`);
+
+          // If few edges or has bad edges, show details
+          if ((el.edges?.length || 0) <= 5 || badEdges.length > 0) {
+            el.edges?.forEach((edge, i) => {
+              console.log(`  Edge ${i}: fill0=${edge.fillStyle0}, fill1=${edge.fillStyle1}, stroke=${edge.strokeStyle}, commands=${edge.commands.length}`);
+              edge.commands.forEach((cmd, j) => {
+                if (cmd.type === 'M') {
+                  console.log(`    ${j}: M ${cmd.x.toFixed(2)}, ${cmd.y.toFixed(2)}`);
+                } else if (cmd.type === 'L') {
+                  console.log(`    ${j}: L ${cmd.x.toFixed(2)}, ${cmd.y.toFixed(2)}`);
+                } else if (cmd.type === 'Q') {
+                  console.log(`    ${j}: Q cx=${cmd.cx.toFixed(2)}, cy=${cmd.cy.toFixed(2)} -> ${cmd.x.toFixed(2)}, ${cmd.y.toFixed(2)}`);
+                } else if (cmd.type === 'C') {
+                  console.log(`    ${j}: C c1=(${cmd.c1x.toFixed(2)}, ${cmd.c1y.toFixed(2)}) c2=(${cmd.c2x.toFixed(2)}, ${cmd.c2y.toFixed(2)}) -> ${cmd.x.toFixed(2)}, ${cmd.y.toFixed(2)}`);
+                } else if (cmd.type === 'Z') {
+                  console.log(`    ${j}: Z`);
+                }
+              });
+            });
+          } else {
+            badEdges.forEach(({ index, edge, badCommands }) => {
+              console.log(`  Edge ${index}: fill0=${edge.fillStyle0}, fill1=${edge.fillStyle1}, stroke=${edge.strokeStyle}`);
+              badCommands.forEach(cmd => console.log(`    ${cmd}`));
+            });
+          }
+        } else if (el.type === 'symbol') {
+          const symbol = el.element as SymbolInstance;
+          console.log('Library Item:', symbol.libraryItemName);
+          console.log('Loop:', symbol.loop);
+          console.log('First Frame:', symbol.firstFrame);
+        } else if (el.type === 'bitmap') {
+          const bitmap = el.element as BitmapInstance;
+          console.log('Library Item:', bitmap.libraryItemName);
+        }
+
+        console.groupEnd();
+      } else {
+        console.log('No elements found at click position');
+      }
+    };
+
+    this.canvas.addEventListener('click', this.clickHandler);
+    this.canvas.style.cursor = 'crosshair';
+    console.log('Debug mode enabled - click on canvas to inspect elements');
+  }
+
+  disableDebugMode(): void {
+    if (!this.debugMode) return;
+    this.debugMode = false;
+
+    if (this.clickHandler) {
+      this.canvas.removeEventListener('click', this.clickHandler);
+      this.clickHandler = null;
+    }
+    this.canvas.style.cursor = 'default';
+    console.log('Debug mode disabled');
   }
 
   setDocument(doc: FLADocument): void {
@@ -70,6 +241,12 @@ export class FLARenderer {
 
     const ctx = this.ctx;
     const doc = this.doc;
+
+    // Clear debug elements for this frame
+    if (this.debugMode) {
+      this.debugElements = [];
+      this.debugSymbolPath = [];
+    }
 
     // Fully reset canvas state
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -370,11 +547,11 @@ export class FLARenderer {
     if (element.type === 'symbol') {
       this.renderSymbolInstance(element, depth, parentFrameIndex);
     } else if (element.type === 'shape') {
-      this.renderShape(element);
+      this.renderShape(element, depth);
     } else if (element.type === 'video') {
-      this.renderVideoInstance(element);
+      this.renderVideoInstance(element, depth);
     } else if (element.type === 'bitmap') {
-      this.renderBitmapInstance(element);
+      this.renderBitmapInstance(element, depth);
     }
   }
 
@@ -396,6 +573,11 @@ export class FLARenderer {
 
     const ctx = this.ctx;
     ctx.save();
+
+    // Track symbol path for debugging
+    if (this.debugMode) {
+      this.debugSymbolPath.push(instance.libraryItemName);
+    }
 
     // Apply transformation matrix
     // Note: The matrix tx/ty already positions the symbol correctly
@@ -425,15 +607,34 @@ export class FLARenderer {
     // Render symbol's timeline
     this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
 
+    // Pop symbol path
+    if (this.debugMode) {
+      this.debugSymbolPath.pop();
+    }
+
     ctx.restore();
   }
 
-  private renderVideoInstance(video: VideoInstance): void {
+  private renderVideoInstance(video: VideoInstance, depth: number = 0): void {
     const ctx = this.ctx;
     ctx.save();
 
     // Apply transformation
     this.applyMatrix(video.matrix);
+
+    // Create path for hit testing
+    if (this.debugMode) {
+      const path = new Path2D();
+      path.rect(0, 0, video.width, video.height);
+      this.debugElements.push({
+        type: 'video',
+        element: video,
+        path,
+        transform: ctx.getTransform(),
+        depth,
+        parentPath: [...this.debugSymbolPath]
+      });
+    }
 
     // Render placeholder rectangle for video
     ctx.fillStyle = '#333333';
@@ -460,7 +661,7 @@ export class FLARenderer {
     ctx.restore();
   }
 
-  private renderBitmapInstance(bitmap: BitmapInstance): void {
+  private renderBitmapInstance(bitmap: BitmapInstance, depth: number = 0): void {
     if (!this.doc) return;
 
     const ctx = this.ctx;
@@ -471,6 +672,22 @@ export class FLARenderer {
 
     // Look up bitmap item from library
     const bitmapItem = this.doc.bitmaps.get(bitmap.libraryItemName);
+
+    // Create path for hit testing
+    if (this.debugMode) {
+      const path = new Path2D();
+      const width = bitmapItem?.width || 100;
+      const height = bitmapItem?.height || 100;
+      path.rect(0, 0, width, height);
+      this.debugElements.push({
+        type: 'bitmap',
+        element: bitmap,
+        path,
+        transform: ctx.getTransform(),
+        depth,
+        parentPath: [...this.debugSymbolPath]
+      });
+    }
 
     if (bitmapItem && bitmapItem.imageData) {
       // If we have loaded image data, draw it
@@ -491,7 +708,7 @@ export class FLARenderer {
     ctx.restore();
   }
 
-  private renderShape(shape: Shape): void {
+  private renderShape(shape: Shape, depth: number = 0): void {
     const ctx = this.ctx;
     ctx.save();
 
@@ -514,9 +731,12 @@ export class FLARenderer {
     const fillPaths = new Map<number, Path2D>();
     // Group edges by stroke style
     const strokePaths = new Map<number, Path2D>();
+    // Combined path for hit testing
+    const combinedPath = new Path2D();
 
     for (const edge of shape.edges) {
       const path = this.edgeToPath(edge);
+      combinedPath.addPath(path);
 
       // Handle fills
       if (edge.fillStyle0 !== undefined || edge.fillStyle1 !== undefined) {
@@ -544,6 +764,21 @@ export class FLARenderer {
         }
         strokePaths.get(edge.strokeStyle)!.addPath(path);
       }
+    }
+
+    // Capture debug element before rendering
+    if (this.debugMode) {
+      this.debugElements.push({
+        type: 'shape',
+        element: shape,
+        path: combinedPath,
+        transform: ctx.getTransform(),
+        depth,
+        parentPath: [...this.debugSymbolPath],
+        fillStyles,
+        strokeStyles,
+        edges: shape.edges
+      });
     }
 
     // Render filled paths - sort by style index for consistent ordering

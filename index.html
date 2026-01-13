@@ -103,6 +103,12 @@
       background: #555;
       cursor: not-allowed;
     }
+    .controls button.active {
+      background: #4CAF50;
+    }
+    .controls button.active:hover {
+      background: #66BB6A;
+    }
     .timeline {
       flex: 1;
       height: 8px;
@@ -187,6 +193,7 @@
           <div class="timeline-progress" id="timeline-progress"></div>
         </div>
         <div class="frame-info" id="frame-info">Frame 1/1</div>
+        <button id="debug-btn" title="Toggle debug mode (D)">Debug</button>
       </div>
       <div class="info-panel" id="info-panel"></div>
     </div>

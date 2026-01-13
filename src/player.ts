@@ -126,4 +126,14 @@ export class FLAPlayer {
       this.onStateChange(this.getState());
     }
   }
+
+  enableDebugMode(): void {
+    this.renderer.enableDebugMode();
+    // Re-render current frame to populate debug elements
+    this.render();
+  }
+
+  disableDebugMode(): void {
+    this.renderer.disableDebugMode();
+  }
 }

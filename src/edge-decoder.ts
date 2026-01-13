@@ -25,7 +25,7 @@ const COORD_SCALE = 20;
 function decodeCoord(value: string): number {
   if (value.startsWith('#')) {
     // Hex encoded format: #XXXX.YY or #XX.YY
-    // Hex values are in a fixed-point format (not twips), scale differently
+    // Per XFL spec: hex values are ALWAYS signed two's complement
     const hex = value.substring(1);
     const dotIndex = hex.indexOf('.');
 
@@ -39,14 +39,26 @@ function decodeCoord(value: string): number {
       intHex = hex;
     }
 
+    // Handle empty integer part
+    if (intHex.length === 0) {
+      intHex = '0';
+    }
+
     // Parse integer part
     let intPart = parseInt(intHex, 16);
+
+    // Check for NaN (invalid hex)
+    if (Number.isNaN(intPart)) {
+      return NaN;
+    }
+
     const numChars = intHex.length;
 
-    // Apply two's complement for signed values
-    // Only apply sign conversion for values with 4+ hex chars (16+ bits)
-    // Small values (2 chars / 8 bits) are typically unsigned
-    if (numChars >= 4) {
+    // Apply two's complement ONLY for 6+ char hex values
+    // These are used specifically for negative numbers with FF sign extension
+    // 2-char and 4-char values are unsigned (positive values use fewer digits)
+    // Example: #81B9 = 33209 (unsigned), #FFBA70 = -17808 (signed 24-bit)
+    if (numChars >= 6) {
       const bitWidth = numChars * 4;
       const signBit = 1 << (bitWidth - 1);
       if (intPart >= signBit) {
@@ -54,23 +66,28 @@ function decodeCoord(value: string): number {
       }
     }
 
-    // Parse fractional part (always positive)
+    // Parse fractional part (always positive, added/subtracted based on int sign)
     let fracPart = 0;
-    if (fracHex) {
-      const fracBits = fracHex.length * 4;
+    if (fracHex && fracHex.length > 0) {
       const fracValue = parseInt(fracHex, 16);
-      fracPart = fracValue / (1 << fracBits);
+      if (!Number.isNaN(fracValue)) {
+        const fracBits = fracHex.length * 4;
+        fracPart = fracValue / (1 << fracBits);
+      }
     }
 
     // Combine, preserving sign for the fractional part
     const result = intPart >= 0 ? intPart + fracPart : intPart - fracPart;
-    // Hex coordinates are in fixed-point format (1/256 of twips typically)
-    // Divide by 256 to get twips, then by 20 to get pixels = divide by 5120
-    // But some implementations use divide by 20 only, let's try that
+
+    // Hex coordinates are in twips (1/20 of a pixel), same as decimal
     return result / COORD_SCALE;
   } else {
     // Decimal values are in twips (1/20 of a pixel)
-    return parseFloat(value) / COORD_SCALE;
+    const parsed = parseFloat(value);
+    if (Number.isNaN(parsed)) {
+      return NaN;
+    }
+    return parsed / COORD_SCALE;
   }
 }
 
@@ -104,8 +121,7 @@ function tokenize(edgeStr: string): string[] {
       continue;
     }
 
-    // Handle '(' followed by coordinates then ';' - alternate cubic format
-    // e.g., (38316,17220; -> '(' '38316' '17220' ';'
+    // Handle '(' - start of cubic format or alternate cubic format
     if (char === '(') {
       if (current.trim()) {
         tokens.push(current.trim());
@@ -116,7 +132,18 @@ function tokenize(edgeStr: string): string[] {
       continue;
     }
 
-    // Semicolon after anchor point in alternate cubic format
+    // Handle ')' alone (not followed by ';')
+    if (char === ')') {
+      if (current.trim()) {
+        tokens.push(current.trim());
+      }
+      tokens.push(')');
+      current = '';
+      i++;
+      continue;
+    }
+
+    // Semicolon - separator in cubic format
     if (char === ';') {
       if (current.trim()) {
         tokens.push(current.trim());
@@ -169,11 +196,25 @@ function tokenize(edgeStr: string): string[] {
   return tokens;
 }
 
+// Debug flag - set to true to enable logging
+const DEBUG_EDGES = false;
+
 export function decodeEdges(edgeStr: string): PathCommand[] {
   const commands: PathCommand[] = [];
   const tokens = tokenize(edgeStr);
 
+  if (DEBUG_EDGES && edgeStr.length > 0) {
+    console.log('Edge string:', edgeStr.substring(0, 200));
+    console.log('Tokens:', tokens.slice(0, 30));
+  }
+
   let i = 0;
+  let currentX = NaN;
+  let currentY = NaN;
+  let startX = NaN;  // Track path start for auto-close
+  let startY = NaN;
+  const EPSILON = 0.01; // Tolerance for coordinate comparison
+  const MAX_COORD = 200000; // Maximum reasonable coordinate value (10000 pixels in twips)
 
   while (i < tokens.length) {
     const token = tokens[i];
@@ -184,7 +225,20 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
         if (i + 2 < tokens.length) {
           const x = decodeCoord(tokens[i + 1]);
           const y = decodeCoord(tokens[i + 2]);
-          commands.push({ type: 'M', x, y });
+          // Skip invalid coordinates
+          if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > MAX_COORD || Math.abs(y) > MAX_COORD) {
+            i += 3;
+            break;
+          }
+          // Skip redundant moveTo if we're already at this position
+          if (Number.isNaN(currentX) || Math.abs(x - currentX) > EPSILON || Math.abs(y - currentY) > EPSILON) {
+            commands.push({ type: 'M', x, y });
+            // Track start of new subpath
+            startX = x;
+            startY = y;
+          }
+          currentX = x;
+          currentY = y;
           i += 3;
         } else {
           i++;
@@ -197,7 +251,17 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
         if (i + 2 < tokens.length) {
           const x = decodeCoord(tokens[i + 1]);
           const y = decodeCoord(tokens[i + 2]);
-          commands.push({ type: 'L', x, y });
+          // Skip invalid coordinates
+          if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > MAX_COORD || Math.abs(y) > MAX_COORD) {
+            i += 3;
+            break;
+          }
+          // Skip zero-length lines
+          if (Math.abs(x - currentX) > EPSILON || Math.abs(y - currentY) > EPSILON) {
+            commands.push({ type: 'L', x, y });
+            currentX = x;
+            currentY = y;
+          }
           i += 3;
         } else {
           i++;
@@ -212,7 +276,15 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
           const cy = decodeCoord(tokens[i + 2]);
           const x = decodeCoord(tokens[i + 3]);
           const y = decodeCoord(tokens[i + 4]);
+          // Skip invalid coordinates
+          if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(x) || !Number.isFinite(y) ||
+              Math.abs(cx) > MAX_COORD || Math.abs(cy) > MAX_COORD || Math.abs(x) > MAX_COORD || Math.abs(y) > MAX_COORD) {
+            i += 5;
+            break;
+          }
           commands.push({ type: 'Q', cx, cy, x, y });
+          currentX = x;
+          currentY = y;
           i += 5;
         } else {
           i++;
@@ -225,14 +297,14 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
         // Format: (; c1x,c1y c2x,c2y ex,ey [more curves...] [q/Q quadratic approx...] );
         i++;
 
-        // Parse cubic bezier curves until we hit q, Q, or );
-        while (i < tokens.length && tokens[i] !== 'q' && tokens[i] !== 'Q' && tokens[i] !== ');') {
+        // Parse cubic bezier curves until we hit q, Q, ); or )
+        while (i < tokens.length && tokens[i] !== 'q' && tokens[i] !== 'Q' && tokens[i] !== ');' && tokens[i] !== ')') {
           // Need 6 coordinates for a cubic: c1x, c1y, c2x, c2y, x, y
           if (i + 5 < tokens.length) {
             const nextTokens = [tokens[i], tokens[i+1], tokens[i+2], tokens[i+3], tokens[i+4], tokens[i+5]];
             // Check if these look like coordinates (not commands)
             const allCoords = nextTokens.every(t =>
-              !['!', '|', '[', '/', 'S', 'q', 'Q', '(;', ');', '(', ';'].includes(t)
+              !['!', '|', '[', '/', 'S', 'q', 'Q', '(;', ');', '(', ')', ';'].includes(t)
             );
 
             if (allCoords) {
@@ -242,7 +314,15 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
               const c2y = decodeCoord(tokens[i + 3]);
               const x = decodeCoord(tokens[i + 4]);
               const y = decodeCoord(tokens[i + 5]);
+              // Skip invalid coordinates
+              const coords = [c1x, c1y, c2x, c2y, x, y];
+              if (coords.some(c => !Number.isFinite(c) || Math.abs(c) > MAX_COORD)) {
+                i += 6;
+                continue;
+              }
               commands.push({ type: 'C', c1x, c1y, c2x, c2y, x, y });
+              currentX = x;
+              currentY = y;
               i += 6;
             } else {
               break;
@@ -270,11 +350,11 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
         }
 
         // Now parse cubic bezier curves (same as '(;' case)
-        while (i < tokens.length && tokens[i] !== 'q' && tokens[i] !== 'Q' && tokens[i] !== ');') {
+        while (i < tokens.length && tokens[i] !== 'q' && tokens[i] !== 'Q' && tokens[i] !== ');' && tokens[i] !== ')') {
           if (i + 5 < tokens.length) {
             const nextTokens = [tokens[i], tokens[i+1], tokens[i+2], tokens[i+3], tokens[i+4], tokens[i+5]];
             const allCoords = nextTokens.every(t =>
-              !['!', '|', '[', '/', 'S', 'q', 'Q', '(;', ');', '(', ';'].includes(t)
+              !['!', '|', '[', '/', 'S', 'q', 'Q', '(;', ');', '(', ')', ';'].includes(t)
             );
 
             if (allCoords) {
@@ -284,7 +364,15 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
               const c2y = decodeCoord(tokens[i + 3]);
               const x = decodeCoord(tokens[i + 4]);
               const y = decodeCoord(tokens[i + 5]);
+              // Skip invalid coordinates
+              const coords = [c1x, c1y, c2x, c2y, x, y];
+              if (coords.some(c => !Number.isFinite(c) || Math.abs(c) > MAX_COORD)) {
+                i += 6;
+                continue;
+              }
               commands.push({ type: 'C', c1x, c1y, c2x, c2y, x, y });
+              currentX = x;
+              currentY = y;
               i += 6;
             } else {
               break;
@@ -305,16 +393,19 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
       case 'q':
       case 'Q': {
         // Quadratic approximation in cubics format - skip along with following coordinates
-        // These come after the cubic data and before );
-        // Skip until we hit );
+        // These come after the cubic data and before ); or )
+        // Skip until we hit a terminator or new command
         i++;
-        while (i < tokens.length && tokens[i] !== ');' && tokens[i] !== '!') {
+        while (i < tokens.length &&
+               tokens[i] !== ');' && tokens[i] !== ')' &&
+               tokens[i] !== '!' && tokens[i] !== '|' && tokens[i] !== '[') {
           i++;
         }
         break;
       }
 
-      case ');': {
+      case ');':
+      case ')': {
         // End of cubic bezier segment
         i++;
         break;
@@ -329,6 +420,9 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
       case '/': {
         // Close path - emit Z command
         commands.push({ type: 'Z' });
+        // Reset start tracking for next subpath
+        startX = NaN;
+        startY = NaN;
         i++;
         break;
       }
@@ -338,6 +432,16 @@ export function decodeEdges(edgeStr: string): PathCommand[] {
         i++;
         break;
       }
+    }
+  }
+
+  // Auto-close path if we ended back at the start position
+  if (!Number.isNaN(startX) && !Number.isNaN(currentX) &&
+      Math.abs(currentX - startX) < EPSILON && Math.abs(currentY - startY) < EPSILON) {
+    // Path returns to start but wasn't explicitly closed - add Z
+    const lastCmd = commands[commands.length - 1];
+    if (lastCmd && lastCmd.type !== 'Z') {
+      commands.push({ type: 'Z' });
     }
   }
 

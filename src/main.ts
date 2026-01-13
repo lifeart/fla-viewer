@@ -16,6 +16,7 @@ class FLAViewerApp {
   private stopBtn: HTMLButtonElement;
   private prevBtn: HTMLButtonElement;
   private nextBtn: HTMLButtonElement;
+  private debugBtn: HTMLButtonElement;
   private timeline: HTMLElement;
   private timelineProgress: HTMLElement;
   private frameInfo: HTMLElement;
@@ -34,6 +35,7 @@ class FLAViewerApp {
     this.stopBtn = document.getElementById('stop-btn') as HTMLButtonElement;
     this.prevBtn = document.getElementById('prev-btn') as HTMLButtonElement;
     this.nextBtn = document.getElementById('next-btn') as HTMLButtonElement;
+    this.debugBtn = document.getElementById('debug-btn') as HTMLButtonElement;
     this.timeline = document.getElementById('timeline')!;
     this.timelineProgress = document.getElementById('timeline-progress')!;
     this.frameInfo = document.getElementById('frame-info')!;
@@ -74,6 +76,7 @@ class FLAViewerApp {
     this.stopBtn.addEventListener('click', () => this.player?.stop());
     this.prevBtn.addEventListener('click', () => this.player?.prevFrame());
     this.nextBtn.addEventListener('click', () => this.player?.nextFrame());
+    this.debugBtn.addEventListener('click', () => this.toggleDebug());
 
     // Timeline scrubbing
     this.timeline.addEventListener('click', (e) => {
@@ -103,8 +106,27 @@ class FLAViewerApp {
         case 'End':
           this.player.goToFrame(this.player.getState().totalFrames - 1);
           break;
+        case 'd':
+        case 'D':
+          this.toggleDebug();
+          break;
       }
     });
+  }
+
+  private debugMode: boolean = false;
+
+  private toggleDebug(): void {
+    if (!this.player) return;
+
+    this.debugMode = !this.debugMode;
+    if (this.debugMode) {
+      this.player.enableDebugMode();
+      this.debugBtn.classList.add('active');
+    } else {
+      this.player.disableDebugMode();
+      this.debugBtn.classList.remove('active');
+    }
   }
 
   private async loadFile(file: File): Promise<void> {
