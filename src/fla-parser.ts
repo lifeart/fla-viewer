@@ -392,14 +392,13 @@ export class FLAParser {
     const identityMatrix: Matrix = { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 };
 
     // Parse direct children in document order to preserve z-ordering
-    // For direct frame elements: composedMatrix is identity, no groupMatrix (undefined)
     for (const child of elementsContainer.children) {
       switch (child.tagName) {
         case 'DOMSymbolInstance':
-          elements.push(this.parseSymbolInstance(child, identityMatrix, undefined));
+          elements.push(this.parseSymbolInstance(child, identityMatrix));
           break;
         case 'DOMShape':
-          elements.push(this.parseShape(child, identityMatrix, undefined));
+          elements.push(this.parseShape(child, identityMatrix));
           break;
         case 'DOMGroup':
           this.parseGroupMembers(child, elements, identityMatrix);
@@ -408,7 +407,7 @@ export class FLAParser {
           elements.push(this.parseVideoInstance(child));
           break;
         case 'DOMBitmapInstance':
-          elements.push(this.parseBitmapInstance(child, identityMatrix, undefined));
+          elements.push(this.parseBitmapInstance(child, identityMatrix));
           break;
       }
     }
@@ -425,27 +424,24 @@ export class FLAParser {
     const composedMatrix = this.composeMatrices(ancestorMatrix, groupMatrix);
 
     // Parse children in document order to preserve z-ordering
-    // Pass composedMatrix and groupMatrix:
-    // - Elements WITH matrix matching groupMatrix: it's a copy, use composedMatrix directly
-    // - Elements WITH different matrix: local transform, compose with composedMatrix
-    // - Elements WITHOUT matrix: use composedMatrix (element at identity within parent's coordinate space)
+    // Elements WITH matrix: use their matrix directly (Flash stores absolute matrices)
+    // Elements WITHOUT matrix: use composedMatrix (element at identity within parent's coordinate space)
     for (const child of members.children) {
       switch (child.tagName) {
         case 'DOMShape':
-          elements.push(this.parseShape(child, composedMatrix, groupMatrix));
+          elements.push(this.parseShape(child, composedMatrix));
           break;
         case 'DOMGroup':
-          // Pass composedMatrix - nested groups need full chain
           this.parseGroupMembers(child, elements, composedMatrix);
           break;
         case 'DOMSymbolInstance':
-          elements.push(this.parseSymbolInstance(child, composedMatrix, groupMatrix));
+          elements.push(this.parseSymbolInstance(child, composedMatrix));
           break;
         case 'DOMVideoInstance':
           elements.push(this.parseVideoInstance(child));
           break;
         case 'DOMBitmapInstance':
-          elements.push(this.parseBitmapInstance(child, composedMatrix, groupMatrix));
+          elements.push(this.parseBitmapInstance(child, composedMatrix));
           break;
       }
     }
@@ -464,7 +460,7 @@ export class FLAParser {
   }
 
 
-  private parseSymbolInstance(el: globalThis.Element, composedMatrix?: Matrix, _groupMatrix?: Matrix): SymbolInstance {
+  private parseSymbolInstance(el: globalThis.Element, composedMatrix?: Matrix): SymbolInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const symbolType = (el.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
     const loop = (el.getAttribute('loop') || 'loop') as 'loop' | 'play once' | 'single frame';
@@ -506,10 +502,6 @@ export class FLAParser {
     return m.a === 1 && m.b === 0 && m.c === 0 && m.d === 1 && m.tx === 0 && m.ty === 0;
   }
 
-  private matricesEqual(a: Matrix, b: Matrix): boolean {
-    return a.a === b.a && a.b === b.b && a.c === b.c && a.d === b.d && a.tx === b.tx && a.ty === b.ty;
-  }
-
   private parseVideoInstance(el: globalThis.Element): VideoInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const frameRight = el.getAttribute('frameRight');
@@ -526,7 +518,7 @@ export class FLAParser {
     };
   }
 
-  private parseBitmapInstance(el: globalThis.Element, composedMatrix?: Matrix, _groupMatrix?: Matrix): BitmapInstance {
+  private parseBitmapInstance(el: globalThis.Element, composedMatrix?: Matrix): BitmapInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const matrixEl = el.querySelector('matrix > Matrix');
     let matrix: Matrix;
@@ -547,7 +539,7 @@ export class FLAParser {
     };
   }
 
-  private parseShape(el: globalThis.Element, composedMatrix?: Matrix, _groupMatrix?: Matrix): Shape {
+  private parseShape(el: globalThis.Element, composedMatrix?: Matrix): Shape {
     const matrixEl = el.querySelector('matrix > Matrix');
     let matrix: Matrix;
 
