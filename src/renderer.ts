@@ -111,7 +111,8 @@ export class FLARenderer {
       }
     }
 
-    // Render layers in reverse order (bottom to top)
+    // Render layers in reverse order (bottom to top in Flash = high index to low index)
+    // In Flash, layer 0 is at the top of the layer list and renders ON TOP (last)
     for (let i = timeline.layers.length - 1; i >= 0; i--) {
       const layer = timeline.layers[i];
 
@@ -123,6 +124,11 @@ export class FLARenderer {
       // Skip invisible layers and guide/folder layers
       if (!layer.visible || layer.layerType === 'guide' || layer.layerType === 'folder') {
         continue;
+      }
+
+      // Debug: log layer rendering order at root level
+      if (depth === 0 && this.logCount < 20) {
+        console.log(`Rendering layer ${i}: "${layer.name}" (type: ${layer.layerType || 'normal'})`);
       }
 
       this.renderLayer(layer, frameIndex, depth);
@@ -212,8 +218,20 @@ export class FLARenderer {
           frame.tweens
         );
 
-        // Match corresponding element by index, fallback to first if not available
-        const nextDisplayElement = nextKeyframe.elements[elementIndex] || nextKeyframe.elements[0];
+        // Find matching element in next keyframe
+        // For symbols, match by libraryItemName; otherwise use same index or first element
+        let nextDisplayElement = nextKeyframe.elements[0];
+        if (element.type === 'symbol') {
+          const matchingElement = nextKeyframe.elements.find(
+            (e) => e.type === 'symbol' && e.libraryItemName === element.libraryItemName
+          );
+          if (matchingElement) {
+            nextDisplayElement = matchingElement;
+          }
+        } else if (elementIndex < nextKeyframe.elements.length) {
+          nextDisplayElement = nextKeyframe.elements[elementIndex];
+        }
+
         this.renderDisplayElementWithTween(element, nextDisplayElement, progress, depth, frameIndex);
       } else {
         this.renderDisplayElement(element, depth, frameIndex);
@@ -334,22 +352,15 @@ export class FLARenderer {
         ty: this.lerp(startMatrix.ty, endMatrix.ty, progress)
       };
 
-      // Interpolate centerPoint3D if present on either element
-      let interpolatedCenterPoint3D = element.centerPoint3D;
-      if (element.centerPoint3D && nextDisplayElement.centerPoint3D) {
-        interpolatedCenterPoint3D = {
-          x: this.lerp(element.centerPoint3D.x, nextDisplayElement.centerPoint3D.x, progress),
-          y: this.lerp(element.centerPoint3D.y, nextDisplayElement.centerPoint3D.y, progress)
-        };
-      } else if (nextDisplayElement.centerPoint3D && !element.centerPoint3D) {
-        // Fade in centerPoint3D
-        interpolatedCenterPoint3D = nextDisplayElement.centerPoint3D;
-      }
+      // Interpolate firstFrame for smooth internal animation during tweens
+      const startFirstFrame = element.firstFrame || 0;
+      const endFirstFrame = nextDisplayElement.firstFrame || 0;
+      const interpolatedFirstFrame = Math.round(this.lerp(startFirstFrame, endFirstFrame, progress));
 
       const tweenedDisplayElement: SymbolInstance = {
         ...element,
         matrix: interpolatedMatrix,
-        centerPoint3D: interpolatedCenterPoint3D
+        firstFrame: interpolatedFirstFrame
       };
 
       this.renderDisplayElement(tweenedDisplayElement, depth, parentFrameIndex);
@@ -376,7 +387,7 @@ export class FLARenderer {
 
   private logCount = 0;
   private missingSymbols = new Set<string>();
-  private renderSymbolInstance(instance: SymbolInstance, depth: number, parentFrameIndex: number): void {
+  private renderSymbolInstance(instance: SymbolInstance, depth: number, _parentFrameIndex: number): void {
     if (!this.doc) return;
 
     const symbol = this.doc.symbols.get(instance.libraryItemName);
@@ -399,39 +410,29 @@ export class FLARenderer {
     const ctx = this.ctx;
     ctx.save();
 
-    // If centerPoint3D is present, apply transformation around that point
-    if (instance.centerPoint3D) {
-      // Translate so centerPoint3D becomes the origin
-      ctx.translate(instance.centerPoint3D.x, instance.centerPoint3D.y);
-      // Apply the transformation matrix
-      this.applyMatrix(instance.matrix);
-      // Translate back
-      ctx.translate(-instance.centerPoint3D.x, -instance.centerPoint3D.y);
-    } else {
-      // Apply transformation normally
-      this.applyMatrix(instance.matrix);
-    }
+    // Apply transformation matrix
+    // Note: The matrix tx/ty already positions the symbol correctly
+    // The transformationPoint is metadata about the pivot, but it's already
+    // accounted for in how the matrix was calculated by Flash
+    this.applyMatrix(instance.matrix);
 
-    // Calculate which frame to render based on symbol's loop mode
+    // Calculate which frame to render based on symbol type and loop mode
+    // In Flash:
+    // - 'single frame': Always shows the specified firstFrame
+    // - 'graphic' with 'loop'/'play once': Internal timeline syncs with parent timeline
+    // - 'movieclip': Internal timeline plays independently (not fully supported)
     const firstFrame = instance.firstFrame || 0;
-    // Ensure totalSymbolFrames is at least 1 to avoid division by zero
     const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
     let symbolFrame: number;
 
-    switch (instance.loop) {
-      case 'single frame':
-        // Always show firstFrame
-        symbolFrame = firstFrame;
-        break;
-      case 'play once':
-        // Play from firstFrame, stop at last frame
-        symbolFrame = Math.min(firstFrame + parentFrameIndex, totalSymbolFrames - 1);
-        break;
-      case 'loop':
-      default:
-        // Loop through symbol's frames starting from firstFrame
-        symbolFrame = (firstFrame + parentFrameIndex) % totalSymbolFrames;
-        break;
+    if (instance.loop === 'single frame') {
+      // Always show the specified firstFrame
+      symbolFrame = firstFrame % totalSymbolFrames;
+    } else {
+      // For both 'loop' and 'play once', just use firstFrame
+      // The animator typically sets firstFrame at each keyframe to control which frame shows
+      // More advanced sync with parent timeline causes jumping artifacts
+      symbolFrame = firstFrame % totalSymbolFrames;
     }
 
     // Render symbol's timeline
