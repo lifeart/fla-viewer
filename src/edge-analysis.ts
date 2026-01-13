@@ -13,15 +13,6 @@ interface EdgeContribution {
   rawData: string;
 }
 
-interface AnalysisResult {
-  totalEdges: number;
-  totalCommands: number;
-  commandCounts: Record<string, number>;
-  gaps: { from: {x: number, y: number}, to: {x: number, y: number}, distance: number, edgeIndex: number }[];
-  unclosedPaths: { startX: number, startY: number, endX: number, endY: number, distance: number }[];
-  emptyEdges: number[];
-  suspiciousCoords: { edgeIndex: number, cmdIndex: number, cmd: PathCommand }[];
-}
 
 // Analyze a single edge's commands
 function analyzeEdgeCommands(commands: PathCommand[]): {
@@ -105,7 +96,7 @@ function parseAndAnalyzeEdge(edgeXml: string): EdgeContribution | null {
 }
 
 // Analyze all edges for a fill style
-function analyzeFillPath(contributions: EdgeContribution[], fillStyle: number): {
+function analyzeFillPath(contributions: EdgeContribution[], _fillStyle: number): {
   totalContributions: number;
   connectedChains: number;
   gaps: { from: {x: number, y: number}, to: {x: number, y: number}, distance: number }[];

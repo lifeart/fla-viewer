@@ -46,41 +46,6 @@ function getLastPoint(commands: PathCommand[]): { x: number; y: number } | null 
   return null;
 }
 
-function reverseCommands(commands: PathCommand[]): PathCommand[] {
-  const points: { x: number; y: number; type: string; cx?: number; cy?: number; c1x?: number; c1y?: number; c2x?: number; c2y?: number }[] = [];
-
-  for (const cmd of commands) {
-    if (cmd.type === 'M' || cmd.type === 'L') {
-      points.push({ x: cmd.x, y: cmd.y, type: cmd.type });
-    } else if (cmd.type === 'Q') {
-      points.push({ x: cmd.x, y: cmd.y, type: 'Q', cx: cmd.cx, cy: cmd.cy });
-    } else if (cmd.type === 'C') {
-      points.push({ x: cmd.x, y: cmd.y, type: 'C', c1x: cmd.c1x, c1y: cmd.c1y, c2x: cmd.c2x, c2y: cmd.c2y });
-    }
-  }
-
-  if (points.length === 0) return [];
-
-  const result: PathCommand[] = [];
-  const lastPoint = points[points.length - 1];
-  result.push({ type: 'M', x: lastPoint.x, y: lastPoint.y });
-
-  for (let i = points.length - 1; i > 0; i--) {
-    const current = points[i];
-    const prev = points[i - 1];
-
-    if (current.type === 'L' || current.type === 'M') {
-      result.push({ type: 'L', x: prev.x, y: prev.y });
-    } else if (current.type === 'Q' && current.cx !== undefined && current.cy !== undefined) {
-      result.push({ type: 'Q', cx: current.cx, cy: current.cy, x: prev.x, y: prev.y });
-    } else if (current.type === 'C' && current.c1x !== undefined) {
-      result.push({ type: 'C', c1x: current.c2x!, c1y: current.c2y!, c2x: current.c1x, c2y: current.c1y!, x: prev.x, y: prev.y });
-    }
-  }
-
-  return result;
-}
-
 function parseEdgesFromXml(xmlContent: string): EdgeInfo[] {
   const edges: EdgeInfo[] = [];
 

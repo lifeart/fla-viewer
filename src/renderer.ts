@@ -783,38 +783,68 @@ export class FLARenderer {
       const path = this.edgeToPath(edge);
       combinedPath.addPath(path);
 
-      // Get start and end points
-      const startPoint = this.getFirstPoint(edge.commands);
-      const endPoint = this.getLastPoint(edge.commands);
-      if (!startPoint || !endPoint) continue;
+      // Split edge commands into segments (at internal MoveTo commands)
+      // Each segment between MoveTos becomes a separate contribution
+      const segments: PathCommand[][] = [];
+      let currentSegment: PathCommand[] = [];
 
-      // Handle fillStyle1 (forward direction)
-      if (edge.fillStyle1 !== undefined) {
-        if (!fillEdgeContributions.has(edge.fillStyle1)) {
-          fillEdgeContributions.set(edge.fillStyle1, []);
+      for (const cmd of edge.commands) {
+        if (cmd.type === 'M') {
+          // MoveTo starts a new segment
+          if (currentSegment.length > 0) {
+            // Save previous segment if it has any drawing commands
+            const hasDrawing = currentSegment.some(c => c.type !== 'M');
+            if (hasDrawing) {
+              segments.push(currentSegment);
+            }
+          }
+          currentSegment = [cmd];
+        } else {
+          currentSegment.push(cmd);
         }
-        fillEdgeContributions.get(edge.fillStyle1)!.push({
-          commands: edge.commands,
-          startX: startPoint.x,
-          startY: startPoint.y,
-          endX: endPoint.x,
-          endY: endPoint.y
-        });
+      }
+      // Don't forget the last segment
+      if (currentSegment.length > 0) {
+        const hasDrawing = currentSegment.some(c => c.type !== 'M');
+        if (hasDrawing) {
+          segments.push(currentSegment);
+        }
       }
 
-      // Handle fillStyle0 (reversed direction - for left-side fill)
-      if (edge.fillStyle0 !== undefined && edge.fillStyle0 !== edge.fillStyle1) {
-        if (!fillEdgeContributions.has(edge.fillStyle0)) {
-          fillEdgeContributions.set(edge.fillStyle0, []);
+      // Process each segment as a separate contribution
+      for (const segmentCmds of segments) {
+        const startPoint = this.getFirstPoint(segmentCmds);
+        const endPoint = this.getLastPoint(segmentCmds);
+        if (!startPoint || !endPoint) continue;
+
+        // Handle fillStyle1 (forward direction)
+        if (edge.fillStyle1 !== undefined) {
+          if (!fillEdgeContributions.has(edge.fillStyle1)) {
+            fillEdgeContributions.set(edge.fillStyle1, []);
+          }
+          fillEdgeContributions.get(edge.fillStyle1)!.push({
+            commands: segmentCmds,
+            startX: startPoint.x,
+            startY: startPoint.y,
+            endX: endPoint.x,
+            endY: endPoint.y
+          });
         }
-        const reversedCmds = this.reverseCommands(edge.commands);
-        fillEdgeContributions.get(edge.fillStyle0)!.push({
-          commands: reversedCmds,
-          startX: endPoint.x,
-          startY: endPoint.y,
-          endX: startPoint.x,
-          endY: startPoint.y
-        });
+
+        // Handle fillStyle0 (reversed direction - for left-side fill)
+        if (edge.fillStyle0 !== undefined && edge.fillStyle0 !== edge.fillStyle1) {
+          if (!fillEdgeContributions.has(edge.fillStyle0)) {
+            fillEdgeContributions.set(edge.fillStyle0, []);
+          }
+          const reversedCmds = this.reverseCommands(segmentCmds);
+          fillEdgeContributions.get(edge.fillStyle0)!.push({
+            commands: reversedCmds,
+            startX: endPoint.x,
+            startY: endPoint.y,
+            endX: startPoint.x,
+            endY: startPoint.y
+          });
+        }
       }
     }
 

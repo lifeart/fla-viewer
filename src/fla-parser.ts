@@ -498,10 +498,6 @@ export class FLAParser {
     };
   }
 
-  private isIdentityMatrix(m: Matrix): boolean {
-    return m.a === 1 && m.b === 0 && m.c === 0 && m.d === 1 && m.tx === 0 && m.ty === 0;
-  }
-
   private parseVideoInstance(el: globalThis.Element): VideoInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const frameRight = el.getAttribute('frameRight');

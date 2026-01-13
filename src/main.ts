@@ -1,6 +1,6 @@
 import { FLAParser } from './fla-parser';
 import { FLAPlayer } from './player';
-import type { PlayerState, FLADocument, Layer } from './types';
+import type { PlayerState, FLADocument } from './types';
 
 class FLAViewerApp {
   private parser: FLAParser;
