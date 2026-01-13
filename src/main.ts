@@ -27,6 +27,8 @@ class FLAViewerApp {
   private layerOrderSelect: HTMLSelectElement;
   private nestedOrderSelect: HTMLSelectElement;
   private elementOrderSelect: HTMLSelectElement;
+  private followCameraCheckbox: HTMLInputElement;
+  private cameraLayerInfo: HTMLElement;
 
   constructor() {
     this.parser = new FLAParser();
@@ -51,6 +53,8 @@ class FLAViewerApp {
     this.layerOrderSelect = document.getElementById('layer-order-select') as HTMLSelectElement;
     this.nestedOrderSelect = document.getElementById('nested-order-select') as HTMLSelectElement;
     this.elementOrderSelect = document.getElementById('element-order-select') as HTMLSelectElement;
+    this.followCameraCheckbox = document.getElementById('follow-camera-checkbox') as HTMLInputElement;
+    this.cameraLayerInfo = document.getElementById('camera-layer-info')!;
 
     this.setupEventListeners();
   }
@@ -112,6 +116,24 @@ class FLAViewerApp {
       this.player?.setElementOrder(this.elementOrderSelect.value as 'forward' | 'reverse');
     });
 
+    // Follow camera toggle
+    this.followCameraCheckbox.addEventListener('change', () => {
+      this.player?.setFollowCamera(this.followCameraCheckbox.checked);
+    });
+
+    // Window resize handler
+    let resizeTimeout: number | null = null;
+    window.addEventListener('resize', () => {
+      // Debounce resize events
+      if (resizeTimeout) {
+        clearTimeout(resizeTimeout);
+      }
+      resizeTimeout = window.setTimeout(() => {
+        this.player?.updateCanvasSize();
+        resizeTimeout = null;
+      }, 100);
+    });
+
     // Keyboard controls
     document.addEventListener('keydown', (e) => {
       if (!this.player) return;
@@ -168,6 +190,9 @@ class FLAViewerApp {
 
     this.layerList.innerHTML = '';
 
+    // Update camera layer info
+    this.updateCameraInfo();
+
     // Create layer items in render order
     const indices = isReverse
       ? [...Array(layers.length).keys()].reverse()
@@ -207,6 +232,24 @@ class FLAViewerApp {
     }
   }
 
+  private updateCameraInfo(): void {
+    if (!this.player) {
+      this.cameraLayerInfo.textContent = '';
+      return;
+    }
+
+    const cameraLayers = this.player.getCameraLayers();
+    if (cameraLayers.length > 0) {
+      const names = cameraLayers.map(l => `"${l.name}"`).join(', ');
+      this.cameraLayerInfo.textContent = `Found: ${names}`;
+      this.followCameraCheckbox.disabled = false;
+    } else {
+      this.cameraLayerInfo.textContent = 'No camera layer found';
+      this.followCameraCheckbox.disabled = true;
+      this.followCameraCheckbox.checked = false;
+    }
+  }
+
   private async loadFile(file: File): Promise<void> {
     if (!file.name.toLowerCase().endsWith('.fla')) {
       alert('Please select a valid FLA file');
@@ -240,6 +283,10 @@ class FLAViewerApp {
       // Show viewer
       this.loading.classList.remove('active');
       this.viewer.classList.add('active');
+
+      // Reset follow camera state for new file
+      this.followCameraCheckbox.checked = false;
+      this.updateCameraInfo();
 
       // Update initial state
       this.updateUI(this.player.getState());

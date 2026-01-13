@@ -54,6 +54,8 @@ export class FLARenderer {
   private nestedLayerOrder: 'forward' | 'reverse' = 'reverse';
   private elementOrder: 'forward' | 'reverse' = 'forward';
   private shapePathCache = new WeakMap<Shape, CachedShapePaths>();
+  private followCamera: boolean = false;
+  private manualCameraLayerIndex: number | undefined = undefined;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -236,6 +238,80 @@ export class FLARenderer {
     this.elementOrder = order;
   }
 
+  // Enable/disable following the camera/ramka layer as viewport
+  setFollowCamera(enabled: boolean): void {
+    this.followCamera = enabled;
+    if (enabled && this.doc) {
+      this.manualCameraLayerIndex = this.findCameraLayerByName();
+      if (DEBUG && this.manualCameraLayerIndex !== undefined) {
+        const layer = this.doc.timelines[0]?.layers[this.manualCameraLayerIndex];
+        console.log(`Follow camera enabled: layer "${layer?.name}" at index ${this.manualCameraLayerIndex}`);
+      }
+    } else {
+      this.manualCameraLayerIndex = undefined;
+    }
+    // Update canvas size when camera following changes
+    this.updateCanvasSize();
+  }
+
+  getFollowCamera(): boolean {
+    return this.followCamera;
+  }
+
+  // Find camera layer by name (less strict than auto-detection)
+  // Returns the index of a layer named ramka/camera/viewport/etc.
+  private findCameraLayerByName(): number | undefined {
+    if (!this.doc || !this.doc.timelines[0]) return undefined;
+
+    const layers = this.doc.timelines[0].layers;
+    for (let i = 0; i < layers.length; i++) {
+      const layer = layers[i];
+      const nameLower = layer.name.toLowerCase();
+
+      // Match camera-related layer names
+      if (nameLower === 'ramka' ||
+          nameLower === 'camera' ||
+          nameLower === 'cam' ||
+          nameLower === 'viewport' ||
+          nameLower === 'frame' ||
+          nameLower.includes('camera') ||
+          nameLower.includes('viewport')) {
+        // Verify layer has at least one symbol element
+        if (layer.frames.length > 0 && layer.frames[0].elements.length > 0) {
+          const element = layer.frames[0].elements[0];
+          if (element.type === 'symbol') {
+            return i;
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+
+  // Get list of potential camera layers for UI
+  getCameraLayers(): { index: number; name: string }[] {
+    if (!this.doc || !this.doc.timelines[0]) return [];
+
+    const result: { index: number; name: string }[] = [];
+    const layers = this.doc.timelines[0].layers;
+
+    for (let i = 0; i < layers.length; i++) {
+      const layer = layers[i];
+      const nameLower = layer.name.toLowerCase();
+
+      if (nameLower === 'ramka' ||
+          nameLower === 'camera' ||
+          nameLower === 'cam' ||
+          nameLower === 'viewport' ||
+          nameLower === 'frame' ||
+          nameLower.includes('camera') ||
+          nameLower.includes('viewport')) {
+        result.push({ index: i, name: layer.name });
+      }
+    }
+    return result;
+  }
+
   setDocument(doc: FLADocument): void {
     this.doc = doc;
     this.dpr = window.devicePixelRatio || 1;
@@ -243,17 +319,34 @@ export class FLARenderer {
     // Clear state from previous document
     this.missingSymbols.clear();
 
+    // Update canvas size
+    this.updateCanvasSize();
+
+    // Pre-compute shape paths asynchronously to warm up cache
+    this.precomputeShapePaths(doc);
+  }
+
+  // Recalculate and update canvas size based on current settings
+  updateCanvasSize(): void {
+    if (!this.doc) return;
+
+    this.dpr = window.devicePixelRatio || 1;
+
+    // Determine effective viewport size
+    // When following camera, use detected camera viewport size
+    const viewportSize = this.getEffectiveViewportSize();
+
     // Calculate scale to fit canvas while maintaining aspect ratio
     const maxWidth = Math.min(window.innerWidth - 100, 1920);
     const maxHeight = Math.min(window.innerHeight - 300, 1080);
 
-    const scaleX = maxWidth / doc.width;
-    const scaleY = maxHeight / doc.height;
+    const scaleX = maxWidth / viewportSize.width;
+    const scaleY = maxHeight / viewportSize.height;
     this.scale = Math.min(scaleX, scaleY, 1);
 
     // Calculate CSS display size
-    const displayWidth = doc.width * this.scale;
-    const displayHeight = doc.height * this.scale;
+    const displayWidth = viewportSize.width * this.scale;
+    const displayHeight = viewportSize.height * this.scale;
 
     // Set canvas buffer size (scaled by DPR for crisp rendering)
     this.canvas.width = displayWidth * this.dpr;
@@ -264,13 +357,84 @@ export class FLARenderer {
     this.canvas.style.height = `${displayHeight}px`;
 
     if (DEBUG) {
-      console.log('Document size:', doc.width, 'x', doc.height);
+      console.log('Viewport size:', viewportSize.width, 'x', viewportSize.height);
       console.log('Canvas size:', this.canvas.width, 'x', this.canvas.height);
       console.log('Scale:', this.scale, 'DPR:', this.dpr);
     }
+  }
 
-    // Pre-compute shape paths asynchronously to warm up cache
-    this.precomputeShapePaths(doc);
+  // Get the effective viewport size (camera viewport or full document)
+  private getEffectiveViewportSize(): { width: number; height: number } {
+    if (!this.doc) return { width: 550, height: 400 };
+
+    // When following camera, try to detect camera viewport size
+    if (this.followCamera && this.manualCameraLayerIndex !== undefined) {
+      const cameraViewport = this.detectCameraViewportSize();
+      if (cameraViewport) {
+        return cameraViewport;
+      }
+    }
+
+    // Default to full document size
+    return { width: this.doc.width, height: this.doc.height };
+  }
+
+  // Detect camera viewport size from the camera symbol and document dimensions
+  private detectCameraViewportSize(): { width: number; height: number } | null {
+    if (!this.doc || this.manualCameraLayerIndex === undefined) return null;
+
+    const timeline = this.doc.timelines[0];
+    if (!timeline) return null;
+
+    const cameraLayer = timeline.layers[this.manualCameraLayerIndex];
+    if (!cameraLayer || cameraLayer.frames.length === 0) return null;
+
+    const firstFrame = cameraLayer.frames[0];
+    if (firstFrame.elements.length === 0) return null;
+
+    const element = firstFrame.elements[0];
+    if (element.type !== 'symbol') return null;
+
+    // Get camera matrix scale (affects viewport size when zooming)
+    const matrix = element.matrix;
+    const scaleX = Math.sqrt(matrix.a * matrix.a + matrix.b * matrix.b);
+    const scaleY = Math.sqrt(matrix.c * matrix.c + matrix.d * matrix.d);
+
+    // Common animation workflow: ultrawide documents (3840x1080) with 1920x1080 output
+    // The camera pans across the wide document, but output is standard 16:9
+    const docAspect = this.doc.width / this.doc.height;
+
+    let baseWidth: number;
+    let baseHeight: number;
+
+    if (docAspect > 2.5) {
+      // Ultrawide document (e.g., 3840x1080, aspect ~3.56)
+      // Assume standard 16:9 viewport (1920x1080)
+      baseHeight = this.doc.height;
+      baseWidth = baseHeight * (16 / 9);
+    } else if (docAspect > 1.9) {
+      // Wide document but not extreme
+      // Use height and 16:9 aspect
+      baseHeight = this.doc.height;
+      baseWidth = baseHeight * (16 / 9);
+    } else {
+      // Normal aspect ratio - use document size
+      baseWidth = this.doc.width;
+      baseHeight = this.doc.height;
+    }
+
+    // Apply inverse scale for zoom
+    const viewportWidth = baseWidth / scaleX;
+    const viewportHeight = baseHeight / scaleY;
+
+    if (DEBUG) {
+      console.log(`Camera viewport: ${Math.round(viewportWidth)}x${Math.round(viewportHeight)} (doc: ${this.doc.width}x${this.doc.height}, scale: ${scaleX.toFixed(2)})`);
+    }
+
+    return {
+      width: Math.round(viewportWidth),
+      height: Math.round(viewportHeight)
+    };
   }
 
   // Pre-compute all shape paths in the background to warm up cache
@@ -354,17 +518,109 @@ export class FLARenderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
+    // Get effective viewport size
+    const viewport = this.getEffectiveViewportSize();
+
     // Apply DPR and content scale together
     const combinedScale = this.scale * this.dpr;
     ctx.setTransform(combinedScale, 0, 0, combinedScale, 0, 0);
 
-    // Fill with background color
+    // Fill with background color (fill the viewport area)
     ctx.fillStyle = doc.backgroundColor;
-    ctx.fillRect(0, 0, doc.width, doc.height);
+    ctx.fillRect(0, 0, viewport.width, viewport.height);
 
     // Render main timeline
     if (doc.timelines.length > 0) {
-      this.renderTimeline(doc.timelines[0], frameIndex);
+      this.renderTimelineWithCamera(doc.timelines[0], frameIndex, viewport);
+    }
+  }
+
+  // Render timeline with proper camera handling
+  private renderTimelineWithCamera(
+    timeline: Timeline,
+    frameIndex: number,
+    viewport: { width: number; height: number }
+  ): void {
+    const ctx = this.ctx;
+
+    // Check if we're following camera
+    if (this.followCamera && this.manualCameraLayerIndex !== undefined) {
+      const cameraLayer = timeline.layers[this.manualCameraLayerIndex];
+      if (cameraLayer) {
+        const cameraElement = this.getCameraElement(cameraLayer, frameIndex);
+        if (cameraElement) {
+          ctx.save();
+
+          // The camera symbol's transformation point is the pivot/center of the viewport frame
+          // The matrix tx/ty positions the symbol's origin on the document
+          // The actual camera center on the document is: tx + transformationPoint.x, ty + transformationPoint.y
+
+          const matrix = cameraElement.matrix;
+          const tp = cameraElement.transformationPoint || { x: 0, y: 0 };
+
+          const scaleX = Math.sqrt(matrix.a * matrix.a + matrix.b * matrix.b);
+          const scaleY = Math.sqrt(matrix.c * matrix.c + matrix.d * matrix.d);
+
+          // Camera center in document coordinates
+          const cameraCenterX = matrix.tx + tp.x * scaleX;
+          const cameraCenterY = matrix.ty + tp.y * scaleY;
+
+          // Viewport center
+          const viewportCenterX = viewport.width / 2;
+          const viewportCenterY = viewport.height / 2;
+
+          if (DEBUG) {
+            console.log(`Camera: center=(${cameraCenterX.toFixed(1)}, ${cameraCenterY.toFixed(1)}), scale=(${scaleX.toFixed(3)}, ${scaleY.toFixed(3)}), tp=(${tp.x}, ${tp.y})`);
+          }
+
+          // Transform: move camera center to viewport center, apply inverse scale
+          ctx.translate(viewportCenterX, viewportCenterY);
+          ctx.scale(1 / scaleX, 1 / scaleY);
+          ctx.translate(-cameraCenterX, -cameraCenterY);
+
+          // Render all layers except camera
+          this.renderTimelineLayers(timeline, frameIndex, 0, this.manualCameraLayerIndex);
+
+          ctx.restore();
+          return;
+        }
+      }
+    }
+
+    // Normal rendering (no camera following)
+    this.renderTimeline(timeline, frameIndex);
+  }
+
+  // Render timeline layers (extracted for reuse)
+  private renderTimelineLayers(
+    timeline: Timeline,
+    frameIndex: number,
+    depth: number,
+    skipLayerIndex?: number
+  ): void {
+    const order = depth === 0 ? this.layerOrder : this.nestedLayerOrder;
+    const indices = order === 'reverse'
+      ? [...Array(timeline.layers.length).keys()].reverse()
+      : [...Array(timeline.layers.length).keys()];
+
+    for (const i of indices) {
+      // Skip specified layer (camera layer)
+      if (i === skipLayerIndex) continue;
+
+      // Skip hidden layers (only for main timeline, depth 0)
+      if (depth === 0 && this.hiddenLayers.has(i)) continue;
+
+      // Skip reference layers
+      if (timeline.referenceLayers.has(i)) continue;
+
+      const layer = timeline.layers[i];
+      const layerTypeLower = (layer.layerType as string)?.toLowerCase() || '';
+      if (layer.layerType === 'guide' || layerTypeLower === 'guide' ||
+          layer.layerType === 'folder' || layerTypeLower === 'folder') {
+        continue;
+      }
+
+      this.renderLayer(layer, frameIndex, depth);
     }
   }
 
@@ -373,16 +629,29 @@ export class FLARenderer {
 
     const ctx = this.ctx;
 
+    // Determine which camera layer to use (if any)
+    // Manual follow camera takes precedence over auto-detected camera
+    let activeCameraIndex: number | undefined;
+    if (depth === 0) {
+      if (this.followCamera && this.manualCameraLayerIndex !== undefined) {
+        activeCameraIndex = this.manualCameraLayerIndex;
+      } else {
+        activeCameraIndex = timeline.cameraLayerIndex;
+      }
+    }
+
     // Apply camera transform at root level only
     let hasCameraTransform = false;
-    if (depth === 0 && timeline.cameraLayerIndex !== undefined) {
-      const cameraLayer = timeline.layers[timeline.cameraLayerIndex];
-      const cameraTransform = this.getCameraTransform(cameraLayer, frameIndex);
-      if (cameraTransform) {
-        ctx.save();
-        // Apply inverse camera transform to simulate camera movement
-        this.applyInverseCameraTransform(cameraTransform);
-        hasCameraTransform = true;
+    if (depth === 0 && activeCameraIndex !== undefined) {
+      const cameraLayer = timeline.layers[activeCameraIndex];
+      if (cameraLayer) {
+        const cameraTransform = this.getCameraTransform(cameraLayer, frameIndex);
+        if (cameraTransform) {
+          ctx.save();
+          // Apply inverse camera transform to simulate camera movement
+          this.applyInverseCameraTransform(cameraTransform);
+          hasCameraTransform = true;
+        }
       }
     }
 
@@ -396,7 +665,7 @@ export class FLARenderer {
       const layer = timeline.layers[i];
 
       // Skip camera layer (it's a reference, not rendered content)
-      if (i === timeline.cameraLayerIndex) {
+      if (i === activeCameraIndex) {
         continue;
       }
 
@@ -464,6 +733,48 @@ export class FLARenderer {
     }
 
     return element.matrix;
+  }
+
+  // Get full camera element with transformation point (for follow camera mode)
+  private getCameraElement(cameraLayer: Layer, frameIndex: number): SymbolInstance | null {
+    const frame = this.findFrameAtIndex(cameraLayer.frames, frameIndex);
+    if (!frame || frame.elements.length === 0) return null;
+
+    const element = frame.elements[0];
+    if (element.type !== 'symbol') return null;
+
+    // Check for motion tween interpolation
+    if (frame.tweenType === 'motion') {
+      const nextKeyframe = this.findNextKeyframe(cameraLayer.frames, frame);
+      if (nextKeyframe && nextKeyframe.elements.length > 0) {
+        const nextElement = nextKeyframe.elements[0];
+        if (nextElement.type === 'symbol') {
+          const progress = this.calculateTweenProgress(
+            frameIndex,
+            frame,
+            nextKeyframe,
+            frame.acceleration,
+            frame.tweens
+          );
+
+          // Return interpolated element
+          return {
+            ...element,
+            matrix: {
+              a: this.lerp(element.matrix.a, nextElement.matrix.a, progress),
+              b: this.lerp(element.matrix.b, nextElement.matrix.b, progress),
+              c: this.lerp(element.matrix.c, nextElement.matrix.c, progress),
+              d: this.lerp(element.matrix.d, nextElement.matrix.d, progress),
+              tx: this.lerp(element.matrix.tx, nextElement.matrix.tx, progress),
+              ty: this.lerp(element.matrix.ty, nextElement.matrix.ty, progress)
+            }
+            // Keep original transformationPoint (pivot doesn't change during tween)
+          };
+        }
+      }
+    }
+
+    return element;
   }
 
   private applyInverseCameraTransform(matrix: Matrix): void {

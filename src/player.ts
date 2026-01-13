@@ -156,4 +156,22 @@ export class FLAPlayer {
     this.renderer.setElementOrder(order);
     this.render();
   }
+
+  setFollowCamera(enabled: boolean): void {
+    this.renderer.setFollowCamera(enabled);
+    this.render();
+  }
+
+  getFollowCamera(): boolean {
+    return this.renderer.getFollowCamera();
+  }
+
+  getCameraLayers(): { index: number; name: string }[] {
+    return this.renderer.getCameraLayers();
+  }
+
+  updateCanvasSize(): void {
+    this.renderer.updateCanvasSize();
+    this.render();
+  }
 }
