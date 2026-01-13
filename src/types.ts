@@ -13,6 +13,7 @@ export interface Timeline {
   name: string;
   layers: Layer[];
   totalFrames: number;
+  cameraLayerIndex?: number; // Index of the "ramka" camera reference layer
 }
 
 export interface Layer {
@@ -20,6 +21,7 @@ export interface Layer {
   color: string;
   visible: boolean;
   locked: boolean;
+  outline: boolean; // Editor-only outline view (not rendered)
   layerType?: 'normal' | 'guide' | 'folder';
   parentLayerIndex?: number;
   frames: Frame[];

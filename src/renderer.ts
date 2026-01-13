@@ -82,9 +82,29 @@ export class FLARenderer {
   private renderTimeline(timeline: Timeline, frameIndex: number, depth: number = 0): void {
     if (depth > 50) return; // Prevent infinite recursion
 
+    const ctx = this.ctx;
+
+    // Apply camera transform at root level only
+    let hasCameraTransform = false;
+    if (depth === 0 && timeline.cameraLayerIndex !== undefined) {
+      const cameraLayer = timeline.layers[timeline.cameraLayerIndex];
+      const cameraTransform = this.getCameraTransform(cameraLayer, frameIndex);
+      if (cameraTransform) {
+        ctx.save();
+        // Apply inverse camera transform to simulate camera movement
+        this.applyInverseCameraTransform(cameraTransform);
+        hasCameraTransform = true;
+      }
+    }
+
     // Render layers in reverse order (bottom to top)
     for (let i = timeline.layers.length - 1; i >= 0; i--) {
       const layer = timeline.layers[i];
+
+      // Skip camera layer (it's a reference, not rendered content)
+      if (i === timeline.cameraLayerIndex) {
+        continue;
+      }
 
       // Skip invisible layers and guide/folder layers
       if (!layer.visible || layer.layerType === 'guide' || layer.layerType === 'folder') {
@@ -93,6 +113,69 @@ export class FLARenderer {
 
       this.renderLayer(layer, frameIndex, depth);
     }
+
+    if (hasCameraTransform) {
+      ctx.restore();
+    }
+  }
+
+  private getCameraTransform(cameraLayer: Layer, frameIndex: number): Matrix | null {
+    const frame = this.findFrameAtIndex(cameraLayer.frames, frameIndex);
+    if (!frame || frame.elements.length === 0) return null;
+
+    // Get the first symbol instance (should be the Ramka/camera symbol)
+    const element = frame.elements[0];
+    if (element.type !== 'symbol') return null;
+
+    // Check for motion tween interpolation
+    if (frame.tweenType === 'motion') {
+      const nextKeyframe = this.findNextKeyframe(cameraLayer.frames, frame);
+      if (nextKeyframe && nextKeyframe.elements.length > 0) {
+        const nextElement = nextKeyframe.elements[0];
+        if (nextElement.type === 'symbol') {
+          const progress = this.calculateTweenProgress(
+            frameIndex,
+            frame,
+            nextKeyframe,
+            frame.acceleration,
+            frame.tweens
+          );
+
+          // Interpolate camera matrix
+          return {
+            a: this.lerp(element.matrix.a, nextElement.matrix.a, progress),
+            b: this.lerp(element.matrix.b, nextElement.matrix.b, progress),
+            c: this.lerp(element.matrix.c, nextElement.matrix.c, progress),
+            d: this.lerp(element.matrix.d, nextElement.matrix.d, progress),
+            tx: this.lerp(element.matrix.tx, nextElement.matrix.tx, progress),
+            ty: this.lerp(element.matrix.ty, nextElement.matrix.ty, progress)
+          };
+        }
+      }
+    }
+
+    return element.matrix;
+  }
+
+  private applyInverseCameraTransform(matrix: Matrix): void {
+    // The camera matrix represents where the "camera frame" is positioned
+    // To render content from the camera's perspective, we need the inverse transform
+    //
+    // For a 2D affine matrix [a c tx; b d ty; 0 0 1]:
+    // The inverse is [d -c (c*ty - d*tx); -b a (b*tx - a*ty); 0 0 1] / determinant
+
+    const det = matrix.a * matrix.d - matrix.b * matrix.c;
+    if (Math.abs(det) < 0.0001) return; // Degenerate matrix
+
+    const invDet = 1 / det;
+    const invA = matrix.d * invDet;
+    const invB = -matrix.b * invDet;
+    const invC = -matrix.c * invDet;
+    const invD = matrix.a * invDet;
+    const invTx = (matrix.c * matrix.ty - matrix.d * matrix.tx) * invDet;
+    const invTy = (matrix.b * matrix.tx - matrix.a * matrix.ty) * invDet;
+
+    this.ctx.transform(invA, invB, invC, invD, invTx, invTy);
   }
 
   private renderLayer(layer: Layer, frameIndex: number, depth: number): void {

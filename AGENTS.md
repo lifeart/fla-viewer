@@ -130,6 +130,37 @@ FLA files (Adobe Animate/Flash Professional) are ZIP archives containing XML fil
 </DOMSymbolInstance>
 ```
 
+### Camera Layer (Ramka Pattern)
+
+Camera movement in FLA files is often simulated using a "ramka" (frame) layer:
+
+```xml
+<DOMLayer name="ramka" color="#9933CC" locked="true">
+    <frames>
+        <DOMFrame index="0" duration="10" tweenType="motion" keyMode="22017">
+            <elements>
+                <DOMSymbolInstance libraryItemName="Ramka" symbolType="graphic">
+                    <matrix>
+                        <!-- Camera position/zoom: scale for zoom, tx/ty for pan -->
+                        <Matrix a="1.0" d="1.0" tx="100" ty="50"/>
+                    </matrix>
+                </DOMSymbolInstance>
+            </elements>
+        </DOMFrame>
+    </frames>
+</DOMLayer>
+```
+
+The camera layer contains a symbol that represents the viewport. Detection criteria:
+1. Layer is non-rendering: `layerType="guide"` OR (`visible="false"` AND `outline="true"`)
+2. Layer contains exactly one symbol instance
+3. Symbol's transformation point is near document center (within 15% tolerance)
+
+To render content from the camera's perspective:
+1. Detect camera layer using the criteria above
+2. Get the symbol's transform matrix at current frame (with tween interpolation)
+3. Apply the **inverse** transform to all other content
+
 ### Video Instance
 
 ```xml
@@ -237,6 +268,23 @@ Decodes to:
 - `fillStyle0`: Fill on the LEFT side of the edge direction
 - `fillStyle1`: Fill on the RIGHT side of the edge direction
 - Used for complex shapes with holes (winding rule)
+
+---
+
+## Completed Features
+
+- [x] **Camera Layer Support**: Simulated camera via viewport layer pattern
+  - Generic detection: non-rendering layer + single symbol + center transformation point
+  - Applies inverse transform for camera pan/zoom
+  - Supports motion tween interpolation for smooth camera movements
+
+- [x] **Video Instance Support**: Placeholder rendering for DOMVideoInstance
+  - Parses video dimensions and position
+  - Renders placeholder rectangle with play button icon
+
+- [x] **Group Support**: DOMGroup elements with nested members
+  - Recursive parsing of nested groups
+  - Shapes and symbols within groups
 
 ---
 

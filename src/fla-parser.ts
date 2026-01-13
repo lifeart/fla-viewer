@@ -58,8 +58,8 @@ export class FLAParser {
     // Parse symbol references and load them
     await this.loadSymbols(root);
 
-    // Parse main timeline
-    const timelines = this.parseTimelines(root);
+    // Parse main timeline (pass dimensions for camera detection)
+    const timelines = this.parseTimelines(root, width, height);
 
     return {
       width,
@@ -212,7 +212,7 @@ export class FLAParser {
     }
   }
 
-  private parseTimelines(parent: globalThis.Element): Timeline[] {
+  private parseTimelines(parent: globalThis.Element, docWidth?: number, docHeight?: number): Timeline[] {
     const timelines: Timeline[] = [];
     const timelineElements = parent.querySelectorAll(':scope > timelines > DOMTimeline, :scope > timeline > DOMTimeline');
 
@@ -231,10 +231,58 @@ export class FLAParser {
         }
       }
 
-      timelines.push({ name, layers, totalFrames });
+      // Find camera layer using generic detection
+      const cameraLayerIndex = this.detectCameraLayer(layers, docWidth, docHeight);
+
+      timelines.push({ name, layers, totalFrames, cameraLayerIndex });
     }
 
     return timelines;
+  }
+
+  private detectCameraLayer(layers: Layer[], docWidth?: number, docHeight?: number): number | undefined {
+    // Generic camera layer detection based on multiple criteria:
+    // 1. Layer is a guide layer OR (not visible AND has outline flag)
+    // 2. Layer contains a single symbol instance
+    // 3. Symbol's transformation point is close to document center
+
+    if (!docWidth || !docHeight) return undefined;
+
+    for (let i = 0; i < layers.length; i++) {
+      const layer = layers[i];
+
+      // Check if layer is explicitly non-rendering
+      // Guide layers are never rendered, or invisible layers with outline (editor reference)
+      const isGuideLayer = layer.layerType === 'guide';
+      const isHiddenReference = !layer.visible && layer.outline;
+      if (!isGuideLayer && !isHiddenReference) continue;
+
+      // Check if layer has frames with elements
+      if (layer.frames.length === 0) continue;
+
+      const firstFrame = layer.frames[0];
+      if (firstFrame.elements.length !== 1) continue;
+
+      const element = firstFrame.elements[0];
+      if (element.type !== 'symbol') continue;
+
+      // Verify transformation point is near document center
+      if (element.transformationPoint) {
+        const centerX = docWidth / 2;
+        const centerY = docHeight / 2;
+        const tolerance = Math.max(docWidth, docHeight) * 0.15; // 15% tolerance
+
+        const dx = Math.abs(element.transformationPoint.x - centerX);
+        const dy = Math.abs(element.transformationPoint.y - centerY);
+
+        if (dx < tolerance && dy < tolerance) {
+          console.log(`Detected camera layer: "${layer.name}" at index ${i}`);
+          return i;
+        }
+      }
+    }
+
+    return undefined;
   }
 
   private parseLayers(timeline: globalThis.Element): Layer[] {
@@ -246,6 +294,7 @@ export class FLAParser {
       const color = layerEl.getAttribute('color') || '#000000';
       const visible = layerEl.getAttribute('visible') !== 'false';
       const locked = layerEl.getAttribute('locked') === 'true';
+      const outline = layerEl.getAttribute('outline') === 'true';
       const layerType = layerEl.getAttribute('layerType') as 'normal' | 'guide' | 'folder' | undefined;
       const parentLayerIndex = layerEl.getAttribute('parentLayerIndex');
 
@@ -256,6 +305,7 @@ export class FLAParser {
         color,
         visible,
         locked,
+        outline,
         layerType: layerType || 'normal',
         parentLayerIndex: parentLayerIndex ? parseInt(parentLayerIndex) : undefined,
         frames
