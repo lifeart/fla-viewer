@@ -868,7 +868,7 @@ export class FLARenderer {
 
     // Build fill paths by sorting edges into connected chains
     const fillPaths = new Map<number, Path2D>();
-    const EPSILON = 5.0; // Tolerance for edge connections (some FLA files have gaps up to 5px)
+    const EPSILON = 8.0; // Tolerance for edge connections (some FLA files have gaps up to 8px)
 
     for (const [styleIndex, contributions] of fillEdgeContributions) {
       const path = new Path2D();
@@ -1101,10 +1101,17 @@ export class FLARenderer {
     const result: typeof contributions = [];
     const used = new Set<number>();
 
+    // Track chain starts for better loop closing
+    let chainStartX = contributions[0].startX;
+    let chainStartY = contributions[0].startY;
+
     // Start with the first contribution
     let current = contributions[0];
     result.push(current);
     used.add(0);
+
+    // Extended epsilon for closing chains (allow larger gaps to close loops)
+    const closeEpsilon = epsilon * 3;
 
     // Greedily find connected contributions
     while (used.size < contributions.length) {
@@ -1132,19 +1139,54 @@ export class FLARenderer {
         result.push(current);
         used.add(bestIdx);
       } else {
-        // No direct continuation found - start a new chain
-        let newChainIdx = -1;
+        // No direct continuation found - try to find a contribution that could help close the loop
+        // Look for contribution that starts near current end AND ends near chain start
+        let closingIdx = -1;
+        let closingDist = Infinity;
+
         for (let i = 0; i < contributions.length; i++) {
-          if (!used.has(i)) {
-            newChainIdx = i;
-            break;
+          if (used.has(i)) continue;
+
+          const candidate = contributions[i];
+          const startDx = Math.abs(candidate.startX - current.endX);
+          const startDy = Math.abs(candidate.startY - current.endY);
+          const endDx = Math.abs(candidate.endX - chainStartX);
+          const endDy = Math.abs(candidate.endY - chainStartY);
+
+          // Check if this contribution could close the loop with extended epsilon
+          if (startDx <= closeEpsilon && startDy <= closeEpsilon &&
+              endDx <= closeEpsilon && endDy <= closeEpsilon) {
+            const dist = startDx + startDy + endDx + endDy;
+            if (dist < closingDist) {
+              closingDist = dist;
+              closingIdx = i;
+            }
           }
         }
 
-        if (newChainIdx >= 0) {
-          current = contributions[newChainIdx];
+        if (closingIdx >= 0) {
+          // Found a closing contribution
+          current = contributions[closingIdx];
           result.push(current);
-          used.add(newChainIdx);
+          used.add(closingIdx);
+        } else {
+          // Start a new chain
+          let newChainIdx = -1;
+          for (let i = 0; i < contributions.length; i++) {
+            if (!used.has(i)) {
+              newChainIdx = i;
+              break;
+            }
+          }
+
+          if (newChainIdx >= 0) {
+            current = contributions[newChainIdx];
+            result.push(current);
+            used.add(newChainIdx);
+            // Update chain start for the new chain
+            chainStartX = current.startX;
+            chainStartY = current.startY;
+          }
         }
       }
     }
