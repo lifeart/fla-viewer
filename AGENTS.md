@@ -130,6 +130,44 @@ FLA files (Adobe Animate/Flash Professional) are ZIP archives containing XML fil
 </DOMSymbolInstance>
 ```
 
+### Video Instance
+
+```xml
+<DOMVideoItem name="video.flv"
+    itemID="xxx"
+    sourceExternalFilepath="./video.flv"
+    videoDataHRef="M 3 123456.dat"    <!-- Binary video data in bin folder -->
+    videoType="h263 media"
+    fps="25"
+    width="320"
+    height="240"
+    length="4.08"/>                   <!-- Duration in seconds -->
+
+<DOMVideoInstance
+    libraryItemName="video.flv"
+    frameRight="6400"                 <!-- Width in twips (÷20 for pixels) -->
+    frameBottom="4800">               <!-- Height in twips (÷20 for pixels) -->
+    <matrix><Matrix .../></matrix>
+</DOMVideoInstance>
+```
+
+### Group Element
+
+Groups contain multiple shapes or symbol instances as members:
+
+```xml
+<DOMGroup>
+    <members>
+        <DOMShape>...</DOMShape>
+        <DOMShape>...</DOMShape>
+        <DOMSymbolInstance>...</DOMSymbolInstance>
+        <DOMGroup>                    <!-- Groups can be nested -->
+            <members>...</members>
+        </DOMGroup>
+    </members>
+</DOMGroup>
+```
+
 ### Shape Definition
 
 ```xml
@@ -272,9 +310,10 @@ Decodes to:
   - Parse audio references from media
   - Sync sound to timeline (event, stream, start, stop)
 
-- [ ] **Video**: Embedded video playback
-  - Parse `<DOMVideoItem>` references
-  - Video timeline synchronization
+- [x] **Video**: Embedded video support (placeholder rendering)
+  - Parse `<DOMVideoItem>` and `<DOMVideoInstance>` elements
+  - Renders placeholder rectangle with play button icon
+  - Full video playback requires FLV/H.263 decoder integration
 
 ### Performance & UX
 
