@@ -39,7 +39,6 @@ export class FLARenderer {
 
     // Clear state from previous document
     this.missingSymbols.clear();
-    this.logCount = 0;
 
     // Calculate scale to fit canvas while maintaining aspect ratio
     const maxWidth = Math.min(window.innerWidth - 100, 1920);
@@ -83,9 +82,6 @@ export class FLARenderer {
     // Fill with background color
     ctx.fillStyle = doc.backgroundColor;
     ctx.fillRect(0, 0, doc.width, doc.height);
-
-    // Reset log count for debugging
-    this.logCount = 0;
 
     // Render main timeline
     if (doc.timelines.length > 0) {
@@ -382,7 +378,6 @@ export class FLARenderer {
     }
   }
 
-  private logCount = 0;
   private missingSymbols = new Set<string>();
   private renderSymbolInstance(instance: SymbolInstance, depth: number, _parentFrameIndex: number): void {
     if (!this.doc) return;
@@ -398,11 +393,6 @@ export class FLARenderer {
       return;
     }
 
-    // Debug: log symbol rendering details
-    if (instance.libraryItemName === 'aero' || (this.logCount < 5 && depth === 0)) {
-      console.log(`Symbol: "${instance.libraryItemName}" at depth=${depth}, firstFrame=${instance.firstFrame || 0}, symbolFrame will be=${(instance.firstFrame || 0) % Math.max(1, symbol.timeline.totalFrames)}, totalSymbolFrames=${symbol.timeline.totalFrames}`);
-      if (depth === 0) this.logCount++;
-    }
 
     const ctx = this.ctx;
     ctx.save();
