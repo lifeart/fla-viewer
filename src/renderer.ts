@@ -783,24 +783,42 @@ export class FLARenderer {
       const path = this.edgeToPath(edge);
       combinedPath.addPath(path);
 
-      // Split edge commands into segments (at internal MoveTo commands)
+      // Split edge commands into segments (at internal MoveTo commands that create gaps)
       // Each segment between MoveTos becomes a separate contribution
       const segments: PathCommand[][] = [];
       let currentSegment: PathCommand[] = [];
+      let lastEndX = NaN;
+      let lastEndY = NaN;
+      const SPLIT_EPSILON = 0.5; // Only split if MoveTo is more than this far from previous end
 
       for (const cmd of edge.commands) {
         if (cmd.type === 'M') {
-          // MoveTo starts a new segment
-          if (currentSegment.length > 0) {
-            // Save previous segment if it has any drawing commands
-            const hasDrawing = currentSegment.some(c => c.type !== 'M');
-            if (hasDrawing) {
-              segments.push(currentSegment);
+          // Check if this MoveTo is at a significantly different position
+          const isContinuous = !Number.isNaN(lastEndX) &&
+            Math.abs(cmd.x - lastEndX) <= SPLIT_EPSILON &&
+            Math.abs(cmd.y - lastEndY) <= SPLIT_EPSILON;
+
+          if (isContinuous) {
+            // Redundant MoveTo at same position - just add it to current segment
+            currentSegment.push(cmd);
+          } else {
+            // MoveTo creates a gap - start new segment
+            if (currentSegment.length > 0) {
+              const hasDrawing = currentSegment.some(c => c.type !== 'M');
+              if (hasDrawing) {
+                segments.push(currentSegment);
+              }
             }
+            currentSegment = [cmd];
           }
-          currentSegment = [cmd];
+          lastEndX = cmd.x;
+          lastEndY = cmd.y;
         } else {
           currentSegment.push(cmd);
+          if ('x' in cmd && Number.isFinite(cmd.x)) {
+            lastEndX = cmd.x;
+            lastEndY = cmd.y;
+          }
         }
       }
       // Don't forget the last segment
@@ -850,7 +868,7 @@ export class FLARenderer {
 
     // Build fill paths by sorting edges into connected chains
     const fillPaths = new Map<number, Path2D>();
-    const EPSILON = 1.0; // Tolerance for edge connections
+    const EPSILON = 5.0; // Tolerance for edge connections (some FLA files have gaps up to 5px)
 
     for (const [styleIndex, contributions] of fillEdgeContributions) {
       const path = new Path2D();
