@@ -483,22 +483,22 @@ class FLAViewerApp {
     this.exportStatus.textContent = 'Preparing...';
 
     try {
-      const blob = await exportVideo(this.currentDoc, (progress) => {
-        if (this.exportCancelled) {
-          throw new Error('Export cancelled');
-        }
+      const blob = await exportVideo(
+        this.currentDoc,
+        (progress) => {
+          const percent = (progress.currentFrame / progress.totalFrames) * 100;
+          this.exportProgressFill.style.width = `${percent}%`;
 
-        const percent = (progress.currentFrame / progress.totalFrames) * 100;
-        this.exportProgressFill.style.width = `${percent}%`;
-
-        if (progress.stage === 'encoding') {
-          this.exportStatus.textContent = `Encoding frame ${progress.currentFrame} / ${progress.totalFrames}`;
-        } else if (progress.stage === 'encoding-audio') {
-          this.exportStatus.textContent = 'Encoding audio...';
-        } else {
-          this.exportStatus.textContent = 'Finalizing video...';
-        }
-      });
+          if (progress.stage === 'encoding') {
+            this.exportStatus.textContent = `Encoding frame ${progress.currentFrame} / ${progress.totalFrames}`;
+          } else if (progress.stage === 'encoding-audio') {
+            this.exportStatus.textContent = 'Encoding audio...';
+          } else {
+            this.exportStatus.textContent = 'Finalizing video...';
+          }
+        },
+        () => this.exportCancelled
+      );
 
       if (!this.exportCancelled) {
         downloadBlob(blob, `${this.currentFileName}.mp4`);

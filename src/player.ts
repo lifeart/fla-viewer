@@ -206,15 +206,25 @@ export class FLAPlayer {
 
   goToFrame(frame: number): void {
     const wasPlaying = this.state.playing;
-    this.state.currentFrame = Math.max(0, Math.min(frame, this.state.totalFrames - 1));
 
-    // Restart audio at new position if playing
+    // Stop animation loop while seeking
     if (wasPlaying) {
-      this.startAudio();
+      this.state.playing = false;
+      this.stopAudio();
+      if (this.animationId !== null) {
+        cancelAnimationFrame(this.animationId);
+        this.animationId = null;
+      }
     }
 
+    this.state.currentFrame = Math.max(0, Math.min(frame, this.state.totalFrames - 1));
     this.render();
     this.notifyStateChange();
+
+    // Resume playback if it was playing
+    if (wasPlaying) {
+      this.play();
+    }
   }
 
   seekToProgress(progress: number): void {

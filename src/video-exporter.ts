@@ -8,6 +8,7 @@ export interface ExportProgress {
 }
 
 export type ProgressCallback = (progress: ExportProgress) => void;
+export type CancellationCheck = () => boolean;
 
 interface StreamSound {
   sound: FrameSound;
@@ -18,7 +19,8 @@ interface StreamSound {
 
 export async function exportVideo(
   doc: FLADocument,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  isCancelled?: CancellationCheck
 ): Promise<Blob> {
   // Lazy load mp4-muxer
   const mp4Muxer = await import('mp4-muxer');
@@ -105,8 +107,17 @@ export async function exportVideo(
     framerate: frameRate,
   });
 
+  // Get 2D context for flushing
+  const ctx = canvas.getContext('2d')!;
+
   // Encode each video frame
   for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+    // Check cancellation before each frame
+    if (isCancelled?.()) {
+      videoEncoder.close();
+      throw new Error('Export cancelled');
+    }
+
     onProgress?.({
       currentFrame: frameIndex + 1,
       totalFrames,
@@ -115,6 +126,10 @@ export async function exportVideo(
 
     // Render frame to canvas
     renderer.renderFrame(frameIndex);
+
+    // Force canvas to complete rendering (prevents black frames when tab is hidden)
+    // Reading a pixel forces the GPU to flush all pending operations
+    ctx.getImageData(0, 0, 1, 1);
 
     // Create VideoFrame from canvas
     const frame = new VideoFrame(canvas, {
@@ -129,10 +144,8 @@ export async function exportVideo(
     // Close frame to free memory
     frame.close();
 
-    // Yield to prevent blocking UI
-    if (frameIndex % 10 === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
+    // Yield every frame to allow UI updates and cancel button clicks
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   await videoEncoder.flush();
