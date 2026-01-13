@@ -464,7 +464,7 @@ export class FLAParser {
   }
 
 
-  private parseSymbolInstance(el: globalThis.Element, composedMatrix?: Matrix, groupMatrix?: Matrix): SymbolInstance {
+  private parseSymbolInstance(el: globalThis.Element, composedMatrix?: Matrix, _groupMatrix?: Matrix): SymbolInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const symbolType = (el.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
     const loop = (el.getAttribute('loop') || 'loop') as 'loop' | 'play once' | 'single frame';
@@ -475,19 +475,9 @@ export class FLAParser {
     const transformationPoint = this.parsePoint(el.querySelector('transformationPoint > Point'));
 
     if (matrixEl) {
-      const elementMatrix = this.parseMatrix(matrixEl);
-      // Check if element's matrix is a copy of the parent group's matrix
-      if (groupMatrix && this.matricesEqual(elementMatrix, groupMatrix)) {
-        // It's a copy - use composedMatrix which already includes the group's transform
-        matrix = composedMatrix || elementMatrix;
-      } else {
-        // Different matrix - it's a local transform, compose with parent
-        if (composedMatrix && !this.isIdentityMatrix(composedMatrix)) {
-          matrix = this.composeMatrices(composedMatrix, elementMatrix);
-        } else {
-          matrix = elementMatrix;
-        }
-      }
+      // Element has its own matrix - use it directly
+      // Flash appears to store the final/absolute matrix on elements
+      matrix = this.parseMatrix(matrixEl);
     } else {
       // Element has NO matrix - use composedMatrix (full ancestor chain)
       matrix = composedMatrix || this.parseMatrix(null);
@@ -536,25 +526,15 @@ export class FLAParser {
     };
   }
 
-  private parseBitmapInstance(el: globalThis.Element, composedMatrix?: Matrix, groupMatrix?: Matrix): BitmapInstance {
+  private parseBitmapInstance(el: globalThis.Element, composedMatrix?: Matrix, _groupMatrix?: Matrix): BitmapInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
     const matrixEl = el.querySelector('matrix > Matrix');
     let matrix: Matrix;
 
     if (matrixEl) {
-      const elementMatrix = this.parseMatrix(matrixEl);
-      // Check if element's matrix is a copy of the parent group's matrix
-      if (groupMatrix && this.matricesEqual(elementMatrix, groupMatrix)) {
-        // It's a copy - use composedMatrix which already includes the group's transform
-        matrix = composedMatrix || elementMatrix;
-      } else {
-        // Different matrix - it's a local transform, compose with parent
-        if (composedMatrix && !this.isIdentityMatrix(composedMatrix)) {
-          matrix = this.composeMatrices(composedMatrix, elementMatrix);
-        } else {
-          matrix = elementMatrix;
-        }
-      }
+      // Element has its own matrix - use it directly
+      // Flash appears to store the final/absolute matrix on elements
+      matrix = this.parseMatrix(matrixEl);
     } else {
       // Element has NO matrix - use composedMatrix (full ancestor chain)
       matrix = composedMatrix || this.parseMatrix(null);
@@ -567,24 +547,14 @@ export class FLAParser {
     };
   }
 
-  private parseShape(el: globalThis.Element, composedMatrix?: Matrix, groupMatrix?: Matrix): Shape {
+  private parseShape(el: globalThis.Element, composedMatrix?: Matrix, _groupMatrix?: Matrix): Shape {
     const matrixEl = el.querySelector('matrix > Matrix');
     let matrix: Matrix;
 
     if (matrixEl) {
-      const elementMatrix = this.parseMatrix(matrixEl);
-      // Check if element's matrix is a copy of the parent group's matrix
-      if (groupMatrix && this.matricesEqual(elementMatrix, groupMatrix)) {
-        // It's a copy - use composedMatrix which already includes the group's transform
-        matrix = composedMatrix || elementMatrix;
-      } else {
-        // Different matrix - it's a local transform, compose with parent
-        if (composedMatrix && !this.isIdentityMatrix(composedMatrix)) {
-          matrix = this.composeMatrices(composedMatrix, elementMatrix);
-        } else {
-          matrix = elementMatrix;
-        }
-      }
+      // Element has its own matrix - use it directly
+      // Flash appears to store the final/absolute matrix on elements
+      matrix = this.parseMatrix(matrixEl);
     } else {
       // Shape has NO matrix - use composedMatrix (full ancestor chain)
       // Shape is at identity position within parent's coordinate space
