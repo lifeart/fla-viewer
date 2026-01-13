@@ -324,28 +324,18 @@ export class FLARenderer {
         continue;
       }
 
-      // Skip guide/folder layers and invisible layers
-      // Guide layers are reference/construction layers not meant for output
-      // Folder layers are organizational only
+      // Skip reference layers (guides, camera frames, folders, etc.)
+      // These are detected during parsing based on layer type, position, and structure
+      if (timeline.referenceLayers.has(i)) {
+        continue;
+      }
+
+      // Also skip guide/folder layers that might not have been detected
       const layerTypeLower = (layer.layerType as string)?.toLowerCase() || '';
       const isGuideLayer = layer.layerType === 'guide' || layerTypeLower === 'guide';
       const isFolderLayer = layer.layerType === 'folder' || layerTypeLower === 'folder';
 
-      // Also skip layers that appear to be camera/frame reference layers
-      // These are typically named "ramka", "camera", "frame" and are not meant to be rendered
-      // "ramka" is Russian for "frame" and commonly used as camera reference in Flash animations
-      const layerNameLower = layer.name.toLowerCase();
-      const isCameraRefLayer = layerNameLower === 'ramka' ||
-                               layerNameLower === 'camera' ||
-                               layerNameLower === 'frame' ||
-                               layerNameLower === 'cam';
-
-      // Debug: log guide/hidden layers info
-      if (layerNameLower === 'ramka' || layerNameLower === 'video' || isGuideLayer || !layer.visible) {
-        console.log(`[DEBUG] Layer check: name="${layer.name}", layerType="${layer.layerType}", visible=${layer.visible}, isGuideLayer=${isGuideLayer}, isFolderLayer=${isFolderLayer}, isCameraRefLayer=${isCameraRefLayer}, will skip=${isGuideLayer || isFolderLayer || isCameraRefLayer}`);
-      }
-
-      if (isGuideLayer || isFolderLayer || isCameraRefLayer) {
+      if (isGuideLayer || isFolderLayer) {
         continue;
       }
 

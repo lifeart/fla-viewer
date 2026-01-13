@@ -244,7 +244,15 @@ export class FLAParser {
       // Find camera layer using generic detection
       const cameraLayerIndex = this.detectCameraLayer(layers, docWidth, docHeight);
 
-      timelines.push({ name, layers, totalFrames, cameraLayerIndex });
+      // Detect all reference layers that should not be rendered
+      const referenceLayers = this.detectReferenceLayers(layers, docWidth, docHeight);
+
+      // Also add camera layer to reference layers if detected
+      if (cameraLayerIndex !== undefined) {
+        referenceLayers.add(cameraLayerIndex);
+      }
+
+      timelines.push({ name, layers, totalFrames, cameraLayerIndex, referenceLayers });
     }
 
     return timelines;
@@ -252,20 +260,14 @@ export class FLAParser {
 
   private detectCameraLayer(layers: Layer[], docWidth?: number, docHeight?: number): number | undefined {
     // Generic camera layer detection based on multiple criteria:
-    // 1. Layer is a guide layer OR (not visible AND has outline flag)
-    // 2. Layer contains a single symbol instance
-    // 3. Symbol's transformation point is close to document center
+    // 1. Layer contains a single symbol instance
+    // 2. Symbol's transformation point is close to document center
+    // 3. Additional heuristics: guide layer, hidden, locked, or specific naming
 
     if (!docWidth || !docHeight) return undefined;
 
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i];
-
-      // Check if layer is explicitly non-rendering
-      // Guide layers are never rendered, or invisible layers with outline (editor reference)
-      const isGuideLayer = layer.layerType === 'guide';
-      const isHiddenReference = !layer.visible && layer.outline;
-      if (!isGuideLayer && !isHiddenReference) continue;
 
       // Check if layer has frames with elements
       if (layer.frames.length === 0) continue;
@@ -276,7 +278,13 @@ export class FLAParser {
       const element = firstFrame.elements[0];
       if (element.type !== 'symbol') continue;
 
-      // Verify transformation point is near document center
+      // Check various indicators that this might be a camera/reference layer
+      const isGuideLayer = layer.layerType === 'guide';
+      const isHiddenReference = !layer.visible && layer.outline;
+      const isLocked = layer.locked;
+
+      // Check if transformation point is near document center
+      let isNearCenter = false;
       if (element.transformationPoint) {
         const centerX = docWidth / 2;
         const centerY = docHeight / 2;
@@ -284,15 +292,80 @@ export class FLAParser {
 
         const dx = Math.abs(element.transformationPoint.x - centerX);
         const dy = Math.abs(element.transformationPoint.y - centerY);
+        isNearCenter = dx < tolerance && dy < tolerance;
+      }
 
-        if (dx < tolerance && dy < tolerance) {
-          console.log(`Detected camera layer: "${layer.name}" at index ${i}`);
-          return i;
-        }
+      // Detect as camera layer if it meets STRICT criteria:
+      // - It's explicitly a guide layer with transformation near center, OR
+      // - It's a hidden reference layer with transformation near center, OR
+      // - It's locked AND has transformation point near center
+      // Note: We do NOT use name-based detection for camera transforms to avoid false positives
+      const isCameraCandidate = isGuideLayer || isHiddenReference || isLocked;
+      if (isCameraCandidate && isNearCenter) {
+        console.log(`Detected camera layer: "${layer.name}" at index ${i} (guide=${isGuideLayer}, hidden=${isHiddenReference}, locked=${isLocked}, nearCenter=${isNearCenter})`);
+        return i;
       }
     }
 
     return undefined;
+  }
+
+  // Detect all reference layers that should not be rendered (camera frames, guides, etc.)
+  detectReferenceLayers(layers: Layer[], docWidth?: number, docHeight?: number): Set<number> {
+    const referenceLayers = new Set<number>();
+
+    for (let i = 0; i < layers.length; i++) {
+      const layer = layers[i];
+      const layerNameLower = layer.name.toLowerCase();
+
+      // Always skip guide and folder layers
+      if (layer.layerType === 'guide' || layer.layerType === 'folder') {
+        referenceLayers.add(i);
+        continue;
+      }
+
+      // Skip common camera/frame reference layer names
+      // These are typically viewport frames not meant to be rendered
+      const isCameraRefName = layerNameLower === 'ramka' ||
+                              layerNameLower === 'camera' ||
+                              layerNameLower === 'frame' ||
+                              layerNameLower === 'cam' ||
+                              layerNameLower === 'viewport';
+      if (isCameraRefName) {
+        referenceLayers.add(i);
+        continue;
+      }
+
+      // Skip layers with no frames
+      if (layer.frames.length === 0) continue;
+
+      const firstFrame = layer.frames[0];
+
+      // Check for single-symbol layers that look like camera/frame references
+      if (firstFrame.elements.length === 1) {
+        const element = firstFrame.elements[0];
+
+        if (element.type === 'symbol' && docWidth && docHeight) {
+          // Check if transformation point suggests a viewport frame
+          if (element.transformationPoint) {
+            const centerX = docWidth / 2;
+            const centerY = docHeight / 2;
+            const tolerance = Math.max(docWidth, docHeight) * 0.2; // 20% tolerance
+
+            const dx = Math.abs(element.transformationPoint.x - centerX);
+            const dy = Math.abs(element.transformationPoint.y - centerY);
+            const isNearCenter = dx < tolerance && dy < tolerance;
+
+            // If locked and near center, likely a camera frame
+            if (layer.locked && isNearCenter) {
+              referenceLayers.add(i);
+            }
+          }
+        }
+      }
+    }
+
+    return referenceLayers;
   }
 
   private parseLayers(timeline: globalThis.Element): Layer[] {

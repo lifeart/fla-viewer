@@ -23,7 +23,8 @@ export interface Timeline {
   name: string;
   layers: Layer[];
   totalFrames: number;
-  cameraLayerIndex?: number; // Index of the "ramka" camera reference layer
+  cameraLayerIndex?: number; // Index of the camera layer for camera transforms
+  referenceLayers: Set<number>; // Indices of layers that should not be rendered (guides, camera frames, etc.)
 }
 
 export interface Layer {
