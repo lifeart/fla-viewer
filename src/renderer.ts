@@ -771,53 +771,93 @@ export class FLARenderer {
       strokeStyles.set(stroke.index, stroke);
     }
 
-    // Group edges by fill style and build continuous paths
-    // Track current position for each fill style to connect edges properly
-    const fillPaths = new Map<number, Path2D>();
-    const fillPositions = new Map<number, { x: number; y: number }>();
-    // Group edges by stroke style
-    const strokePaths = new Map<number, Path2D>();
     // Combined path for hit testing
     const combinedPath = new Path2D();
 
-    const EPSILON = 0.5;
+    // First, collect all edge contributions for each fill style
+    // Each edge can contribute to fillStyle0 (reversed) and/or fillStyle1 (forward)
+    const fillEdgeContributions = new Map<number, { commands: PathCommand[], startX: number, startY: number, endX: number, endY: number }[]>();
 
     for (const edge of shape.edges) {
+      // Add to combined path for hit testing
       const path = this.edgeToPath(edge);
       combinedPath.addPath(path);
 
-      // Handle fills - build continuous paths by connecting edges
+      // Get start and end points
+      const startPoint = this.getFirstPoint(edge.commands);
+      const endPoint = this.getLastPoint(edge.commands);
+      if (!startPoint || !endPoint) continue;
+
+      // Handle fillStyle1 (forward direction)
       if (edge.fillStyle1 !== undefined) {
-        if (!fillPaths.has(edge.fillStyle1)) {
-          fillPaths.set(edge.fillStyle1, new Path2D());
+        if (!fillEdgeContributions.has(edge.fillStyle1)) {
+          fillEdgeContributions.set(edge.fillStyle1, []);
         }
-        const fillPath = fillPaths.get(edge.fillStyle1)!;
-        const pos = fillPositions.get(edge.fillStyle1);
-        this.appendEdgeToPath(fillPath, edge.commands, pos, EPSILON);
-        // Update position to end of this edge
-        const lastCmd = this.getLastPoint(edge.commands);
-        if (lastCmd) fillPositions.set(edge.fillStyle1, lastCmd);
+        fillEdgeContributions.get(edge.fillStyle1)!.push({
+          commands: edge.commands,
+          startX: startPoint.x,
+          startY: startPoint.y,
+          endX: endPoint.x,
+          endY: endPoint.y
+        });
       }
 
-      // Handle fillStyle0 (left side fill) - use reversed commands
+      // Handle fillStyle0 (reversed direction - for left-side fill)
       if (edge.fillStyle0 !== undefined && edge.fillStyle0 !== edge.fillStyle1) {
-        if (!fillPaths.has(edge.fillStyle0)) {
-          fillPaths.set(edge.fillStyle0, new Path2D());
+        if (!fillEdgeContributions.has(edge.fillStyle0)) {
+          fillEdgeContributions.set(edge.fillStyle0, []);
         }
-        const fillPath = fillPaths.get(edge.fillStyle0)!;
-        const pos = fillPositions.get(edge.fillStyle0);
         const reversedCmds = this.reverseCommands(edge.commands);
-        this.appendEdgeToPath(fillPath, reversedCmds, pos, EPSILON);
-        const lastCmd = this.getLastPoint(reversedCmds);
-        if (lastCmd) fillPositions.set(edge.fillStyle0, lastCmd);
+        fillEdgeContributions.get(edge.fillStyle0)!.push({
+          commands: reversedCmds,
+          startX: endPoint.x,
+          startY: endPoint.y,
+          endX: startPoint.x,
+          endY: startPoint.y
+        });
+      }
+    }
+
+    // Build fill paths by sorting edges into connected chains
+    const fillPaths = new Map<number, Path2D>();
+    const EPSILON = 0.5;
+
+    for (const [styleIndex, contributions] of fillEdgeContributions) {
+      const path = new Path2D();
+      const sortedContributions = this.sortEdgeContributions(contributions, EPSILON);
+
+      let currentX = NaN;
+      let currentY = NaN;
+
+      for (const contrib of sortedContributions) {
+        // Check if we need to move to the start of this contribution
+        if (Number.isNaN(currentX) ||
+            Math.abs(contrib.startX - currentX) > EPSILON ||
+            Math.abs(contrib.startY - currentY) > EPSILON) {
+          path.moveTo(contrib.startX, contrib.startY);
+        }
+
+        // Add commands (skip the first moveTo since we handled positioning)
+        for (const cmd of contrib.commands) {
+          if (cmd.type === 'M') continue; // Skip moveTo, we handled it
+          this.addCommandToPath(path, cmd);
+        }
+
+        currentX = contrib.endX;
+        currentY = contrib.endY;
       }
 
-      // Handle strokes
+      fillPaths.set(styleIndex, path);
+    }
+
+    // Handle strokes separately (they don't need sorting)
+    const strokePaths = new Map<number, Path2D>();
+    for (const edge of shape.edges) {
       if (edge.strokeStyle !== undefined) {
         if (!strokePaths.has(edge.strokeStyle)) {
           strokePaths.set(edge.strokeStyle, new Path2D());
         }
-        strokePaths.get(edge.strokeStyle)!.addPath(path);
+        strokePaths.get(edge.strokeStyle)!.addPath(this.edgeToPath(edge));
       }
     }
 
@@ -915,111 +955,6 @@ export class FLARenderer {
     return path;
   }
 
-  // Reverse the path direction for fillStyle0 (left-side fill)
-  private reverseEdgePath(edge: Edge): Path2D {
-    const path = new Path2D();
-    const commands = edge.commands;
-
-    if (commands.length === 0) return path;
-
-    // Build list of points and their types, then traverse in reverse
-    const points: { x: number; y: number; type: string; cx?: number; cy?: number; c1x?: number; c1y?: number; c2x?: number; c2y?: number }[] = [];
-
-    for (const cmd of commands) {
-      if (cmd.type === 'M' || cmd.type === 'L') {
-        points.push({ x: cmd.x, y: cmd.y, type: cmd.type });
-      } else if (cmd.type === 'Q') {
-        points.push({ x: cmd.x, y: cmd.y, type: 'Q', cx: cmd.cx, cy: cmd.cy });
-      } else if (cmd.type === 'C') {
-        points.push({ x: cmd.x, y: cmd.y, type: 'C', c1x: cmd.c1x, c1y: cmd.c1y, c2x: cmd.c2x, c2y: cmd.c2y });
-      }
-    }
-
-    if (points.length === 0) return path;
-
-    // Start from the last point
-    const lastPoint = points[points.length - 1];
-    path.moveTo(lastPoint.x, lastPoint.y);
-
-    // Traverse backwards
-    for (let i = points.length - 1; i > 0; i--) {
-      const current = points[i];
-      const prev = points[i - 1];
-
-      if (current.type === 'L' || current.type === 'M') {
-        path.lineTo(prev.x, prev.y);
-      } else if (current.type === 'Q' && current.cx !== undefined && current.cy !== undefined) {
-        // Quadratic curve - control point stays the same, just swap endpoints
-        path.quadraticCurveTo(current.cx, current.cy, prev.x, prev.y);
-      } else if (current.type === 'C' && current.c1x !== undefined) {
-        // Cubic curve - swap control points order
-        path.bezierCurveTo(current.c2x!, current.c2y!, current.c1x, current.c1y!, prev.x, prev.y);
-      }
-    }
-
-    return path;
-  }
-
-  // Append edge commands to a path, connecting to previous position if possible
-  private appendEdgeToPath(
-    path: Path2D,
-    commands: PathCommand[],
-    currentPos: { x: number; y: number } | undefined,
-    epsilon: number
-  ): void {
-    let isFirst = true;
-    let lastX = currentPos?.x ?? NaN;
-    let lastY = currentPos?.y ?? NaN;
-
-    for (const cmd of commands) {
-      if ('x' in cmd && (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y))) {
-        continue;
-      }
-
-      switch (cmd.type) {
-        case 'M':
-          // Skip moveTo if we're already at this position (connecting edges)
-          if (isFirst && currentPos &&
-              Math.abs(cmd.x - currentPos.x) <= epsilon &&
-              Math.abs(cmd.y - currentPos.y) <= epsilon) {
-            // Already at position, skip moveTo to maintain continuity
-          } else {
-            path.moveTo(cmd.x, cmd.y);
-          }
-          lastX = cmd.x;
-          lastY = cmd.y;
-          isFirst = false;
-          break;
-        case 'L':
-          path.lineTo(cmd.x, cmd.y);
-          lastX = cmd.x;
-          lastY = cmd.y;
-          isFirst = false;
-          break;
-        case 'Q':
-          if (Number.isFinite(cmd.cx) && Number.isFinite(cmd.cy)) {
-            path.quadraticCurveTo(cmd.cx, cmd.cy, cmd.x, cmd.y);
-          }
-          lastX = cmd.x;
-          lastY = cmd.y;
-          isFirst = false;
-          break;
-        case 'C':
-          if (Number.isFinite(cmd.c1x) && Number.isFinite(cmd.c1y) &&
-              Number.isFinite(cmd.c2x) && Number.isFinite(cmd.c2y)) {
-            path.bezierCurveTo(cmd.c1x, cmd.c1y, cmd.c2x, cmd.c2y, cmd.x, cmd.y);
-          }
-          lastX = cmd.x;
-          lastY = cmd.y;
-          isFirst = false;
-          break;
-        case 'Z':
-          path.closePath();
-          break;
-      }
-    }
-  }
-
   // Get the last point from a command list
   private getLastPoint(commands: PathCommand[]): { x: number; y: number } | null {
     for (let i = commands.length - 1; i >= 0; i--) {
@@ -1065,6 +1000,95 @@ export class FLARenderer {
     }
 
     return result;
+  }
+
+  // Get the first point from a command list
+  private getFirstPoint(commands: PathCommand[]): { x: number; y: number } | null {
+    for (const cmd of commands) {
+      if ('x' in cmd && Number.isFinite(cmd.x) && Number.isFinite(cmd.y)) {
+        return { x: cmd.x, y: cmd.y };
+      }
+    }
+    return null;
+  }
+
+  // Sort edge contributions to form connected chains
+  // This resolves the "edge soup" problem in Flash shapes
+  private sortEdgeContributions(
+    contributions: { commands: PathCommand[], startX: number, startY: number, endX: number, endY: number }[],
+    epsilon: number
+  ): { commands: PathCommand[], startX: number, startY: number, endX: number, endY: number }[] {
+    if (contributions.length <= 1) return contributions;
+
+    const result: typeof contributions = [];
+    const used = new Set<number>();
+
+    // Start with the first contribution
+    let current = contributions[0];
+    result.push(current);
+    used.add(0);
+
+    // Greedily find connected contributions
+    while (used.size < contributions.length) {
+      let foundNext = false;
+
+      // Look for a contribution that starts where the current one ends
+      for (let i = 0; i < contributions.length; i++) {
+        if (used.has(i)) continue;
+
+        const candidate = contributions[i];
+        const dx = Math.abs(candidate.startX - current.endX);
+        const dy = Math.abs(candidate.startY - current.endY);
+
+        if (dx <= epsilon && dy <= epsilon) {
+          result.push(candidate);
+          used.add(i);
+          current = candidate;
+          foundNext = true;
+          break;
+        }
+      }
+
+      // If no direct continuation found, start a new chain with any unused contribution
+      if (!foundNext) {
+        for (let i = 0; i < contributions.length; i++) {
+          if (!used.has(i)) {
+            current = contributions[i];
+            result.push(current);
+            used.add(i);
+            break;
+          }
+        }
+      }
+    }
+
+    return result;
+  }
+
+  // Add a single command to a path
+  private addCommandToPath(path: Path2D, cmd: PathCommand): void {
+    switch (cmd.type) {
+      case 'M':
+        path.moveTo(cmd.x, cmd.y);
+        break;
+      case 'L':
+        path.lineTo(cmd.x, cmd.y);
+        break;
+      case 'Q':
+        if (Number.isFinite(cmd.cx) && Number.isFinite(cmd.cy)) {
+          path.quadraticCurveTo(cmd.cx, cmd.cy, cmd.x, cmd.y);
+        }
+        break;
+      case 'C':
+        if (Number.isFinite(cmd.c1x) && Number.isFinite(cmd.c1y) &&
+            Number.isFinite(cmd.c2x) && Number.isFinite(cmd.c2y)) {
+          path.bezierCurveTo(cmd.c1x, cmd.c1y, cmd.c2x, cmd.c2y, cmd.x, cmd.y);
+        }
+        break;
+      case 'Z':
+        path.closePath();
+        break;
+    }
   }
 
   private getFillStyle(fill: FillStyle): string | CanvasGradient {
