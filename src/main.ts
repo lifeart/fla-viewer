@@ -18,6 +18,9 @@ class FLAViewerApp {
   private prevBtn: HTMLButtonElement;
   private nextBtn: HTMLButtonElement;
   private debugBtn: HTMLButtonElement;
+  private muteBtn: HTMLButtonElement;
+  private volumeSlider: HTMLInputElement;
+  private fullscreenBtn: HTMLButtonElement;
   private timeline: HTMLElement;
   private timelineProgress: HTMLElement;
   private frameInfo: HTMLElement;
@@ -29,6 +32,8 @@ class FLAViewerApp {
   private elementOrderSelect: HTMLSelectElement;
   private followCameraCheckbox: HTMLInputElement;
   private cameraLayerInfo: HTMLElement;
+  private videoControls: HTMLElement;
+  private audioControls: HTMLElement;
 
   constructor() {
     this.parser = new FLAParser();
@@ -44,6 +49,9 @@ class FLAViewerApp {
     this.prevBtn = document.getElementById('prev-btn') as HTMLButtonElement;
     this.nextBtn = document.getElementById('next-btn') as HTMLButtonElement;
     this.debugBtn = document.getElementById('debug-btn') as HTMLButtonElement;
+    this.muteBtn = document.getElementById('mute-btn') as HTMLButtonElement;
+    this.volumeSlider = document.getElementById('volume-slider') as HTMLInputElement;
+    this.fullscreenBtn = document.getElementById('fullscreen-btn') as HTMLButtonElement;
     this.timeline = document.getElementById('timeline')!;
     this.timelineProgress = document.getElementById('timeline-progress')!;
     this.frameInfo = document.getElementById('frame-info')!;
@@ -55,6 +63,8 @@ class FLAViewerApp {
     this.elementOrderSelect = document.getElementById('element-order-select') as HTMLSelectElement;
     this.followCameraCheckbox = document.getElementById('follow-camera-checkbox') as HTMLInputElement;
     this.cameraLayerInfo = document.getElementById('camera-layer-info')!;
+    this.videoControls = document.getElementById('video-controls')!;
+    this.audioControls = document.getElementById('audio-controls')!;
 
     this.setupEventListeners();
   }
@@ -92,6 +102,14 @@ class FLAViewerApp {
     this.prevBtn.addEventListener('click', () => this.player?.prevFrame());
     this.nextBtn.addEventListener('click', () => this.player?.nextFrame());
     this.debugBtn.addEventListener('click', () => this.toggleDebug());
+
+    // Audio controls
+    this.muteBtn.addEventListener('click', () => this.toggleMute());
+    this.volumeSlider.addEventListener('input', () => this.updateVolume());
+
+    // Fullscreen
+    this.fullscreenBtn.addEventListener('click', () => this.toggleFullscreen());
+    document.addEventListener('fullscreenchange', () => this.updateFullscreenButton());
 
     // Timeline scrubbing
     this.timeline.addEventListener('click', (e) => {
@@ -159,12 +177,76 @@ class FLAViewerApp {
         case 'D':
           this.toggleDebug();
           break;
+        case 'm':
+        case 'M':
+          this.toggleMute();
+          break;
+        case 'f':
+        case 'F':
+          this.toggleFullscreen();
+          break;
       }
     });
   }
 
   private debugMode: boolean = false;
   private hiddenLayers: Set<number> = new Set();
+  private isMuted: boolean = false;
+  private lastVolume: number = 100;
+
+  // Audio icons
+  private volumeIcon = '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
+  private mutedIcon = '<svg viewBox="0 0 24 24"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>';
+  private fullscreenIcon = '<svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>';
+  private exitFullscreenIcon = '<svg viewBox="0 0 24 24"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>';
+
+  private toggleMute(): void {
+    this.isMuted = !this.isMuted;
+    if (this.isMuted) {
+      this.lastVolume = parseInt(this.volumeSlider.value);
+      this.volumeSlider.value = '0';
+      this.muteBtn.classList.add('muted');
+    } else {
+      this.volumeSlider.value = String(this.lastVolume);
+      this.muteBtn.classList.remove('muted');
+    }
+    this.updateVolume();
+    this.updateMuteButton();
+  }
+
+  private updateMuteButton(): void {
+    this.muteBtn.innerHTML = this.isMuted ? this.mutedIcon : this.volumeIcon;
+  }
+
+  private updateVolume(): void {
+    const volume = parseInt(this.volumeSlider.value) / 100;
+    this.player?.setVolume(volume);
+
+    // Update muted state based on slider
+    if (volume === 0 && !this.isMuted) {
+      this.isMuted = true;
+      this.muteBtn.classList.add('muted');
+      this.updateMuteButton();
+    } else if (volume > 0 && this.isMuted) {
+      this.isMuted = false;
+      this.muteBtn.classList.remove('muted');
+      this.updateMuteButton();
+    }
+  }
+
+  private toggleFullscreen(): void {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      this.viewer.requestFullscreen();
+    }
+  }
+
+  private updateFullscreenButton(): void {
+    this.fullscreenBtn.innerHTML = document.fullscreenElement
+      ? this.exitFullscreenIcon
+      : this.fullscreenIcon;
+  }
 
   private toggleDebug(): void {
     if (!this.player) return;
@@ -211,11 +293,11 @@ class FLAViewerApp {
 
       div.innerHTML = `
         <input type="checkbox" ${this.hiddenLayers.has(i) ? '' : 'checked'} data-layer="${i}" ${!isRenderable ? 'disabled' : ''}>
-        <span class="layer-index">#${i}</span>
+        <span class="layer-index">${i}</span>
         <span class="layer-color" style="background: ${layer.color}"></span>
         <span class="layer-name">${layer.name}</span>
-        ${layer.parentLayerIndex !== undefined ? `<span class="layer-parent">(in ${layer.parentLayerIndex})</span>` : ''}
-        ${isRenderable ? `<span class="render-order-indicator">${orderNum}</span>` : ''}
+        ${layer.parentLayerIndex !== undefined ? `<span class="layer-parent">(${layer.parentLayerIndex})</span>` : ''}
+        ${isRenderable ? `<span class="render-order">${orderNum}</span>` : ''}
       `;
 
       const checkbox = div.querySelector('input') as HTMLInputElement;
@@ -250,6 +332,15 @@ class FLAViewerApp {
     }
   }
 
+  private hasLoadedAudio(doc: FLADocument): boolean {
+    for (const sound of doc.sounds.values()) {
+      if (sound.audioData) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private async loadFile(file: File): Promise<void> {
     if (!file.name.toLowerCase().endsWith('.fla')) {
       alert('Please select a valid FLA file');
@@ -258,7 +349,7 @@ class FLAViewerApp {
 
     try {
       // Show loading state
-      this.dropZone.style.display = 'none';
+      this.dropZone.classList.add('hidden');
       this.loading.classList.add('active');
       this.viewer.classList.remove('active');
 
@@ -272,17 +363,35 @@ class FLAViewerApp {
       this.player.onStateUpdate((state) => this.updateUI(state));
 
       // Update info panel
+      const totalFrames = this.player.getState().totalFrames;
       this.infoPanel.innerHTML = `
-        <strong>File:</strong> ${file.name} |
-        <strong>Size:</strong> ${doc.width}x${doc.height} |
-        <strong>FPS:</strong> ${doc.frameRate} |
-        <strong>Frames:</strong> ${this.player.getState().totalFrames} |
-        <strong>Symbols:</strong> ${doc.symbols.size}
+        <span><span class="label">File:</span> <span class="value">${file.name}</span></span>
+        <span><span class="label">Size:</span> <span class="value">${doc.width}x${doc.height}</span></span>
+        <span><span class="label">FPS:</span> <span class="value">${doc.frameRate}</span></span>
+        <span><span class="label">Frames:</span> <span class="value">${totalFrames}</span></span>
+        <span><span class="label">Symbols:</span> <span class="value">${doc.symbols.size}</span></span>
       `;
 
       // Show viewer
       this.loading.classList.remove('active');
       this.viewer.classList.add('active');
+
+      // Check if we have audio and multiple frames
+      const hasAudio = this.hasLoadedAudio(doc);
+      const hasMultipleFrames = totalFrames > 1;
+
+      // Show/hide controls based on content
+      if (hasMultipleFrames) {
+        this.videoControls.classList.remove('hidden');
+      } else {
+        this.videoControls.classList.add('hidden');
+      }
+
+      if (hasAudio && hasMultipleFrames) {
+        this.audioControls.classList.remove('hidden');
+      } else {
+        this.audioControls.classList.add('hidden');
+      }
 
       // Reset follow camera state for new file
       this.followCameraCheckbox.checked = false;
@@ -295,7 +404,7 @@ class FLAViewerApp {
       console.error('Failed to load FLA file:', error);
       alert('Failed to load FLA file: ' + (error as Error).message);
       this.loading.classList.remove('active');
-      this.dropZone.style.display = 'block';
+      this.dropZone.classList.remove('hidden');
     }
   }
 
@@ -310,12 +419,16 @@ class FLAViewerApp {
     }
   }
 
-  private updateUI(state: PlayerState): void {
-    // Update play button text
-    this.playBtn.textContent = state.playing ? 'Pause' : 'Play';
+  // SVG icons for play/pause
+  private playIcon = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+  private pauseIcon = '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
 
-    // Update frame info
-    this.frameInfo.textContent = `Frame ${state.currentFrame + 1}/${state.totalFrames}`;
+  private updateUI(state: PlayerState): void {
+    // Update play button icon
+    this.playBtn.innerHTML = state.playing ? this.pauseIcon : this.playIcon;
+
+    // Update frame info (timecode style)
+    this.frameInfo.innerHTML = `<span class="current">${state.currentFrame + 1}</span> / ${state.totalFrames}`;
 
     // Update timeline progress
     const progress = state.totalFrames > 1

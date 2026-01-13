@@ -23,8 +23,10 @@ export class FLAPlayer {
 
   // Audio playback
   private audioContext: AudioContext | null = null;
+  private gainNode: GainNode | null = null;
   private activeAudioSource: AudioBufferSourceNode | null = null;
   private streamSounds: StreamSound[] = [];
+  private volume: number = 1;
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new FLARenderer(canvas);
@@ -125,6 +127,9 @@ export class FLAPlayer {
     // Initialize AudioContext on first use (requires user interaction)
     if (!this.audioContext) {
       this.audioContext = new AudioContext();
+      this.gainNode = this.audioContext.createGain();
+      this.gainNode.gain.value = this.volume;
+      this.gainNode.connect(this.audioContext.destination);
     }
 
     // Resume context if suspended (autoplay policy)
@@ -165,10 +170,10 @@ export class FLAPlayer {
     // Don't play if offset is beyond the audio
     if (audioOffset >= audioBuffer.duration) return;
 
-    // Create source and play
+    // Create source and play through gain node
     const source = this.audioContext.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(this.audioContext.destination);
+    source.connect(this.gainNode!);
     this.activeAudioSource = source;
 
     source.start(0, audioOffset);
@@ -299,5 +304,16 @@ export class FLAPlayer {
   updateCanvasSize(): void {
     this.renderer.updateCanvasSize();
     this.render();
+  }
+
+  setVolume(volume: number): void {
+    this.volume = Math.max(0, Math.min(1, volume));
+    if (this.gainNode) {
+      this.gainNode.gain.value = this.volume;
+    }
+  }
+
+  getVolume(): number {
+    return this.volume;
   }
 }
