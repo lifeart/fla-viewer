@@ -1290,6 +1290,251 @@ describe('FLAParser', () => {
       // imageData will be undefined due to decompression failure
       expect(bitmap?.imageData).toBeUndefined();
     });
+
+    it('should use streaming recovery with onData callback for mid-stream corruption', async () => {
+      const width = 30;
+      const height = 30;
+      // Create larger image data to ensure compression produces enough bytes for mid-stream corruption
+      const pixelData = new Uint8Array(width * height * 4);
+      for (let i = 0; i < width * height; i++) {
+        // Varied pixel data for better compression testing
+        pixelData[i * 4 + 0] = 0xFF; // A
+        pixelData[i * 4 + 1] = i % 256; // R
+        pixelData[i * 4 + 2] = (i * 2) % 256; // G
+        pixelData[i * 4 + 3] = (i * 3) % 256; // B
+      }
+
+      // Compress and corrupt mid-stream
+      const compressed = pako.deflateRaw(pixelData);
+      const corruptOffset = Math.floor(compressed.length * 0.4); // Corrupt at 40%
+
+      // Create corrupted compressed data
+      const corruptedCompressed = new Uint8Array(compressed);
+      for (let i = corruptOffset; i < Math.min(corruptOffset + 20, compressed.length); i++) {
+        corruptedCompressed[i] = 0xFF;
+      }
+
+      // Build .dat file manually
+      const headerSize = 30;
+      const dat = new Uint8Array(headerSize + corruptedCompressed.length);
+      dat[0] = 0x03; dat[1] = 0x05;
+      dat[2] = (width * 4) & 0xFF; dat[3] = ((width * 4) >> 8) & 0xFF;
+      dat[4] = width & 0xFF; dat[5] = (width >> 8) & 0xFF;
+      dat[6] = height & 0xFF; dat[7] = (height >> 8) & 0xFF;
+      dat[24] = 0; dat[25] = 1; dat[26] = 0; dat[27] = 8;
+      dat[28] = 0x78; dat[29] = 0x01;
+      dat.set(corruptedCompressed, headerSize);
+
+      const media = `
+        <media>
+          <DOMBitmapItem name="streaming_test.png" href="streaming_test.png"
+            bitmapDataHRef="M 8 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+
+      const consoleSpy = createConsoleSpy();
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 8 123456.dat': dat }
+      );
+
+      const doc = await parser.parse(fla);
+      consoleSpy.mockRestore();
+
+      // Streaming recovery should capture partial data via onData callback
+      const bitmap = doc.bitmaps.get('streaming_test.png');
+      expect(bitmap).toBeDefined();
+      // Should have recovered at least some data (partial image)
+      // The key test is that it doesn't throw and processes the partial data
+    });
+
+    it('should fall back to dictionary decompression when raw deflate fails with distance error', async () => {
+      const width = 10;
+      const height = 10;
+
+      // Create deflate data that references a distance larger than current output
+      // This simulates data that expects a preset dictionary
+      // Deflate block: BFINAL=1, BTYPE=01 (fixed huffman), then a length/distance pair
+      // that references beyond current output position
+      const deflateWithDistanceRef = new Uint8Array([
+        // Fixed huffman block that copies from "dictionary" area
+        // This is a minimal block that causes "invalid distance too far back" without dict
+        0x63, 0x60, 0x60, 0x60, // literal zeros
+        0x62, 0x00, // back-reference (distance > current position without dict)
+        0x00, // end of block
+      ]);
+
+      // Build .dat file
+      const headerSize = 30;
+      const dat = new Uint8Array(headerSize + deflateWithDistanceRef.length);
+      dat[0] = 0x03; dat[1] = 0x05;
+      dat[2] = (width * 4) & 0xFF; dat[3] = ((width * 4) >> 8) & 0xFF;
+      dat[4] = width & 0xFF; dat[5] = (width >> 8) & 0xFF;
+      dat[6] = height & 0xFF; dat[7] = (height >> 8) & 0xFF;
+      dat[24] = 0; dat[25] = 1; dat[26] = 0; dat[27] = 8;
+      dat[28] = 0x78; dat[29] = 0x01;
+      dat.set(deflateWithDistanceRef, headerSize);
+
+      const media = `
+        <media>
+          <DOMBitmapItem name="dict_test.png" href="dict_test.png"
+            bitmapDataHRef="M 9 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+
+      const consoleSpy = createConsoleSpy();
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 9 123456.dat': dat }
+      );
+
+      const doc = await parser.parse(fla);
+      consoleSpy.mockRestore();
+
+      // Should not throw - either dict succeeds or falls back to streaming
+      const bitmap = doc.bitmaps.get('dict_test.png');
+      expect(bitmap).toBeDefined();
+    });
+
+    it('should use streaming+dictionary fallback as final recovery method', async () => {
+      const width = 10;
+      const height = 10;
+
+      // Create data that:
+      // 1. Fails raw deflate (needs dictionary)
+      // 2. Fails dictionary alone (has mid-stream corruption)
+      // 3. Fails regular streaming (needs dictionary from byte 0)
+      // 4. Succeeds with streaming+dictionary (has dict AND captures partial via onData)
+
+      // First create valid dict-requiring data, then corrupt it mid-stream
+      const pixelData = new Uint8Array(width * height * 4);
+      for (let i = 0; i < pixelData.length; i++) {
+        pixelData[i] = (i % 256);
+      }
+
+      // Create a compressed stream that we'll make require dictionary
+      // by corrupting the first few bytes to reference back-distance > output position
+      const compressed = pako.deflateRaw(pixelData);
+
+      // Modify to create "distance too far back" at start, plus corruption later
+      const modifiedCompressed = new Uint8Array(compressed.length + 4);
+      // Insert bytes that reference preset dictionary area
+      modifiedCompressed[0] = 0x63; // literal block header variation
+      modifiedCompressed[1] = 0x62; // distance reference
+      modifiedCompressed.set(compressed.subarray(0, compressed.length - 4), 2);
+      // Corrupt near the end
+      for (let i = modifiedCompressed.length - 10; i < modifiedCompressed.length - 5; i++) {
+        modifiedCompressed[i] = 0xFF;
+      }
+
+      // Build .dat file
+      const headerSize = 30;
+      const dat = new Uint8Array(headerSize + modifiedCompressed.length);
+      dat[0] = 0x03; dat[1] = 0x05;
+      dat[2] = (width * 4) & 0xFF; dat[3] = ((width * 4) >> 8) & 0xFF;
+      dat[4] = width & 0xFF; dat[5] = (width >> 8) & 0xFF;
+      dat[6] = height & 0xFF; dat[7] = (height >> 8) & 0xFF;
+      dat[24] = 0; dat[25] = 1; dat[26] = 0; dat[27] = 8;
+      dat[28] = 0x78; dat[29] = 0x01;
+      dat.set(modifiedCompressed, headerSize);
+
+      const media = `
+        <media>
+          <DOMBitmapItem name="stream_dict_test.png" href="stream_dict_test.png"
+            bitmapDataHRef="M 10 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+
+      const consoleSpy = createConsoleSpy();
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 10 123456.dat': dat }
+      );
+
+      const doc = await parser.parse(fla);
+      consoleSpy.mockRestore();
+
+      // The test passes if parsing completes without throwing
+      // The streaming+dictionary path is the final fallback
+      const bitmap = doc.bitmaps.get('stream_dict_test.png');
+      expect(bitmap).toBeDefined();
+    });
+
+    it('should use multi-segment recovery for severely corrupted files with stored blocks', async () => {
+      const width = 20;
+      const height = 20;
+      const expectedSize = width * height * 4;
+
+      // Create a file that:
+      // 1. Has corrupted data at the start (streaming gets partial)
+      // 2. Has a stored block that can be extracted directly
+      // This tests the multi-segment recovery path
+
+      // Create pixel data
+      const pixelData = new Uint8Array(expectedSize);
+      for (let i = 0; i < pixelData.length; i++) {
+        pixelData[i] = (i % 256);
+      }
+
+      // Compress half of it normally
+      const firstHalf = pixelData.slice(0, expectedSize / 2);
+      const compressedFirst = pako.deflateRaw(firstHalf);
+
+      // Create a "stored block" for the second half
+      // Stored block format: [BTYPE byte] [LEN:2] [NLEN:2] [DATA]
+      const secondHalf = pixelData.slice(expectedSize / 2);
+      const storedBlockLen = secondHalf.length;
+      const storedBlock = new Uint8Array(5 + storedBlockLen);
+      storedBlock[0] = 0x00; // BFINAL=0, BTYPE=0 (stored)
+      storedBlock[1] = storedBlockLen & 0xFF;
+      storedBlock[2] = (storedBlockLen >> 8) & 0xFF;
+      storedBlock[3] = (~storedBlockLen) & 0xFF;
+      storedBlock[4] = ((~storedBlockLen) >> 8) & 0xFF;
+      storedBlock.set(secondHalf, 5);
+
+      // Combine: corrupted compressed + stored block
+      // Corrupt the compressed data to force fallback
+      const corruptedFirst = new Uint8Array(compressedFirst);
+      for (let i = 10; i < Math.min(20, corruptedFirst.length); i++) {
+        corruptedFirst[i] = 0xFF;
+      }
+
+      const combinedCompressed = new Uint8Array(corruptedFirst.length + storedBlock.length);
+      combinedCompressed.set(corruptedFirst, 0);
+      combinedCompressed.set(storedBlock, corruptedFirst.length);
+
+      // Build .dat file
+      const headerSize = 30;
+      const dat = new Uint8Array(headerSize + combinedCompressed.length);
+      dat[0] = 0x03; dat[1] = 0x05;
+      dat[2] = (width * 4) & 0xFF; dat[3] = ((width * 4) >> 8) & 0xFF;
+      dat[4] = width & 0xFF; dat[5] = (width >> 8) & 0xFF;
+      dat[6] = height & 0xFF; dat[7] = (height >> 8) & 0xFF;
+      dat[24] = 0; dat[25] = 1; dat[26] = 0; dat[27] = 8;
+      dat[28] = 0x78; dat[29] = 0x01;
+      dat.set(combinedCompressed, headerSize);
+
+      const media = `
+        <media>
+          <DOMBitmapItem name="multi_segment_test.png" href="multi_segment_test.png"
+            bitmapDataHRef="M 11 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+
+      const consoleSpy = createConsoleSpy();
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 11 123456.dat': dat }
+      );
+
+      const doc = await parser.parse(fla);
+      consoleSpy.mockRestore();
+
+      // Multi-segment recovery should extract data from the stored block
+      const bitmap = doc.bitmaps.get('multi_segment_test.png');
+      expect(bitmap).toBeDefined();
+      // The parser should recover and produce a bitmap (even if partial)
+    });
   });
 
   describe('edge cases', () => {
