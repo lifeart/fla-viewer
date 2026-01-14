@@ -44,8 +44,9 @@ export interface Layer {
   outline: boolean; // Editor-only outline view (not rendered)
   transparent?: boolean; // Layer has transparency/onion-skin enabled
   alphaPercent?: number; // Layer alpha percentage (0-100)
-  layerType?: 'normal' | 'guide' | 'folder' | 'camera';
+  layerType?: 'normal' | 'guide' | 'folder' | 'camera' | 'mask' | 'masked';
   parentLayerIndex?: number;
+  maskLayerIndex?: number; // For masked layers, index of the mask layer
   frames: Frame[];
 }
 
@@ -58,6 +59,7 @@ export interface Frame {
   elements: DisplayElement[];
   tweens?: Tween[];
   sound?: FrameSound;
+  morphShape?: MorphShape; // For shape tweens
 }
 
 export interface FrameSound {
@@ -91,6 +93,7 @@ export interface SymbolInstance {
   loop: 'loop' | 'play once' | 'single frame';
   firstFrame?: number;
   colorTransform?: ColorTransform;
+  filters?: Filter[];
 }
 
 export interface VideoInstance {
@@ -114,6 +117,7 @@ export interface TextInstance {
   width: number;
   height: number;
   textRuns: TextRun[];
+  filters?: Filter[];
 }
 
 export interface TextRun {
@@ -206,4 +210,64 @@ export interface PlayerState {
   currentFrame: number;
   totalFrames: number;
   fps: number;
+}
+
+// Filters
+export interface BlurFilter {
+  type: 'blur';
+  blurX: number;
+  blurY: number;
+  quality?: number; // 1-3, defaults to 1
+}
+
+export interface GlowFilter {
+  type: 'glow';
+  blurX: number;
+  blurY: number;
+  color: string;
+  strength: number; // 0-1 (normalized from 0-255)
+  alpha?: number;
+  inner?: boolean;
+  knockout?: boolean;
+  quality?: number;
+}
+
+export interface DropShadowFilter {
+  type: 'dropShadow';
+  blurX: number;
+  blurY: number;
+  color: string;
+  strength: number; // 0-1 (normalized from 0-255)
+  alpha?: number;
+  distance: number;
+  angle: number; // in degrees
+  inner?: boolean;
+  knockout?: boolean;
+  hideObject?: boolean;
+  quality?: number;
+}
+
+export type Filter = BlurFilter | GlowFilter | DropShadowFilter;
+
+// Shape Tweens (MorphShape)
+export interface MorphCurve {
+  controlPointA: Point;
+  anchorPointA: Point;
+  controlPointB: Point;
+  anchorPointB: Point;
+  isLine: boolean;
+}
+
+export interface MorphSegment {
+  startPointA: Point;
+  startPointB: Point;
+  fillIndex1?: number;
+  fillIndex2?: number;
+  strokeIndex1?: number;
+  strokeIndex2?: number;
+  curves: MorphCurve[];
+}
+
+export interface MorphShape {
+  segments: MorphSegment[];
 }

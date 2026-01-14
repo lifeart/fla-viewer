@@ -35,6 +35,10 @@ A modern, lightweight web viewer for Adobe Animate/Flash Professional `.fla` fil
 | **Vector Shapes** | Solid fills, linear/radial gradients, strokes with caps/joins |
 | **Symbols** | Graphic, MovieClip, and Button symbols with unlimited nesting |
 | **Motion Tweens** | Smooth interpolated animations with easing functions |
+| **Shape Tweens** | Morph shape interpolation between keyframes |
+| **Filters** | Blur, glow, and drop shadow effects |
+| **Masks** | Layer masking with clip paths |
+| **Color Effects** | Alpha, brightness, tint, and color transforms |
 | **Bitmaps** | Full image rendering from embedded PNGs, JPGs, GIFs |
 | **Text Rendering** | Static/dynamic text with word wrap, alignment, Google Fonts |
 | **Audio Playback** | Stream sounds synced to timeline with volume control |
@@ -165,11 +169,14 @@ npm run build
 | DOMDynamicText | :white_check_mark: | Same as static |
 | DOMSoundItem | :white_check_mark: | Stream sync |
 | Motion Tweens | :white_check_mark: | Linear + eased |
+| Shape Tweens | :white_check_mark: | MorphShape interpolation |
+| Filters | :white_check_mark: | Blur, glow, drop shadow |
+| Masks | :white_check_mark: | Layer clip paths |
+| Color Effects | :white_check_mark: | Alpha, tint, brightness |
 | Camera Layer | :white_check_mark: | Auto-detect + follow |
 | DOMVideoInstance | :warning: | Placeholder only |
-| Shape Tweens | :x: | Not yet supported |
-| Masks | :x: | Not yet supported |
-| Filters | :x: | Not yet supported |
+| Bitmap Fills | :x: | Not yet supported |
+| Blend Modes | :x: | Not yet supported |
 | ActionScript | :x: | Not supported |
 
 ---
@@ -244,10 +251,10 @@ See [AGENTS.md](./AGENTS.md) for detailed format documentation.
 
 - Video elements show placeholder only (no FLV playback)
 - No bitmap fills in shapes (solid colors and gradients only)
-- No mask layers
-- No filters (drop shadow, blur, glow, etc.)
+- No blend modes (all layers render with normal blend)
 - No ActionScript execution
 - Fonts fall back to system fonts if not available in Google Fonts
+- Filter `knockout` and `inner` options are not fully supported
 
 ---
 
