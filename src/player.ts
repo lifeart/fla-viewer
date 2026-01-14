@@ -283,6 +283,11 @@ export class FLAPlayer {
     this.render();
   }
 
+  setHiddenElements(hiddenElements: Map<number, Set<number>>): void {
+    this.renderer.setHiddenElements(hiddenElements);
+    this.render();
+  }
+
   setLayerOrder(order: 'forward' | 'reverse'): void {
     this.renderer.setLayerOrder(order);
     this.render();

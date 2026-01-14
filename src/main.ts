@@ -1,7 +1,7 @@
 import { FLAParser } from './fla-parser';
 import { FLAPlayer } from './player';
 import { exportVideo, downloadBlob, isWebCodecsSupported } from './video-exporter';
-import type { PlayerState, FLADocument } from './types';
+import type { PlayerState, FLADocument, DisplayElement, Symbol } from './types';
 
 export class FLAViewerApp {
   private parser: FLAParser;
@@ -80,6 +80,7 @@ export class FLAViewerApp {
     this.exportProgressFill = document.getElementById('export-progress-fill')!;
     this.exportStatus = document.getElementById('export-status')!;
     this.exportCancelBtn = document.getElementById('export-cancel-btn') as HTMLButtonElement;
+    this.debugCloseBtn = document.getElementById('debug-close-btn') as HTMLButtonElement;
 
     this.setupEventListeners();
   }
@@ -117,6 +118,7 @@ export class FLAViewerApp {
     this.prevBtn.addEventListener('click', () => this.player?.prevFrame());
     this.nextBtn.addEventListener('click', () => this.player?.nextFrame());
     this.debugBtn.addEventListener('click', () => this.toggleDebug());
+    this.debugCloseBtn?.addEventListener('click', () => this.closeDebug());
 
     // Audio controls
     this.muteBtn.addEventListener('click', () => this.toggleMute());
@@ -210,6 +212,11 @@ export class FLAViewerApp {
 
   private debugMode: boolean = false;
   private hiddenLayers: Set<number> = new Set();
+  private hiddenElements: Map<number, Set<number>> = new Map(); // layerIndex -> Set of hidden element indices
+  private collapsedLayers: Set<number> = new Set();
+  private collapsedSymbols: Set<string> = new Set(); // Track collapsed symbols by path
+  private lastDebugFrame: number = -1; // Track frame for debug panel refresh
+  private debugCloseBtn: HTMLButtonElement;
   private isMuted: boolean = false;
   private lastVolume: number = 100;
 
@@ -274,17 +281,33 @@ export class FLAViewerApp {
   private toggleDebug(): void {
     if (!this.player) return;
 
-    this.debugMode = !this.debugMode;
-    if (this.debugMode) {
+    if (!this.debugMode) {
+      this.debugMode = true;
       this.player.enableDebugMode();
       this.debugBtn.classList.add('active');
       this.debugPanel.classList.add('active');
+      this.lastDebugFrame = this.player.getState().currentFrame;
       this.populateLayerList();
     } else {
-      this.player.disableDebugMode();
-      this.debugBtn.classList.remove('active');
-      this.debugPanel.classList.remove('active');
+      this.closeDebug();
     }
+  }
+
+  private closeDebug(): void {
+    if (!this.debugMode) return;
+    this.debugMode = false;
+    this.player?.disableDebugMode();
+    this.debugBtn.classList.remove('active');
+    this.debugPanel.classList.remove('active');
+  }
+
+  private findFrameAtIndex(frames: { index: number; duration: number; elements: DisplayElement[] }[], index: number) {
+    for (const frame of frames) {
+      if (index >= frame.index && index < frame.index + frame.duration) {
+        return frame;
+      }
+    }
+    return null;
   }
 
   private populateLayerList(): void {
@@ -292,6 +315,7 @@ export class FLAViewerApp {
 
     const layers = this.currentDoc.timelines[0].layers;
     const isReverse = this.layerOrderSelect.value === 'reverse';
+    const currentFrame = this.player?.getState().currentFrame ?? 0;
 
     this.layerList.innerHTML = '';
 
@@ -306,6 +330,9 @@ export class FLAViewerApp {
     let renderOrder = 1;
     for (const i of indices) {
       const layer = layers[i];
+      const layerContainer = document.createElement('div');
+      layerContainer.className = 'layer-container';
+
       const div = document.createElement('div');
       div.className = 'layer-item';
       if (layer.layerType === 'folder') div.className += ' folder';
@@ -314,7 +341,14 @@ export class FLAViewerApp {
       const isRenderable = layer.layerType !== 'guide' && layer.layerType !== 'folder';
       const orderNum = isRenderable ? renderOrder++ : '-';
 
+      // Get elements from the current frame for display
+      const frame = this.findFrameAtIndex(layer.frames, currentFrame);
+      const elements = frame?.elements || [];
+      const hasElements = elements.length > 0 && isRenderable;
+      const isCollapsed = this.collapsedLayers.has(i);
+
       div.innerHTML = `
+        <span class="layer-toggle ${isCollapsed ? 'collapsed' : ''} ${!hasElements ? 'no-children' : ''}">&#9660;</span>
         <input type="checkbox" ${this.hiddenLayers.has(i) ? '' : 'checked'} data-layer="${i}" ${!isRenderable ? 'disabled' : ''}>
         <span class="layer-index">${i}</span>
         <span class="layer-color" style="background: ${layer.color}"></span>
@@ -323,6 +357,7 @@ export class FLAViewerApp {
         ${isRenderable ? `<span class="render-order">${orderNum}</span>` : ''}
       `;
 
+      // Layer visibility checkbox
       const checkbox = div.querySelector('input') as HTMLInputElement;
       checkbox.addEventListener('change', () => {
         if (checkbox.checked) {
@@ -333,8 +368,186 @@ export class FLAViewerApp {
         this.player?.setHiddenLayers(this.hiddenLayers);
       });
 
-      this.layerList.appendChild(div);
+      // Toggle collapse/expand
+      const toggleBtn = div.querySelector('.layer-toggle') as HTMLElement;
+      if (hasElements) {
+        toggleBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (this.collapsedLayers.has(i)) {
+            this.collapsedLayers.delete(i);
+            toggleBtn.classList.remove('collapsed');
+            elementsContainer.classList.add('expanded');
+          } else {
+            this.collapsedLayers.add(i);
+            toggleBtn.classList.add('collapsed');
+            elementsContainer.classList.remove('expanded');
+          }
+        });
+      }
+
+      layerContainer.appendChild(div);
+
+      // Create elements container
+      const elementsContainer = document.createElement('div');
+      elementsContainer.className = `layer-elements ${!isCollapsed && hasElements ? 'expanded' : ''}`;
+
+      // Add element items
+      if (hasElements) {
+        for (let j = 0; j < elements.length; j++) {
+          const element = elements[j];
+          const elementContainer = this.createElementItem(element, i, j, `layer-${i}-el-${j}`);
+          elementsContainer.appendChild(elementContainer);
+        }
+      }
+
+      layerContainer.appendChild(elementsContainer);
+      this.layerList.appendChild(layerContainer);
     }
+  }
+
+  private createElementItem(
+    element: DisplayElement,
+    layerIndex: number,
+    elementIndex: number,
+    path: string,
+    depth: number = 0
+  ): HTMLElement {
+    const container = document.createElement('div');
+    container.className = 'element-container';
+
+    const elementDiv = document.createElement('div');
+    elementDiv.className = 'element-item';
+
+    // Generate element name based on type
+    let elementName = '';
+    let symbol: Symbol | undefined;
+    if (element.type === 'symbol') {
+      elementName = element.libraryItemName;
+      symbol = this.currentDoc?.symbols.get(element.libraryItemName);
+    } else if (element.type === 'text') {
+      const text = element.textRuns.map(r => r.characters).join('');
+      elementName = text.length > 20 ? text.substring(0, 20) + '...' : text;
+    } else if (element.type === 'bitmap') {
+      elementName = element.libraryItemName;
+    } else if (element.type === 'video') {
+      elementName = element.libraryItemName;
+    } else if (element.type === 'shape') {
+      elementName = `${element.fills.length}f/${element.strokes.length}s`;
+    }
+
+    // Check if this element is hidden (only for top-level elements)
+    const hiddenSet = this.hiddenElements.get(layerIndex);
+    const isHidden = depth === 0 ? (hiddenSet?.has(elementIndex) ?? false) : false;
+
+    // Check if symbol has content to expand
+    const hasSymbolContent = symbol && symbol.timeline.layers.length > 0;
+    const isCollapsed = this.collapsedSymbols.has(path);
+
+    // Build element HTML
+    const toggleHtml = hasSymbolContent
+      ? `<span class="element-toggle ${isCollapsed ? 'collapsed' : ''}">&#9660;</span>`
+      : `<span class="element-toggle no-children"></span>`;
+
+    const checkboxHtml = depth === 0
+      ? `<input type="checkbox" ${isHidden ? '' : 'checked'} data-layer="${layerIndex}" data-element="${elementIndex}">`
+      : '';
+
+    elementDiv.innerHTML = `
+      ${toggleHtml}
+      ${checkboxHtml}
+      <span class="element-id">#${elementIndex}</span>
+      <span class="element-type ${element.type}">${element.type}</span>
+      <span class="element-name" title="${elementName}">${elementName}</span>
+    `;
+
+    // Element visibility checkbox (only for top-level)
+    if (depth === 0) {
+      const elCheckbox = elementDiv.querySelector('input') as HTMLInputElement;
+      if (elCheckbox) {
+        elCheckbox.addEventListener('change', () => {
+          if (!this.hiddenElements.has(layerIndex)) {
+            this.hiddenElements.set(layerIndex, new Set());
+          }
+          const set = this.hiddenElements.get(layerIndex)!;
+          if (elCheckbox.checked) {
+            set.delete(elementIndex);
+          } else {
+            set.add(elementIndex);
+          }
+          this.player?.setHiddenElements(this.hiddenElements);
+        });
+      }
+    }
+
+    container.appendChild(elementDiv);
+
+    // Create symbol content container
+    if (hasSymbolContent && symbol) {
+      const symbolContent = document.createElement('div');
+      symbolContent.className = `symbol-content ${!isCollapsed ? 'expanded' : ''}`;
+
+      // Add symbol layers and their elements
+      const timeline = symbol.timeline;
+      for (let li = 0; li < timeline.layers.length; li++) {
+        const layer = timeline.layers[li];
+        const layerDiv = document.createElement('div');
+        layerDiv.className = 'symbol-layer';
+        layerDiv.innerHTML = `
+          <span class="sym-layer-color" style="background: ${layer.color}"></span>
+          <span class="sym-layer-name">${layer.name}</span>
+          <span class="sym-layer-info">(${layer.frames[0]?.elements.length || 0} el)</span>
+        `;
+        symbolContent.appendChild(layerDiv);
+
+        // Add elements from first frame
+        const frameElements = layer.frames[0]?.elements || [];
+        for (let ei = 0; ei < frameElements.length; ei++) {
+          const childElement = frameElements[ei];
+          const childPath = `${path}/${symbol.name}-L${li}-E${ei}`;
+          // Limit depth to prevent infinite recursion and performance issues
+          if (depth < 3) {
+            const childContainer = this.createElementItem(
+              childElement,
+              layerIndex,
+              elementIndex,
+              childPath,
+              depth + 1
+            );
+            symbolContent.appendChild(childContainer);
+          } else {
+            // Just show a summary for deep nesting
+            const summaryDiv = document.createElement('div');
+            summaryDiv.className = 'element-item';
+            summaryDiv.innerHTML = `
+              <span class="element-toggle no-children"></span>
+              <span class="element-id">#${ei}</span>
+              <span class="element-type ${childElement.type}">${childElement.type}</span>
+              <span class="element-name">...</span>
+            `;
+            symbolContent.appendChild(summaryDiv);
+          }
+        }
+      }
+
+      container.appendChild(symbolContent);
+
+      // Toggle collapse/expand for symbol
+      const toggleBtn = elementDiv.querySelector('.element-toggle') as HTMLElement;
+      toggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.collapsedSymbols.has(path)) {
+          this.collapsedSymbols.delete(path);
+          toggleBtn.classList.remove('collapsed');
+          symbolContent.classList.add('expanded');
+        } else {
+          this.collapsedSymbols.add(path);
+          toggleBtn.classList.add('collapsed');
+          symbolContent.classList.remove('expanded');
+        }
+      });
+    }
+
+    return container;
   }
 
   private updateCameraInfo(): void {
@@ -472,6 +685,12 @@ export class FLAViewerApp {
       ? (state.currentFrame / (state.totalFrames - 1)) * 100
       : 0;
     this.timelineProgress.style.width = `${progress}%`;
+
+    // Refresh debug panel when frame changes
+    if (this.debugMode && state.currentFrame !== this.lastDebugFrame) {
+      this.lastDebugFrame = state.currentFrame;
+      this.populateLayerList();
+    }
   }
 
   private async startExport(): Promise<void> {
