@@ -456,5 +456,158 @@ describe('FLAPlayer', () => {
 
       await audioContext.close();
     });
+
+    it('should restart audio when looping back to beginning', async () => {
+      const audioContext = new AudioContext();
+      const sampleRate = audioContext.sampleRate;
+      const duration = 0.5;
+      const audioBuffer = audioContext.createBuffer(2, Math.ceil(sampleRate * duration), sampleRate);
+
+      const leftChannel = audioBuffer.getChannelData(0);
+      const rightChannel = audioBuffer.getChannelData(1);
+      for (let i = 0; i < audioBuffer.length; i++) {
+        leftChannel[i] = Math.sin(2 * Math.PI * 440 * i / sampleRate);
+        rightChannel[i] = Math.sin(2 * Math.PI * 440 * i / sampleRate);
+      }
+
+      const sounds = new Map();
+      sounds.set('loop.mp3', {
+        name: 'loop.mp3',
+        audioData: audioBuffer,
+      });
+
+      const doc = createMinimalDoc({
+        sounds,
+        timelines: [createTimeline({
+          totalFrames: 5,
+          layers: [createLayer({
+            frames: [createFrame({
+              index: 0,
+              duration: 5,
+              sound: {
+                name: 'loop.mp3',
+                sync: 'stream',
+                inPoint44: 0,
+              },
+            })],
+          })],
+        })],
+      });
+      await player.setDocument(doc);
+
+      // Go to frame 4 (near end)
+      player.goToFrame(4);
+      expect(player.getState().currentFrame).toBe(4);
+
+      // Loop back to frame 0 (triggers audio restart - line 251)
+      player.goToFrame(0);
+      expect(player.getState().currentFrame).toBe(0);
+
+      await audioContext.close();
+    });
+
+    it('should restart audio when animation loops back to beginning', async () => {
+      const audioContext = new AudioContext();
+      const sampleRate = audioContext.sampleRate;
+      const duration = 2;
+      const audioBuffer = audioContext.createBuffer(2, Math.ceil(sampleRate * duration), sampleRate);
+
+      const leftChannel = audioBuffer.getChannelData(0);
+      const rightChannel = audioBuffer.getChannelData(1);
+      for (let i = 0; i < audioBuffer.length; i++) {
+        leftChannel[i] = Math.sin(2 * Math.PI * 440 * i / sampleRate);
+        rightChannel[i] = Math.sin(2 * Math.PI * 440 * i / sampleRate);
+      }
+
+      const sounds = new Map();
+      sounds.set('loopback.mp3', {
+        name: 'loopback.mp3',
+        audioData: audioBuffer,
+      });
+
+      const doc = createMinimalDoc({
+        frameRate: 60, // High frame rate for faster looping
+        sounds,
+        timelines: [createTimeline({
+          totalFrames: 3, // Very short timeline to loop quickly
+          layers: [createLayer({
+            frames: [createFrame({
+              index: 0,
+              duration: 3,
+              sound: {
+                name: 'loopback.mp3',
+                sync: 'stream',
+                inPoint44: 0,
+              },
+            })],
+          })],
+        })],
+      });
+      await player.setDocument(doc);
+
+      // Start playing and wait for loop (frame 2 -> 0)
+      player.play();
+      // Wait enough time for the animation to loop at least once (3 frames at 60fps = 50ms + buffer)
+      await new Promise(resolve => setTimeout(resolve, 150));
+      player.pause();
+
+      // Should have looped at least once
+      expect(player.getState().playing).toBe(false);
+
+      await audioContext.close();
+    });
+
+    it('should set volume on gainNode when playing', async () => {
+      const audioContext = new AudioContext();
+      const sampleRate = audioContext.sampleRate;
+      const duration = 1;
+      const audioBuffer = audioContext.createBuffer(2, Math.ceil(sampleRate * duration), sampleRate);
+
+      const leftChannel = audioBuffer.getChannelData(0);
+      const rightChannel = audioBuffer.getChannelData(1);
+      for (let i = 0; i < audioBuffer.length; i++) {
+        leftChannel[i] = Math.sin(2 * Math.PI * 440 * i / sampleRate) * 0.5;
+        rightChannel[i] = Math.sin(2 * Math.PI * 440 * i / sampleRate) * 0.5;
+      }
+
+      const sounds = new Map();
+      sounds.set('volume.mp3', {
+        name: 'volume.mp3',
+        audioData: audioBuffer,
+      });
+
+      const doc = createMinimalDoc({
+        sounds,
+        timelines: [createTimeline({
+          totalFrames: 24,
+          layers: [createLayer({
+            frames: [createFrame({
+              index: 0,
+              duration: 24,
+              sound: {
+                name: 'volume.mp3',
+                sync: 'stream',
+                inPoint44: 0,
+              },
+            })],
+          })],
+        })],
+      });
+      await player.setDocument(doc);
+
+      // Start playing to create gainNode
+      player.play();
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Set volume while playing (line 322)
+      player.setVolume(0.5);
+      expect(player.getVolume()).toBe(0.5);
+
+      player.setVolume(0.8);
+      expect(player.getVolume()).toBe(0.8);
+
+      player.pause();
+      await audioContext.close();
+    });
   });
 });

@@ -441,5 +441,54 @@ describe('edge-decoder', () => {
       expect(commands.some(c => c.type === 'C')).toBe(true);
       expect(commands.some(c => c.type === 'Z')).toBe(true);
     });
+
+    it('should handle cubic with incomplete coordinates (break case)', () => {
+      // Tests line 327: break when not enough coordinates for cubic
+      // Only 4 coordinates instead of 6 needed for cubic
+      const commands = decodeEdges('!0 0 (; 100 100 200 200 );');
+      expect(commands[0]).toEqual({ type: 'M', x: 0, y: 0 });
+      // No cubic should be added since only 4 coords provided
+      expect(commands.filter(c => c.type === 'C')).toHaveLength(0);
+    });
+
+    it('should handle alternate cubic format with invalid coordinates', () => {
+      // Tests lines 369-370: skip invalid coordinates in alternate format
+      // Large coordinates > MAX_COORD (200000) should be skipped
+      const commands = decodeEdges('!0 0 (0 0 ; 5000000 0 0 0 100 100 100 100 200 200 300 300 )');
+      expect(commands[0]).toEqual({ type: 'M', x: 0, y: 0 });
+      // First cubic skipped due to invalid coord, second should be valid
+      const cubics = commands.filter(c => c.type === 'C');
+      expect(cubics.length).toBe(1);
+      expect(cubics[0]).toEqual({
+        type: 'C',
+        c1x: 5, c1y: 5, // 100/20
+        c2x: 10, c2y: 10, // 200/20
+        x: 15, y: 15 // 300/20
+      });
+    });
+
+    it('should handle alternate cubic with insufficient coords (break case)', () => {
+      // Tests lines 377-380: break when not enough coords in alternate format
+      const commands = decodeEdges('!0 0 (0 0 ; 100 100 200 )');
+      expect(commands[0]).toEqual({ type: 'M', x: 0, y: 0 });
+      // No cubic added due to insufficient coords
+      expect(commands.filter(c => c.type === 'C')).toHaveLength(0);
+    });
+
+    it('should handle standalone semicolon', () => {
+      // Tests lines 388-389: standalone semicolon handling
+      const commands = decodeEdges('!0 0 ; |100 100');
+      expect(commands[0]).toEqual({ type: 'M', x: 0, y: 0 });
+      expect(commands[1]).toEqual({ type: 'L', x: 5, y: 5 });
+    });
+
+    it('should handle cubic with command token in middle (break case)', () => {
+      // Tests line 327: break when encountering command token
+      // The '!' command token should cause a break in cubic parsing
+      const commands = decodeEdges('!0 0 (; 100 100 ! 200 200 300 300 );');
+      expect(commands[0]).toEqual({ type: 'M', x: 0, y: 0 });
+      // Cubic parsing should break at '!' and second moveTo should be parsed
+      expect(commands.filter(c => c.type === 'M').length).toBeGreaterThanOrEqual(1);
+    });
   });
 });

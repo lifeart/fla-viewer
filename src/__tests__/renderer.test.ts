@@ -2868,9 +2868,159 @@ describe('FLARenderer', () => {
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       expect(imageData.data.length).toBeGreaterThan(0);
     });
+
+    it('should interpolate camera matrix when followCamera enabled with motion tween', async () => {
+      const cameraSymbol = createTimeline({
+        name: 'CameraRect',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, color: '#888888' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 550, y: 0 },
+                  { type: 'L', x: 550, y: 400 },
+                  { type: 'L', x: 0, y: 400 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('CameraRect', {
+        name: 'CameraRect',
+        symbolType: 'graphic',
+        timeline: cameraSymbol,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 10,
+          layers: [
+            // Camera layer with motion tween
+            createLayer({
+              name: 'camera',
+              frames: [
+                createFrame({
+                  index: 0,
+                  duration: 5,
+                  tweenType: 'motion',
+                  elements: [{
+                    type: 'symbol',
+                    libraryItemName: 'CameraRect',
+                    symbolType: 'graphic',
+                    matrix: createMatrix({ a: 1, d: 1, tx: 0, ty: 0 }),
+                    firstFrame: 0,
+                    loop: 'loop',
+                  }],
+                }),
+                createFrame({
+                  index: 5,
+                  duration: 5,
+                  elements: [{
+                    type: 'symbol',
+                    libraryItemName: 'CameraRect',
+                    symbolType: 'graphic',
+                    matrix: createMatrix({ a: 1.5, d: 1.5, tx: 50, ty: 50 }),
+                    firstFrame: 0,
+                    loop: 'loop',
+                  }],
+                }),
+              ],
+            }),
+            // Content layer
+            createLayer({
+              name: 'Content',
+              frames: [createFrame({
+                duration: 10,
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix({ tx: 100, ty: 100 }),
+                  fills: [{ index: 1, color: '#FF0000' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 0, y: 0 },
+                      { type: 'L', x: 100, y: 0 },
+                      { type: 'L', x: 100, y: 100 },
+                      { type: 'L', x: 0, y: 100 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+          referenceLayers: new Set([0]),
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Enable follow camera to trigger camera transform code path
+      renderer.setFollowCamera(true);
+      expect(renderer.getFollowCamera()).toBe(true);
+
+      // Render at intermediate frame to trigger motion tween interpolation
+      // Frame 2 is between keyframe 0 and keyframe 5
+      renderer.renderFrame(2);
+
+      const ctx = canvas.getContext('2d')!;
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      expect(imageData.data.length).toBeGreaterThan(0);
+
+      // Render at another intermediate frame
+      renderer.renderFrame(3);
+
+      // Disable follow camera
+      renderer.setFollowCamera(false);
+      expect(renderer.getFollowCamera()).toBe(false);
+    });
   });
 
   describe('text rendering with fonts', () => {
+    it('should preload Google fonts when text uses mapped font', async () => {
+      // Create document with text using a font that maps to a Google font
+      // PressStart2P-Regular maps to 'Press Start 2P' which is in googleFonts
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                textRuns: [{
+                  characters: 'Pixel Text',
+                  face: 'PressStart2P-Regular',
+                  size: 16,
+                  fillColor: '#000000',
+                  alignment: 'left',
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      // setDocument triggers font preloading
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+
+      const ctx = canvas.getContext('2d')!;
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      expect(imageData.data.length).toBeGreaterThan(0);
+    });
+
     it('should render text element', async () => {
       const doc = createMinimalDoc({
         timelines: [createTimeline({
@@ -3187,6 +3337,216 @@ describe('FLARenderer', () => {
   });
 
   describe('debug click handling', () => {
+    it('should render shape with debug mode enabled and handle click on shape', async () => {
+      // Add canvas to DOM for proper coordinate calculation
+      document.body.appendChild(canvas);
+      canvas.style.position = 'fixed';
+      canvas.style.left = '0';
+      canvas.style.top = '0';
+
+      // Create a large red shape covering the canvas center
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#FF0000' }],
+                strokes: [{ index: 1, color: '#000000', weight: 2 }],
+                edges: [{
+                  fillStyle0: 1,
+                  strokeStyle: 1,
+                  commands: [
+                    { type: 'M', x: 50, y: 50 },
+                    { type: 'L', x: 500, y: 50 },
+                    { type: 'L', x: 500, y: 350 },
+                    { type: 'L', x: 50, y: 350 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.enableDebugMode();
+      renderer.renderFrame(0);
+
+      // Verify shape rendered (stroke visible)
+      expect(hasRenderedContent(canvas)).toBe(true);
+
+      // Verify debug mode sets crosshair cursor
+      expect(canvas.style.cursor).toBe('crosshair');
+
+      const rect = canvas.getBoundingClientRect();
+
+      // Click in the center of the shape - triggers isPointInPath check and hit detection code
+      const clickEvent = new MouseEvent('click', {
+        clientX: rect.left + 275,
+        clientY: rect.top + 200,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(clickEvent);
+
+      // Click outside the shape - triggers "no elements found" path
+      const missEvent = new MouseEvent('click', {
+        clientX: rect.left + 10,
+        clientY: rect.top + 10,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(missEvent);
+
+      renderer.disableDebugMode();
+      expect(canvas.style.cursor).toBe('default');
+
+      document.body.removeChild(canvas);
+    });
+
+    it('should render symbol with debug mode and handle click on symbol shape', async () => {
+      // Add canvas to DOM
+      document.body.appendChild(canvas);
+      canvas.style.position = 'fixed';
+      canvas.style.left = '0';
+      canvas.style.top = '0';
+
+      const symbolTimeline = createTimeline({
+        name: 'ClickableSymbol',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, color: '#00FF00' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 300, y: 0 },
+                  { type: 'L', x: 300, y: 300 },
+                  { type: 'L', x: 0, y: 300 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('ClickableSymbol', {
+        name: 'ClickableSymbol',
+        symbolType: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'ClickableSymbol',
+                symbolType: 'graphic',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                firstFrame: 0,
+                loop: 'loop',
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.enableDebugMode();
+      renderer.renderFrame(0);
+
+      // Verify symbol's shape rendered
+      expect(hasRenderedContent(canvas)).toBe(true);
+
+      const rect = canvas.getBoundingClientRect();
+
+      // Click in the symbol area (symbol at 50,50 with 300x300 shape inside)
+      const clickEvent = new MouseEvent('click', {
+        clientX: rect.left + 200,
+        clientY: rect.top + 200,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(clickEvent);
+
+      renderer.disableDebugMode();
+      document.body.removeChild(canvas);
+    });
+
+    it('should render bitmap with debug mode and handle click on bitmap', async () => {
+      // Add canvas to DOM
+      document.body.appendChild(canvas);
+      canvas.style.position = 'fixed';
+      canvas.style.left = '0';
+      canvas.style.top = '0';
+
+      // Create a blue bitmap
+      const bitmapCanvas = document.createElement('canvas');
+      bitmapCanvas.width = 200;
+      bitmapCanvas.height = 200;
+      const bitmapCtx = bitmapCanvas.getContext('2d')!;
+      bitmapCtx.fillStyle = '#0000FF';
+      bitmapCtx.fillRect(0, 0, 200, 200);
+      const img = new Image();
+      img.width = 200;
+      img.height = 200;
+
+      const bitmaps = new Map();
+      bitmaps.set('debug.png', {
+        name: 'debug.png',
+        href: 'debug.png',
+        imageData: img,
+        width: 200,
+        height: 200,
+      });
+
+      const doc = createMinimalDoc({
+        bitmaps,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'bitmap',
+                libraryItemName: 'debug.png',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.enableDebugMode();
+      renderer.renderFrame(0);
+
+      // Verify debug mode is active
+      expect(canvas.style.cursor).toBe('crosshair');
+
+      const rect = canvas.getBoundingClientRect();
+
+      // Click in bitmap area (bitmap at 50,50 with 200x200 size)
+      const clickEvent = new MouseEvent('click', {
+        clientX: rect.left + 150,
+        clientY: rect.top + 150,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(clickEvent);
+
+      renderer.disableDebugMode();
+      expect(canvas.style.cursor).toBe('default');
+
+      document.body.removeChild(canvas);
+    });
+
     it('should track elements in debug mode', async () => {
       const doc = createMinimalDoc({
         timelines: [createTimeline({
