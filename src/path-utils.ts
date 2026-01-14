@@ -66,5 +66,8 @@ export function hasWithNormalizedPath<T>(map: Map<string, T>, key: string): bool
  */
 export function getFilename(path: string): string {
   const normalized = normalizePath(path);
-  return normalized.split('/').pop() || normalized;
+  const parts = normalized.split('/');
+  const filename = parts.pop();
+  // Return empty string if path ends with separator or pop returns undefined
+  return filename !== undefined ? filename : '';
 }

@@ -3,7 +3,7 @@ import { FLAPlayer } from './player';
 import { exportVideo, downloadBlob, isWebCodecsSupported } from './video-exporter';
 import type { PlayerState, FLADocument } from './types';
 
-class FLAViewerApp {
+export class FLAViewerApp {
   private parser: FLAParser;
   private player: FLAPlayer | null = null;
   private currentDoc: FLADocument | null = null;

@@ -200,8 +200,13 @@ function tokenize(edgeStr: string): string[] {
   return tokens;
 }
 
-// Debug flag - set to true to enable logging
-const DEBUG_EDGES = false;
+// Debug flag - set to true to enable logging, or use setEdgeDecoderDebug(true)
+let DEBUG_EDGES = false;
+
+// Export setter for testing
+export function setEdgeDecoderDebug(value: boolean): void {
+  DEBUG_EDGES = value;
+}
 
 export function decodeEdges(edgeStr: string): PathCommand[] {
   const commands: PathCommand[] = [];

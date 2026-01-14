@@ -30,8 +30,13 @@ import {
   getFilename
 } from './path-utils';
 
-// Debug flag - enabled via ?debug=true URL parameter
-const DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
+// Debug flag - enabled via ?debug=true URL parameter or setParserDebug(true)
+let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
+
+// Export setter for testing
+export function setParserDebug(value: boolean): void {
+  DEBUG = value;
+}
 
 export type ProgressCallback = (message: string) => void;
 
