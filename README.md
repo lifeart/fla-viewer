@@ -39,6 +39,7 @@ A modern, lightweight web viewer for Adobe Animate/Flash Professional `.fla` fil
 | **Filters** | Blur, glow, and drop shadow effects |
 | **Masks** | Layer masking with clip paths |
 | **Color Effects** | Alpha, brightness, tint, and color transforms |
+| **Blend Modes** | Multiply, screen, overlay, add, difference, and more |
 | **Bitmaps** | Full image rendering from embedded PNGs, JPGs, GIFs |
 | **Text Rendering** | Static/dynamic text with word wrap, alignment, Google Fonts |
 | **Audio Playback** | Stream sounds synced to timeline with volume control |
@@ -173,10 +174,10 @@ npm run build
 | Filters | :white_check_mark: | Blur, glow, drop shadow |
 | Masks | :white_check_mark: | Layer clip paths |
 | Color Effects | :white_check_mark: | Alpha, tint, brightness |
+| Blend Modes | :white_check_mark: | Multiply, screen, overlay, etc. |
 | Camera Layer | :white_check_mark: | Auto-detect + follow |
 | DOMVideoInstance | :warning: | Placeholder only |
 | Bitmap Fills | :x: | Not yet supported |
-| Blend Modes | :x: | Not yet supported |
 | ActionScript | :x: | Not supported |
 
 ---
