@@ -19,7 +19,8 @@ import type {
   Filter,
   MorphShape,
   MorphSegment,
-  ColorTransform
+  ColorTransform,
+  BlendMode
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
 
@@ -1296,6 +1297,12 @@ export class FLARenderer {
       this.applyColorTransform(ctx, instance.colorTransform);
     }
 
+    // Apply blend mode if present
+    const savedCompositeOp = ctx.globalCompositeOperation;
+    if (instance.blendMode) {
+      ctx.globalCompositeOperation = this.mapBlendMode(instance.blendMode);
+    }
+
     // Track symbol path for debugging
     if (this.debugMode) {
       this.debugSymbolPath.push(instance.libraryItemName);
@@ -1355,6 +1362,11 @@ export class FLARenderer {
     if (instance.colorTransform) {
       ctx.globalAlpha = savedAlpha;
       ctx.filter = savedFilter;
+    }
+
+    // Restore blend mode
+    if (instance.blendMode) {
+      ctx.globalCompositeOperation = savedCompositeOp;
     }
 
     ctx.restore();
@@ -2335,6 +2347,28 @@ export class FLARenderer {
     ctx.shadowBlur = 0;
     ctx.shadowOffsetX = 0;
     ctx.shadowOffsetY = 0;
+  }
+
+  // Map Flash blend mode to Canvas globalCompositeOperation
+  private mapBlendMode(blendMode: BlendMode): GlobalCompositeOperation {
+    const blendModeMap: Record<BlendMode, GlobalCompositeOperation> = {
+      'normal': 'source-over',
+      'layer': 'source-over',      // Layer behaves like normal in most cases
+      'multiply': 'multiply',
+      'screen': 'screen',
+      'overlay': 'overlay',
+      'darken': 'darken',
+      'lighten': 'lighten',
+      'hardlight': 'hard-light',
+      'add': 'lighter',            // 'add' in Flash is 'lighter' in Canvas
+      'subtract': 'difference',    // Approximate - Canvas doesn't have true subtract
+      'difference': 'difference',
+      'invert': 'exclusion',       // Approximate - Canvas doesn't have true invert
+      'alpha': 'source-over',      // Alpha mode is complex, fallback to normal
+      'erase': 'destination-out',  // Erases underlying content
+    };
+
+    return blendModeMap[blendMode] || 'source-over';
   }
 
   // Apply color transform to context

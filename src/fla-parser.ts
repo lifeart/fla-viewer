@@ -25,7 +25,8 @@ import type {
   MorphShape,
   MorphSegment,
   MorphCurve,
-  ColorTransform
+  ColorTransform,
+  BlendMode
 } from './types';
 import { decodeEdges } from './edge-decoder';
 import {
@@ -718,6 +719,10 @@ export class FLAParser {
     // Parse color transform
     const colorTransform = this.parseColorTransform(el);
 
+    // Parse blend mode
+    const blendModeAttr = el.getAttribute('blendMode');
+    const blendMode = this.parseBlendMode(blendModeAttr);
+
     return {
       type: 'symbol',
       libraryItemName,
@@ -728,7 +733,8 @@ export class FLAParser {
       loop,
       firstFrame: firstFrame ? parseInt(firstFrame) : undefined,
       ...(filters.length > 0 && { filters }),
-      ...(colorTransform && { colorTransform })
+      ...(colorTransform && { colorTransform }),
+      ...(blendMode && { blendMode })
     };
   }
 
@@ -1336,6 +1342,33 @@ export class FLAParser {
     }
 
     return hasValues ? transform : undefined;
+  }
+
+  // Parse blend mode from attribute value
+  private parseBlendMode(value: string | null): BlendMode | undefined {
+    if (!value || value === 'normal') return undefined;
+
+    // Map Flash blend mode names to our BlendMode type
+    const blendModeMap: Record<string, BlendMode> = {
+      'normal': 'normal',
+      'layer': 'layer',
+      'multiply': 'multiply',
+      'screen': 'screen',
+      'overlay': 'overlay',
+      'darken': 'darken',
+      'lighten': 'lighten',
+      'hardlight': 'hardlight',
+      'hard light': 'hardlight',  // Alternative format
+      'add': 'add',
+      'subtract': 'subtract',
+      'difference': 'difference',
+      'invert': 'invert',
+      'alpha': 'alpha',
+      'erase': 'erase',
+    };
+
+    const normalized = value.toLowerCase();
+    return blendModeMap[normalized] || undefined;
   }
 
   // Parse MorphShape for shape tweens

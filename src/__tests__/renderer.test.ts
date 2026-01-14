@@ -6842,6 +6842,535 @@ describe('FLARenderer', () => {
     });
   });
 
+  describe('blend modes', () => {
+    it('should render symbol with multiply blend mode', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Symbol 1',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [createRectangleShape({ width: 50, height: 50, color: '#FF0000' })],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Symbol 1', {
+        name: 'Symbol 1',
+        type: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              frames: [createFrame({
+                elements: [createRectangleShape({ x: 0, y: 0, width: 200, height: 200, color: '#00FF00' })],
+              })],
+            }),
+            createLayer({
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Symbol 1',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 50, ty: 50 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  blendMode: 'multiply',
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render symbol with screen blend mode', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Symbol 1',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [createRectangleShape({ width: 50, height: 50, color: '#0000FF' })],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Symbol 1', {
+        name: 'Symbol 1',
+        type: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              frames: [createFrame({
+                elements: [createRectangleShape({ x: 0, y: 0, width: 200, height: 200, color: '#FF0000' })],
+              })],
+            }),
+            createLayer({
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Symbol 1',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 50, ty: 50 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  blendMode: 'screen',
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render symbol with overlay blend mode', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Symbol 1',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [createRectangleShape({ width: 50, height: 50, color: '#FFFFFF' })],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Symbol 1', {
+        name: 'Symbol 1',
+        type: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              frames: [createFrame({
+                elements: [createRectangleShape({ x: 0, y: 0, width: 200, height: 200, color: '#808080' })],
+              })],
+            }),
+            createLayer({
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Symbol 1',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 50, ty: 50 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  blendMode: 'overlay',
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render symbol with add blend mode', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Symbol 1',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [createRectangleShape({ width: 50, height: 50, color: '#FF0000' })],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Symbol 1', {
+        name: 'Symbol 1',
+        type: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              frames: [createFrame({
+                elements: [createRectangleShape({ x: 0, y: 0, width: 200, height: 200, color: '#00FF00' })],
+              })],
+            }),
+            createLayer({
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Symbol 1',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 50, ty: 50 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  blendMode: 'add',
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render symbol with difference blend mode', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Symbol 1',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [createRectangleShape({ width: 50, height: 50, color: '#FFFFFF' })],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Symbol 1', {
+        name: 'Symbol 1',
+        type: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              frames: [createFrame({
+                elements: [createRectangleShape({ x: 0, y: 0, width: 200, height: 200, color: '#FF00FF' })],
+              })],
+            }),
+            createLayer({
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Symbol 1',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 50, ty: 50 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  blendMode: 'difference',
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render symbol with darken blend mode', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Symbol 1',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [createRectangleShape({ width: 50, height: 50, color: '#888888' })],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Symbol 1', {
+        name: 'Symbol 1',
+        type: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              frames: [createFrame({
+                elements: [createRectangleShape({ x: 0, y: 0, width: 200, height: 200, color: '#AAAAAA' })],
+              })],
+            }),
+            createLayer({
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Symbol 1',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 50, ty: 50 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  blendMode: 'darken',
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render symbol with lighten blend mode', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Symbol 1',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [createRectangleShape({ width: 50, height: 50, color: '#CCCCCC' })],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Symbol 1', {
+        name: 'Symbol 1',
+        type: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              frames: [createFrame({
+                elements: [createRectangleShape({ x: 0, y: 0, width: 200, height: 200, color: '#444444' })],
+              })],
+            }),
+            createLayer({
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Symbol 1',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 50, ty: 50 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  blendMode: 'lighten',
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render symbol with erase blend mode', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Symbol 1',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [createRectangleShape({ width: 30, height: 30, color: '#000000' })],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Symbol 1', {
+        name: 'Symbol 1',
+        type: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              frames: [createFrame({
+                elements: [createRectangleShape({ x: 0, y: 0, width: 200, height: 200, color: '#FF0000' })],
+              })],
+            }),
+            createLayer({
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Symbol 1',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 85, ty: 85 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  blendMode: 'erase',
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render symbol with hardlight blend mode', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Symbol 1',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [createRectangleShape({ width: 50, height: 50, color: '#FF8000' })],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Symbol 1', {
+        name: 'Symbol 1',
+        type: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              frames: [createFrame({
+                elements: [createRectangleShape({ x: 0, y: 0, width: 200, height: 200, color: '#0080FF' })],
+              })],
+            }),
+            createLayer({
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Symbol 1',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 50, ty: 50 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  blendMode: 'hardlight',
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should combine blend mode with color transform', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Symbol 1',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [createRectangleShape({ width: 50, height: 50, color: '#FF0000' })],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Symbol 1', {
+        name: 'Symbol 1',
+        type: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              frames: [createFrame({
+                elements: [createRectangleShape({ x: 0, y: 0, width: 200, height: 200, color: '#00FF00' })],
+              })],
+            }),
+            createLayer({
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Symbol 1',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 50, ty: 50 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  blendMode: 'multiply',
+                  colorTransform: {
+                    alphaMultiplier: 0.7,
+                  },
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should combine blend mode with filter', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Symbol 1',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [createRectangleShape({ width: 50, height: 50, color: '#0000FF' })],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Symbol 1', {
+        name: 'Symbol 1',
+        type: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              frames: [createFrame({
+                elements: [createRectangleShape({ x: 0, y: 0, width: 200, height: 200, color: '#FFFF00' })],
+              })],
+            }),
+            createLayer({
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Symbol 1',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 50, ty: 50 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  blendMode: 'screen',
+                  filters: [{
+                    type: 'glow',
+                    blurX: 5,
+                    blurY: 5,
+                    color: '#FFFFFF',
+                    strength: 0.5,
+                  }],
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+  });
+
   describe('color transforms', () => {
     it('should render symbol with alpha color transform', async () => {
       const symbolTimeline = createTimeline({

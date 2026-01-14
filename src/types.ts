@@ -83,6 +83,23 @@ export interface Point {
 
 export type DisplayElement = SymbolInstance | Shape | VideoInstance | BitmapInstance | TextInstance;
 
+// Flash/Animate blend modes
+export type BlendMode =
+  | 'normal'
+  | 'layer'
+  | 'multiply'
+  | 'screen'
+  | 'overlay'
+  | 'darken'
+  | 'lighten'
+  | 'hardlight'
+  | 'add'
+  | 'subtract'
+  | 'difference'
+  | 'invert'
+  | 'alpha'
+  | 'erase';
+
 export interface SymbolInstance {
   type: 'symbol';
   libraryItemName: string;
@@ -94,6 +111,7 @@ export interface SymbolInstance {
   firstFrame?: number;
   colorTransform?: ColorTransform;
   filters?: Filter[];
+  blendMode?: BlendMode;
 }
 
 export interface VideoInstance {
