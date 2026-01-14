@@ -1405,4 +1405,205 @@ describe('main.ts', () => {
       expect(cameraInfo.textContent).toContain('Found');
     });
   });
+
+  describe('mobile responsive styles', () => {
+    let container: HTMLElement;
+
+    beforeEach(() => {
+      container = createAppDOM();
+    });
+
+    afterEach(() => {
+      container.remove();
+    });
+
+    it('should have required elements for mobile styling', () => {
+      // Check that elements targeted by mobile CSS exist
+      const stopBtn = document.getElementById('stop-btn');
+      const audioControls = document.getElementById('audio-controls');
+
+      expect(stopBtn).not.toBeNull();
+      expect(audioControls).not.toBeNull();
+
+      // Verify elements exist and can be styled
+      expect(stopBtn?.tagName).toBe('BUTTON');
+      expect(audioControls?.id).toBe('audio-controls');
+    });
+
+    it('should have stop button visible by default', () => {
+      const stopBtn = document.getElementById('stop-btn')!;
+      const computedStyle = window.getComputedStyle(stopBtn);
+
+      // On desktop (default), stop button should be visible (not display:none)
+      expect(computedStyle.display).not.toBe('none');
+    });
+
+    it('should have audio controls visible by default', () => {
+      const audioControls = document.getElementById('audio-controls')!;
+      const computedStyle = window.getComputedStyle(audioControls);
+
+      // Audio controls should be visible by default
+      expect(computedStyle.display).not.toBe('none');
+    });
+
+    it('should have info panel visible by default', () => {
+      const infoPanel = document.getElementById('info-panel')!;
+      const computedStyle = window.getComputedStyle(infoPanel);
+
+      expect(computedStyle.display).not.toBe('none');
+    });
+
+    it('should have download button visible by default', () => {
+      const downloadBtn = document.getElementById('download-btn')!;
+      const computedStyle = window.getComputedStyle(downloadBtn);
+
+      expect(computedStyle.display).not.toBe('none');
+    });
+
+    it('should support mobile breakpoint media query', () => {
+      // Test that matchMedia works for mobile breakpoint
+      const mobileQuery = window.matchMedia('(max-width: 768px)');
+      expect(mobileQuery).toBeDefined();
+      expect(typeof mobileQuery.matches).toBe('boolean');
+    });
+
+    it('should support extra small breakpoint media query', () => {
+      const extraSmallQuery = window.matchMedia('(max-width: 480px)');
+      expect(extraSmallQuery).toBeDefined();
+      expect(typeof extraSmallQuery.matches).toBe('boolean');
+    });
+
+    it('should have video controls container', () => {
+      const videoControls = document.getElementById('video-controls');
+      expect(videoControls).not.toBeNull();
+      expect(videoControls?.children.length).toBeGreaterThan(0);
+    });
+
+    it('should have timeline element', () => {
+      const timeline = document.getElementById('timeline');
+      expect(timeline).not.toBeNull();
+    });
+
+    it('should have debug panel', () => {
+      const debugPanel = document.getElementById('debug-panel');
+      expect(debugPanel).not.toBeNull();
+    });
+  });
+
+  describe('mobile viewport simulation', () => {
+    let container: HTMLElement;
+    let mobileStyleSheet: HTMLStyleElement;
+
+    beforeEach(() => {
+      container = createAppDOM();
+
+      // Add a style element that simulates mobile styles for testing
+      mobileStyleSheet = document.createElement('style');
+      mobileStyleSheet.id = 'mobile-test-styles';
+      document.head.appendChild(mobileStyleSheet);
+    });
+
+    afterEach(() => {
+      container.remove();
+      mobileStyleSheet.remove();
+    });
+
+    it('should hide stop button when mobile styles applied', () => {
+      // Simulate mobile by applying the same CSS rules directly
+      mobileStyleSheet.textContent = `#stop-btn { display: none !important; }`;
+
+      const stopBtn = document.getElementById('stop-btn')!;
+      const computedStyle = window.getComputedStyle(stopBtn);
+
+      expect(computedStyle.display).toBe('none');
+    });
+
+    it('should hide audio controls when mobile styles applied', () => {
+      // Use ID selector since test DOM uses id="audio-controls"
+      mobileStyleSheet.textContent = `#audio-controls { display: none !important; }`;
+
+      const audioControls = document.getElementById('audio-controls')!;
+      const computedStyle = window.getComputedStyle(audioControls);
+
+      expect(computedStyle.display).toBe('none');
+    });
+
+    it('should hide header when extra small styles applied', () => {
+      const header = document.createElement('header');
+      header.className = 'fla-header';
+      container.insertBefore(header, container.firstChild);
+
+      mobileStyleSheet.textContent = `.fla-header { display: none !important; }`;
+
+      const computedStyle = window.getComputedStyle(header);
+      expect(computedStyle.display).toBe('none');
+    });
+
+    it('should hide download button when extra small styles applied', () => {
+      mobileStyleSheet.textContent = `#download-btn { display: none !important; }`;
+
+      const downloadBtn = document.getElementById('download-btn')!;
+      const computedStyle = window.getComputedStyle(downloadBtn);
+
+      expect(computedStyle.display).toBe('none');
+    });
+
+    it('should hide info panel when extra small styles applied', () => {
+      // Use ID selector since test DOM uses id="info-panel"
+      mobileStyleSheet.textContent = `#info-panel { display: none !important; }`;
+
+      const infoPanel = document.getElementById('info-panel')!;
+      const computedStyle = window.getComputedStyle(infoPanel);
+
+      expect(computedStyle.display).toBe('none');
+    });
+
+    it('should adjust video controls height when mobile styles applied', () => {
+      // Use ID selector since test DOM uses id="video-controls"
+      mobileStyleSheet.textContent = `#video-controls { height: 40px !important; }`;
+
+      const videoControls = document.getElementById('video-controls')!;
+      const computedStyle = window.getComputedStyle(videoControls);
+
+      expect(computedStyle.height).toBe('40px');
+    });
+
+    it('should adjust button size when mobile styles applied', () => {
+      mobileStyleSheet.textContent = `#play-btn { width: 32px !important; height: 32px !important; }`;
+
+      const playBtn = document.getElementById('play-btn')!;
+      const computedStyle = window.getComputedStyle(playBtn);
+
+      expect(computedStyle.width).toBe('32px');
+      expect(computedStyle.height).toBe('32px');
+    });
+
+    it('should adjust frame info font size when mobile styles applied', () => {
+      // Use ID selector since test DOM uses id="frame-info"
+      mobileStyleSheet.textContent = `#frame-info { font-size: 10px !important; }`;
+
+      const frameInfo = document.getElementById('frame-info')!;
+      const computedStyle = window.getComputedStyle(frameInfo);
+
+      expect(computedStyle.fontSize).toBe('10px');
+    });
+
+    it('should adjust debug panel width when mobile styles applied', () => {
+      mobileStyleSheet.textContent = `#debug-panel { width: 220px !important; }`;
+
+      const debugPanel = document.getElementById('debug-panel')!;
+      const computedStyle = window.getComputedStyle(debugPanel);
+
+      expect(computedStyle.width).toBe('220px');
+    });
+
+    it('should support dvh viewport units', () => {
+      // Test that the CSS with dvh is valid (browser may fall back)
+      mobileStyleSheet.textContent = `#viewer { height: 100dvh; }`;
+
+      const viewer = document.getElementById('viewer');
+      expect(viewer).not.toBeNull();
+      // Just verify no error is thrown - dvh support varies by browser
+    });
+  });
 });

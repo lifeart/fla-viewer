@@ -347,45 +347,60 @@ Decodes to:
   - Parses bitmap dimensions and references
   - Infrastructure for future BitmapFill support
 
+- [x] **Shape Tweening**: MorphShape interpolation between keyframes
+  - Parses `tweenType="shape"` frames with MorphShape data
+  - Interpolates MorphSegment paths (startPointA/B, controlPointA/B, anchorPointA/B)
+  - Supports both line and curve segments
+  - Uses fill/stroke indices from segments
+
+- [x] **Mask Layers**: Layer masking with clip paths
+  - Parses `layerType="mask"` and `layerType="masked"` attributes
+  - Applies clipping paths from mask layer shapes
+  - Supports animated masks via `maskLayerIndex` tracking
+  - Groups masked layers with their mask for proper rendering order
+
+- [x] **Filters**: Visual effects (blur, glow, drop shadow)
+  - Parses `<filters>` element on symbol instances and text
+  - BlurFilter: CSS blur via `ctx.filter`
+  - GlowFilter: Shadow-based glow effect with strength/color
+  - DropShadowFilter: Offset shadows with angle/distance
+  - Supports quality levels and alpha values
+
+- [x] **Color Transforms**: Symbol instance color effects
+  - Alpha multiplier/offset
+  - RGB multipliers/offsets (redMultiplier, greenMultiplier, blueMultiplier)
+  - Tint and brightness via CSS filter approximation
+  - Parses `<color><Color .../></color>` element
+
+- [x] **Blend Modes**: Layer and symbol blend modes
+  - Parses `blendMode` attribute on symbol instances
+  - Maps Flash blend modes to Canvas `globalCompositeOperation`
+  - Supports: normal, multiply, screen, overlay, darken, lighten, hardlight, add, subtract, difference, invert, alpha, erase
+
+- [x] **Bitmap Fills**: Shape fills with bitmap patterns
+  - Parses `<BitmapFill bitmapPath="...">` in FillStyle elements
+  - Applies bitmap as repeating pattern via `createPattern()`
+  - Supports matrix transform for position/scale
+  - Case-insensitive bitmap lookup in library
+
+- [x] **Video Items**: Enhanced video placeholder with metadata
+  - Parses `<DOMVideoItem>` from media section
+  - Stores video metadata: name, fps, duration, dimensions, videoType
+  - Displays metadata on video placeholders (name, resolution, fps, duration)
+  - VideoItem type added to FLADocument
+
 ---
 
 ## Remaining TODOs
 
-### High Priority
+### Completed (Previously Listed as TODO)
 
-- [ ] **Shape Tweening**: Implement shape morphing between keyframes
-  - Parse `tweenType="shape"` frames
-  - Interpolate edge paths between shapes
-  - Handle fill color transitions
-
-- [ ] **Gradient Fills**: Proper gradient rendering
-  - Linear gradients with matrix transform
-  - Radial gradients with focal point
-  - Spread modes (pad, reflect, repeat)
-
-- [ ] **Bitmap Fills**: Support bitmap/image fills
-  - Parse bitmap references from media
-  - Apply bitmap as fill pattern with transform
+- [x] **Gradient Fills**: Gradient rendering with matrix transforms
+  - Linear gradients with matrix transform via `createLinearGradient()`
+  - Radial gradients with focal point via `createRadialGradient()`
+  - Proper coordinate mapping from Flash gradient space (-819.2 to 819.2)
 
 ### Medium Priority
-
-- [ ] **Mask Layers**: Implement layer masking
-  - Parse `layerType="mask"` and `layerType="masked"`
-  - Apply clipping paths from mask layer shapes
-  - Support animated masks
-
-- [ ] **Color Transforms**: Symbol instance color effects
-  - Alpha multiplier/offset
-  - RGB multipliers/offsets
-  - Tint and brightness
-
-- [ ] **Blend Modes**: Layer and symbol blend modes
-  - Normal, multiply, screen, overlay, etc.
-  - Parse `blendMode` attribute
-
-- [ ] **Filters**: Drop shadow, blur, glow effects
-  - Parse `<filters>` element
-  - Implement using Canvas filters or manual rendering
 
 - [ ] **9-Slice Scaling**: Support for scalable symbols
   - Parse scale9Grid attribute
@@ -393,10 +408,11 @@ Decodes to:
 
 ### Lower Priority
 
-- [ ] **Text Fields**: Static and dynamic text
+- [x] **Text Fields**: Static and dynamic text
   - Parse `<DOMStaticText>` and `<DOMDynamicText>`
   - Font rendering with proper styling
   - Text transforms and effects
+  - Word wrap, alignment, line spacing
 
 - [ ] **Buttons**: Interactive button symbols
   - Up, Over, Down, Hit states
@@ -410,9 +426,10 @@ Decodes to:
   - Parse frame labels for navigation
   - Scene support
 
-- [ ] **Sound**: Audio playback
+- [x] **Sound**: Audio playback
   - Parse audio references from media
   - Sync sound to timeline (event, stream, start, stop)
+  - In/out points, loop count support
 
 - [x] **Video**: Embedded video support (placeholder rendering)
   - Parse `<DOMVideoItem>` and `<DOMVideoInstance>` elements
@@ -518,10 +535,18 @@ Decodes to:
 | SolidStroke | `scaleMode` | Stroke scale mode |
 | DashedStroke | `scaleMode` | Dashed stroke scale mode |
 | DOMBitmapInstance | all | Bitmap instances (not in samples) |
-| BitmapFill | all | Bitmap fills (not in samples) |
-| filters | all | Filter effects (drop shadow, blur, etc.) |
-| blendMode | all | Blend modes |
-| Color (transform) | `alphaMultiplier`, offsets | Color transform (partial support) |
+
+### Now Implemented
+
+| Element | Attribute | Status |
+|---------|-----------|--------|
+| filters | BlurFilter, GlowFilter, DropShadowFilter | ✓ Implemented |
+| blendMode | normal, multiply, screen, overlay, etc. | ✓ Implemented |
+| Color (transform) | alphaMultiplier, RGB multipliers/offsets | ✓ Implemented |
+| MorphShape | shape tweening via MorphSegments | ✓ Implemented |
+| layerType | mask, masked | ✓ Implemented |
+| BitmapFill | bitmapPath, matrix transform | ✓ Implemented |
+| DOMVideoItem | name, fps, duration, videoType, dimensions | ✓ Implemented |
 
 ---
 

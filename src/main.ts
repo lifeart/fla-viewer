@@ -255,9 +255,13 @@ export class FLAViewerApp {
 
   private toggleFullscreen(): void {
     if (document.fullscreenElement) {
-      document.exitFullscreen();
+      document.exitFullscreen().catch(() => {
+        // Ignore fullscreen exit errors (e.g., no user gesture in tests)
+      });
     } else {
-      this.viewer.requestFullscreen();
+      this.viewer.requestFullscreen().catch(() => {
+        // Ignore fullscreen request errors (e.g., no user gesture in tests)
+      });
     }
   }
 

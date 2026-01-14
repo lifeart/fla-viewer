@@ -15,7 +15,12 @@ import type {
   Edge,
   Tween,
   Point,
-  PathCommand
+  PathCommand,
+  Filter,
+  MorphShape,
+  MorphSegment,
+  ColorTransform,
+  BlendMode
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
 
@@ -710,6 +715,18 @@ export class FLARenderer {
       ? [...Array(timeline.layers.length).keys()].reverse()
       : [...Array(timeline.layers.length).keys()];
 
+    // Track which layers are masked and their mask layer index
+    const maskedLayers = new Map<number, number>(); // masked layer index -> mask layer index
+    for (let i = 0; i < timeline.layers.length; i++) {
+      const layer = timeline.layers[i];
+      if (layer.maskLayerIndex !== undefined) {
+        maskedLayers.set(i, layer.maskLayerIndex);
+      }
+    }
+
+    // Track which masked layers have been rendered (so we don't render them twice)
+    const renderedMasked = new Set<number>();
+
     for (const i of indices) {
       // Skip specified layer (camera layer)
       if (i === skipLayerIndex) continue;
@@ -720,6 +737,9 @@ export class FLARenderer {
       // Skip reference layers
       if (timeline.referenceLayers.has(i)) continue;
 
+      // Skip if already rendered as part of a mask group
+      if (renderedMasked.has(i)) continue;
+
       const layer = timeline.layers[i];
       const layerTypeLower = (layer.layerType as string)?.toLowerCase() || '';
       if (layer.layerType === 'guide' || layerTypeLower === 'guide' ||
@@ -727,8 +747,92 @@ export class FLARenderer {
         continue;
       }
 
+      // Check if this is a mask layer
+      if (layer.layerType === 'mask' || layerTypeLower === 'mask') {
+        // Find all layers masked by this layer
+        const maskedByThis: number[] = [];
+        for (const [maskedIdx, maskIdx] of maskedLayers) {
+          if (maskIdx === i) {
+            maskedByThis.push(maskedIdx);
+            renderedMasked.add(maskedIdx);
+          }
+        }
+
+        if (maskedByThis.length > 0) {
+          // Render mask layer with clipping
+          this.renderMaskGroup(timeline, frameIndex, depth, i, maskedByThis);
+        }
+        continue; // Don't render mask layer normally
+      }
+
+      // Skip masked layers - they'll be rendered as part of their mask group
+      if (maskedLayers.has(i)) {
+        continue;
+      }
+
       this.renderLayer(layer, frameIndex, depth);
     }
+  }
+
+  // Render a mask layer and its masked children
+  private renderMaskGroup(
+    timeline: Timeline,
+    frameIndex: number,
+    depth: number,
+    maskLayerIndex: number,
+    maskedLayerIndices: number[]
+  ): void {
+    const ctx = this.ctx;
+    const maskLayer = timeline.layers[maskLayerIndex];
+
+    // Find the frame at the current index for the mask layer
+    const maskFrame = this.findFrameAtIndex(maskLayer.frames, frameIndex);
+    if (!maskFrame || maskFrame.elements.length === 0) {
+      // No mask content, just render masked layers normally
+      for (const maskedIdx of maskedLayerIndices) {
+        const maskedLayer = timeline.layers[maskedIdx];
+        if (maskedLayer) {
+          this.renderLayer(maskedLayer, frameIndex, depth);
+        }
+      }
+      return;
+    }
+
+    ctx.save();
+
+    // Create clip path from mask layer content
+    ctx.beginPath();
+    for (const element of maskFrame.elements) {
+      if (element.type === 'shape') {
+        // Apply shape's matrix
+        ctx.save();
+        this.applyMatrix(element.matrix);
+
+        // Add shape edges to clip path
+        const cached = this.getOrComputeShapePaths(element);
+        for (const [, path] of cached.fillPaths) {
+          ctx.clip(path, 'nonzero');
+        }
+
+        ctx.restore();
+      } else if (element.type === 'symbol') {
+        // For symbol masks, we need to render the symbol's shapes as clip paths
+        // This is a simplified version - complex symbol masks may need more work
+        const path = new Path2D();
+        path.rect(-10000, -10000, 20000, 20000); // Fallback full rect
+        ctx.clip(path);
+      }
+    }
+
+    // Render masked layers within the clip
+    for (const maskedIdx of maskedLayerIndices) {
+      const maskedLayer = timeline.layers[maskedIdx];
+      if (maskedLayer) {
+        this.renderLayer(maskedLayer, frameIndex, depth);
+      }
+    }
+
+    ctx.restore();
   }
 
   private renderTimeline(timeline: Timeline, frameIndex: number, depth: number = 0): void {
@@ -768,6 +872,18 @@ export class FLARenderer {
       ? [...Array(timeline.layers.length).keys()].reverse()  // [len-1, len-2, ..., 0]
       : [...Array(timeline.layers.length).keys()];           // [0, 1, ..., len-1]
 
+    // Track which layers are masked and their mask layer index
+    const maskedLayers = new Map<number, number>(); // masked layer index -> mask layer index
+    for (let i = 0; i < timeline.layers.length; i++) {
+      const layer = timeline.layers[i];
+      if (layer.maskLayerIndex !== undefined) {
+        maskedLayers.set(i, layer.maskLayerIndex);
+      }
+    }
+
+    // Track which masked layers have been rendered
+    const renderedMasked = new Set<number>();
+
     for (const i of indices) {
       const layer = timeline.layers[i];
 
@@ -787,12 +903,40 @@ export class FLARenderer {
         continue;
       }
 
+      // Skip if already rendered as part of a mask group
+      if (renderedMasked.has(i)) {
+        continue;
+      }
+
       // Also skip guide/folder layers that might not have been detected
       const layerTypeLower = (layer.layerType as string)?.toLowerCase() || '';
       const isGuideLayer = layer.layerType === 'guide' || layerTypeLower === 'guide';
       const isFolderLayer = layer.layerType === 'folder' || layerTypeLower === 'folder';
 
       if (isGuideLayer || isFolderLayer) {
+        continue;
+      }
+
+      // Check if this is a mask layer
+      if (layer.layerType === 'mask' || layerTypeLower === 'mask') {
+        // Find all layers masked by this layer
+        const maskedByThis: number[] = [];
+        for (const [maskedIdx, maskIdx] of maskedLayers) {
+          if (maskIdx === i) {
+            maskedByThis.push(maskedIdx);
+            renderedMasked.add(maskedIdx);
+          }
+        }
+
+        if (maskedByThis.length > 0) {
+          // Render mask layer with clipping
+          this.renderMaskGroup(timeline, frameIndex, depth, i, maskedByThis);
+        }
+        continue; // Don't render mask layer normally
+      }
+
+      // Skip masked layers - they'll be rendered as part of their mask group
+      if (maskedLayers.has(i)) {
         continue;
       }
 
@@ -928,7 +1072,22 @@ export class FLARenderer {
 
     for (const elementIndex of elementIndices) {
       const element = frame.elements[elementIndex];
-      if (frame.tweenType === 'motion' && nextKeyframe && nextKeyframe.elements.length > 0) {
+
+      // Handle shape tweens with morphShape
+      if (frame.tweenType === 'shape' && frame.morphShape && element.type === 'shape') {
+        // Calculate interpolation progress for shape tween
+        const progress = nextKeyframe
+          ? this.calculateTweenProgress(
+              frameIndex,
+              frame,
+              nextKeyframe,
+              frame.acceleration,
+              frame.tweens
+            )
+          : 0;
+
+        this.renderMorphShape(frame.morphShape, element, progress, depth);
+      } else if (frame.tweenType === 'motion' && nextKeyframe && nextKeyframe.elements.length > 0) {
         // Calculate interpolation progress
         const progress = this.calculateTweenProgress(
           frameIndex,
@@ -1122,9 +1281,27 @@ export class FLARenderer {
       return;
     }
 
-
     const ctx = this.ctx;
     ctx.save();
+
+    // Apply filters if present
+    const hasFilters = instance.filters && instance.filters.length > 0;
+    if (hasFilters) {
+      this.applyFilters(ctx, instance.filters!);
+    }
+
+    // Apply color transform if present
+    const savedAlpha = ctx.globalAlpha;
+    const savedFilter = ctx.filter;
+    if (instance.colorTransform) {
+      this.applyColorTransform(ctx, instance.colorTransform);
+    }
+
+    // Apply blend mode if present
+    const savedCompositeOp = ctx.globalCompositeOperation;
+    if (instance.blendMode) {
+      ctx.globalCompositeOperation = this.mapBlendMode(instance.blendMode);
+    }
 
     // Track symbol path for debugging
     if (this.debugMode) {
@@ -1176,6 +1353,22 @@ export class FLARenderer {
       this.debugSymbolPath.pop();
     }
 
+    // Clear filters if applied
+    if (hasFilters) {
+      this.clearFilters(ctx);
+    }
+
+    // Restore color transform state
+    if (instance.colorTransform) {
+      ctx.globalAlpha = savedAlpha;
+      ctx.filter = savedFilter;
+    }
+
+    // Restore blend mode
+    if (instance.blendMode) {
+      ctx.globalCompositeOperation = savedCompositeOp;
+    }
+
     ctx.restore();
   }
 
@@ -1221,6 +1414,40 @@ export class FLARenderer {
     ctx.lineTo(centerX + size, centerY);
     ctx.closePath();
     ctx.fill();
+
+    // Draw video name and metadata if space permits
+    if (video.width > 100 && video.height > 60) {
+      ctx.fillStyle = '#AAAAAA';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+
+      // Show video name
+      const displayName = video.libraryItemName.length > 30
+        ? video.libraryItemName.substring(0, 27) + '...'
+        : video.libraryItemName;
+      ctx.fillText(displayName, centerX, 8);
+
+      // Show video info from metadata if available
+      if (this.doc) {
+        const videoItem = this.doc.videos.get(video.libraryItemName);
+        if (videoItem) {
+          const info: string[] = [];
+          if (videoItem.width && videoItem.height) {
+            info.push(`${videoItem.width}×${videoItem.height}`);
+          }
+          if (videoItem.fps) {
+            info.push(`${videoItem.fps}fps`);
+          }
+          if (videoItem.duration) {
+            info.push(`${videoItem.duration.toFixed(1)}s`);
+          }
+          if (info.length > 0) {
+            ctx.fillText(info.join(' • '), centerX, video.height - 20);
+          }
+        }
+      }
+    }
 
     ctx.restore();
   }
@@ -1275,6 +1502,12 @@ export class FLARenderer {
   private renderTextInstance(text: TextInstance, depth: number = 0): void {
     const ctx = this.ctx;
     ctx.save();
+
+    // Apply filters if present
+    const hasFilters = text.filters && text.filters.length > 0;
+    if (hasFilters) {
+      this.applyFilters(ctx, text.filters!);
+    }
 
     // Apply transformation
     this.applyMatrix(text.matrix);
@@ -1339,6 +1572,11 @@ export class FLARenderer {
           yOffset += lineHeight;
         }
       }
+    }
+
+    // Clear filters if applied
+    if (hasFilters) {
+      this.clearFilters(ctx);
     }
 
     ctx.restore();
@@ -1973,7 +2211,7 @@ export class FLARenderer {
     }
   }
 
-  private getFillStyle(fill: FillStyle): string | CanvasGradient {
+  private getFillStyle(fill: FillStyle): string | CanvasGradient | CanvasPattern {
     if (fill.type === 'solid' && fill.color) {
       if (fill.alpha !== undefined && fill.alpha < 1) {
         return this.colorWithAlpha(fill.color, fill.alpha);
@@ -1990,7 +2228,52 @@ export class FLARenderer {
       return this.createRadialGradient(fill);
     }
 
+    // Handle bitmap fills
+    if (fill.type === 'bitmap' && fill.bitmapPath) {
+      return this.createBitmapPattern(fill);
+    }
+
     return '#000000';
+  }
+
+  private createBitmapPattern(fill: FillStyle): CanvasPattern | string {
+    if (!this.doc || !fill.bitmapPath) {
+      return '#808080'; // Gray fallback for missing bitmap
+    }
+
+    // Look up bitmap by path in the document's bitmaps
+    const bitmapItem = this.doc.bitmaps.get(fill.bitmapPath);
+    if (!bitmapItem || !bitmapItem.imageData) {
+      // Try case-insensitive lookup
+      for (const [key, item] of this.doc.bitmaps) {
+        if (key.toLowerCase() === fill.bitmapPath.toLowerCase() && item.imageData) {
+          return this.createPatternFromBitmap(item.imageData, fill.matrix);
+        }
+      }
+      return '#808080'; // Gray fallback for missing bitmap
+    }
+
+    return this.createPatternFromBitmap(bitmapItem.imageData, fill.matrix);
+  }
+
+  private createPatternFromBitmap(image: HTMLImageElement, matrix?: Matrix): CanvasPattern | string {
+    const pattern = this.ctx.createPattern(image, 'repeat');
+    if (!pattern) {
+      return '#808080';
+    }
+
+    // Apply the bitmap matrix transform
+    if (matrix) {
+      // Flash bitmap fills use a matrix to position and scale the bitmap
+      // The matrix transforms from bitmap space to shape-local space
+      pattern.setTransform(new DOMMatrix([
+        matrix.a, matrix.b,
+        matrix.c, matrix.d,
+        matrix.tx, matrix.ty
+      ]));
+    }
+
+    return pattern;
   }
 
   private createLinearGradient(fill: FillStyle): CanvasGradient | string {
@@ -2098,5 +2381,229 @@ export class FLARenderer {
 
   private applyMatrix(matrix: Matrix): void {
     this.ctx.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.tx, matrix.ty);
+  }
+
+  // Apply filters using Canvas 2D shadow and filter API
+  private applyFilters(ctx: CanvasRenderingContext2D, filters: Filter[]): void {
+    // Combine multiple blur filters
+    let totalBlurX = 0;
+    let totalBlurY = 0;
+
+    for (const filter of filters) {
+      switch (filter.type) {
+        case 'blur':
+          totalBlurX += filter.blurX;
+          totalBlurY += filter.blurY;
+          break;
+        case 'glow':
+          // Use shadow for glow effect
+          ctx.shadowColor = this.colorWithAlpha(filter.color, filter.alpha ?? 1);
+          ctx.shadowBlur = Math.max(filter.blurX, filter.blurY) * (filter.strength ?? 1);
+          ctx.shadowOffsetX = 0;
+          ctx.shadowOffsetY = 0;
+          break;
+        case 'dropShadow':
+          const angle = (filter.angle || 45) * Math.PI / 180;
+          ctx.shadowColor = this.colorWithAlpha(filter.color, filter.alpha ?? 1);
+          ctx.shadowBlur = Math.max(filter.blurX, filter.blurY) * (filter.strength ?? 1);
+          ctx.shadowOffsetX = Math.cos(angle) * filter.distance;
+          ctx.shadowOffsetY = Math.sin(angle) * filter.distance;
+          break;
+      }
+    }
+
+    // Apply combined blur using CSS filter
+    if (totalBlurX > 0 || totalBlurY > 0) {
+      const avgBlur = (totalBlurX + totalBlurY) / 2;
+      ctx.filter = `blur(${avgBlur}px)`;
+    }
+  }
+
+  // Clear all filter effects
+  private clearFilters(ctx: CanvasRenderingContext2D): void {
+    ctx.filter = 'none';
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+  }
+
+  // Map Flash blend mode to Canvas globalCompositeOperation
+  private mapBlendMode(blendMode: BlendMode): GlobalCompositeOperation {
+    const blendModeMap: Record<BlendMode, GlobalCompositeOperation> = {
+      'normal': 'source-over',
+      'layer': 'source-over',      // Layer behaves like normal in most cases
+      'multiply': 'multiply',
+      'screen': 'screen',
+      'overlay': 'overlay',
+      'darken': 'darken',
+      'lighten': 'lighten',
+      'hardlight': 'hard-light',
+      'add': 'lighter',            // 'add' in Flash is 'lighter' in Canvas
+      'subtract': 'difference',    // Approximate - Canvas doesn't have true subtract
+      'difference': 'difference',
+      'invert': 'exclusion',       // Approximate - Canvas doesn't have true invert
+      'alpha': 'source-over',      // Alpha mode is complex, fallback to normal
+      'erase': 'destination-out',  // Erases underlying content
+    };
+
+    return blendModeMap[blendMode] || 'source-over';
+  }
+
+  // Apply color transform to context
+  private applyColorTransform(ctx: CanvasRenderingContext2D, transform: ColorTransform): void {
+    // Apply alpha multiplier
+    if (transform.alphaMultiplier !== undefined) {
+      ctx.globalAlpha *= transform.alphaMultiplier;
+    }
+
+    // Build CSS filter string for color transforms
+    const filters: string[] = [];
+
+    // Calculate brightness adjustment from color multipliers
+    // Average of RGB multipliers gives us an approximate brightness
+    const rMult = transform.redMultiplier ?? 1;
+    const gMult = transform.greenMultiplier ?? 1;
+    const bMult = transform.blueMultiplier ?? 1;
+    const avgMult = (rMult + gMult + bMult) / 3;
+
+    // If multipliers are uniform, we can use brightness filter
+    if (Math.abs(rMult - gMult) < 0.01 && Math.abs(gMult - bMult) < 0.01) {
+      if (avgMult !== 1) {
+        filters.push(`brightness(${avgMult})`);
+      }
+    }
+
+    // Apply offsets as contrast/brightness if uniform
+    const rOff = transform.redOffset ?? 0;
+    const gOff = transform.greenOffset ?? 0;
+    const bOff = transform.blueOffset ?? 0;
+    const avgOff = (rOff + gOff + bOff) / 3;
+
+    if (Math.abs(rOff - gOff) < 1 && Math.abs(gOff - bOff) < 1 && avgOff !== 0) {
+      // Offset adds to all channels - simulate with brightness
+      // 255 offset = double brightness, -255 = black
+      const offsetBrightness = 1 + (avgOff / 255);
+      if (offsetBrightness > 0) {
+        filters.push(`brightness(${offsetBrightness})`);
+      }
+    }
+
+    // Apply the combined filter
+    if (filters.length > 0) {
+      const existingFilter = ctx.filter !== 'none' ? ctx.filter + ' ' : '';
+      ctx.filter = existingFilter + filters.join(' ');
+    }
+  }
+
+  // Render a morph shape (shape tween) at the given progress
+  private renderMorphShape(
+    morphShape: MorphShape,
+    startShape: Shape,
+    progress: number,
+    depth: number
+  ): void {
+    const ctx = this.ctx;
+    ctx.save();
+
+    // Apply shape's transformation matrix
+    this.applyMatrix(startShape.matrix);
+
+    // Build fill style lookup from start shape
+    const fillStyles = new Map<number, FillStyle>();
+    for (const fill of startShape.fills) {
+      fillStyles.set(fill.index, fill);
+    }
+
+    // Build stroke style lookup from start shape
+    const strokeStyles = new Map<number, StrokeStyle>();
+    for (const stroke of startShape.strokes) {
+      strokeStyles.set(stroke.index, stroke);
+    }
+
+    // Render each segment
+    for (const segment of morphShape.segments) {
+      const path = new Path2D();
+
+      // Interpolate start point
+      const startX = this.lerp(segment.startPointA.x, segment.startPointB.x, progress);
+      const startY = this.lerp(segment.startPointA.y, segment.startPointB.y, progress);
+      path.moveTo(startX, startY);
+
+      // Interpolate each curve
+      for (const curve of segment.curves) {
+        const ctrlX = this.lerp(curve.controlPointA.x, curve.controlPointB.x, progress);
+        const ctrlY = this.lerp(curve.controlPointA.y, curve.controlPointB.y, progress);
+        const anchorX = this.lerp(curve.anchorPointA.x, curve.anchorPointB.x, progress);
+        const anchorY = this.lerp(curve.anchorPointA.y, curve.anchorPointB.y, progress);
+
+        if (curve.isLine) {
+          path.lineTo(anchorX, anchorY);
+        } else {
+          path.quadraticCurveTo(ctrlX, ctrlY, anchorX, anchorY);
+        }
+      }
+
+      path.closePath();
+
+      // Apply fill from segment indices
+      const fillIndex = segment.fillIndex1 ?? segment.fillIndex2;
+      if (fillIndex !== undefined) {
+        const fill = fillStyles.get(fillIndex);
+        if (fill) {
+          ctx.fillStyle = this.getFillStyle(fill);
+          ctx.fill(path, 'nonzero');
+        }
+      }
+
+      // Apply stroke from segment indices
+      const strokeIndex = segment.strokeIndex1 ?? segment.strokeIndex2;
+      if (strokeIndex !== undefined) {
+        const stroke = strokeStyles.get(strokeIndex);
+        if (stroke) {
+          ctx.strokeStyle = stroke.color;
+          ctx.lineWidth = stroke.weight;
+          ctx.lineCap = stroke.caps === 'none' ? 'butt' : stroke.caps || 'round';
+          ctx.lineJoin = stroke.joints || 'round';
+          ctx.stroke(path);
+        }
+      }
+    }
+
+    // Track for debug mode
+    if (this.debugMode) {
+      const combinedPath = new Path2D();
+      for (const segment of morphShape.segments) {
+        const startX = this.lerp(segment.startPointA.x, segment.startPointB.x, progress);
+        const startY = this.lerp(segment.startPointA.y, segment.startPointB.y, progress);
+        combinedPath.moveTo(startX, startY);
+        for (const curve of segment.curves) {
+          const anchorX = this.lerp(curve.anchorPointA.x, curve.anchorPointB.x, progress);
+          const anchorY = this.lerp(curve.anchorPointA.y, curve.anchorPointB.y, progress);
+          if (curve.isLine) {
+            combinedPath.lineTo(anchorX, anchorY);
+          } else {
+            const ctrlX = this.lerp(curve.controlPointA.x, curve.controlPointB.x, progress);
+            const ctrlY = this.lerp(curve.controlPointA.y, curve.controlPointB.y, progress);
+            combinedPath.quadraticCurveTo(ctrlX, ctrlY, anchorX, anchorY);
+          }
+        }
+        combinedPath.closePath();
+      }
+
+      this.debugElements.push({
+        type: 'shape',
+        element: startShape,
+        path: combinedPath,
+        transform: ctx.getTransform(),
+        depth,
+        parentPath: [...this.debugSymbolPath],
+        fillStyles,
+        strokeStyles,
+        edges: startShape.edges
+      });
+    }
+
+    ctx.restore();
   }
 }

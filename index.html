@@ -642,6 +642,146 @@
     .transport-btn.hidden {
       display: none;
     }
+
+    /* Mobile styles */
+    @media (max-width: 768px) {
+      /* Fit viewport */
+      body {
+        min-height: 100dvh;
+        min-height: -webkit-fill-available;
+      }
+
+      .fla-viewer {
+        height: 100dvh;
+        height: -webkit-fill-available;
+      }
+
+      /* Hide header on mobile for more space */
+      .fla-header {
+        height: 28px;
+        padding: 0 8px;
+        font-size: 11px;
+      }
+
+      /* Hide stop button on mobile */
+      #stop-btn {
+        display: none;
+      }
+
+      /* Hide audio controls on mobile */
+      .audio-controls {
+        display: none !important;
+      }
+
+      /* Compact transport bar */
+      .transport {
+        height: 40px;
+        padding: 0 8px;
+        gap: 6px;
+      }
+
+      /* Smaller buttons on mobile */
+      .transport-btn {
+        width: 32px;
+        height: 32px;
+      }
+
+      .transport-btn.primary {
+        width: 36px;
+        height: 36px;
+      }
+
+      /* Smaller timeline gap */
+      .timeline-container {
+        margin: 0 4px;
+        gap: 8px;
+      }
+
+      /* Compact timecode */
+      .timecode {
+        min-width: 70px;
+        font-size: 10px;
+      }
+
+      /* Smaller info bar */
+      .info-bar {
+        height: 20px;
+        padding: 0 8px;
+        font-size: 10px;
+        gap: 8px;
+        overflow-x: auto;
+        flex-wrap: nowrap;
+      }
+
+      .info-bar span {
+        white-space: nowrap;
+      }
+
+      /* Debug panel adjustments for mobile */
+      .debug-panel {
+        width: 220px;
+        right: 4px;
+        top: 4px;
+        max-height: calc(100% - 8px);
+        font-size: 10px;
+      }
+
+      /* Drop zone adjustments */
+      .drop-zone-content {
+        padding: 24px;
+      }
+
+      .drop-zone-icon {
+        width: 40px;
+        height: 40px;
+        margin-bottom: 12px;
+      }
+
+      .drop-zone p {
+        font-size: 13px;
+      }
+
+      .drop-zone small {
+        font-size: 11px;
+      }
+
+      /* Export modal adjustments */
+      .export-content {
+        padding: 20px 24px;
+        min-width: 280px;
+        margin: 0 16px;
+      }
+    }
+
+    /* Extra small screens (phones in portrait) */
+    @media (max-width: 480px) {
+      .fla-header {
+        display: none;
+      }
+
+      .transport {
+        height: 44px;
+        padding: 0 6px;
+      }
+
+      /* Hide download button on very small screens */
+      #download-btn {
+        display: none;
+      }
+
+      .timecode {
+        min-width: 60px;
+        font-size: 9px;
+      }
+
+      .info-bar {
+        display: none;
+      }
+
+      .debug-panel {
+        width: 180px;
+      }
+    }
   </style>
 </head>
 <body>

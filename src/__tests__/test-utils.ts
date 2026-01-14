@@ -194,6 +194,7 @@ export function createMinimalDoc(overrides: Partial<FLADocument> = {}): FLADocum
     symbols: new Map(),
     bitmaps: new Map(),
     sounds: new Map(),
+    videos: new Map(),
     ...overrides,
   };
 }

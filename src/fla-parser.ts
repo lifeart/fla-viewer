@@ -18,9 +18,16 @@ import type {
   Symbol,
   BitmapItem,
   SoundItem,
+  VideoItem,
   Point,
   Tween,
-  Edge
+  Edge,
+  Filter,
+  MorphShape,
+  MorphSegment,
+  MorphCurve,
+  ColorTransform,
+  BlendMode
 } from './types';
 import { decodeEdges } from './edge-decoder';
 import {
@@ -92,6 +99,10 @@ export class FLAParser {
     progress('Loading audio...');
     const sounds = await this.parseSounds(root);
 
+    // Parse video items from media section
+    progress('Loading videos...');
+    const videos = this.parseVideos(root);
+
     // Parse main timeline (pass dimensions for camera detection)
     progress('Building timeline...');
     const timelines = this.parseTimelines(root, width, height);
@@ -104,7 +115,8 @@ export class FLAParser {
       timelines,
       symbols: this.symbolCache,
       bitmaps,
-      sounds
+      sounds,
+      videos
     };
   }
 
@@ -474,7 +486,7 @@ export class FLAParser {
       const transparent = layerEl.getAttribute('transparent') === 'true';
       const alphaPercentAttr = layerEl.getAttribute('alphaPercent');
       const alphaPercent = alphaPercentAttr ? parseInt(alphaPercentAttr) : undefined;
-      const layerType = layerEl.getAttribute('layerType') as 'normal' | 'guide' | 'folder' | 'camera' | undefined;
+      const layerType = layerEl.getAttribute('layerType') as Layer['layerType'];
       const parentLayerIndex = layerEl.getAttribute('parentLayerIndex');
 
       const frames = this.parseFrames(layerEl);
@@ -491,6 +503,18 @@ export class FLAParser {
         parentLayerIndex: parentLayerIndex ? parseInt(parentLayerIndex) : undefined,
         frames
       });
+    }
+
+    // Build mask relationships: layers with parentLayerIndex pointing to a mask layer are masked
+    for (let i = 0; i < layers.length; i++) {
+      const layer = layers[i];
+      if (layer.parentLayerIndex !== undefined) {
+        const parentLayer = layers[layer.parentLayerIndex];
+        if (parentLayer && parentLayer.layerType === 'mask') {
+          layer.layerType = 'masked';
+          layer.maskLayerIndex = layer.parentLayerIndex;
+        }
+      }
     }
 
     return layers;
@@ -514,6 +538,9 @@ export class FLAParser {
       // Parse sound reference
       const sound = this.parseFrameSound(frameEl);
 
+      // Parse morph shape for shape tweens
+      const morphShape = tweenType === 'shape' ? this.parseMorphShape(frameEl) : undefined;
+
       frames.push({
         index,
         duration,
@@ -522,7 +549,8 @@ export class FLAParser {
         acceleration: acceleration ? parseInt(acceleration) : undefined,
         elements,
         tweens,
-        sound
+        sound,
+        ...(morphShape && { morphShape })
       });
     }
 
@@ -691,6 +719,16 @@ export class FLAParser {
       ? { x: parseFloat(centerPoint3DX || '0'), y: parseFloat(centerPoint3DY || '0') }
       : undefined;
 
+    // Parse filters
+    const filters = this.parseFilters(el);
+
+    // Parse color transform
+    const colorTransform = this.parseColorTransform(el);
+
+    // Parse blend mode
+    const blendModeAttr = el.getAttribute('blendMode');
+    const blendMode = this.parseBlendMode(blendModeAttr);
+
     return {
       type: 'symbol',
       libraryItemName,
@@ -699,7 +737,10 @@ export class FLAParser {
       transformationPoint,
       centerPoint3D,
       loop,
-      firstFrame: firstFrame ? parseInt(firstFrame) : undefined
+      firstFrame: firstFrame ? parseInt(firstFrame) : undefined,
+      ...(filters.length > 0 && { filters }),
+      ...(colorTransform && { colorTransform }),
+      ...(blendMode && { blendMode })
     };
   }
 
@@ -786,13 +827,17 @@ export class FLAParser {
       });
     }
 
+    // Parse filters
+    const filters = this.parseFilters(el);
+
     return {
       type: 'text',
       matrix,
       left,
       width,
       height,
-      textRuns
+      textRuns,
+      ...(filters.length > 0 && { filters })
     };
   }
 
@@ -865,6 +910,23 @@ export class FLAParser {
           gradient: this.parseGradientEntries(radialGradient),
           matrix: this.parseMatrix(radialGradient.querySelector('matrix > Matrix'))
         });
+        continue;
+      }
+
+      // Check for bitmap fill
+      const bitmapFill = fillEl.querySelector('BitmapFill');
+      if (bitmapFill) {
+        const bitmapPath = bitmapFill.getAttribute('bitmapPath') || '';
+        const matrixEl = bitmapFill.querySelector('matrix > Matrix');
+        const fill: FillStyle = {
+          index,
+          type: 'bitmap',
+          bitmapPath: normalizePath(bitmapPath),
+        };
+        if (matrixEl) {
+          fill.matrix = this.parseMatrix(matrixEl);
+        }
+        fills.push(fill);
         continue;
       }
     }
@@ -1077,6 +1139,41 @@ export class FLAParser {
     }
   }
 
+  private parseVideos(root: globalThis.Element): Map<string, VideoItem> {
+    const videos = new Map<string, VideoItem>();
+    const videoElements = root.querySelectorAll('media > DOMVideoItem');
+
+    for (const videoEl of videoElements) {
+      const name = videoEl.getAttribute('name') || '';
+      const href = videoEl.getAttribute('videoDataHRef') || '';
+      const frameRight = videoEl.getAttribute('width');
+      const frameBottom = videoEl.getAttribute('height');
+      const fps = videoEl.getAttribute('fps');
+      const length = videoEl.getAttribute('length');
+      const videoType = videoEl.getAttribute('videoType') || undefined;
+      const sourceExternalFilepath = videoEl.getAttribute('sourceExternalFilepath') || undefined;
+
+      const videoItem: VideoItem = {
+        name,
+        href,
+        width: frameRight ? parseInt(frameRight) : 0,
+        height: frameBottom ? parseInt(frameBottom) : 0,
+        fps: fps ? parseFloat(fps) : undefined,
+        duration: length ? parseFloat(length) : undefined,
+        videoType,
+        sourceExternalFilepath
+      };
+
+      videos.set(name, videoItem);
+
+      if (DEBUG) {
+        console.log(`Found video: ${name}, ${videoItem.width}x${videoItem.height}, ${videoItem.fps}fps`);
+      }
+    }
+
+    return videos;
+  }
+
   private parseShapeEdges(shape: globalThis.Element): Edge[] {
     const edges: Edge[] = [];
     const edgeElements = shape.querySelectorAll('edges > Edge');
@@ -1137,5 +1234,299 @@ export class FLAParser {
       x: Number.isFinite(x) ? x : 0,
       y: Number.isFinite(y) ? y : 0
     };
+  }
+
+  // Parse filters from <filters> element
+  private parseFilters(el: globalThis.Element): Filter[] {
+    const filtersEl = el.querySelector(':scope > filters');
+    if (!filtersEl) return [];
+
+    const filters: Filter[] = [];
+
+    for (const child of filtersEl.children) {
+      switch (child.tagName) {
+        case 'BlurFilter':
+          filters.push({
+            type: 'blur',
+            blurX: parseFloat(child.getAttribute('blurX') || '0'),
+            blurY: parseFloat(child.getAttribute('blurY') || '0'),
+            quality: parseInt(child.getAttribute('quality') || '1')
+          });
+          break;
+
+        case 'GlowFilter':
+          filters.push({
+            type: 'glow',
+            blurX: parseFloat(child.getAttribute('blurX') || '0'),
+            blurY: parseFloat(child.getAttribute('blurY') || '0'),
+            color: child.getAttribute('color') || '#000000',
+            // Strength is stored as 0-255 in XFL, normalize to 0-1
+            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            alpha: parseFloat(child.getAttribute('alpha') || '1'),
+            inner: child.getAttribute('inner') === 'true',
+            knockout: child.getAttribute('knockout') === 'true',
+            quality: parseInt(child.getAttribute('quality') || '1')
+          });
+          break;
+
+        case 'DropShadowFilter':
+          filters.push({
+            type: 'dropShadow',
+            blurX: parseFloat(child.getAttribute('blurX') || '0'),
+            blurY: parseFloat(child.getAttribute('blurY') || '0'),
+            color: child.getAttribute('color') || '#000000',
+            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            alpha: parseFloat(child.getAttribute('alpha') || '1'),
+            distance: parseFloat(child.getAttribute('distance') || '4'),
+            angle: parseFloat(child.getAttribute('angle') || '45'),
+            inner: child.getAttribute('inner') === 'true',
+            knockout: child.getAttribute('knockout') === 'true',
+            hideObject: child.getAttribute('hideObject') === 'true',
+            quality: parseInt(child.getAttribute('quality') || '1')
+          });
+          break;
+      }
+    }
+
+    return filters;
+  }
+
+  // Parse ColorTransform from <color> element
+  private parseColorTransform(el: globalThis.Element): ColorTransform | undefined {
+    const colorEl = el.querySelector(':scope > color > Color');
+    if (!colorEl) return undefined;
+
+    const transform: ColorTransform = {};
+    let hasValues = false;
+
+    // Alpha multiplier (0-1)
+    const alphaMultiplier = colorEl.getAttribute('alphaMultiplier');
+    if (alphaMultiplier !== null) {
+      transform.alphaMultiplier = parseFloat(alphaMultiplier);
+      hasValues = true;
+    }
+
+    // Alpha offset (-255 to 255)
+    const alphaOffset = colorEl.getAttribute('alphaOffset');
+    if (alphaOffset !== null) {
+      transform.alphaOffset = parseFloat(alphaOffset);
+      hasValues = true;
+    }
+
+    // Red multiplier (0-1)
+    const redMultiplier = colorEl.getAttribute('redMultiplier');
+    if (redMultiplier !== null) {
+      transform.redMultiplier = parseFloat(redMultiplier);
+      hasValues = true;
+    }
+
+    // Red offset (-255 to 255)
+    const redOffset = colorEl.getAttribute('redOffset');
+    if (redOffset !== null) {
+      transform.redOffset = parseFloat(redOffset);
+      hasValues = true;
+    }
+
+    // Green multiplier (0-1)
+    const greenMultiplier = colorEl.getAttribute('greenMultiplier');
+    if (greenMultiplier !== null) {
+      transform.greenMultiplier = parseFloat(greenMultiplier);
+      hasValues = true;
+    }
+
+    // Green offset (-255 to 255)
+    const greenOffset = colorEl.getAttribute('greenOffset');
+    if (greenOffset !== null) {
+      transform.greenOffset = parseFloat(greenOffset);
+      hasValues = true;
+    }
+
+    // Blue multiplier (0-1)
+    const blueMultiplier = colorEl.getAttribute('blueMultiplier');
+    if (blueMultiplier !== null) {
+      transform.blueMultiplier = parseFloat(blueMultiplier);
+      hasValues = true;
+    }
+
+    // Blue offset (-255 to 255)
+    const blueOffset = colorEl.getAttribute('blueOffset');
+    if (blueOffset !== null) {
+      transform.blueOffset = parseFloat(blueOffset);
+      hasValues = true;
+    }
+
+    // Brightness (-1 to 1)
+    const brightness = colorEl.getAttribute('brightness');
+    if (brightness !== null) {
+      // Convert brightness to color multipliers/offsets
+      // Positive brightness increases all colors, negative decreases
+      const b = parseFloat(brightness);
+      if (b >= 0) {
+        // Positive: multiply by (1-b) and add b*255
+        transform.redMultiplier = 1 - b;
+        transform.greenMultiplier = 1 - b;
+        transform.blueMultiplier = 1 - b;
+        transform.redOffset = b * 255;
+        transform.greenOffset = b * 255;
+        transform.blueOffset = b * 255;
+      } else {
+        // Negative: multiply by (1+b)
+        transform.redMultiplier = 1 + b;
+        transform.greenMultiplier = 1 + b;
+        transform.blueMultiplier = 1 + b;
+      }
+      hasValues = true;
+    }
+
+    // Tint (tintMultiplier + tintColor)
+    const tintMultiplier = colorEl.getAttribute('tintMultiplier');
+    const tintColor = colorEl.getAttribute('tintColor');
+    if (tintMultiplier !== null && tintColor !== null) {
+      const tint = parseFloat(tintMultiplier);
+      // Parse tint color
+      const colorHex = tintColor.replace('#', '');
+      const r = parseInt(colorHex.substring(0, 2), 16);
+      const g = parseInt(colorHex.substring(2, 4), 16);
+      const b = parseInt(colorHex.substring(4, 6), 16);
+
+      // Apply tint: newColor = originalColor * (1 - tint) + tintColor * tint
+      transform.redMultiplier = 1 - tint;
+      transform.greenMultiplier = 1 - tint;
+      transform.blueMultiplier = 1 - tint;
+      transform.redOffset = r * tint;
+      transform.greenOffset = g * tint;
+      transform.blueOffset = b * tint;
+      hasValues = true;
+    }
+
+    return hasValues ? transform : undefined;
+  }
+
+  // Parse blend mode from attribute value
+  private parseBlendMode(value: string | null): BlendMode | undefined {
+    if (!value || value === 'normal') return undefined;
+
+    // Map Flash blend mode names to our BlendMode type
+    const blendModeMap: Record<string, BlendMode> = {
+      'normal': 'normal',
+      'layer': 'layer',
+      'multiply': 'multiply',
+      'screen': 'screen',
+      'overlay': 'overlay',
+      'darken': 'darken',
+      'lighten': 'lighten',
+      'hardlight': 'hardlight',
+      'hard light': 'hardlight',  // Alternative format
+      'add': 'add',
+      'subtract': 'subtract',
+      'difference': 'difference',
+      'invert': 'invert',
+      'alpha': 'alpha',
+      'erase': 'erase',
+    };
+
+    const normalized = value.toLowerCase();
+    return blendModeMap[normalized] || undefined;
+  }
+
+  // Parse MorphShape for shape tweens
+  private parseMorphShape(frame: globalThis.Element): MorphShape | undefined {
+    const morphShapeEl = frame.querySelector(':scope > MorphShape');
+    if (!morphShapeEl) return undefined;
+
+    const segments: MorphSegment[] = [];
+    const morphSegments = morphShapeEl.querySelector('morphSegments');
+    if (!morphSegments) return undefined;
+
+    for (const segEl of morphSegments.querySelectorAll(':scope > MorphSegment')) {
+      const segment: MorphSegment = {
+        startPointA: this.parseMorphPoint(segEl.getAttribute('startPointA')),
+        startPointB: this.parseMorphPoint(segEl.getAttribute('startPointB')),
+        fillIndex1: segEl.getAttribute('fillIndex1') ? parseInt(segEl.getAttribute('fillIndex1')!) : undefined,
+        fillIndex2: segEl.getAttribute('fillIndex2') ? parseInt(segEl.getAttribute('fillIndex2')!) : undefined,
+        strokeIndex1: segEl.getAttribute('strokeIndex1') ? parseInt(segEl.getAttribute('strokeIndex1')!) : undefined,
+        strokeIndex2: segEl.getAttribute('strokeIndex2') ? parseInt(segEl.getAttribute('strokeIndex2')!) : undefined,
+        curves: []
+      };
+
+      for (const curveEl of segEl.querySelectorAll(':scope > MorphCurves')) {
+        segment.curves.push({
+          controlPointA: this.parseMorphPoint(curveEl.getAttribute('controlPointA')),
+          anchorPointA: this.parseMorphPoint(curveEl.getAttribute('anchorPointA')),
+          controlPointB: this.parseMorphPoint(curveEl.getAttribute('controlPointB')),
+          anchorPointB: this.parseMorphPoint(curveEl.getAttribute('anchorPointB')),
+          isLine: curveEl.getAttribute('isLine') === 'true'
+        });
+      }
+
+      segments.push(segment);
+    }
+
+    return segments.length > 0 ? { segments } : undefined;
+  }
+
+  // Parse morph point from string like "x, y" or "#hex, #hex"
+  private parseMorphPoint(value: string | null): Point {
+    if (!value) return { x: 0, y: 0 };
+
+    // Split on comma (may have spaces)
+    const parts = value.split(',').map(s => s.trim());
+    if (parts.length !== 2) return { x: 0, y: 0 };
+
+    return {
+      x: this.decodeMorphCoord(parts[0]),
+      y: this.decodeMorphCoord(parts[1])
+    };
+  }
+
+  // Decode morph coordinate (same hex format as edges)
+  private decodeMorphCoord(value: string): number {
+    const COORD_SCALE = 20; // Twips to pixels
+
+    if (value.startsWith('#')) {
+      // Hex encoded format: #XXXX.YY or #XX.YY
+      const hex = value.substring(1);
+      const dotIndex = hex.indexOf('.');
+
+      let intHex: string;
+      let fracHex: string | null = null;
+
+      if (dotIndex !== -1) {
+        intHex = hex.substring(0, dotIndex);
+        fracHex = hex.substring(dotIndex + 1);
+      } else {
+        intHex = hex;
+      }
+
+      if (intHex.length === 0) intHex = '0';
+
+      let intPart = parseInt(intHex, 16);
+      if (Number.isNaN(intPart)) return 0;
+
+      // Apply two's complement for 6+ char hex values
+      if (intHex.length >= 6) {
+        const bitWidth = intHex.length * 4;
+        const signBit = 1 << (bitWidth - 1);
+        if (intPart >= signBit) {
+          intPart = intPart - (1 << bitWidth);
+        }
+      }
+
+      let fracPart = 0;
+      if (fracHex && fracHex.length > 0) {
+        const fracValue = parseInt(fracHex, 16);
+        if (!Number.isNaN(fracValue)) {
+          const fracBits = fracHex.length * 4;
+          fracPart = fracValue / (1 << fracBits);
+        }
+      }
+
+      const result = intPart >= 0 ? intPart + fracPart : intPart - fracPart;
+      return result / COORD_SCALE;
+    } else {
+      // Decimal value in twips
+      const parsed = parseFloat(value);
+      return Number.isFinite(parsed) ? parsed / COORD_SCALE : 0;
+    }
   }
 }
