@@ -597,3 +597,69 @@ Edge contributions are collected per fill style, then sorted into connected chai
 - [XFL Format Reference (Adobe)](https://help.adobe.com/en_US/flash/cs/extend/WS5b3ccc516d4fbf351e63e3d118a9024f3f-7ff7CS5.html)
 - [SWF File Format Specification](https://www.adobe.com/content/dam/acom/en/devnet/pdf/swf-file-format-spec.pdf)
 - [Canvas 2D API (MDN)](https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D)
+
+
+## Adobe FLA Bitmap Format (.dat files in bin/)
+
+Source: https://stackoverflow.com/a/78489790 (CC BY-SA 4.0, DaniilSV)
+
+### Header Structure
+
+```
+Offset  Size  Field           Description
+──────────────────────────────────────────────────────────────────
+0       1     Media Type      0x03 = Bitmap, 0x01 = Sound
+1       1     Depth Type      0x05 = 16-bit, 0x03 = 8-bit
+2-3     2     Row Stride      Length of decompressed row data (LE)
+4-5     2     Width           Image width in pixels (LE)
+6-7     2     Height          Image height in pixels (LE)
+8-11    4     RECT X          Always 0
+12-15   4     RECT Width      Width in twips (LE)
+16-19   4     RECT Y          Always 0
+20-23   4     RECT Height     Height in twips (LE)
+24      1     Has Alpha       0 = no alpha, 1 = has alpha
+25      1     Compressed      1 = zlib compressed
+26-27   2     Zlib Header Len 0x0020 typically
+28-29   2     Zlib Header     0x78 0x01
+30+     var   Compressed Data Chunked zlib stream
+```
+
+### Compression Format
+
+Data is stored in chunked zlib blocks:
+```
+[2 bytes: chunk length][chunk data]...
+[0x0000 = end of stream]
+```
+
+### Pixel Format: ARGB
+
+32-bit pixels stored as **ARGB** (Alpha, Red, Green, Blue):
+- Byte 0: Alpha (0-255)
+- Byte 1: Red (0-255)
+- Byte 2: Green (0-255)
+- Byte 3: Blue (0-255)
+
+Canvas ImageData requires RGBA, so conversion needed:
+```typescript
+// ARGB → RGBA conversion
+rgba[dstIdx + 0] = argb[srcIdx + 1];  // R ← byte 1
+rgba[dstIdx + 1] = argb[srcIdx + 2];  // G ← byte 2
+rgba[dstIdx + 2] = argb[srcIdx + 3];  // B ← byte 3
+rgba[dstIdx + 3] = argb[srcIdx + 0];  // A ← byte 0
+```
+
+### 8-bit Palette Mode (Depth Type = 0x03)
+
+When depth is 8-bit, a palette follows the header:
+```
+[2 bytes: palette entry count (1-256)]
+[N × 3 or 4 bytes: RGB or RGBA palette entries]
+[pixel data as palette indices]
+```
+
+### Implementation Notes
+
+- Extra bytes beyond width×height×4 are trailing padding (truncate)
+- Some files require preset zlib dictionary (32KB zeros)
+- Decompression offset: byte 30 (standard) or 32 (alternate format)

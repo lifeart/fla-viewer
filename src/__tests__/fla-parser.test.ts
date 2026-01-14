@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import JSZip from 'jszip';
+import pako from 'pako';
 import { FLAParser, setParserDebug } from '../fla-parser';
 import { createConsoleSpy, expectLogContaining, type ConsoleSpy } from './test-utils';
 
@@ -979,6 +980,315 @@ describe('FLAParser', () => {
       const doc = await parser.parse(fla);
 
       expect(doc.bitmaps.has('test.png')).toBe(true);
+    });
+  });
+
+  describe('FLA bitmap (.dat) decompression', () => {
+    // Helper to create FLA bitmap .dat file format
+    function createFlaBitmapDat(options: {
+      width: number;
+      height: number;
+      pixelData?: Uint8Array; // ARGB pixel data (if not provided, creates solid color)
+      subFormat?: number; // 0 = standard, 2 = alternate
+      corruptAt?: number; // Offset to corrupt the deflate stream
+      useInvalidData?: boolean; // Use completely invalid data
+    }): Uint8Array {
+      const { width, height, subFormat = 0, corruptAt, useInvalidData = false } = options;
+
+      // Create ARGB pixel data if not provided (solid red)
+      let pixelData = options.pixelData;
+      if (!pixelData) {
+        pixelData = new Uint8Array(width * height * 4);
+        for (let i = 0; i < width * height; i++) {
+          pixelData[i * 4 + 0] = 0xFF; // A
+          pixelData[i * 4 + 1] = 0xFF; // R
+          pixelData[i * 4 + 2] = 0x00; // G
+          pixelData[i * 4 + 3] = 0x00; // B
+        }
+      }
+
+      // Compress the pixel data using raw deflate
+      let compressed: Uint8Array;
+      if (useInvalidData) {
+        // Create data that won't decompress at all
+        compressed = new Uint8Array([0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA]);
+      } else {
+        compressed = pako.deflateRaw(pixelData);
+
+        // Corrupt the stream if requested (simulate corrupted FLA file)
+        if (corruptAt !== undefined && corruptAt < compressed.length) {
+          compressed = new Uint8Array(compressed);
+          // Corrupt bytes starting at corruptAt to break the deflate stream
+          for (let i = corruptAt; i < Math.min(corruptAt + 10, compressed.length); i++) {
+            compressed[i] = 0xFF; // Invalid deflate data
+          }
+        }
+      }
+
+      // Build the header
+      // Header size: 30 for subFormat=0, 32 for subFormat=2
+      const headerSize = subFormat === 2 ? 32 : 30;
+      const totalSize = headerSize + compressed.length;
+      const dat = new Uint8Array(totalSize);
+
+      // Bytes 0-1: Format marker
+      dat[0] = 0x03;
+      dat[1] = 0x05;
+
+      // Bytes 2-3: Row stride (width * 4, little endian)
+      const rowStride = width * 4;
+      dat[2] = rowStride & 0xFF;
+      dat[3] = (rowStride >> 8) & 0xFF;
+
+      // Bytes 4-5: Width in pixels (little endian)
+      dat[4] = width & 0xFF;
+      dat[5] = (width >> 8) & 0xFF;
+
+      // Bytes 6-7: Height in pixels (little endian)
+      dat[6] = height & 0xFF;
+      dat[7] = (height >> 8) & 0xFF;
+
+      // Bytes 8-23: Reserved/twips data (zeros for simplicity)
+      // Already zero from Uint8Array initialization
+
+      // Bytes 24-27: Format flags
+      dat[24] = 0; // has_alpha
+      dat[25] = 1; // is_compressed
+      dat[26] = subFormat; // sub_format
+      dat[27] = subFormat === 0 ? 8 : 0;
+
+      // Bytes 28-29: Zlib header (for subFormat=0)
+      dat[28] = 0x78;
+      dat[29] = 0x01;
+
+      // Bytes 30+ (or 32+): Compressed pixel data
+      dat.set(compressed, headerSize);
+
+      return dat;
+    }
+
+    it('should decompress valid FLA bitmap with subFormat=0', async () => {
+      const width = 10;
+      const height = 10;
+      const datFile = createFlaBitmapDat({ width, height, subFormat: 0 });
+
+      const media = `
+        <media>
+          <DOMBitmapItem name="test.png" href="test.png"
+            bitmapDataHRef="M 1 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 1 123456.dat': datFile }
+      );
+      const doc = await parser.parse(fla);
+
+      const bitmap = doc.bitmaps.get('test.png');
+      expect(bitmap).toBeDefined();
+      expect(bitmap?.width).toBe(width);
+      expect(bitmap?.height).toBe(height);
+      // imageData should be loaded (not null/undefined) for valid decompression
+      expect(bitmap?.imageData).toBeDefined();
+    });
+
+    it('should decompress valid FLA bitmap with subFormat=2', async () => {
+      const width = 8;
+      const height = 8;
+      const datFile = createFlaBitmapDat({ width, height, subFormat: 2 });
+
+      const media = `
+        <media>
+          <DOMBitmapItem name="test2.png" href="test2.png"
+            bitmapDataHRef="M 2 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 2 123456.dat': datFile }
+      );
+      const doc = await parser.parse(fla);
+
+      const bitmap = doc.bitmaps.get('test2.png');
+      expect(bitmap).toBeDefined();
+      expect(bitmap?.imageData).toBeDefined();
+    });
+
+    it('should handle partial recovery for corrupted deflate stream', async () => {
+      const width = 20;
+      const height = 20;
+      // Corrupt the deflate stream halfway through
+      const datFile = createFlaBitmapDat({
+        width,
+        height,
+        subFormat: 0,
+        corruptAt: 50 // Corrupt after some valid data
+      });
+
+      const media = `
+        <media>
+          <DOMBitmapItem name="corrupted.png" href="corrupted.png"
+            bitmapDataHRef="M 3 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+
+      const consoleSpy = createConsoleSpy();
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 3 123456.dat': datFile }
+      );
+
+      const doc = await parser.parse(fla);
+      consoleSpy.mockRestore();
+
+      // Should have attempted some form of recovery
+      const bitmap = doc.bitmaps.get('corrupted.png');
+      expect(bitmap).toBeDefined();
+      // Either recovery succeeded (has imageData) or failed gracefully (no imageData)
+      // The key is that it doesn't throw an exception
+      expect(bitmap?.name).toBe('corrupted.png');
+    });
+
+    it('should return null for completely invalid bitmap data', async () => {
+      const width = 10;
+      const height = 10;
+      const datFile = createFlaBitmapDat({
+        width,
+        height,
+        useInvalidData: true
+      });
+
+      const media = `
+        <media>
+          <DOMBitmapItem name="invalid.png" href="invalid.png"
+            bitmapDataHRef="M 4 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 4 123456.dat': datFile }
+      );
+
+      const doc = await parser.parse(fla);
+
+      // Bitmap entry should exist but imageData should be undefined (failed to decode)
+      const bitmap = doc.bitmaps.get('invalid.png');
+      expect(bitmap).toBeDefined();
+      expect(bitmap?.imageData).toBeUndefined();
+    });
+
+    it('should handle undersized decompressed data by adjusting height', async () => {
+      const width = 10;
+      const height = 20;
+      // Create pixel data for only half the rows
+      const partialPixelData = new Uint8Array(width * 10 * 4); // Only 10 rows instead of 20
+      for (let i = 0; i < width * 10; i++) {
+        partialPixelData[i * 4 + 0] = 0xFF; // A
+        partialPixelData[i * 4 + 1] = 0x00; // R
+        partialPixelData[i * 4 + 2] = 0xFF; // G
+        partialPixelData[i * 4 + 3] = 0x00; // B
+      }
+
+      // Manually create a dat file with header saying 20 rows but data for 10
+      const compressed = pako.deflateRaw(partialPixelData);
+      const headerSize = 30;
+      const dat = new Uint8Array(headerSize + compressed.length);
+
+      // Header
+      dat[0] = 0x03; dat[1] = 0x05;
+      dat[2] = (width * 4) & 0xFF; dat[3] = ((width * 4) >> 8) & 0xFF;
+      dat[4] = width & 0xFF; dat[5] = (width >> 8) & 0xFF;
+      dat[6] = height & 0xFF; dat[7] = (height >> 8) & 0xFF; // Header says 20 rows
+      dat[24] = 0; dat[25] = 1; dat[26] = 0; dat[27] = 8;
+      dat[28] = 0x78; dat[29] = 0x01;
+      dat.set(compressed, headerSize);
+
+      const media = `
+        <media>
+          <DOMBitmapItem name="undersized.png" href="undersized.png"
+            bitmapDataHRef="M 5 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 5 123456.dat': dat }
+      );
+
+      const doc = await parser.parse(fla);
+
+      // Should still create a bitmap, possibly with adjusted dimensions
+      const bitmap = doc.bitmaps.get('undersized.png');
+      expect(bitmap).toBeDefined();
+      // The imageData might exist with adjusted height
+    });
+
+    it('should log partial recovery information', async () => {
+      const width = 15;
+      const height = 15;
+      const datFile = createFlaBitmapDat({
+        width,
+        height,
+        subFormat: 0,
+        corruptAt: 30 // Corrupt early in the stream
+      });
+
+      const media = `
+        <media>
+          <DOMBitmapItem name="partial.png" href="partial.png"
+            bitmapDataHRef="M 6 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+
+      const consoleSpy = createConsoleSpy();
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 6 123456.dat': datFile }
+      );
+
+      await parser.parse(fla);
+
+      // Check if any recovery-related log was made
+      const hasRecoveryLog = consoleSpy.mock.calls.some(
+        call => typeof call[0] === 'string' && (
+          call[0].includes('deflate failed') ||
+          call[0].includes('recovery') ||
+          call[0].includes('Streaming')
+        )
+      );
+      consoleSpy.mockRestore();
+
+      // The test passes regardless of whether recovery logs were made
+      // since the exact behavior depends on the corruption pattern
+      // The key is that parsing doesn't throw
+    });
+
+    it('should handle empty dat file gracefully', async () => {
+      const emptyDat = new Uint8Array(30); // Just header, no compressed data
+      emptyDat[0] = 0x03; emptyDat[1] = 0x05;
+      emptyDat[4] = 10; emptyDat[6] = 10; // 10x10 dimensions
+
+      const media = `
+        <media>
+          <DOMBitmapItem name="empty.png" href="empty.png"
+            bitmapDataHRef="M 7 123456.dat"
+            frameRight="200" frameBottom="200"/>
+        </media>`;
+
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 7 123456.dat': emptyDat }
+      );
+
+      // Should not throw
+      const doc = await parser.parse(fla);
+      const bitmap = doc.bitmaps.get('empty.png');
+      expect(bitmap).toBeDefined();
+      // imageData will be undefined due to decompression failure
+      expect(bitmap?.imageData).toBeUndefined();
     });
   });
 

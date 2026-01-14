@@ -1,4 +1,5 @@
 import JSZip from 'jszip';
+import pako from 'pako';
 import type {
   FLADocument,
   Timeline,
@@ -1011,6 +1012,7 @@ export class FLAParser {
       const rawName = bitmapEl.getAttribute('name') || '';
       const name = normalizePath(rawName);
       const href = bitmapEl.getAttribute('href') || rawName;
+      const bitmapDataHRef = bitmapEl.getAttribute('bitmapDataHRef') || undefined;
       const frameRight = bitmapEl.getAttribute('frameRight');
       const frameBottom = bitmapEl.getAttribute('frameBottom');
       const sourceExternalFilepath = bitmapEl.getAttribute('sourceExternalFilepath') || undefined;
@@ -1022,6 +1024,7 @@ export class FLAParser {
       const bitmapItem: BitmapItem = {
         name,
         href,
+        bitmapDataHRef,
         width,
         height,
         sourceExternalFilepath
@@ -1041,22 +1044,44 @@ export class FLAParser {
   }
 
   private async loadBitmapImage(bitmapItem: BitmapItem): Promise<void> {
-    const imageData = await this.findFileData(bitmapItem.href);
+    let imageData: ArrayBuffer | null = null;
+    let sourceRef = bitmapItem.href;
+
+    // First try bitmapDataHRef from bin/ folder (preferred for .dat files)
+    if (bitmapItem.bitmapDataHRef) {
+      imageData = await this.findFileData(bitmapItem.bitmapDataHRef, 'bin');
+      if (imageData) {
+        sourceRef = bitmapItem.bitmapDataHRef;
+      }
+    }
+
+    // Fall back to href from LIBRARY/ folder
+    if (!imageData) {
+      imageData = await this.findFileData(bitmapItem.href);
+    }
 
     if (!imageData) {
       if (DEBUG) {
-        console.warn(`Bitmap image not found: ${bitmapItem.href}`);
+        console.warn(`Bitmap image not found: ${bitmapItem.href} (bitmapDataHRef: ${bitmapItem.bitmapDataHRef})`);
       }
       return;
     }
 
-    // Determine MIME type from extension
-    const ext = getFilename(bitmapItem.href).toLowerCase().split('.').pop();
-    const mimeType = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg'
-                   : ext === 'gif' ? 'image/gif'
-                   : 'image/png';
+    // Determine MIME type from magic bytes or extension
+    const mimeType = this.detectImageMimeType(imageData, sourceRef);
 
-    // Create blob and load as image
+    // Handle Adobe FLA bitmap format (proprietary .dat files)
+    if (mimeType === 'application/x-fla-bitmap') {
+      const img = await this.decodeFlaBitmap(imageData, bitmapItem.width, bitmapItem.height);
+      if (img) {
+        bitmapItem.imageData = img;
+      } else if (DEBUG) {
+        console.warn(`Failed to decode FLA bitmap: ${bitmapItem.href}`);
+      }
+      return;
+    }
+
+    // Create blob and load as standard image
     const blob = new Blob([imageData], { type: mimeType });
     const url = URL.createObjectURL(blob);
 
@@ -1074,6 +1099,218 @@ export class FLAParser {
       }
     } finally {
       URL.revokeObjectURL(url);
+    }
+  }
+
+  private detectImageMimeType(data: ArrayBuffer, filename: string): string {
+    // Check magic bytes first
+    const bytes = new Uint8Array(data.slice(0, 8));
+
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
+      return 'image/png';
+    }
+
+    // JPEG: FF D8 FF
+    if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) {
+      return 'image/jpeg';
+    }
+
+    // GIF: 47 49 46 38 (GIF8)
+    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) {
+      return 'image/gif';
+    }
+
+    // Adobe FLA bitmap format: starts with 03 05 (format marker)
+    if (bytes[0] === 0x03 && bytes[1] === 0x05) {
+      return 'application/x-fla-bitmap';
+    }
+
+    // Fall back to extension-based detection
+    const ext = getFilename(filename).toLowerCase().split('.').pop();
+    if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+    if (ext === 'gif') return 'image/gif';
+
+    // Default to PNG for unknown types (including .dat files)
+    return 'image/png';
+  }
+
+  /**
+   * Paeth predictor for PNG filter algorithm.
+   * Selects the value closest to p = a + b - c among a, b, and c.
+   */
+  private paethPredictor(a: number, b: number, c: number): number {
+    const p = a + b - c;
+    const pa = Math.abs(p - a);
+    const pb = Math.abs(p - b);
+    const pc = Math.abs(p - c);
+    if (pa <= pb && pa <= pc) return a;
+    if (pb <= pc) return b;
+    return c;
+  }
+
+  /**
+   * Decode Adobe FLA bitmap format (.dat files in bin/ folder).
+   *
+   * Format structure:
+   * - Bytes 0-1: Format marker (0x03 0x05)
+   * - Bytes 2-3: Row stride (width * 4, little endian)
+   * - Bytes 4-5: Width in pixels (little endian)
+   * - Bytes 6-7: Height in pixels (little endian)
+   * - Bytes 8-11: Reserved (zeros)
+   * - Bytes 12-15: frameRight in twips (little endian)
+   * - Bytes 16-19: Reserved (zeros)
+   * - Bytes 20-23: frameBottom in twips (little endian)
+   * - Bytes 24-27: Format flags
+   *   - Byte 26: Sub-format (0 = standard, 2 = alternate)
+   *   - Byte 27: 8 for format 0, 0 for format 2
+   * - Bytes 28-29: Zlib header (0x78 0x01)
+   * - Bytes 30+ (format 0) or 32+ (format 2): Deflate compressed RGBA pixel data
+   */
+  private async decodeFlaBitmap(data: ArrayBuffer, expectedWidth: number, expectedHeight: number): Promise<HTMLImageElement | null> {
+    const bytes = new Uint8Array(data);
+
+    // Parse header
+    const headerWidth = bytes[4] | (bytes[5] << 8);
+    const headerHeight = bytes[6] | (bytes[7] << 8);
+    const subFormat = bytes[26];
+
+    // Adobe FLA bitmap format:
+    // - Header: 28 bytes of metadata (magic, dimensions, flags)
+    // - subFormat=0: zlib compressed (78 xx header) at offset 28
+    // - subFormat=2: raw deflate at offset 32 (extended header)
+
+    if (DEBUG) {
+      console.log(`FLA bitmap: ${headerWidth}x${headerHeight}, subFormat=${subFormat}, expected=${expectedWidth}x${expectedHeight}`);
+    }
+
+    // Decompress the data using pako
+    const zeroDict = new Uint8Array(32768);
+
+    try {
+      let pixelData: Uint8Array;
+
+      // Offset depends on subFormat:
+      // - subFormat=0: zlib header at offset 28, raw deflate at offset 30
+      // - subFormat=2: extended header, raw deflate at offset 32
+      const offset = subFormat === 2 ? 32 : 30;
+      const compData = bytes.slice(offset);
+
+      const expectedSize = headerWidth * headerHeight * 4;
+
+      // Helper function for streaming partial recovery
+      const tryStreamingRecovery = (): Uint8Array | null => {
+        try {
+          const inflater = new pako.Inflate({ raw: true, chunkSize: 16384 });
+          const chunkSize = 512;
+
+          for (let i = 0; i < compData.length; i += chunkSize) {
+            const isLast = i + chunkSize >= compData.length;
+            const chunk = compData.slice(i, Math.min(i + chunkSize, compData.length));
+
+            try {
+              inflater.push(chunk, isLast);
+            } catch {
+              break;
+            }
+
+            if (inflater.err) {
+              break;
+            }
+          }
+
+          if (inflater.result && inflater.result.length > 0) {
+            return new Uint8Array(inflater.result as ArrayBuffer);
+          }
+        } catch {
+          // Streaming failed entirely
+        }
+        return null;
+      };
+
+      // Try raw deflate first (most common)
+      try {
+        pixelData = pako.inflateRaw(compData);
+      } catch (rawError) {
+        // Raw deflate failed - try streaming recovery first (gets partial data)
+        // This is more reliable for corrupted files than dictionary decompression
+        console.log(`Raw deflate failed for ${headerWidth}x${headerHeight}, trying streaming recovery...`);
+        const streamResult = tryStreamingRecovery();
+
+        if (streamResult && streamResult.length > 0) {
+          pixelData = streamResult;
+          const pct = (100 * pixelData.length / expectedSize).toFixed(1);
+          console.log(`Streaming recovery: ${pixelData.length}/${expectedSize} bytes (${pct}%) for ${headerWidth}x${headerHeight}`);
+        } else {
+          // Try with zero dictionary as fallback
+          console.log(`Streaming recovery failed, trying dictionary for ${headerWidth}x${headerHeight}...`);
+          try {
+            pixelData = pako.inflateRaw(compData, { dictionary: zeroDict });
+            console.log(`Dictionary decompress: ${pixelData.length} bytes for ${headerWidth}x${headerHeight}`);
+          } catch (dictError) {
+            console.warn(`All decompression methods failed for ${headerWidth}x${headerHeight}`);
+            return null;
+          }
+        }
+      }
+
+      // Use header dimensions
+      let width = headerWidth;
+      let height = headerHeight;
+
+      // Extract pixel data - extra bytes are trailing padding, just truncate
+      let actualPixelData: Uint8Array;
+
+      if (pixelData.length >= expectedSize) {
+        // Use first expectedSize bytes as pixel data (truncate trailing padding)
+        actualPixelData = pixelData.slice(0, expectedSize);
+      } else {
+        // Data is smaller than expected - adjust height
+        const actualPixels = Math.floor(pixelData.length / 4);
+        height = Math.floor(actualPixels / width);
+        if (height === 0) height = 1;
+        actualPixelData = pixelData;
+      }
+
+      // Create canvas
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+
+      const imageData = ctx.createImageData(width, height);
+      const rgba = imageData.data;
+
+      // Copy pixel data - ARGB format (Adobe FLA native format)
+      // Source: https://stackoverflow.com/a/78489790
+      // ARGB → RGBA conversion for Canvas ImageData
+      const pixelCount = width * height;
+      for (let i = 0; i < pixelCount; i++) {
+        const srcIdx = i * 4;
+        const dstIdx = i * 4;
+        if (srcIdx + 3 < actualPixelData.length) {
+          rgba[dstIdx] = actualPixelData[srcIdx + 1];     // R ← byte 1
+          rgba[dstIdx + 1] = actualPixelData[srcIdx + 2]; // G ← byte 2
+          rgba[dstIdx + 2] = actualPixelData[srcIdx + 3]; // B ← byte 3
+          rgba[dstIdx + 3] = actualPixelData[srcIdx];     // A ← byte 0
+        }
+      }
+
+      ctx.putImageData(imageData, 0, 0);
+
+      // Convert canvas to image
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => resolve(null);
+        img.src = canvas.toDataURL('image/png');
+      });
+    } catch (e) {
+      if (DEBUG) {
+        console.warn('Failed to decode FLA bitmap:', e);
+      }
+      return null;
     }
   }
 

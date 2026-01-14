@@ -5669,13 +5669,15 @@ describe('FLARenderer', () => {
     });
 
     it('should log details for bitmap element in debug mode', async () => {
-      // Create a test image
+      // Create a test image with actual content
       const testCanvas = document.createElement('canvas');
       testCanvas.width = 100;
       testCanvas.height = 100;
       const testCtx = testCanvas.getContext('2d')!;
       testCtx.fillStyle = '#0000FF';
       testCtx.fillRect(0, 0, 100, 100);
+      const imgData = testCtx.getImageData(0, 0, 100, 100);
+      const bitmap = await createImageBitmap(imgData);
 
       const doc = createMinimalDoc({
         timelines: [createTimeline({
@@ -5691,8 +5693,14 @@ describe('FLARenderer', () => {
         })],
       });
 
-      // Add bitmap
-      doc.bitmaps.set('TestBitmap', testCanvas);
+      // Add bitmap with proper BitmapItem structure (cast ImageBitmap to HTMLImageElement for compatibility)
+      doc.bitmaps.set('TestBitmap', {
+        name: 'TestBitmap',
+        href: 'TestBitmap',
+        width: 100,
+        height: 100,
+        imageData: bitmap as unknown as HTMLImageElement,
+      });
 
       await renderer.setDocument(doc);
       document.body.appendChild(canvas);
