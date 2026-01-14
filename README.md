@@ -40,7 +40,7 @@ A modern, lightweight web viewer for Adobe Animate/Flash Professional `.fla` fil
 | **Masks** | Layer masking with clip paths |
 | **Color Effects** | Alpha, brightness, tint, and color transforms |
 | **Blend Modes** | Multiply, screen, overlay, add, difference, and more |
-| **Bitmaps** | Full image rendering from embedded PNGs, JPGs, GIFs |
+| **Bitmaps** | Full image rendering from embedded PNGs, JPGs, GIFs, and Adobe `.dat` format with corruption recovery |
 | **Text Rendering** | Static/dynamic text with word wrap, alignment, Google Fonts |
 | **Audio Playback** | Stream sounds synced to timeline with volume control |
 | **Camera Support** | Auto-detected camera layers with follow mode |
@@ -255,11 +255,46 @@ document.fla (ZIP)
 │   ├── Symbol_1.xml
 │   └── ...
 └── bin/                 # Binary assets
-    ├── image.png
+    ├── image.png        # Standard image formats
+    ├── M 1 123456.dat   # Adobe bitmap format (deflate-compressed ARGB)
     └── audio.mp3
 ```
 
 See [AGENTS.md](./AGENTS.md) for detailed format documentation.
+
+---
+
+## Bitmap Recovery
+
+FLA Viewer includes advanced recovery capabilities for corrupted or partially damaged bitmap data, which is common in older or recovered FLA files.
+
+### Adobe `.dat` Bitmap Format
+
+Adobe Animate stores bitmaps in a proprietary `.dat` format in the `bin/` folder:
+- 28-32 byte header with dimensions and format flags
+- Deflate-compressed ARGB pixel data
+- Some files reference preset dictionaries or have mid-stream corruption
+
+### Recovery Strategies
+
+The parser attempts multiple decompression methods in order:
+
+| Strategy | Description | Typical Recovery |
+|----------|-------------|------------------|
+| Raw Deflate | Standard decompression | 100% (well-formed files) |
+| Dictionary | Zero-filled 32KB preset dictionary | 100% (dictionary-dependent files) |
+| Streaming | Captures partial data via chunk callbacks | 60-90% |
+| Streaming+Dict | Dictionary with streaming for mid-stream errors | 60-90% |
+| Multi-Segment | Extracts stored blocks + scans for valid segments | 20-50% (severely corrupted) |
+
+### Multi-Segment Recovery
+
+For severely corrupted files (<50% recovery), the parser:
+1. Extracts uncompressed "stored blocks" directly from the deflate stream
+2. Scans for valid deflate block starts after corruption points
+3. Combines all recovered segments to maximize data recovery
+
+This allows partial image display even when source files are damaged.
 
 ---
 

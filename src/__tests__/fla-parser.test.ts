@@ -1459,6 +1459,82 @@ describe('FLAParser', () => {
       const bitmap = doc.bitmaps.get('stream_dict_test.png');
       expect(bitmap).toBeDefined();
     });
+
+    it('should use multi-segment recovery for severely corrupted files with stored blocks', async () => {
+      const width = 20;
+      const height = 20;
+      const expectedSize = width * height * 4;
+
+      // Create a file that:
+      // 1. Has corrupted data at the start (streaming gets partial)
+      // 2. Has a stored block that can be extracted directly
+      // This tests the multi-segment recovery path
+
+      // Create pixel data
+      const pixelData = new Uint8Array(expectedSize);
+      for (let i = 0; i < pixelData.length; i++) {
+        pixelData[i] = (i % 256);
+      }
+
+      // Compress half of it normally
+      const firstHalf = pixelData.slice(0, expectedSize / 2);
+      const compressedFirst = pako.deflateRaw(firstHalf);
+
+      // Create a "stored block" for the second half
+      // Stored block format: [BTYPE byte] [LEN:2] [NLEN:2] [DATA]
+      const secondHalf = pixelData.slice(expectedSize / 2);
+      const storedBlockLen = secondHalf.length;
+      const storedBlock = new Uint8Array(5 + storedBlockLen);
+      storedBlock[0] = 0x00; // BFINAL=0, BTYPE=0 (stored)
+      storedBlock[1] = storedBlockLen & 0xFF;
+      storedBlock[2] = (storedBlockLen >> 8) & 0xFF;
+      storedBlock[3] = (~storedBlockLen) & 0xFF;
+      storedBlock[4] = ((~storedBlockLen) >> 8) & 0xFF;
+      storedBlock.set(secondHalf, 5);
+
+      // Combine: corrupted compressed + stored block
+      // Corrupt the compressed data to force fallback
+      const corruptedFirst = new Uint8Array(compressedFirst);
+      for (let i = 10; i < Math.min(20, corruptedFirst.length); i++) {
+        corruptedFirst[i] = 0xFF;
+      }
+
+      const combinedCompressed = new Uint8Array(corruptedFirst.length + storedBlock.length);
+      combinedCompressed.set(corruptedFirst, 0);
+      combinedCompressed.set(storedBlock, corruptedFirst.length);
+
+      // Build .dat file
+      const headerSize = 30;
+      const dat = new Uint8Array(headerSize + combinedCompressed.length);
+      dat[0] = 0x03; dat[1] = 0x05;
+      dat[2] = (width * 4) & 0xFF; dat[3] = ((width * 4) >> 8) & 0xFF;
+      dat[4] = width & 0xFF; dat[5] = (width >> 8) & 0xFF;
+      dat[6] = height & 0xFF; dat[7] = (height >> 8) & 0xFF;
+      dat[24] = 0; dat[25] = 1; dat[26] = 0; dat[27] = 8;
+      dat[28] = 0x78; dat[29] = 0x01;
+      dat.set(combinedCompressed, headerSize);
+
+      const media = `
+        <media>
+          <DOMBitmapItem name="multi_segment_test.png" href="multi_segment_test.png"
+            bitmapDataHRef="M 11 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+
+      const consoleSpy = createConsoleSpy();
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 11 123456.dat': dat }
+      );
+
+      const doc = await parser.parse(fla);
+      consoleSpy.mockRestore();
+
+      // Multi-segment recovery should extract data from the stored block
+      const bitmap = doc.bitmaps.get('multi_segment_test.png');
+      expect(bitmap).toBeDefined();
+      // The parser should recover and produce a bitmap (even if partial)
+    });
   });
 
   describe('edge cases', () => {

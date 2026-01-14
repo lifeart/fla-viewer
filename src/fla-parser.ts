@@ -1174,7 +1174,11 @@ export class FLAParser {
    * 3. Streaming recovery - uses onData callback to capture partial data from
    *    corrupted/truncated deflate streams (recovers 60-90% typically)
    * 4. Streaming with dictionary - for files that need dictionary from byte 0
-   *    and also have mid-stream errors (final fallback)
+   *    and also have mid-stream errors
+   * 5. Multi-segment recovery - for severely corrupted files (<50% recovery):
+   *    - Extracts stored blocks (uncompressed data) directly from the stream
+   *    - Scans for valid deflate segments after corruption points
+   *    - Combines all recovered segments to maximize data recovery
    *
    * Pixel format: ARGB (alpha in byte 0, then RGB), converted to RGBA for Canvas
    */
@@ -1262,6 +1266,102 @@ export class FLAParser {
         return null;
       };
 
+      // Multi-segment recovery for severely corrupted files
+      // Combines: baseline streaming + stored blocks + valid deflate segments found after corruption
+      const tryMultiSegmentRecovery = (): Uint8Array | null => {
+        const segments: Uint8Array[] = [];
+
+        // 1. Get baseline streaming data
+        const baseline = tryStreamingRecovery(false) || tryStreamingRecovery(true);
+        if (baseline && baseline.length > 0) {
+          segments.push(baseline);
+        }
+
+        // 2. Find stored blocks (uncompressed data embedded in deflate stream)
+        // Stored block format: [byte with BTYPE=00] [LEN:2] [NLEN:2] [DATA:LEN]
+        for (let i = 0; i < compData.length - 5; i++) {
+          const byte = compData[i];
+          const BTYPE = (byte >> 1) & 0x03;
+          if (BTYPE === 0) { // Stored block
+            const len = compData[i + 1] | (compData[i + 2] << 8);
+            const nlen = compData[i + 3] | (compData[i + 4] << 8);
+            // Validate: NLEN should be one's complement of LEN
+            if ((len ^ nlen) === 0xFFFF && len > 1000 && i + 5 + len <= compData.length) {
+              const blockData = compData.slice(i + 5, i + 5 + len);
+              segments.push(new Uint8Array(blockData));
+            }
+          }
+        }
+
+        // 3. Scan for valid deflate segments after baseline
+        // Coarse scan with step 500, directly trying decompression at each point
+        // This is slower but ensures we don't miss valid segments
+        const baselineLen = baseline?.length || 0;
+        if (baselineLen < expectedSize * 0.5) {
+          const foundOffsets = new Set<number>();
+
+          for (let scanOffset = 1000; scanOffset < compData.length - 100; scanOffset += 500) {
+            // Try at exact offset and nearby (within +/- 50, step 1)
+            for (let delta = -50; delta <= 50; delta++) {
+              const tryOffset = scanOffset + delta;
+              if (tryOffset < 1000 || tryOffset >= compData.length - 100) continue;
+              if (foundOffsets.has(Math.floor(tryOffset / 1000))) continue; // Skip if already found in this 1K region
+
+              const byte = compData[tryOffset];
+              const BTYPE = (byte >> 1) & 0x03;
+              if (BTYPE === 3) continue;
+
+              try {
+                const result = pako.inflateRaw(compData.slice(tryOffset), { dictionary: zeroDict });
+                if (result.length > 50000) {
+                  const isDupe = segments.some(s => Math.abs(s.length - result.length) < 10000);
+                  if (!isDupe) {
+                    segments.push(result);
+                    foundOffsets.add(Math.floor(tryOffset / 1000));
+                    scanOffset += 10000; // Skip ahead
+                    break;
+                  }
+                }
+              } catch {
+                try {
+                  const result = pako.inflateRaw(compData.slice(tryOffset));
+                  if (result.length > 50000) {
+                    const isDupe = segments.some(s => Math.abs(s.length - result.length) < 10000);
+                    if (!isDupe) {
+                      segments.push(result);
+                      foundOffsets.add(Math.floor(tryOffset / 1000));
+                      scanOffset += 10000;
+                      break;
+                    }
+                  }
+                } catch { /* ignore */ }
+              }
+            }
+          }
+        }
+
+        // Combine all segments sequentially
+        if (segments.length === 0) return null;
+
+        let totalLen = 0;
+        for (const seg of segments) totalLen += seg.length;
+
+        // Cap at expected size
+        const cappedLen = Math.min(totalLen, expectedSize);
+        const result = new Uint8Array(cappedLen);
+        let writeOffset = 0;
+
+        for (const seg of segments) {
+          const remaining = cappedLen - writeOffset;
+          if (remaining <= 0) break;
+          const copyLen = Math.min(seg.length, remaining);
+          result.set(seg.subarray(0, copyLen), writeOffset);
+          writeOffset += copyLen;
+        }
+
+        return result;
+      };
+
       // Try raw deflate first (most common)
       try {
         pixelData = pako.inflateRaw(compData);
@@ -1280,17 +1380,48 @@ export class FLAParser {
             pixelData = streamResult;
             const pct = (100 * pixelData.length / expectedSize).toFixed(1);
             if (DEBUG) console.log(`Streaming recovery: ${pixelData.length}/${expectedSize} bytes (${pct}%) for ${headerWidth}x${headerHeight}`);
+
+            // If streaming recovered less than 50%, try multi-segment recovery
+            if (pixelData.length < expectedSize * 0.5) {
+              if (DEBUG) console.log(`Low recovery, trying multi-segment for ${headerWidth}x${headerHeight}...`);
+              const multiResult = tryMultiSegmentRecovery();
+              if (multiResult && multiResult.length > pixelData.length) {
+                pixelData = multiResult;
+                const newPct = (100 * pixelData.length / expectedSize).toFixed(1);
+                if (DEBUG) console.log(`Multi-segment recovery: ${pixelData.length}/${expectedSize} bytes (${newPct}%) for ${headerWidth}x${headerHeight}`);
+              }
+            }
           } else {
-            // Final fallback: streaming with dictionary (for files that need dictionary from the start)
+            // Streaming without dict failed - try with dictionary
             if (DEBUG) console.log(`Streaming failed, trying streaming with dictionary for ${headerWidth}x${headerHeight}...`);
             const streamDictResult = tryStreamingRecovery(true);
             if (streamDictResult && streamDictResult.length > 0) {
               pixelData = streamDictResult;
               const pct = (100 * pixelData.length / expectedSize).toFixed(1);
               if (DEBUG) console.log(`Streaming+dict recovery: ${pixelData.length}/${expectedSize} bytes (${pct}%) for ${headerWidth}x${headerHeight}`);
+
+              // If streaming+dict recovered less than 50%, try multi-segment recovery
+              if (pixelData.length < expectedSize * 0.5) {
+                if (DEBUG) console.log(`Low recovery, trying multi-segment for ${headerWidth}x${headerHeight}...`);
+                const multiResult = tryMultiSegmentRecovery();
+                if (multiResult && multiResult.length > pixelData.length) {
+                  pixelData = multiResult;
+                  const newPct = (100 * pixelData.length / expectedSize).toFixed(1);
+                  if (DEBUG) console.log(`Multi-segment recovery: ${pixelData.length}/${expectedSize} bytes (${newPct}%) for ${headerWidth}x${headerHeight}`);
+                }
+              }
             } else {
-              console.warn(`All decompression methods failed for ${headerWidth}x${headerHeight}`);
-              return null;
+              // All streaming failed - try multi-segment as last resort
+              if (DEBUG) console.log(`All streaming failed, trying multi-segment for ${headerWidth}x${headerHeight}...`);
+              const multiResult = tryMultiSegmentRecovery();
+              if (multiResult && multiResult.length > 0) {
+                pixelData = multiResult;
+                const pct = (100 * pixelData.length / expectedSize).toFixed(1);
+                if (DEBUG) console.log(`Multi-segment recovery: ${pixelData.length}/${expectedSize} bytes (${pct}%) for ${headerWidth}x${headerHeight}`);
+              } else {
+                console.warn(`All decompression methods failed for ${headerWidth}x${headerHeight}`);
+                return null;
+              }
             }
           }
         }
