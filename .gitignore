@@ -4,3 +4,4 @@ dist/
 coverage/
 src/__tests__/__screenshots__/
 .env
+bitmap_analysis/

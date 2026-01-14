@@ -15,6 +15,7 @@ export interface FLADocument {
 export interface BitmapItem {
   name: string;
   href: string; // Filename in archive
+  bitmapDataHRef?: string; // Binary data filename in bin/ folder (e.g., "M 1 1731603320.dat")
   width: number; // In pixels
   height: number; // In pixels
   sourceExternalFilepath?: string;

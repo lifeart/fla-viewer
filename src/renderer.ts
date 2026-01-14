@@ -1455,6 +1455,10 @@ export class FLARenderer {
   private renderBitmapInstance(bitmap: BitmapInstance, depth: number = 0): void {
     if (!this.doc) return;
 
+    if (DEBUG) {
+      console.log('renderBitmap:', bitmap.libraryItemName);
+    }
+
     const ctx = this.ctx;
     ctx.save();
 
@@ -1467,8 +1471,10 @@ export class FLARenderer {
     // Create path for hit testing
     if (this.debugMode) {
       const path = new Path2D();
-      const width = bitmapItem?.width || 100;
-      const height = bitmapItem?.height || 100;
+      // Use actual image dimensions if available, otherwise fall back to BitmapItem dimensions
+      const img = bitmapItem?.imageData;
+      const width = img ? (img.naturalWidth || img.width) : (bitmapItem?.width || 100);
+      const height = img ? (img.naturalHeight || img.height) : (bitmapItem?.height || 100);
       path.rect(0, 0, width, height);
       this.debugElements.push({
         type: 'bitmap',
@@ -1481,19 +1487,23 @@ export class FLARenderer {
     }
 
     if (bitmapItem && bitmapItem.imageData) {
-      // If we have loaded image data, draw it
-      ctx.drawImage(bitmapItem.imageData, 0, 0, bitmapItem.width, bitmapItem.height);
+      // If we have loaded image data, draw it at its natural dimensions
+      // The actual image may be smaller than BitmapItem dimensions due to FLA format quirks
+      const img = bitmapItem.imageData;
+      ctx.drawImage(img, 0, 0, img.naturalWidth || img.width, img.naturalHeight || img.height);
     } else if (bitmapItem) {
-      // Draw placeholder with bitmap dimensions
-      ctx.fillStyle = '#555555';
-      ctx.fillRect(0, 0, bitmapItem.width, bitmapItem.height);
-      ctx.strokeStyle = '#777777';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(0, 0, bitmapItem.width, bitmapItem.height);
+      // Bitmap exists but imageData failed to load (e.g., corrupted data)
+      // Skip drawing placeholder to avoid visual artifacts - just log in debug mode
+      if (DEBUG) {
+        console.log('Skipping bitmap (no imageData):', bitmap.libraryItemName, bitmapItem.width, 'x', bitmapItem.height);
+      }
+      // Don't draw gray placeholder - it creates visual artifacts
     } else {
-      // No bitmap info, draw small placeholder
-      ctx.fillStyle = '#555555';
-      ctx.fillRect(0, 0, 100, 100);
+      // No bitmap info at all - skip silently
+      if (DEBUG) {
+        console.log('Skipping missing bitmap:', bitmap.libraryItemName);
+      }
+      // Don't draw placeholder
     }
 
     ctx.restore();
