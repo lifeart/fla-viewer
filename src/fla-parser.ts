@@ -1165,7 +1165,18 @@ export class FLAParser {
    *   - Byte 26: Sub-format (0 = standard, 2 = alternate)
    *   - Byte 27: 8 for format 0, 0 for format 2
    * - Bytes 28-29: Zlib header (0x78 0x01)
-   * - Bytes 30+ (format 0) or 32+ (format 2): Deflate compressed RGBA pixel data
+   * - Bytes 30+ (format 0) or 32+ (format 2): Deflate compressed ARGB pixel data
+   *
+   * Decompression strategy (in order of attempts):
+   * 1. Raw deflate - works for most well-formed files
+   * 2. Dictionary decompression - uses zero-filled 32KB dictionary for files
+   *    that reference a preset dictionary (gives complete results)
+   * 3. Streaming recovery - uses onData callback to capture partial data from
+   *    corrupted/truncated deflate streams (recovers 60-90% typically)
+   * 4. Streaming with dictionary - for files that need dictionary from byte 0
+   *    and also have mid-stream errors (final fallback)
+   *
+   * Pixel format: ARGB (alpha in byte 0, then RGB), converted to RGBA for Canvas
    */
   private async decodeFlaBitmap(data: ArrayBuffer, expectedWidth: number, expectedHeight: number): Promise<HTMLImageElement | null> {
     const bytes = new Uint8Array(data);
@@ -1199,10 +1210,23 @@ export class FLAParser {
       const expectedSize = headerWidth * headerHeight * 4;
 
       // Helper function for streaming partial recovery
-      const tryStreamingRecovery = (): Uint8Array | null => {
+      // Uses onData callback to capture chunks as they're produced,
+      // allowing recovery of partial data when decompression errors occur mid-stream
+      const tryStreamingRecovery = (useDict: boolean = false): Uint8Array | null => {
         try {
-          const inflater = new pako.Inflate({ raw: true, chunkSize: 16384 });
-          const chunkSize = 512;
+          const chunks: Uint8Array[] = [];
+          const options: pako.InflateOptions = { raw: true, chunkSize: 16384 };
+          if (useDict) {
+            options.dictionary = zeroDict;
+          }
+          const inflater = new pako.Inflate(options);
+
+          // Capture chunks via onData callback - this is key for partial recovery
+          inflater.onData = (chunk: Uint8Array) => {
+            chunks.push(new Uint8Array(chunk));
+          };
+
+          const chunkSize = 4096;
 
           for (let i = 0; i < compData.length; i += chunkSize) {
             const isLast = i + chunkSize >= compData.length;
@@ -1219,9 +1243,19 @@ export class FLAParser {
             }
           }
 
-          if (inflater.result && inflater.result.length > 0) {
-            return new Uint8Array(inflater.result as ArrayBuffer);
+          // Combine collected chunks
+          if (chunks.length === 0) return null;
+
+          let totalSize = 0;
+          for (const chunk of chunks) totalSize += chunk.length;
+
+          const result = new Uint8Array(totalSize);
+          let offset = 0;
+          for (const chunk of chunks) {
+            result.set(chunk, offset);
+            offset += chunk.length;
           }
+          return result;
         } catch {
           // Streaming failed entirely
         }
@@ -1232,24 +1266,32 @@ export class FLAParser {
       try {
         pixelData = pako.inflateRaw(compData);
       } catch (rawError) {
-        // Raw deflate failed - try streaming recovery first (gets partial data)
-        // This is more reliable for corrupted files than dictionary decompression
-        console.log(`Raw deflate failed for ${headerWidth}x${headerHeight}, trying streaming recovery...`);
-        const streamResult = tryStreamingRecovery();
+        // Raw deflate failed - try dictionary first (gives complete results for some files)
+        if (DEBUG) console.log(`Raw deflate failed for ${headerWidth}x${headerHeight}, trying dictionary...`);
+        try {
+          pixelData = pako.inflateRaw(compData, { dictionary: zeroDict });
+          if (DEBUG) console.log(`Dictionary decompress: ${pixelData.length} bytes for ${headerWidth}x${headerHeight}`);
+        } catch (dictError) {
+          // Dictionary failed - try streaming recovery (gets partial data)
+          if (DEBUG) console.log(`Dictionary failed, trying streaming for ${headerWidth}x${headerHeight}...`);
+          const streamResult = tryStreamingRecovery(false);
 
-        if (streamResult && streamResult.length > 0) {
-          pixelData = streamResult;
-          const pct = (100 * pixelData.length / expectedSize).toFixed(1);
-          console.log(`Streaming recovery: ${pixelData.length}/${expectedSize} bytes (${pct}%) for ${headerWidth}x${headerHeight}`);
-        } else {
-          // Try with zero dictionary as fallback
-          console.log(`Streaming recovery failed, trying dictionary for ${headerWidth}x${headerHeight}...`);
-          try {
-            pixelData = pako.inflateRaw(compData, { dictionary: zeroDict });
-            console.log(`Dictionary decompress: ${pixelData.length} bytes for ${headerWidth}x${headerHeight}`);
-          } catch (dictError) {
-            console.warn(`All decompression methods failed for ${headerWidth}x${headerHeight}`);
-            return null;
+          if (streamResult && streamResult.length > 0) {
+            pixelData = streamResult;
+            const pct = (100 * pixelData.length / expectedSize).toFixed(1);
+            if (DEBUG) console.log(`Streaming recovery: ${pixelData.length}/${expectedSize} bytes (${pct}%) for ${headerWidth}x${headerHeight}`);
+          } else {
+            // Final fallback: streaming with dictionary (for files that need dictionary from the start)
+            if (DEBUG) console.log(`Streaming failed, trying streaming with dictionary for ${headerWidth}x${headerHeight}...`);
+            const streamDictResult = tryStreamingRecovery(true);
+            if (streamDictResult && streamDictResult.length > 0) {
+              pixelData = streamDictResult;
+              const pct = (100 * pixelData.length / expectedSize).toFixed(1);
+              if (DEBUG) console.log(`Streaming+dict recovery: ${pixelData.length}/${expectedSize} bytes (${pct}%) for ${headerWidth}x${headerHeight}`);
+            } else {
+              console.warn(`All decompression methods failed for ${headerWidth}x${headerHeight}`);
+              return null;
+            }
           }
         }
       }
