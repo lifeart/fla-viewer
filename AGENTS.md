@@ -347,16 +347,41 @@ Decodes to:
   - Parses bitmap dimensions and references
   - Infrastructure for future BitmapFill support
 
+- [x] **Shape Tweening**: MorphShape interpolation between keyframes
+  - Parses `tweenType="shape"` frames with MorphShape data
+  - Interpolates MorphSegment paths (startPointA/B, controlPointA/B, anchorPointA/B)
+  - Supports both line and curve segments
+  - Uses fill/stroke indices from segments
+
+- [x] **Mask Layers**: Layer masking with clip paths
+  - Parses `layerType="mask"` and `layerType="masked"` attributes
+  - Applies clipping paths from mask layer shapes
+  - Supports animated masks via `maskLayerIndex` tracking
+  - Groups masked layers with their mask for proper rendering order
+
+- [x] **Filters**: Visual effects (blur, glow, drop shadow)
+  - Parses `<filters>` element on symbol instances and text
+  - BlurFilter: CSS blur via `ctx.filter`
+  - GlowFilter: Shadow-based glow effect with strength/color
+  - DropShadowFilter: Offset shadows with angle/distance
+  - Supports quality levels and alpha values
+
+- [x] **Color Transforms**: Symbol instance color effects
+  - Alpha multiplier/offset
+  - RGB multipliers/offsets (redMultiplier, greenMultiplier, blueMultiplier)
+  - Tint and brightness via CSS filter approximation
+  - Parses `<color><Color .../></color>` element
+
+- [x] **Blend Modes**: Layer and symbol blend modes
+  - Parses `blendMode` attribute on symbol instances
+  - Maps Flash blend modes to Canvas `globalCompositeOperation`
+  - Supports: normal, multiply, screen, overlay, darken, lighten, hardlight, add, subtract, difference, invert, alpha, erase
+
 ---
 
 ## Remaining TODOs
 
 ### High Priority
-
-- [ ] **Shape Tweening**: Implement shape morphing between keyframes
-  - Parse `tweenType="shape"` frames
-  - Interpolate edge paths between shapes
-  - Handle fill color transitions
 
 - [ ] **Gradient Fills**: Proper gradient rendering
   - Linear gradients with matrix transform
@@ -368,24 +393,6 @@ Decodes to:
   - Apply bitmap as fill pattern with transform
 
 ### Medium Priority
-
-- [ ] **Mask Layers**: Implement layer masking
-  - Parse `layerType="mask"` and `layerType="masked"`
-  - Apply clipping paths from mask layer shapes
-  - Support animated masks
-
-- [ ] **Color Transforms**: Symbol instance color effects
-  - Alpha multiplier/offset
-  - RGB multipliers/offsets
-  - Tint and brightness
-
-- [ ] **Blend Modes**: Layer and symbol blend modes
-  - Normal, multiply, screen, overlay, etc.
-  - Parse `blendMode` attribute
-
-- [ ] **Filters**: Drop shadow, blur, glow effects
-  - Parse `<filters>` element
-  - Implement using Canvas filters or manual rendering
 
 - [ ] **9-Slice Scaling**: Support for scalable symbols
   - Parse scale9Grid attribute
@@ -519,9 +526,16 @@ Decodes to:
 | DashedStroke | `scaleMode` | Dashed stroke scale mode |
 | DOMBitmapInstance | all | Bitmap instances (not in samples) |
 | BitmapFill | all | Bitmap fills (not in samples) |
-| filters | all | Filter effects (drop shadow, blur, etc.) |
-| blendMode | all | Blend modes |
-| Color (transform) | `alphaMultiplier`, offsets | Color transform (partial support) |
+
+### Now Implemented
+
+| Element | Attribute | Status |
+|---------|-----------|--------|
+| filters | BlurFilter, GlowFilter, DropShadowFilter | ✓ Implemented |
+| blendMode | normal, multiply, screen, overlay, etc. | ✓ Implemented |
+| Color (transform) | alphaMultiplier, RGB multipliers/offsets | ✓ Implemented |
+| MorphShape | shape tweening via MorphSegments | ✓ Implemented |
+| layerType | mask, masked | ✓ Implemented |
 
 ---
 
