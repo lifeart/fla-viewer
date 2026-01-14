@@ -26,7 +26,6 @@ import type {
   Filter,
   MorphShape,
   MorphSegment,
-  MorphCurve,
   ColorTransform,
   BlendMode
 } from './types';
@@ -1136,20 +1135,6 @@ export class FLAParser {
   }
 
   /**
-   * Paeth predictor for PNG filter algorithm.
-   * Selects the value closest to p = a + b - c among a, b, and c.
-   */
-  private paethPredictor(a: number, b: number, c: number): number {
-    const p = a + b - c;
-    const pa = Math.abs(p - a);
-    const pb = Math.abs(p - b);
-    const pc = Math.abs(p - c);
-    if (pa <= pb && pa <= pc) return a;
-    if (pb <= pc) return b;
-    return c;
-  }
-
-  /**
    * Decode Adobe FLA bitmap format (.dat files in bin/ folder).
    *
    * Format structure:
@@ -1312,7 +1297,7 @@ export class FLAParser {
               if (BTYPE === 3) continue;
 
               try {
-                const result = pako.inflateRaw(compData.slice(tryOffset), { dictionary: zeroDict });
+                const result = pako.inflateRaw(compData.slice(tryOffset), { dictionary: zeroDict } as pako.InflateOptions);
                 if (result.length > 50000) {
                   const isDupe = segments.some(s => Math.abs(s.length - result.length) < 10000);
                   if (!isDupe) {
@@ -1369,7 +1354,7 @@ export class FLAParser {
         // Raw deflate failed - try dictionary first (gives complete results for some files)
         if (DEBUG) console.log(`Raw deflate failed for ${headerWidth}x${headerHeight}, trying dictionary...`);
         try {
-          pixelData = pako.inflateRaw(compData, { dictionary: zeroDict });
+          pixelData = pako.inflateRaw(compData, { dictionary: zeroDict } as pako.InflateOptions);
           if (DEBUG) console.log(`Dictionary decompress: ${pixelData.length} bytes for ${headerWidth}x${headerHeight}`);
         } catch (dictError) {
           // Dictionary failed - try streaming recovery (gets partial data)

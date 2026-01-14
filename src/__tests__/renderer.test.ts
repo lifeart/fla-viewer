@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FLARenderer, setRendererDebug } from '../renderer';
+import type { Edge } from '../types';
 import {
   createConsoleSpy,
   expectLogContaining,
@@ -63,6 +64,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix(),
                 fills: [{
                   index: 1,
+                  type: 'solid',
                   color: '#FF0000',
                 }],
                 strokes: [],
@@ -113,7 +115,7 @@ describe('FLARenderer', () => {
       Object.defineProperty(container, 'clientWidth', { value: 1000, configurable: true });
       Object.defineProperty(container, 'clientHeight', { value: 800, configurable: true });
 
-      renderer.updateCanvasSize(container);
+      renderer.updateCanvasSize();
 
       // Canvas should be resized
       expect(canvas.width).toBeGreaterThan(0);
@@ -192,7 +194,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#FFFFFF' }],
+              fills: [{ index: 1, type: 'solid', color: '#FFFFFF' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -230,6 +232,7 @@ describe('FLARenderer', () => {
                   matrix: createMatrix(),
                   firstFrame: 0,
                   loop: 'loop',
+                  transformationPoint: { x: 0, y: 0 },
                 }],
               })],
             }),
@@ -255,7 +258,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#00FF00' }],
+              fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -293,6 +296,7 @@ describe('FLARenderer', () => {
                   matrix: createMatrix(),
                   firstFrame: 0,
                   loop: 'loop',
+                  transformationPoint: { x: 0, y: 0 },
                 }],
               })],
             }),
@@ -314,7 +318,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#0000FF' }],
+              fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -352,6 +356,7 @@ describe('FLARenderer', () => {
                   matrix: createMatrix({ tx: 50, ty: 50 }),
                   firstFrame: 0,
                   loop: 'loop',
+                  transformationPoint: { x: 0, y: 0 },
                 }],
               })],
             }),
@@ -361,7 +366,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -421,9 +426,9 @@ describe('FLARenderer', () => {
                 fills: [{
                   index: 1,
                   type: 'linear',
-                  entries: [
-                    { ratio: 0, color: '#FF0000' },
-                    { ratio: 1, color: '#0000FF' },
+                  gradient: [
+                    { ratio: 0, color: '#FF0000', alpha: 1 },
+                    { ratio: 1, color: '#0000FF', alpha: 1 },
                   ],
                   matrix: createMatrix(),
                 }],
@@ -459,9 +464,9 @@ describe('FLARenderer', () => {
                 fills: [{
                   index: 1,
                   type: 'radial',
-                  entries: [
-                    { ratio: 0, color: '#FFFFFF' },
-                    { ratio: 1, color: '#000000' },
+                  gradient: [
+                    { ratio: 0, color: '#FFFFFF', alpha: 1 },
+                    { ratio: 1, color: '#000000', alpha: 1 },
                   ],
                   matrix: createMatrix(),
                 }],
@@ -790,7 +795,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#00FF00' }],
+              fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -826,6 +831,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix({ tx: 100, ty: 100 }),
                 firstFrame: 0,
                 loop: 'loop',
+                transformationPoint: { x: 0, y: 0 },
               }],
             })],
           })],
@@ -902,7 +908,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 0 }),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -922,7 +928,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 200 }),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -956,7 +962,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF0000' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -997,7 +1003,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#00FF00' }],
+              fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -1033,6 +1039,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix({ tx: 100, ty: 100 }),
                 firstFrame: 0,
                 loop: 'loop',
+                transformationPoint: { x: 0, y: 0 },
               }],
             })],
           })],
@@ -1085,7 +1092,7 @@ describe('FLARenderer', () => {
                 {
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -1100,7 +1107,7 @@ describe('FLARenderer', () => {
                 {
                   type: 'shape',
                   matrix: createMatrix({ tx: 100 }),
-                  fills: [{ index: 1, color: '#00FF00' }],
+                  fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -1136,7 +1143,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF0000' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -1168,7 +1175,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#0000FF' }],
+                fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -1204,7 +1211,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -1351,7 +1358,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF0000' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -1372,7 +1379,7 @@ describe('FLARenderer', () => {
       const symbols = new Map();
       symbols.set('MovieClip 1', {
         name: 'MovieClip 1',
-        type: 'movie clip',
+        type: 'movieclip',
         timeline: symbolTimeline,
       });
 
@@ -1386,10 +1393,11 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'symbol',
                 libraryItemName: 'MovieClip 1',
-                symbolType: 'movie clip',
+                symbolType: 'movieclip',
                 matrix: createMatrix({ tx: 50, ty: 50 }),
                 firstFrame: 0,
                 loop: 'loop',
+                transformationPoint: { x: 0, y: 0 },
               }],
             })],
           })],
@@ -1413,7 +1421,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#0000FF' }],
+              fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -1441,6 +1449,7 @@ describe('FLARenderer', () => {
               matrix: createMatrix({ tx: 10, ty: 10 }),
               firstFrame: 0,
               loop: 'loop',
+              transformationPoint: { x: 0, y: 0 },
             }],
           })],
         })],
@@ -1470,6 +1479,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix({ tx: 100, ty: 100 }),
                 firstFrame: 0,
                 loop: 'loop',
+                transformationPoint: { x: 0, y: 0 },
               }],
             })],
           })],
@@ -1490,7 +1500,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF0000', alpha: 0.5 }],
+                fills: [{ index: 1, type: 'solid', color: '#FF0000', alpha: 0.5 }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -1570,7 +1580,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 0 }),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -1590,7 +1600,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 200 }),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -1627,7 +1637,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#00FF00' }],
+              fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -1698,7 +1708,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 100, ty: 100 }),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -1738,8 +1748,8 @@ describe('FLARenderer', () => {
                 type: 'shape',
                 matrix: createMatrix(),
                 fills: [
-                  { index: 1, color: '#FF0000' },
-                  { index: 2, color: '#00FF00' },
+                  { index: 1, type: 'solid', color: '#FF0000' },
+                  { index: 2, type: 'solid', color: '#00FF00' },
                 ],
                 strokes: [],
                 edges: [
@@ -1816,7 +1826,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#0000FF' }],
+                fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
                 strokes: [],
                 edges: [
                   // First segment
@@ -1905,7 +1915,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#FF00FF' }],
+              fills: [{ index: 1, type: 'solid', color: '#FF00FF' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -1942,7 +1952,8 @@ describe('FLARenderer', () => {
                 matrix: createMatrix({ tx: 50, ty: 50 }),
                 firstFrame: 0,
                 loop: 'play once',
-              }],
+              transformationPoint: { x: 0, y: 0 },
+            }],
             })],
           })],
         })],
@@ -1967,7 +1978,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#00FFFF' }],
+                fills: [{ index: 1, type: 'solid', color: '#00FFFF' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -1985,7 +1996,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FFFF00' }],
+                fills: [{ index: 1, type: 'solid', color: '#FFFF00' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -2022,7 +2033,8 @@ describe('FLARenderer', () => {
                 matrix: createMatrix({ tx: 80, ty: 80 }),
                 firstFrame: 3,
                 loop: 'single frame',
-              }],
+              transformationPoint: { x: 0, y: 0 },
+            }],
             })],
           })],
         })],
@@ -2219,7 +2231,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 0 }),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -2237,7 +2249,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 150 }),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -2274,7 +2286,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ ty: 0 }),
-                  fills: [{ index: 1, color: '#00FF00' }],
+                  fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -2292,7 +2304,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ ty: 100 }),
-                  fills: [{ index: 1, color: '#00FF00' }],
+                  fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -2338,7 +2350,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 0 }),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -2356,7 +2368,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 200 }),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -2426,7 +2438,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#00FF00' }],
+              fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -2467,6 +2479,7 @@ describe('FLARenderer', () => {
                   matrix: createMatrix({ a: 1, d: 1, tx: 0, ty: 0 }),
                   firstFrame: 0,
                   loop: 'loop',
+                  transformationPoint: { x: 0, y: 0 },
                 }],
               }),
               createFrame({
@@ -2479,6 +2492,7 @@ describe('FLARenderer', () => {
                   matrix: createMatrix({ a: 2, d: 2, tx: 100, ty: 100 }),
                   firstFrame: 0,
                   loop: 'loop',
+                  transformationPoint: { x: 0, y: 0 },
                 }],
               }),
             ],
@@ -2715,7 +2729,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#0000FF' }],
+                fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -2752,7 +2766,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF00FF' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF00FF' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -2790,7 +2804,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#FFFFFF' }],
+              fills: [{ index: 1, type: 'solid', color: '#FFFFFF' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -2826,7 +2840,8 @@ describe('FLARenderer', () => {
                 matrix: createMatrix({ tx: 100, ty: 100 }),
                 firstFrame: 0,
                 loop: 'loop',
-                color: {
+                transformationPoint: { x: 0, y: 0 },
+                colorTransform: {
                   redMultiplier: 1,
                   greenMultiplier: 0,
                   blueMultiplier: 0,
@@ -2856,7 +2871,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#000000' }],
+              fills: [{ index: 1, type: 'solid', color: '#000000' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -2899,6 +2914,7 @@ describe('FLARenderer', () => {
                     matrix: createMatrix({ a: 1, d: 1, tx: 0, ty: 0 }),
                     firstFrame: 0,
                     loop: 'loop',
+                    transformationPoint: { x: 0, y: 0 },
                   }],
                 }),
                 createFrame({
@@ -2911,6 +2927,7 @@ describe('FLARenderer', () => {
                     matrix: createMatrix({ a: 2, d: 2, tx: 100, ty: 100 }),
                     firstFrame: 0,
                     loop: 'loop',
+                    transformationPoint: { x: 0, y: 0 },
                   }],
                 }),
               ],
@@ -2922,7 +2939,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -2970,7 +2987,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#333333' }],
+              fills: [{ index: 1, type: 'solid', color: '#333333' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -3010,6 +3027,7 @@ describe('FLARenderer', () => {
                   matrix: createMatrix({ a: 0.5, d: 0.5, tx: 137.5, ty: 100 }),
                   firstFrame: 0,
                   loop: 'loop',
+                  transformationPoint: { x: 0, y: 0 },
                 }],
               })],
             }),
@@ -3020,7 +3038,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#0000FF' }],
+                  fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -3056,7 +3074,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#888888' }],
+              fills: [{ index: 1, type: 'solid', color: '#888888' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -3100,6 +3118,7 @@ describe('FLARenderer', () => {
                     matrix: createMatrix({ a: 1, d: 1, tx: 0, ty: 0 }),
                     firstFrame: 0,
                     loop: 'loop',
+                    transformationPoint: { x: 0, y: 0 },
                   }],
                 }),
                 createFrame({
@@ -3112,6 +3131,7 @@ describe('FLARenderer', () => {
                     matrix: createMatrix({ a: 1.5, d: 1.5, tx: 50, ty: 50 }),
                     firstFrame: 0,
                     loop: 'loop',
+                    transformationPoint: { x: 0, y: 0 },
                   }],
                 }),
               ],
@@ -3124,7 +3144,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 100, ty: 100 }),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -3177,6 +3197,9 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'text',
                 matrix: createMatrix({ tx: 50, ty: 50 }),
+                left: 0,
+                width: 200,
+                height: 30,
                 textRuns: [{
                   characters: 'Pixel Text',
                   face: 'PressStart2P-Regular',
@@ -3208,6 +3231,9 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'text',
                 matrix: createMatrix({ tx: 50, ty: 50 }),
+                left: 0,
+                width: 200,
+                height: 30,
                 textRuns: [{
                   characters: 'Hello World',
                   face: 'Arial',
@@ -3238,6 +3264,9 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'text',
                 matrix: createMatrix({ tx: 50, ty: 50 }),
+                left: 0,
+                width: 200,
+                height: 30,
                 textRuns: [{
                   characters: 'Partial Match Font',
                   face: 'PressStart2P-Bold', // Starts with PressStart2P
@@ -3267,6 +3296,9 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'text',
                 matrix: createMatrix({ tx: 50, ty: 50 }),
+                left: 0,
+                width: 200,
+                height: 30,
                 textRuns: [{
                   characters: 'Unknown Font',
                   face: 'SomeRandomFont-XYZ',
@@ -3296,6 +3328,9 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'text',
                 matrix: createMatrix({ tx: 50, ty: 100 }),
+                left: 0,
+                width: 200,
+                height: 30,
                 textRuns: [
                   {
                     characters: 'Bold ',
@@ -3590,7 +3625,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF0000' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                 strokes: [{ index: 1, color: '#000000', weight: 2 }],
                 edges: [{
                   fillStyle0: 1,
@@ -3657,7 +3692,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#00FF00' }],
+              fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -3693,6 +3728,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix({ tx: 50, ty: 50 }),
                 firstFrame: 0,
                 loop: 'loop',
+                transformationPoint: { x: 0, y: 0 },
               }],
             })],
           })],
@@ -3793,7 +3829,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF0000' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -3834,7 +3870,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#00FF00' }],
+              fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -3870,6 +3906,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix({ tx: 100, ty: 100 }),
                 firstFrame: 0,
                 loop: 'loop',
+                transformationPoint: { x: 0, y: 0 },
               }],
             })],
           })],
@@ -3901,7 +3938,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF00FF' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF00FF' }],
                 strokes: [],
                 edges: [
                   // Multiple edge contributions that need to be connected
@@ -3956,7 +3993,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FFFF00' }],
+                fills: [{ index: 1, type: 'solid', color: '#FFFF00' }],
                 strokes: [],
                 edges: [
                   // First contribution
@@ -4011,7 +4048,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#444444' }],
+              fills: [{ index: 1, type: 'solid', color: '#444444' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -4055,6 +4092,7 @@ describe('FLARenderer', () => {
                     matrix: createMatrix({ a: 1, d: 1, tx: 0, ty: 0 }),
                     firstFrame: 0,
                     loop: 'loop',
+                    transformationPoint: { x: 0, y: 0 },
                   }],
                 }),
                 createFrame({
@@ -4067,6 +4105,7 @@ describe('FLARenderer', () => {
                     matrix: createMatrix({ a: 1.5, d: 1.5, tx: 100, ty: 75 }),
                     firstFrame: 0,
                     loop: 'loop',
+                    transformationPoint: { x: 0, y: 0 },
                   }],
                 }),
               ],
@@ -4079,7 +4118,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 150, ty: 150 }),
-                  fills: [{ index: 1, color: '#00FF00' }],
+                  fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -4134,7 +4173,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#888888' }],
+              fills: [{ index: 1, type: 'solid', color: '#888888' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -4185,7 +4224,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#00FFFF' }],
+                  fills: [{ index: 1, type: 'solid', color: '#00FFFF' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -4230,6 +4269,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix(),
                 firstFrame: 0,
                 loop: 'loop',
+                transformationPoint: { x: 0, y: 0 },
               }],
             })],
           })],
@@ -4256,7 +4296,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#888888' }],
+              fills: [{ index: 1, type: 'solid', color: '#888888' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -4298,6 +4338,7 @@ describe('FLARenderer', () => {
                   matrix: createMatrix({ a: 1, d: 1, tx: 0, ty: 0 }),
                   firstFrame: 0,
                   loop: 'loop',
+                  transformationPoint: { x: 0, y: 0 },
                 }],
               })],
             }),
@@ -4307,7 +4348,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -4343,7 +4384,7 @@ describe('FLARenderer', () => {
             elements: [{
               type: 'shape',
               matrix: createMatrix(),
-              fills: [{ index: 1, color: '#888888' }],
+              fills: [{ index: 1, type: 'solid', color: '#888888' }],
               strokes: [],
               edges: [{
                 fillStyle0: 1,
@@ -4385,6 +4426,7 @@ describe('FLARenderer', () => {
                   matrix: createMatrix({ a: 1, d: 1, tx: 0, ty: 0 }),
                   firstFrame: 0,
                   loop: 'loop',
+                  transformationPoint: { x: 0, y: 0 },
                 }],
               })],
             }),
@@ -4394,7 +4436,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#00FF00' }],
+                  fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -4431,7 +4473,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#0000FF' }],
+                fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
                 strokes: [{ index: 1, color: '#000000', weight: 2 }],
                 edges: [{
                   fillStyle0: 1,
@@ -4464,7 +4506,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF00FF' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF00FF' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -4501,7 +4543,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -4522,7 +4564,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#00FF00' }],
+                  fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -4562,7 +4604,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#0000FF' }],
+                  fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -4683,7 +4725,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF0000' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -4716,7 +4758,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#00FF00' }],
+                fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -4747,7 +4789,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#0000FF' }],
+                fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -4780,7 +4822,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FFFF00' }],
+                fills: [{ index: 1, type: 'solid', color: '#FFFF00' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -4820,7 +4862,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF00FF' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF00FF' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -4944,7 +4986,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#FF0000' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -4965,7 +5007,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#00FF00' }],
+                  fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -5043,7 +5085,6 @@ describe('FLARenderer', () => {
                   index: 1,
                   color: '#0000FF',
                   weight: 5,
-                  alpha: 0.7
                 }],
                 edges: [{
                   strokeStyle: 1,
@@ -5077,7 +5118,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#00FFFF' }],
+                fills: [{ index: 1, type: 'solid', color: '#00FFFF' }],
                 strokes: [],
                 edges: [
                   // First contribution - partial path
@@ -5120,7 +5161,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FFFF00' }],
+                fills: [{ index: 1, type: 'solid', color: '#FFFF00' }],
                 strokes: [],
                 edges: [
                   // First contribution - starts at 10,10
@@ -5174,7 +5215,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF00FF' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF00FF' }],
                 strokes: [],
                 edges: [
                   // First contribution - starts at (0,0), ends at (100,0)
@@ -5230,6 +5271,7 @@ describe('FLARenderer', () => {
                   elements: [{
                     type: 'symbol',
                     libraryItemName: 'Ramka',
+                    symbolType: 'graphic',
                     matrix: createMatrix({ tx: 0, ty: 0, a: 1, d: 1 }),
                     transformationPoint: { x: 960, y: 540 },
                     loop: 'loop',
@@ -5242,6 +5284,7 @@ describe('FLARenderer', () => {
                   elements: [{
                     type: 'symbol',
                     libraryItemName: 'Ramka',
+                    symbolType: 'graphic',
                     matrix: createMatrix({ tx: 500, ty: 300, a: 0.5, d: 0.5 }),
                     transformationPoint: { x: 960, y: 540 },
                     loop: 'loop',
@@ -5259,7 +5302,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#00FF00' }],
+                  fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -5282,6 +5325,8 @@ describe('FLARenderer', () => {
       // Add Ramka symbol to document
       doc.symbols.set('Ramka', {
         name: 'Ramka',
+        itemID: 'ramka-symbol',
+        symbolType: 'graphic',
         timeline: createTimeline({
           layers: [createLayer({
             frames: [createFrame()],
@@ -5324,6 +5369,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'symbol',
                   libraryItemName: 'Ramka',
+                  symbolType: 'graphic',
                   // Non-identity matrix with rotation and scale
                   matrix: { a: 0.866, b: 0.5, c: -0.5, d: 0.866, tx: 100, ty: 50 },
                   transformationPoint: { x: 400, y: 300 },
@@ -5341,7 +5387,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#FF00FF' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF00FF' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -5363,6 +5409,8 @@ describe('FLARenderer', () => {
 
       doc.symbols.set('Ramka', {
         name: 'Ramka',
+        itemID: 'ramka-symbol',
+        symbolType: 'graphic',
         timeline: createTimeline({
           layers: [createLayer({ frames: [createFrame()] })],
         }),
@@ -5386,23 +5434,22 @@ describe('FLARenderer', () => {
                 {
                   type: 'text',
                   matrix: createMatrix({ tx: 50, ty: 200 }),
-                  textRuns: [{
-                    characters: 'GAME OVER',
-                    textAttrs: {
-                      face: 'PressStart2P',
-                      size: 32,
-                      fillColor: '#FF0000',
-                      alignment: 'left',
-                    },
-                  }],
+                  left: 0,
                   width: 400,
                   height: 100,
+                  textRuns: [{
+                    characters: 'GAME OVER',
+                    face: 'PressStart2P',
+                    size: 32,
+                    fillColor: '#FF0000',
+                    alignment: 'left',
+                  }],
                 },
                 // Add a shape to ensure something is rendered
                 {
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#00FF00' }],
+                  fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -5441,19 +5488,18 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'text',
                 matrix: createMatrix({ tx: 50, ty: 100 }),
-                textRuns: [{
-                  characters: 'Test Font Loading',
-                  textAttrs: {
-                    // Use 'PressStart2P' which maps to 'Press Start 2P' in fontMap
-                    // This triggers ensureFontLoaded for a Google Font
-                    face: 'PressStart2P',
-                    size: 16,
-                    fillColor: '#0000FF',
-                    alignment: 'left',
-                  },
-                }],
+                left: 0,
                 width: 400,
                 height: 50,
+                textRuns: [{
+                  characters: 'Test Font Loading',
+                  // Use 'PressStart2P' which maps to 'Press Start 2P' in fontMap
+                  // This triggers ensureFontLoaded for a Google Font
+                  face: 'PressStart2P',
+                  size: 16,
+                  fillColor: '#0000FF',
+                  alignment: 'left',
+                }],
               }],
             })],
           })],
@@ -5481,7 +5527,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#123456' }],
+                fills: [{ index: 1, type: 'solid', color: '#123456' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -5514,7 +5560,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#AABBCC' }],
+                fills: [{ index: 1, type: 'solid', color: '#AABBCC' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -5560,7 +5606,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#DDEEFF' }],
+                fills: [{ index: 1, type: 'solid', color: '#DDEEFF' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -5611,6 +5657,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'symbol',
                 libraryItemName: 'TestSymbol',
+                symbolType: 'graphic',
                 matrix: createMatrix(),
                 transformationPoint: { x: 50, y: 50 },
                 loop: 'loop',
@@ -5624,13 +5671,15 @@ describe('FLARenderer', () => {
       // Add symbol with visible content
       doc.symbols.set('TestSymbol', {
         name: 'TestSymbol',
+        itemID: 'test-symbol',
+        symbolType: 'graphic',
         timeline: createTimeline({
           layers: [createLayer({
             frames: [createFrame({
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF0000' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -5730,7 +5779,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#112233' }],
+                fills: [{ index: 1, type: 'solid', color: '#112233' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -5776,7 +5825,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#445566' }],
+                fills: [{ index: 1, type: 'solid', color: '#445566' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -5820,7 +5869,7 @@ describe('FLARenderer', () => {
 
     it('should handle many edges with bad edges in debug mode', async () => {
       // Create more than 5 edges, with some bad ones - triggers the badEdges display path
-      const edges = [];
+      const edges: Edge[] = [];
       for (let i = 0; i < 8; i++) {
         edges.push({
           fillStyle0: 1,
@@ -5851,7 +5900,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#778899' }],
+                fills: [{ index: 1, type: 'solid', color: '#778899' }],
                 strokes: [],
                 edges,
               }],
@@ -5896,6 +5945,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'symbol',
                   libraryItemName: 'Ramka',
+                  symbolType: 'graphic',
                   // Near-degenerate matrix: a*d - b*c = 0.00001*0.00001 - 0*0 ≈ 0.0000000001
                   // This should trigger the det < 0.0001 check
                   matrix: { a: 0.00001, b: 0, c: 0, d: 0.00001, tx: 400, ty: 300 },
@@ -5913,7 +5963,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#AABB00' }],
+                  fills: [{ index: 1, type: 'solid', color: '#AABB00' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -5935,6 +5985,8 @@ describe('FLARenderer', () => {
 
       doc.symbols.set('Ramka', {
         name: 'Ramka',
+        itemID: 'ramka-symbol',
+        symbolType: 'graphic',
         timeline: createTimeline({
           layers: [createLayer({ frames: [createFrame()] })],
         }),
@@ -5967,6 +6019,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'symbol',
                   libraryItemName: 'Ramka',
+                  symbolType: 'graphic',
                   matrix: { a: 1.5, b: 0, c: 0, d: 1.5, tx: -200, ty: -150 },
                   transformationPoint: { x: 400, y: 300 },
                   loop: 'loop',
@@ -5982,7 +6035,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#FF5500' }],
+                  fills: [{ index: 1, type: 'solid', color: '#FF5500' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -6004,6 +6057,8 @@ describe('FLARenderer', () => {
 
       doc.symbols.set('Ramka', {
         name: 'Ramka',
+        itemID: 'ramka-symbol',
+        symbolType: 'graphic',
         timeline: createTimeline({
           layers: [createLayer({ frames: [createFrame()] })],
         }),
@@ -6035,6 +6090,7 @@ describe('FLARenderer', () => {
                   elements: [{
                     type: 'symbol',
                     libraryItemName: 'Ramka',
+                    symbolType: 'graphic',
                     matrix: { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 },
                     transformationPoint: { x: 320, y: 240 },
                     loop: 'loop',
@@ -6047,6 +6103,7 @@ describe('FLARenderer', () => {
                   elements: [{
                     type: 'symbol',
                     libraryItemName: 'Ramka',
+                    symbolType: 'graphic',
                     matrix: { a: 2, b: 0, c: 0, d: 2, tx: -320, ty: -240 },
                     transformationPoint: { x: 320, y: 240 },
                     loop: 'loop',
@@ -6063,7 +6120,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#00AAFF' }],
+                  fills: [{ index: 1, type: 'solid', color: '#00AAFF' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -6085,6 +6142,8 @@ describe('FLARenderer', () => {
 
       doc.symbols.set('Ramka', {
         name: 'Ramka',
+        itemID: 'ramka-symbol',
+        symbolType: 'graphic',
         timeline: createTimeline({
           layers: [createLayer({ frames: [createFrame()] })],
         }),
@@ -6116,6 +6175,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'symbol',
                   libraryItemName: 'Ramka',
+                  symbolType: 'graphic',
                   // Valid invertible matrix (det = 1.2 * 0.8 - 0.1 * 0.1 = 0.95 ≠ 0)
                   matrix: { a: 1.2, b: 0.1, c: 0.1, d: 0.8, tx: 50, ty: 30 },
                   transformationPoint: { x: 200, y: 150 },
@@ -6132,7 +6192,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix(),
-                  fills: [{ index: 1, color: '#AA00FF' }],
+                  fills: [{ index: 1, type: 'solid', color: '#AA00FF' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -6154,6 +6214,8 @@ describe('FLARenderer', () => {
 
       doc.symbols.set('Ramka', {
         name: 'Ramka',
+        itemID: 'ramka-symbol',
+        symbolType: 'graphic',
         timeline: createTimeline({
           layers: [createLayer({ frames: [createFrame()] })],
         }),
@@ -6176,7 +6238,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF8800' }, { index: 2, color: '#0088FF' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF8800' }, { index: 2, type: 'solid', color: '#0088FF' }],
                 strokes: [],
                 edges: [
                   // Edge with fillStyle1 (right-side fill)
@@ -6346,7 +6408,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#AABBCC' }],
+                fills: [{ index: 1, type: 'solid', color: '#AABBCC' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -6374,6 +6436,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'symbol',
                 libraryItemName: 'NonExistentSymbol',
+                symbolType: 'graphic',
                 matrix: createMatrix(),
                 transformationPoint: { x: 0, y: 0 },
                 loop: 'loop',
@@ -6437,6 +6500,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix(),
                 fills: [{
                   index: 1,
+                  type: 'solid',
                   color: 'invalid', // Invalid color format
                   alpha: 0.5,
                 }],
@@ -6471,6 +6535,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix(),
                 fills: [{
                   index: 1,
+                  type: 'solid',
                   color: '#F00', // Short hex format (3 chars)
                   alpha: 0.8,
                 }],
@@ -6507,7 +6572,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FFCC00' }],
+                fills: [{ index: 1, type: 'solid', color: '#FFCC00' }],
                 strokes: [],
                 edges: [
                   // First edge: A(0,0) -> B(100,0)
@@ -6555,7 +6620,7 @@ describe('FLARenderer', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#00CCFF' }],
+                fills: [{ index: 1, type: 'solid', color: '#00CCFF' }],
                 strokes: [],
                 edges: [
                   // First edge starts at (50,50)
@@ -6667,7 +6732,9 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'symbol',
                   libraryItemName: 'CameraSymbol',
+                  symbolType: 'graphic',
                   matrix: createMatrix({ tx: 100, ty: 100 }),
+                  transformationPoint: { x: 0, y: 0 },
                   loop: 'single frame',
                 }],
               })],
@@ -6699,6 +6766,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'symbol',
                   libraryItemName: 'RamkaSymbol',
+                  symbolType: 'graphic',
                   matrix: createMatrix({ a: 1, b: 0, c: 0, d: 1, tx: 960, ty: 540 }),
                   transformationPoint: { x: 0, y: 0 },
                   loop: 'single frame',
@@ -6735,6 +6803,7 @@ describe('FLARenderer', () => {
                 elements: [{
                   type: 'symbol',
                   libraryItemName: 'ViewportSymbol',
+                  symbolType: 'graphic',
                   matrix: createMatrix({ a: 1, b: 0, c: 0, d: 1, tx: 500, ty: 300 }),
                   transformationPoint: { x: 200, y: 150 },
                   loop: 'single frame',
@@ -6816,6 +6885,7 @@ describe('FLARenderer', () => {
                 libraryItemName: 'Symbol 1',
                 symbolType: 'graphic',
                 matrix: createMatrix({ tx: 100, ty: 100 }),
+                transformationPoint: { x: 0, y: 0 },
                 firstFrame: 0,
                 loop: 'loop',
                 filters: [{
@@ -6860,6 +6930,7 @@ describe('FLARenderer', () => {
                 libraryItemName: 'Symbol 1',
                 symbolType: 'graphic',
                 matrix: createMatrix({ tx: 100, ty: 100 }),
+                transformationPoint: { x: 0, y: 0 },
                 firstFrame: 0,
                 loop: 'loop',
                 filters: [{
@@ -6907,6 +6978,7 @@ describe('FLARenderer', () => {
                 libraryItemName: 'Symbol 1',
                 symbolType: 'graphic',
                 matrix: createMatrix({ tx: 100, ty: 100 }),
+                transformationPoint: { x: 0, y: 0 },
                 firstFrame: 0,
                 loop: 'loop',
                 filters: [{
@@ -6955,6 +7027,7 @@ describe('FLARenderer', () => {
                 libraryItemName: 'Symbol 1',
                 symbolType: 'graphic',
                 matrix: createMatrix({ tx: 100, ty: 100 }),
+                transformationPoint: { x: 0, y: 0 },
                 firstFrame: 0,
                 loop: 'loop',
                 filters: [
@@ -7243,6 +7316,7 @@ describe('FLARenderer', () => {
                   libraryItemName: 'Symbol 1',
                   symbolType: 'graphic',
                   matrix: createMatrix({ tx: 50, ty: 50 }),
+                  transformationPoint: { x: 0, y: 0 },
                   firstFrame: 0,
                   loop: 'loop',
                   blendMode: 'multiply',
@@ -7290,6 +7364,7 @@ describe('FLARenderer', () => {
                   libraryItemName: 'Symbol 1',
                   symbolType: 'graphic',
                   matrix: createMatrix({ tx: 50, ty: 50 }),
+                  transformationPoint: { x: 0, y: 0 },
                   firstFrame: 0,
                   loop: 'loop',
                   blendMode: 'screen',
@@ -7337,6 +7412,7 @@ describe('FLARenderer', () => {
                   libraryItemName: 'Symbol 1',
                   symbolType: 'graphic',
                   matrix: createMatrix({ tx: 50, ty: 50 }),
+                  transformationPoint: { x: 0, y: 0 },
                   firstFrame: 0,
                   loop: 'loop',
                   blendMode: 'overlay',
@@ -7384,6 +7460,7 @@ describe('FLARenderer', () => {
                   libraryItemName: 'Symbol 1',
                   symbolType: 'graphic',
                   matrix: createMatrix({ tx: 50, ty: 50 }),
+                  transformationPoint: { x: 0, y: 0 },
                   firstFrame: 0,
                   loop: 'loop',
                   blendMode: 'add',
@@ -7431,6 +7508,7 @@ describe('FLARenderer', () => {
                   libraryItemName: 'Symbol 1',
                   symbolType: 'graphic',
                   matrix: createMatrix({ tx: 50, ty: 50 }),
+                  transformationPoint: { x: 0, y: 0 },
                   firstFrame: 0,
                   loop: 'loop',
                   blendMode: 'difference',
@@ -7478,6 +7556,7 @@ describe('FLARenderer', () => {
                   libraryItemName: 'Symbol 1',
                   symbolType: 'graphic',
                   matrix: createMatrix({ tx: 50, ty: 50 }),
+                  transformationPoint: { x: 0, y: 0 },
                   firstFrame: 0,
                   loop: 'loop',
                   blendMode: 'darken',
@@ -7525,6 +7604,7 @@ describe('FLARenderer', () => {
                   libraryItemName: 'Symbol 1',
                   symbolType: 'graphic',
                   matrix: createMatrix({ tx: 50, ty: 50 }),
+                  transformationPoint: { x: 0, y: 0 },
                   firstFrame: 0,
                   loop: 'loop',
                   blendMode: 'lighten',
@@ -7572,6 +7652,7 @@ describe('FLARenderer', () => {
                   libraryItemName: 'Symbol 1',
                   symbolType: 'graphic',
                   matrix: createMatrix({ tx: 85, ty: 85 }),
+                  transformationPoint: { x: 0, y: 0 },
                   firstFrame: 0,
                   loop: 'loop',
                   blendMode: 'erase',
@@ -7619,6 +7700,7 @@ describe('FLARenderer', () => {
                   libraryItemName: 'Symbol 1',
                   symbolType: 'graphic',
                   matrix: createMatrix({ tx: 50, ty: 50 }),
+                  transformationPoint: { x: 0, y: 0 },
                   firstFrame: 0,
                   loop: 'loop',
                   blendMode: 'hardlight',
@@ -7666,6 +7748,7 @@ describe('FLARenderer', () => {
                   libraryItemName: 'Symbol 1',
                   symbolType: 'graphic',
                   matrix: createMatrix({ tx: 50, ty: 50 }),
+                  transformationPoint: { x: 0, y: 0 },
                   firstFrame: 0,
                   loop: 'loop',
                   blendMode: 'multiply',
@@ -7716,6 +7799,7 @@ describe('FLARenderer', () => {
                   libraryItemName: 'Symbol 1',
                   symbolType: 'graphic',
                   matrix: createMatrix({ tx: 50, ty: 50 }),
+                  transformationPoint: { x: 0, y: 0 },
                   firstFrame: 0,
                   loop: 'loop',
                   blendMode: 'screen',
@@ -7766,6 +7850,7 @@ describe('FLARenderer', () => {
                 libraryItemName: 'Symbol 1',
                 symbolType: 'graphic',
                 matrix: createMatrix({ tx: 100, ty: 100 }),
+                transformationPoint: { x: 0, y: 0 },
                 firstFrame: 0,
                 loop: 'loop',
                 colorTransform: {
@@ -7808,6 +7893,7 @@ describe('FLARenderer', () => {
                 libraryItemName: 'Symbol 1',
                 symbolType: 'graphic',
                 matrix: createMatrix({ tx: 100, ty: 100 }),
+                transformationPoint: { x: 0, y: 0 },
                 firstFrame: 0,
                 loop: 'loop',
                 colorTransform: {
@@ -7852,6 +7938,7 @@ describe('FLARenderer', () => {
                 libraryItemName: 'Symbol 1',
                 symbolType: 'graphic',
                 matrix: createMatrix({ tx: 100, ty: 100 }),
+                transformationPoint: { x: 0, y: 0 },
                 firstFrame: 0,
                 loop: 'loop',
                 colorTransform: {
@@ -7899,6 +7986,7 @@ describe('FLARenderer', () => {
                 libraryItemName: 'Symbol 1',
                 symbolType: 'graphic',
                 matrix: createMatrix({ tx: 100, ty: 100 }),
+                transformationPoint: { x: 0, y: 0 },
                 firstFrame: 0,
                 loop: 'loop',
                 colorTransform: {

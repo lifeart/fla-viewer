@@ -301,7 +301,7 @@ describe('FLAPlayer', () => {
       Object.defineProperty(container, 'clientWidth', { value: 800, configurable: true });
       Object.defineProperty(container, 'clientHeight', { value: 600, configurable: true });
 
-      expect(() => player.updateCanvasSize(container)).not.toThrow();
+      expect(() => player.updateCanvasSize()).not.toThrow();
 
       document.body.removeChild(container);
     });

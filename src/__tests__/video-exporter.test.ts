@@ -48,7 +48,7 @@ describe('video-exporter', () => {
       revokedUrls = [];
 
       // Track URL creation/revocation
-      URL.createObjectURL = vi.fn((blob: Blob) => {
+      URL.createObjectURL = vi.fn((_blob: Blob) => {
         const url = `blob:test-${createdUrls.length}`;
         createdUrls.push(url);
         return url;
@@ -111,6 +111,7 @@ describe('video-exporter', () => {
                 matrix: createMatrix(),
                 fills: [{
                   index: 1,
+                  type: 'solid',
                   color: '#FF0000',
                 }],
                 strokes: [],
@@ -217,7 +218,7 @@ describe('video-exporter', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#00FF00' }],
+                fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,
@@ -257,7 +258,7 @@ describe('video-exporter', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 0 }),
-                  fills: [{ index: 1, color: '#0000FF' }],
+                  fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -277,7 +278,7 @@ describe('video-exporter', () => {
                 elements: [{
                   type: 'shape',
                   matrix: createMatrix({ tx: 100 }),
-                  fills: [{ index: 1, color: '#0000FF' }],
+                  fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
                   strokes: [],
                   edges: [{
                     fillStyle0: 1,
@@ -342,7 +343,7 @@ describe('video-exporter', () => {
               elements: [{
                 type: 'shape',
                 matrix: createMatrix(),
-                fills: [{ index: 1, color: '#FF0000' }],
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
                 strokes: [],
                 edges: [{
                   fillStyle0: 1,

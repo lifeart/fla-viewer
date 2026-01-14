@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { decodeEdges, parseEdge, setEdgeDecoderDebug } from '../edge-decoder';
 import { createConsoleSpy, expectLogContaining, type ConsoleSpy } from './test-utils';
-import type { PathCommand } from '../types';
 
 describe('edge-decoder', () => {
   describe('decodeEdges', () => {

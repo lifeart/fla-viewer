@@ -2,15 +2,21 @@ import { vi, expect } from 'vitest';
 import type {
   Shape,
   Matrix,
-  PathCommand,
   FillStyle,
   Edge,
+  PathCommand,
   FLADocument,
   Timeline,
   Layer,
   Frame,
   SymbolInstance,
   Symbol,
+  TextInstance,
+  TextRun,
+  StrokeStyle,
+  ColorTransform,
+  Filter,
+  BlendMode,
 } from '../types';
 
 /**
@@ -22,7 +28,7 @@ export function expectLogContaining(
   substring: string
 ): void {
   const logCall = spy.mock.calls.find(
-    (call) => typeof call[0] === 'string' && call[0].includes(substring)
+    (call: unknown[]) => typeof call[0] === 'string' && call[0].includes(substring)
   );
   expect(logCall, `Expected console.log call containing "${substring}"`).toBeDefined();
 }
@@ -36,7 +42,7 @@ export function hasLogContaining(
   substring: string
 ): boolean {
   return spy.mock.calls.some(
-    (call) => typeof call[0] === 'string' && call[0].includes(substring)
+    (call: unknown[]) => typeof call[0] === 'string' && call[0].includes(substring)
   );
 }
 
@@ -218,6 +224,10 @@ export function createTimeline(overrides: Partial<Timeline> = {}): Timeline {
 export function createLayer(overrides: Partial<Layer> = {}): Layer {
   return {
     name: 'Layer 1',
+    color: '#000000',
+    visible: true,
+    locked: false,
+    outline: false,
     frames: [],
     ...overrides,
   };
@@ -230,6 +240,7 @@ export function createFrame(overrides: Partial<Frame> = {}): Frame {
   return {
     index: 0,
     duration: 1,
+    keyMode: 9728,
     elements: [],
     ...overrides,
   };
@@ -336,7 +347,7 @@ export function createSymbolInstance(
     loop,
     symbolType,
     firstFrame,
-    ...(transformationPoint && { transformationPoint }),
+    transformationPoint: transformationPoint || { x: 0, y: 0 },
   };
 }
 
@@ -348,12 +359,14 @@ export function createSymbol(
   options: {
     timeline?: Partial<Timeline>;
     symbolType?: 'graphic' | 'movieclip' | 'button';
+    itemID?: string;
   } = {}
 ): Symbol {
-  const { timeline = {}, symbolType = 'graphic' } = options;
+  const { timeline = {}, symbolType = 'graphic', itemID = `symbol-${name}` } = options;
 
   return {
     name,
+    itemID,
     symbolType,
     timeline: createTimeline({ name, ...timeline }),
   };
@@ -376,4 +389,367 @@ export function createDocWithSymbols(
     symbols,
     ...docOverrides,
   });
+}
+
+// ============================================================================
+// Fill Helpers
+// ============================================================================
+
+/**
+ * Creates a solid color fill.
+ */
+export function createSolidFill(
+  color: string,
+  options: { index?: number; alpha?: number } = {}
+): FillStyle {
+  const { index = 1, alpha } = options;
+  return {
+    index,
+    type: 'solid',
+    color,
+    ...(alpha !== undefined && { alpha }),
+  };
+}
+
+/**
+ * Creates a linear gradient fill.
+ */
+export function createLinearGradient(
+  colors: Array<{ color: string; ratio: number; alpha?: number }>,
+  options: { index?: number; matrix?: Partial<Matrix> } = {}
+): FillStyle {
+  const { index = 1, matrix = {} } = options;
+  return {
+    index,
+    type: 'linear',
+    gradient: colors.map(c => ({
+      color: c.color,
+      ratio: c.ratio,
+      alpha: c.alpha ?? 1,
+    })),
+    matrix: createIdentityMatrix(matrix),
+  };
+}
+
+/**
+ * Creates a radial gradient fill.
+ */
+export function createRadialGradient(
+  colors: Array<{ color: string; ratio: number; alpha?: number }>,
+  options: { index?: number; matrix?: Partial<Matrix> } = {}
+): FillStyle {
+  const { index = 1, matrix = {} } = options;
+  return {
+    index,
+    type: 'radial',
+    gradient: colors.map(c => ({
+      color: c.color,
+      ratio: c.ratio,
+      alpha: c.alpha ?? 1,
+    })),
+    matrix: createIdentityMatrix(matrix),
+  };
+}
+
+/**
+ * Creates a bitmap fill.
+ */
+export function createBitmapFill(
+  bitmapPath: string,
+  options: { index?: number; matrix?: Partial<Matrix> } = {}
+): FillStyle {
+  const { index = 1, matrix = {} } = options;
+  return {
+    index,
+    type: 'bitmap',
+    bitmapPath,
+    matrix: createIdentityMatrix(matrix),
+  };
+}
+
+// ============================================================================
+// Edge Helpers
+// ============================================================================
+
+/**
+ * Creates a rectangular edge path.
+ */
+export function createRectEdge(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  fillStyle: number
+): Edge {
+  return {
+    fillStyle0: fillStyle,
+    commands: [
+      { type: 'M', x, y },
+      { type: 'L', x: x + width, y },
+      { type: 'L', x: x + width, y: y + height },
+      { type: 'L', x, y: y + height },
+      { type: 'Z' },
+    ] as PathCommand[],
+  };
+}
+
+/**
+ * Creates an edge with custom commands.
+ */
+export function createEdge(
+  commands: PathCommand[],
+  options: { fillStyle0?: number; fillStyle1?: number; strokeStyle?: number } = {}
+): Edge {
+  return {
+    ...options,
+    commands,
+  };
+}
+
+// ============================================================================
+// Text Helpers
+// ============================================================================
+
+/**
+ * Creates a TextRun for use in TextInstance.
+ */
+export function createTextRun(
+  characters: string,
+  options: {
+    face?: string;
+    size?: number;
+    fillColor?: string;
+    alignment?: 'left' | 'center' | 'right' | 'justify';
+    bold?: boolean;
+    italic?: boolean;
+    lineHeight?: number;
+  } = {}
+): TextRun {
+  const {
+    face = 'Arial',
+    size = 12,
+    fillColor = '#000000',
+    alignment = 'left',
+    bold,
+    italic,
+    lineHeight,
+  } = options;
+
+  return {
+    characters,
+    face,
+    size,
+    fillColor,
+    alignment,
+    ...(bold !== undefined && { bold }),
+    ...(italic !== undefined && { italic }),
+    ...(lineHeight !== undefined && { lineHeight }),
+  };
+}
+
+/**
+ * Creates a TextInstance for testing.
+ */
+export function createTextInstance(
+  text: string,
+  options: {
+    matrix?: Partial<Matrix>;
+    left?: number;
+    width?: number;
+    height?: number;
+    face?: string;
+    size?: number;
+    fillColor?: string;
+    alignment?: 'left' | 'center' | 'right' | 'justify';
+  } = {}
+): TextInstance {
+  const {
+    matrix = {},
+    left = 0,
+    width = 100,
+    height = 20,
+    face = 'Arial',
+    size = 12,
+    fillColor = '#000000',
+    alignment = 'left',
+  } = options;
+
+  return {
+    type: 'text',
+    matrix: createIdentityMatrix(matrix),
+    left,
+    width,
+    height,
+    textRuns: [createTextRun(text, { face, size, fillColor, alignment })],
+  };
+}
+
+// ============================================================================
+// Stroke Helpers
+// ============================================================================
+
+/**
+ * Creates a stroke style.
+ */
+export function createStroke(
+  color: string,
+  weight: number,
+  options: {
+    index?: number;
+    caps?: 'none' | 'round' | 'square';
+    joints?: 'miter' | 'round' | 'bevel';
+  } = {}
+): StrokeStyle {
+  const { index = 1, caps, joints } = options;
+  return {
+    index,
+    color,
+    weight,
+    ...(caps && { caps }),
+    ...(joints && { joints }),
+  };
+}
+
+// ============================================================================
+// Color Transform and Filter Helpers
+// ============================================================================
+
+/**
+ * Creates a color transform.
+ */
+export function createColorTransform(
+  options: Partial<ColorTransform> = {}
+): ColorTransform {
+  return {
+    alphaMultiplier: 1,
+    redMultiplier: 1,
+    greenMultiplier: 1,
+    blueMultiplier: 1,
+    alphaOffset: 0,
+    redOffset: 0,
+    greenOffset: 0,
+    blueOffset: 0,
+    ...options,
+  };
+}
+
+/**
+ * Creates a blur filter.
+ */
+export function createBlurFilter(
+  blurX: number,
+  blurY: number
+): Filter {
+  return {
+    type: 'blur',
+    blurX,
+    blurY,
+  };
+}
+
+/**
+ * Creates a glow filter.
+ */
+export function createGlowFilter(
+  options: {
+    blurX?: number;
+    blurY?: number;
+    color?: string;
+    strength?: number;
+    alpha?: number;
+  } = {}
+): Filter {
+  const {
+    blurX = 5,
+    blurY = 5,
+    color = '#000000',
+    strength = 1,
+    alpha = 1,
+  } = options;
+  return {
+    type: 'glow',
+    blurX,
+    blurY,
+    color,
+    strength,
+    alpha,
+  };
+}
+
+/**
+ * Creates a drop shadow filter.
+ */
+export function createDropShadowFilter(
+  options: {
+    blurX?: number;
+    blurY?: number;
+    color?: string;
+    strength?: number;
+    distance?: number;
+    angle?: number;
+  } = {}
+): Filter {
+  const {
+    blurX = 5,
+    blurY = 5,
+    color = '#000000',
+    strength = 1,
+    distance = 5,
+    angle = 45,
+  } = options;
+  return {
+    type: 'dropShadow',
+    blurX,
+    blurY,
+    color,
+    strength,
+    distance,
+    angle,
+  };
+}
+
+// ============================================================================
+// Extended Symbol Instance Helper
+// ============================================================================
+
+/**
+ * Creates a SymbolInstance with additional visual properties.
+ * Use this when testing color transforms, filters, or blend modes.
+ */
+export function createSymbolInstanceWithEffects(
+  libraryItemName: string,
+  options: {
+    matrix?: Partial<Matrix>;
+    loop?: 'loop' | 'play once' | 'single frame';
+    symbolType?: 'graphic' | 'movieclip' | 'button';
+    firstFrame?: number;
+    transformationPoint?: { x: number; y: number };
+    colorTransform?: Partial<ColorTransform>;
+    filters?: Filter[];
+    blendMode?: BlendMode;
+  } = {}
+): SymbolInstance {
+  const {
+    matrix = {},
+    loop = 'loop',
+    symbolType = 'graphic',
+    firstFrame = 0,
+    transformationPoint = { x: 0, y: 0 },
+    colorTransform,
+    filters,
+    blendMode,
+  } = options;
+
+  return {
+    type: 'symbol',
+    libraryItemName,
+    matrix: createIdentityMatrix(matrix),
+    loop,
+    symbolType,
+    firstFrame,
+    transformationPoint,
+    ...(colorTransform && { colorTransform: createColorTransform(colorTransform) }),
+    ...(filters && { filters }),
+    ...(blendMode && { blendMode }),
+  };
 }

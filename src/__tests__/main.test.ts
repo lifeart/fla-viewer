@@ -798,11 +798,10 @@ describe('main.ts', () => {
 
   describe('FLAViewerApp with loaded file', () => {
     let container: HTMLElement;
-    let app: FLAViewerApp;
 
     beforeEach(() => {
       container = createAppDOM();
-      app = new FLAViewerApp();
+      new FLAViewerApp();
     });
 
     afterEach(() => {
@@ -834,7 +833,6 @@ describe('main.ts', () => {
 
     it('should show loading state while parsing', async () => {
       const flaFile = await createMinimalFlaZip();
-      const loading = document.getElementById('loading')!;
 
       const dataTransfer = new DataTransfer();
       dataTransfer.items.add(flaFile);
@@ -968,12 +966,11 @@ describe('main.ts', () => {
 
   describe('FLAViewerApp error handling', () => {
     let container: HTMLElement;
-    let app: FLAViewerApp;
     let originalAlert: typeof window.alert;
 
     beforeEach(() => {
       container = createAppDOM();
-      app = new FLAViewerApp();
+      new FLAViewerApp();
       originalAlert = window.alert;
       window.alert = vi.fn();
     });
@@ -1035,11 +1032,10 @@ describe('main.ts', () => {
 
   describe('volume slider muting', () => {
     let container: HTMLElement;
-    let app: FLAViewerApp;
 
     beforeEach(async () => {
       container = createAppDOM();
-      app = new FLAViewerApp();
+      new FLAViewerApp();
 
       // Load a file to enable player
       const flaFile = await createMinimalFlaZip();
@@ -1088,11 +1084,10 @@ describe('main.ts', () => {
 
   describe('fullscreen functionality', () => {
     let container: HTMLElement;
-    let app: FLAViewerApp;
 
     beforeEach(() => {
       container = createAppDOM();
-      app = new FLAViewerApp();
+      new FLAViewerApp();
     });
 
     afterEach(() => {
@@ -1101,7 +1096,6 @@ describe('main.ts', () => {
 
     it('should update fullscreen button on fullscreenchange event', async () => {
       const fullscreenBtn = document.getElementById('fullscreen-btn')!;
-      const initialHTML = fullscreenBtn.innerHTML;
 
       // Dispatch fullscreenchange event
       document.dispatchEvent(new Event('fullscreenchange'));
@@ -1139,11 +1133,10 @@ describe('main.ts', () => {
 
   describe('layer visibility', () => {
     let container: HTMLElement;
-    let app: FLAViewerApp;
 
     beforeEach(async () => {
       container = createAppDOM();
-      app = new FLAViewerApp();
+      new FLAViewerApp();
 
       const flaFile = await createMinimalFlaZip();
       const dropZone = document.getElementById('drop-zone')!;
@@ -1194,11 +1187,10 @@ describe('main.ts', () => {
 
   describe('export functionality', () => {
     let container: HTMLElement;
-    let app: FLAViewerApp;
 
     beforeEach(async () => {
       container = createAppDOM();
-      app = new FLAViewerApp();
+      new FLAViewerApp();
 
       const flaFile = await createMinimalFlaZip();
       const dropZone = document.getElementById('drop-zone')!;
@@ -1219,7 +1211,6 @@ describe('main.ts', () => {
 
     it('should show export modal when download button clicked', async () => {
       const downloadBtn = document.getElementById('download-btn')!;
-      const exportModal = document.getElementById('export-modal')!;
 
       // Click download - will start export
       downloadBtn.click();

@@ -29,6 +29,7 @@
   "devDependencies": {
     "@types/jsdom": "^27.0.0",
     "@types/node": "^25.0.7",
+    "@types/pako": "^2.0.4",
     "@vitest/browser": "^4.0.17",
     "@vitest/browser-playwright": "^4.0.17",
     "@vitest/coverage-v8": "^4.0.17",

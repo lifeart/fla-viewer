@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import JSZip from 'jszip';
 import pako from 'pako';
 import { FLAParser, setParserDebug } from '../fla-parser';
@@ -1251,16 +1251,7 @@ describe('FLAParser', () => {
 
       await parser.parse(fla);
 
-      // Check if any recovery-related log was made
-      const hasRecoveryLog = consoleSpy.mock.calls.some(
-        call => typeof call[0] === 'string' && (
-          call[0].includes('deflate failed') ||
-          call[0].includes('recovery') ||
-          call[0].includes('Streaming')
-        )
-      );
       consoleSpy.mockRestore();
-
       // The test passes regardless of whether recovery logs were made
       // since the exact behavior depends on the corruption pattern
       // The key is that parsing doesn't throw
@@ -2597,13 +2588,9 @@ describe('FLAParser', () => {
       const validBuffer = await validFla.arrayBuffer();
       const validBytes = new Uint8Array(validBuffer);
 
-      // Find EOCD and get expected end
+      // Find EOCD
       const eocdOffset = findEOCDOffset(validBytes);
       expect(eocdOffset).toBeGreaterThan(0);
-
-      const view = new DataView(validBuffer);
-      const commentLength = view.getUint16(eocdOffset + 20, true);
-      const expectedEnd = eocdOffset + 22 + commentLength;
 
       // Append garbage data after EOCD to corrupt the file
       const extraBytes = new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00]);
@@ -2724,11 +2711,9 @@ describe('FLAParser', () => {
       const validBuffer = await validFla.arrayBuffer();
       const validBytes = new Uint8Array(validBuffer);
 
-      // Find EOCD
+      // Find EOCD to verify structure is valid
       const eocdOffset = findEOCDOffset(validBytes);
-      const view = new DataView(validBuffer);
-      const commentLength = view.getUint16(eocdOffset + 20, true);
-      const expectedEnd = eocdOffset + 22 + commentLength;
+      expect(eocdOffset).toBeGreaterThan(0);
 
       // Append lots of garbage data after EOCD
       const garbageSize = 1024;

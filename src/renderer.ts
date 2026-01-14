@@ -18,7 +18,6 @@ import type {
   PathCommand,
   Filter,
   MorphShape,
-  MorphSegment,
   ColorTransform,
   BlendMode
 } from './types';
