@@ -1129,6 +1129,11 @@ describe('main.ts', () => {
       // Fullscreen button exists
       const fullscreenBtn = document.getElementById('fullscreen-btn');
       expect(fullscreenBtn).not.toBeNull();
+
+      // Dispatch F key event to trigger fullscreen toggle code path
+      // The actual fullscreen won't activate without user gesture but the code runs
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F', bubbles: true }));
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', bubbles: true }));
     });
   });
 

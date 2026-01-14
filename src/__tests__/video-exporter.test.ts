@@ -1,55 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { exportVideo, downloadBlob, isWebCodecsSupported } from '../video-exporter';
-import type { FLADocument, Timeline, Layer, Frame, Matrix } from '../types';
-
-// Helper to create minimal document structure
-function createMinimalDoc(overrides: Partial<FLADocument> = {}): FLADocument {
-  return {
-    width: 320,
-    height: 240,
-    frameRate: 24,
-    backgroundColor: '#FFFFFF',
-    timelines: [],
-    symbols: new Map(),
-    bitmaps: new Map(),
-    sounds: new Map(),
-    ...overrides,
-  };
-}
-
-function createMatrix(overrides: Partial<Matrix> = {}): Matrix {
-  return {
-    a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0,
-    ...overrides,
-  };
-}
-
-function createTimeline(overrides: Partial<Timeline> = {}): Timeline {
-  return {
-    name: 'Timeline 1',
-    layers: [],
-    totalFrames: 1,
-    referenceLayers: new Set(),
-    ...overrides,
-  };
-}
-
-function createLayer(overrides: Partial<Layer> = {}): Layer {
-  return {
-    name: 'Layer 1',
-    frames: [],
-    ...overrides,
-  };
-}
-
-function createFrame(overrides: Partial<Frame> = {}): Frame {
-  return {
-    index: 0,
-    duration: 1,
-    elements: [],
-    ...overrides,
-  };
-}
+import {
+  createMinimalDoc,
+  createTimeline,
+  createLayer,
+  createFrame,
+  createMatrix,
+} from './test-utils';
 
 describe('video-exporter', () => {
   describe('isWebCodecsSupported', () => {

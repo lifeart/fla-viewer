@@ -1,48 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FLAPlayer } from '../player';
-import type { FLADocument, Timeline, Layer, Frame, Matrix } from '../types';
-
-// Helper to create minimal document structure
-function createMinimalDoc(overrides: Partial<FLADocument> = {}): FLADocument {
-  return {
-    width: 550,
-    height: 400,
-    frameRate: 24,
-    backgroundColor: '#FFFFFF',
-    timelines: [],
-    symbols: new Map(),
-    bitmaps: new Map(),
-    sounds: new Map(),
-    ...overrides,
-  };
-}
-
-function createTimeline(overrides: Partial<Timeline> = {}): Timeline {
-  return {
-    name: 'Timeline 1',
-    layers: [],
-    totalFrames: 1,
-    referenceLayers: new Set(),
-    ...overrides,
-  };
-}
-
-function createLayer(overrides: Partial<Layer> = {}): Layer {
-  return {
-    name: 'Layer 1',
-    frames: [],
-    ...overrides,
-  };
-}
-
-function createFrame(overrides: Partial<Frame> = {}): Frame {
-  return {
-    index: 0,
-    duration: 1,
-    elements: [],
-    ...overrides,
-  };
-}
+import {
+  createMinimalDoc,
+  createTimeline,
+  createLayer,
+  createFrame,
+} from './test-utils';
 
 describe('FLAPlayer', () => {
   let canvas: HTMLCanvasElement;

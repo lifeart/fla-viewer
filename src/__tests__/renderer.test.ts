@@ -1,101 +1,19 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { FLARenderer } from '../renderer';
-import type { FLADocument, Timeline, Layer, Frame, Matrix } from '../types';
-
-// Helper to create minimal document structure
-function createMinimalDoc(overrides: Partial<FLADocument> = {}): FLADocument {
-  return {
-    width: 550,
-    height: 400,
-    frameRate: 24,
-    backgroundColor: '#FFFFFF',
-    timelines: [],
-    symbols: new Map(),
-    bitmaps: new Map(),
-    sounds: new Map(),
-    ...overrides,
-  };
-}
-
-function createMatrix(overrides: Partial<Matrix> = {}): Matrix {
-  return {
-    a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0,
-    ...overrides,
-  };
-}
-
-function createTimeline(overrides: Partial<Timeline> = {}): Timeline {
-  return {
-    name: 'Timeline 1',
-    layers: [],
-    totalFrames: 1,
-    referenceLayers: new Set(),
-    ...overrides,
-  };
-}
-
-function createLayer(overrides: Partial<Layer> = {}): Layer {
-  return {
-    name: 'Layer 1',
-    frames: [],
-    ...overrides,
-  };
-}
-
-function createFrame(overrides: Partial<Frame> = {}): Frame {
-  return {
-    index: 0,
-    duration: 1,
-    elements: [],
-    ...overrides,
-  };
-}
-
-// Helper to check if canvas has any rendered (non-transparent) pixels
-function hasRenderedContent(canvas: HTMLCanvasElement, backgroundColor = '#FFFFFF'): boolean {
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return false;
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const bgR = parseInt(backgroundColor.slice(1, 3), 16);
-  const bgG = parseInt(backgroundColor.slice(3, 5), 16);
-  const bgB = parseInt(backgroundColor.slice(5, 7), 16);
-
-  for (let i = 0; i < imageData.data.length; i += 4) {
-    const r = imageData.data[i];
-    const g = imageData.data[i + 1];
-    const b = imageData.data[i + 2];
-    const a = imageData.data[i + 3];
-    // Check if pixel is not transparent and not background color
-    if (a > 0 && (r !== bgR || g !== bgG || b !== bgB)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Helper to check if a specific color exists in the canvas
-function hasColor(canvas: HTMLCanvasElement, colorHex: string, tolerance = 10): boolean {
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return false;
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const targetR = parseInt(colorHex.slice(1, 3), 16);
-  const targetG = parseInt(colorHex.slice(3, 5), 16);
-  const targetB = parseInt(colorHex.slice(5, 7), 16);
-
-  for (let i = 0; i < imageData.data.length; i += 4) {
-    const r = imageData.data[i];
-    const g = imageData.data[i + 1];
-    const b = imageData.data[i + 2];
-    const a = imageData.data[i + 3];
-    if (a > 0 &&
-        Math.abs(r - targetR) <= tolerance &&
-        Math.abs(g - targetG) <= tolerance &&
-        Math.abs(b - targetB) <= tolerance) {
-      return true;
-    }
-  }
-  return false;
-}
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { FLARenderer, setRendererDebug } from '../renderer';
+import {
+  createConsoleSpy,
+  expectLogContaining,
+  createRectangleShape,
+  createTriangleShape,
+  createMinimalDoc,
+  createTimeline,
+  createLayer,
+  createFrame,
+  createMatrix,
+  hasRenderedContent,
+  hasColor,
+  type ConsoleSpy,
+} from './test-utils';
 
 describe('FLARenderer', () => {
   let canvas: HTMLCanvasElement;
@@ -4980,6 +4898,54 @@ describe('FLARenderer', () => {
       renderer.renderFrame(0);
       expect(hasRenderedContent(canvas)).toBe(true);
     });
+
+    it('should detect closing contribution with gap between contributions', async () => {
+      // EPSILON = 8.0, closeEpsilon = 24
+      // Need gap > 8 (no direct continuation) but <= 24 (can close)
+      // First contribution: chainStart=(0,0), ends at (100, 0)
+      // Second contribution: starts at (100, 10) - gap=10 > 8, no direct match
+      //   ends at (10, 10) - within 24 of chainStart (0,0)
+      // This forces the closing detection code path (lines 1907-1910, 1917-1919)
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#FF00FF' }],
+                strokes: [],
+                edges: [
+                  // First contribution - starts at (0,0), ends at (100,0)
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 0, y: 0 },
+                      { type: 'L', x: 100, y: 0 },
+                    ],
+                  },
+                  // Second contribution - gap from first's end but can close the loop
+                  // starts at (100, 10) - gap=10 from first's end (100, 0), > epsilon=8
+                  // ends at (10, 10) - distance to chainStart (0,0) is sqrt(200) < 24
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 100, y: 10 },
+                      { type: 'L', x: 50, y: 50 },
+                      { type: 'L', x: 10, y: 10 },
+                    ],
+                  },
+                ],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
   });
 
   describe('camera motion tween interpolation', () => {
@@ -5201,6 +5167,12 @@ describe('FLARenderer', () => {
     });
 
     it('should wait for font loading promise to resolve or reject', async () => {
+      // Use a fresh canvas and renderer to avoid cached fonts
+      const freshCanvas = document.createElement('canvas');
+      freshCanvas.width = 550;
+      freshCanvas.height = 400;
+      const freshRenderer = new FLARenderer(freshCanvas);
+
       const doc = createMinimalDoc({
         timelines: [createTimeline({
           layers: [createLayer({
@@ -5211,7 +5183,9 @@ describe('FLARenderer', () => {
                 textRuns: [{
                   characters: 'Test Font Loading',
                   textAttrs: {
-                    face: 'Press Start 2P', // Direct Google font name
+                    // Use 'PressStart2P' which maps to 'Press Start 2P' in fontMap
+                    // This triggers ensureFontLoaded for a Google Font
+                    face: 'PressStart2P',
                     size: 16,
                     fillColor: '#0000FF',
                     alignment: 'left',
@@ -5224,16 +5198,16 @@ describe('FLARenderer', () => {
           })],
         })],
       });
-      await renderer.setDocument(doc);
+      await freshRenderer.setDocument(doc);
 
       // Render to trigger font loading
-      renderer.renderFrame(0);
+      freshRenderer.renderFrame(0);
 
       // Wait for font loading promise to settle (resolve or reject)
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, 600));
 
       // Render again after font potentially loaded
-      renderer.renderFrame(0);
+      freshRenderer.renderFrame(0);
     });
   });
 
@@ -5316,6 +5290,8 @@ describe('FLARenderer', () => {
     });
 
     it('should handle debug click on shape with C curve commands', async () => {
+      // Create a large rectangle with a C curve command
+      // The shape covers (50,50) to (500,350) ensuring the click at center definitely hits
       const doc = createMinimalDoc({
         timelines: [createTimeline({
           layers: [createLayer({
@@ -5328,9 +5304,11 @@ describe('FLARenderer', () => {
                 edges: [{
                   fillStyle0: 1,
                   commands: [
-                    { type: 'M', x: 100, y: 200 },
-                    { type: 'C', c1x: 120, c1y: 100, c2x: 180, c2y: 100, x: 200, y: 200 },
-                    { type: 'L', x: 100, y: 200 },
+                    { type: 'M', x: 50, y: 50 },
+                    // Cubic bezier for top edge - goes up slightly then back down
+                    { type: 'C', c1x: 200, c1y: 20, c2x: 350, c2y: 20, x: 500, y: 50 },
+                    { type: 'L', x: 500, y: 350 },
+                    { type: 'L', x: 50, y: 350 },
                     { type: 'Z' },
                   ],
                 }],
@@ -5340,15 +5318,21 @@ describe('FLARenderer', () => {
         })],
       });
       await renderer.setDocument(doc);
+
+      // Position canvas at origin for predictable coordinates
       document.body.appendChild(canvas);
+      canvas.style.position = 'fixed';
+      canvas.style.left = '0';
+      canvas.style.top = '0';
 
       renderer.enableDebugMode();
       renderer.renderFrame(0);
 
       const rect = canvas.getBoundingClientRect();
+      // Click in the center of the shape - definitely inside the large rectangle
       const clickEvent = new MouseEvent('click', {
-        clientX: rect.left + 150,
-        clientY: rect.top + 150,
+        clientX: rect.left + 275,
+        clientY: rect.top + 200,
         bubbles: true,
       });
       canvas.dispatchEvent(clickEvent);
@@ -5514,6 +5498,8 @@ describe('FLARenderer', () => {
     });
 
     it('should show bad edges in debug click with out-of-bounds C coords', async () => {
+      // Create a large shape covering the canvas with a C curve having out-of-bounds control points
+      // The shape is defined to ensure the click point is inside it
       const doc = createMinimalDoc({
         timelines: [createTimeline({
           layers: [createLayer({
@@ -5526,11 +5512,11 @@ describe('FLARenderer', () => {
                 edges: [{
                   fillStyle0: 1,
                   commands: [
-                    { type: 'M', x: 100, y: 100 },
-                    // C with out-of-bounds control points
-                    { type: 'C', c1x: 60000, c1y: 60000, c2x: 70000, c2y: 70000, x: 200, y: 100 },
-                    { type: 'L', x: 200, y: 200 },
-                    { type: 'L', x: 100, y: 200 },
+                    { type: 'M', x: 50, y: 50 },
+                    { type: 'L', x: 500, y: 50 },
+                    // C with out-of-bounds control point coordinates (>10000)
+                    { type: 'C', c1x: 500, c1y: 20000, c2x: 500, c2y: 350, x: 500, y: 350 },
+                    { type: 'L', x: 50, y: 350 },
                     { type: 'Z' },
                   ],
                 }],
@@ -5540,15 +5526,21 @@ describe('FLARenderer', () => {
         })],
       });
       await renderer.setDocument(doc);
+
+      // Position canvas for predictable coordinates
       document.body.appendChild(canvas);
+      canvas.style.position = 'fixed';
+      canvas.style.left = '0';
+      canvas.style.top = '0';
 
       renderer.enableDebugMode();
       renderer.renderFrame(0);
 
       const rect = canvas.getBoundingClientRect();
+      // Click in the center of the shape
       const clickEvent = new MouseEvent('click', {
-        clientX: rect.left + 150,
-        clientY: rect.top + 150,
+        clientX: rect.left + 275,
+        clientY: rect.top + 200,
         bubbles: true,
       });
       canvas.dispatchEvent(clickEvent);
@@ -6244,6 +6236,188 @@ describe('FLARenderer', () => {
       await renderer.setDocument(doc);
       renderer.renderFrame(0);
       expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('DEBUG mode', () => {
+    let renderer: FLARenderer;
+    let canvas: HTMLCanvasElement;
+    let consoleSpy: ConsoleSpy;
+
+    beforeEach(() => {
+      setRendererDebug(true);
+      canvas = document.createElement('canvas');
+      renderer = new FLARenderer(canvas);
+      consoleSpy = createConsoleSpy();
+    });
+
+    afterEach(() => {
+      setRendererDebug(false);
+      consoleSpy.mockRestore();
+    });
+
+    it('should log viewport and canvas size info when DEBUG is enabled', async () => {
+      const doc = createMinimalDoc({
+        width: 800,
+        height: 600,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [createRectangleShape({ color: '#FF0000' })],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expectLogContaining(consoleSpy, 'Viewport size:');
+      expectLogContaining(consoleSpy, 'Canvas size:');
+      expectLogContaining(consoleSpy, 'Scale:');
+    });
+
+    it('should log shape pre-computation count when DEBUG is enabled', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [createTriangleShape({ color: '#00FF00', size: 50 })],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expectLogContaining(consoleSpy, 'Pre-computing');
+    });
+
+    it('should log camera info when setFollowCamera is enabled with DEBUG', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              name: 'camera',
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'CameraSymbol',
+                  matrix: createMatrix({ tx: 100, ty: 100 }),
+                  loop: 'single frame',
+                }],
+              })],
+            }),
+            createLayer({
+              name: 'content',
+              frames: [createFrame({
+                elements: [createRectangleShape({ color: '#0000FF' })],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.setFollowCamera(true);
+
+      expectLogContaining(consoleSpy, 'Follow camera enabled');
+    });
+
+    it('should log camera viewport detection with DEBUG enabled', async () => {
+      const doc = createMinimalDoc({
+        width: 1920,
+        height: 1080,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              name: 'ramka',
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'RamkaSymbol',
+                  matrix: createMatrix({ a: 1, b: 0, c: 0, d: 1, tx: 960, ty: 540 }),
+                  transformationPoint: { x: 0, y: 0 },
+                  loop: 'single frame',
+                }],
+              })],
+            }),
+            createLayer({
+              name: 'background',
+              frames: [createFrame({
+                elements: [createRectangleShape({ width: 1920, height: 1080, color: '#333333' })],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+      consoleSpy.mockClear();
+
+      renderer.setFollowCamera(true);
+      renderer.renderFrame(0);
+
+      expectLogContaining(consoleSpy, 'Camera viewport:');
+    });
+
+    it('should log camera center during render when following camera with DEBUG', async () => {
+      const doc = createMinimalDoc({
+        width: 1920,
+        height: 1080,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              name: 'viewport',
+              frames: [createFrame({
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'ViewportSymbol',
+                  matrix: createMatrix({ a: 1, b: 0, c: 0, d: 1, tx: 500, ty: 300 }),
+                  transformationPoint: { x: 200, y: 150 },
+                  loop: 'single frame',
+                }],
+              })],
+            }),
+            createLayer({
+              name: 'main',
+              frames: [createFrame({
+                elements: [createRectangleShape({ width: 200, height: 200, color: '#AABBCC' })],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.setFollowCamera(true);
+      consoleSpy.mockClear();
+
+      renderer.renderFrame(0);
+
+      expectLogContaining(consoleSpy, 'Camera:');
+    });
+
+    it('should log font preload info when document has text elements with DEBUG', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix(),
+                left: 10,
+                width: 200,
+                height: 50,
+                textRuns: [{
+                  characters: 'Test text',
+                  face: 'PressStart2P-Regular',
+                  size: 16,
+                  fillColor: '#000000',
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      await renderer.setDocument(doc);
+
+      expectLogContaining(consoleSpy, 'Fonts to preload:');
     });
   });
 

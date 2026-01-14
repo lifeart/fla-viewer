@@ -19,8 +19,13 @@ import type {
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
 
-// Debug flag - enabled via ?debug=true URL parameter
-const DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
+// Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
+let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
+
+// Export setter for testing
+export function setRendererDebug(value: boolean): void {
+  DEBUG = value;
+}
 
 interface DebugElement {
   type: 'shape' | 'symbol' | 'bitmap' | 'video' | 'text';

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { decodeEdges, parseEdge } from '../edge-decoder';
+import { decodeEdges, parseEdge, setEdgeDecoderDebug } from '../edge-decoder';
+import { createConsoleSpy, expectLogContaining, type ConsoleSpy } from './test-utils';
 import type { PathCommand } from '../types';
 
 describe('edge-decoder', () => {
@@ -522,6 +523,42 @@ describe('edge-decoder', () => {
       const commands = decodeEdges('!0 0 (; 10 10 20 20 30 30 40 40 50 )');
       // Should parse MoveTo, C curve, then break due to insufficient tokens
       expect(commands[0]).toEqual({ type: 'M', x: 0, y: 0 });
+    });
+  });
+
+  describe('DEBUG_EDGES mode', () => {
+    let consoleSpy: ConsoleSpy;
+
+    beforeEach(() => {
+      setEdgeDecoderDebug(true);
+      consoleSpy = createConsoleSpy();
+    });
+
+    afterEach(() => {
+      setEdgeDecoderDebug(false);
+      consoleSpy.mockRestore();
+    });
+
+    it('should log command counts when DEBUG_EDGES is enabled', () => {
+      decodeEdges('!0 0|100 0|100 100|0 100|0 0');
+      expect(consoleSpy).toHaveBeenCalled();
+      expectLogContaining(consoleSpy, 'Commands:');
+    });
+
+    it('should log M, L, Q, C command counts', () => {
+      decodeEdges('!0 0|100 0|100 100');
+      expectLogContaining(consoleSpy, 'M=');
+      expectLogContaining(consoleSpy, 'L=');
+    });
+
+    it('should log Q command count for quadratic curves', () => {
+      decodeEdges('!0 0[50 50 100 100');
+      expectLogContaining(consoleSpy, 'Q=');
+    });
+
+    it('should log C command count for cubic curves', () => {
+      decodeEdges('!0 0(; 10 10 20 20 30 30)');
+      expectLogContaining(consoleSpy, 'C=');
     });
   });
 });
