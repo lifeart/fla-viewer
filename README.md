@@ -32,7 +32,7 @@ A modern, lightweight web viewer for Adobe Animate/Flash Professional `.fla` fil
 |---------|-------------|
 | **FLA/XFL Parsing** | Reads native Adobe Animate format (ZIP archives with XML) |
 | **Timeline Playback** | Play, pause, scrub, frame-by-frame navigation |
-| **Vector Shapes** | Solid fills, linear/radial gradients, strokes with caps/joins |
+| **Vector Shapes** | Solid fills, linear/radial gradients, bitmap fills, strokes with caps/joins |
 | **Symbols** | Graphic, MovieClip, and Button symbols with unlimited nesting |
 | **Motion Tweens** | Smooth interpolated animations with easing functions |
 | **Shape Tweens** | Morph shape interpolation between keyframes |
@@ -176,8 +176,8 @@ npm run build
 | Color Effects | :white_check_mark: | Alpha, tint, brightness |
 | Blend Modes | :white_check_mark: | Multiply, screen, overlay, etc. |
 | Camera Layer | :white_check_mark: | Auto-detect + follow |
-| DOMVideoInstance | :warning: | Placeholder only |
-| Bitmap Fills | :x: | Not yet supported |
+| DOMVideoInstance | :white_check_mark: | Placeholder with metadata (name, resolution, fps, duration) |
+| Bitmap Fills | :white_check_mark: | Shape fills with bitmap patterns |
 | ActionScript | :x: | Not supported |
 
 ---
@@ -250,9 +250,7 @@ See [AGENTS.md](./AGENTS.md) for detailed format documentation.
 
 ## Known Limitations
 
-- Video elements show placeholder only (no FLV playback)
-- No bitmap fills in shapes (solid colors and gradients only)
-- No blend modes (all layers render with normal blend)
+- Video elements show placeholder only (no FLV/H.263 playback)
 - No ActionScript execution
 - Fonts fall back to system fonts if not available in Google Fonts
 - Filter `knockout` and `inner` options are not fully supported

@@ -9,6 +9,7 @@ export interface FLADocument {
   symbols: Map<string, Symbol>;
   bitmaps: Map<string, BitmapItem>;
   sounds: Map<string, SoundItem>;
+  videos: Map<string, VideoItem>;
 }
 
 export interface BitmapItem {
@@ -26,6 +27,17 @@ export interface SoundItem {
   format?: string; // e.g., "44kHz 16bit Stereo"
   sampleCount?: number;
   audioData?: AudioBuffer; // Loaded audio (if available)
+}
+
+export interface VideoItem {
+  name: string;
+  href: string; // Binary data filename in archive (videoDataHRef)
+  width: number; // In pixels
+  height: number; // In pixels
+  fps?: number;
+  duration?: number; // Length in seconds
+  videoType?: string; // e.g., "h263 media"
+  sourceExternalFilepath?: string;
 }
 
 export interface Timeline {
@@ -185,6 +197,7 @@ export interface FillStyle {
   alpha?: number;
   gradient?: GradientEntry[];
   matrix?: Matrix;
+  bitmapPath?: string; // Reference to bitmap in library (for bitmap fills)
 }
 
 export interface GradientEntry {

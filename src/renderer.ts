@@ -1415,6 +1415,40 @@ export class FLARenderer {
     ctx.closePath();
     ctx.fill();
 
+    // Draw video name and metadata if space permits
+    if (video.width > 100 && video.height > 60) {
+      ctx.fillStyle = '#AAAAAA';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+
+      // Show video name
+      const displayName = video.libraryItemName.length > 30
+        ? video.libraryItemName.substring(0, 27) + '...'
+        : video.libraryItemName;
+      ctx.fillText(displayName, centerX, 8);
+
+      // Show video info from metadata if available
+      if (this.doc) {
+        const videoItem = this.doc.videos.get(video.libraryItemName);
+        if (videoItem) {
+          const info: string[] = [];
+          if (videoItem.width && videoItem.height) {
+            info.push(`${videoItem.width}×${videoItem.height}`);
+          }
+          if (videoItem.fps) {
+            info.push(`${videoItem.fps}fps`);
+          }
+          if (videoItem.duration) {
+            info.push(`${videoItem.duration.toFixed(1)}s`);
+          }
+          if (info.length > 0) {
+            ctx.fillText(info.join(' • '), centerX, video.height - 20);
+          }
+        }
+      }
+    }
+
     ctx.restore();
   }
 
@@ -2177,7 +2211,7 @@ export class FLARenderer {
     }
   }
 
-  private getFillStyle(fill: FillStyle): string | CanvasGradient {
+  private getFillStyle(fill: FillStyle): string | CanvasGradient | CanvasPattern {
     if (fill.type === 'solid' && fill.color) {
       if (fill.alpha !== undefined && fill.alpha < 1) {
         return this.colorWithAlpha(fill.color, fill.alpha);
@@ -2194,7 +2228,52 @@ export class FLARenderer {
       return this.createRadialGradient(fill);
     }
 
+    // Handle bitmap fills
+    if (fill.type === 'bitmap' && fill.bitmapPath) {
+      return this.createBitmapPattern(fill);
+    }
+
     return '#000000';
+  }
+
+  private createBitmapPattern(fill: FillStyle): CanvasPattern | string {
+    if (!this.doc || !fill.bitmapPath) {
+      return '#808080'; // Gray fallback for missing bitmap
+    }
+
+    // Look up bitmap by path in the document's bitmaps
+    const bitmapItem = this.doc.bitmaps.get(fill.bitmapPath);
+    if (!bitmapItem || !bitmapItem.imageData) {
+      // Try case-insensitive lookup
+      for (const [key, item] of this.doc.bitmaps) {
+        if (key.toLowerCase() === fill.bitmapPath.toLowerCase() && item.imageData) {
+          return this.createPatternFromBitmap(item.imageData, fill.matrix);
+        }
+      }
+      return '#808080'; // Gray fallback for missing bitmap
+    }
+
+    return this.createPatternFromBitmap(bitmapItem.imageData, fill.matrix);
+  }
+
+  private createPatternFromBitmap(image: HTMLImageElement, matrix?: Matrix): CanvasPattern | string {
+    const pattern = this.ctx.createPattern(image, 'repeat');
+    if (!pattern) {
+      return '#808080';
+    }
+
+    // Apply the bitmap matrix transform
+    if (matrix) {
+      // Flash bitmap fills use a matrix to position and scale the bitmap
+      // The matrix transforms from bitmap space to shape-local space
+      pattern.setTransform(new DOMMatrix([
+        matrix.a, matrix.b,
+        matrix.c, matrix.d,
+        matrix.tx, matrix.ty
+      ]));
+    }
+
+    return pattern;
   }
 
   private createLinearGradient(fill: FillStyle): CanvasGradient | string {

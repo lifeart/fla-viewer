@@ -18,6 +18,7 @@ import type {
   Symbol,
   BitmapItem,
   SoundItem,
+  VideoItem,
   Point,
   Tween,
   Edge,
@@ -98,6 +99,10 @@ export class FLAParser {
     progress('Loading audio...');
     const sounds = await this.parseSounds(root);
 
+    // Parse video items from media section
+    progress('Loading videos...');
+    const videos = this.parseVideos(root);
+
     // Parse main timeline (pass dimensions for camera detection)
     progress('Building timeline...');
     const timelines = this.parseTimelines(root, width, height);
@@ -110,7 +115,8 @@ export class FLAParser {
       timelines,
       symbols: this.symbolCache,
       bitmaps,
-      sounds
+      sounds,
+      videos
     };
   }
 
@@ -906,6 +912,23 @@ export class FLAParser {
         });
         continue;
       }
+
+      // Check for bitmap fill
+      const bitmapFill = fillEl.querySelector('BitmapFill');
+      if (bitmapFill) {
+        const bitmapPath = bitmapFill.getAttribute('bitmapPath') || '';
+        const matrixEl = bitmapFill.querySelector('matrix > Matrix');
+        const fill: FillStyle = {
+          index,
+          type: 'bitmap',
+          bitmapPath: normalizePath(bitmapPath),
+        };
+        if (matrixEl) {
+          fill.matrix = this.parseMatrix(matrixEl);
+        }
+        fills.push(fill);
+        continue;
+      }
     }
 
     return fills;
@@ -1114,6 +1137,41 @@ export class FLAParser {
         console.warn(`Failed to decode audio: ${soundItem.href}`, e);
       }
     }
+  }
+
+  private parseVideos(root: globalThis.Element): Map<string, VideoItem> {
+    const videos = new Map<string, VideoItem>();
+    const videoElements = root.querySelectorAll('media > DOMVideoItem');
+
+    for (const videoEl of videoElements) {
+      const name = videoEl.getAttribute('name') || '';
+      const href = videoEl.getAttribute('videoDataHRef') || '';
+      const frameRight = videoEl.getAttribute('width');
+      const frameBottom = videoEl.getAttribute('height');
+      const fps = videoEl.getAttribute('fps');
+      const length = videoEl.getAttribute('length');
+      const videoType = videoEl.getAttribute('videoType') || undefined;
+      const sourceExternalFilepath = videoEl.getAttribute('sourceExternalFilepath') || undefined;
+
+      const videoItem: VideoItem = {
+        name,
+        href,
+        width: frameRight ? parseInt(frameRight) : 0,
+        height: frameBottom ? parseInt(frameBottom) : 0,
+        fps: fps ? parseFloat(fps) : undefined,
+        duration: length ? parseFloat(length) : undefined,
+        videoType,
+        sourceExternalFilepath
+      };
+
+      videos.set(name, videoItem);
+
+      if (DEBUG) {
+        console.log(`Found video: ${name}, ${videoItem.width}x${videoItem.height}, ${videoItem.fps}fps`);
+      }
+    }
+
+    return videos;
   }
 
   private parseShapeEdges(shape: globalThis.Element): Edge[] {

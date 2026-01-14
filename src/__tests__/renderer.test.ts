@@ -487,6 +487,267 @@ describe('FLARenderer', () => {
     });
   });
 
+  describe('bitmap fills', () => {
+    it('should render bitmap fill when bitmap is loaded', async () => {
+      // Create a mock image
+      const mockImage = new Image();
+      mockImage.width = 100;
+      mockImage.height = 100;
+
+      const bitmaps = new Map();
+      bitmaps.set('texture.png', {
+        name: 'texture.png',
+        href: 'texture.png',
+        width: 100,
+        height: 100,
+        imageData: mockImage,
+      });
+
+      const doc = createMinimalDoc({
+        bitmaps,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  type: 'bitmap',
+                  bitmapPath: 'texture.png',
+                  matrix: createMatrix({ a: 20, d: 20 }),
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 100, y: 0 },
+                    { type: 'L', x: 100, y: 100 },
+                    { type: 'L', x: 0, y: 100 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should fallback to gray when bitmap is not found', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  type: 'bitmap',
+                  bitmapPath: 'missing.png',
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 100, y: 0 },
+                    { type: 'L', x: 100, y: 100 },
+                    { type: 'L', x: 0, y: 100 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Should not throw, but render gray fallback
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render bitmap fill without matrix', async () => {
+      const mockImage = new Image();
+      mockImage.width = 50;
+      mockImage.height = 50;
+
+      const bitmaps = new Map();
+      bitmaps.set('pattern.png', {
+        name: 'pattern.png',
+        href: 'pattern.png',
+        width: 50,
+        height: 50,
+        imageData: mockImage,
+      });
+
+      const doc = createMinimalDoc({
+        bitmaps,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  type: 'bitmap',
+                  bitmapPath: 'pattern.png',
+                  // No matrix - should still render
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 200, y: 0 },
+                    { type: 'L', x: 200, y: 200 },
+                    { type: 'L', x: 0, y: 200 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should handle case-insensitive bitmap lookup', async () => {
+      const mockImage = new Image();
+      mockImage.width = 100;
+      mockImage.height = 100;
+
+      const bitmaps = new Map();
+      bitmaps.set('Texture.PNG', {
+        name: 'Texture.PNG',
+        href: 'Texture.PNG',
+        width: 100,
+        height: 100,
+        imageData: mockImage,
+      });
+
+      const doc = createMinimalDoc({
+        bitmaps,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  type: 'bitmap',
+                  bitmapPath: 'texture.png', // Different case
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 100, y: 0 },
+                    { type: 'L', x: 100, y: 100 },
+                    { type: 'L', x: 0, y: 100 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+  });
+
+  describe('video instance with metadata', () => {
+    it('should render video placeholder with metadata', async () => {
+      const videos = new Map();
+      videos.set('intro.mp4', {
+        name: 'intro.mp4',
+        href: 'M 1.dat',
+        width: 640,
+        height: 360,
+        fps: 30,
+        duration: 5.5,
+      });
+
+      const doc = createMinimalDoc({
+        videos,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'video',
+                libraryItemName: 'intro.mp4',
+                matrix: createMatrix(),
+                width: 320,
+                height: 180,
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render video placeholder without metadata', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'video',
+                libraryItemName: 'unknown.flv',
+                matrix: createMatrix(),
+                width: 320,
+                height: 240,
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Should not throw even if video metadata is not found
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render small video without text labels', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'video',
+                libraryItemName: 'tiny.mp4',
+                matrix: createMatrix(),
+                width: 50, // Too small for text labels
+                height: 30,
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+  });
+
   describe('strokes', () => {
     it('should render stroke with color', async () => {
       const doc = createMinimalDoc({
