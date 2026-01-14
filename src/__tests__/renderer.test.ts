@@ -6202,6 +6202,104 @@ describe('FLARenderer', () => {
     });
   });
 
+  describe('internal edges (fillStyle0 === fillStyle1)', () => {
+    it('should not create holes when edge has same fill on both sides', async () => {
+      // This tests the fix for the "triangle hole" bug where internal detail lines
+      // (edges with fillStyle0 === fillStyle1) were incorrectly contributing to fill paths
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#FFCC99' }],
+                strokes: [{ index: 2, color: '#000000', weight: 1 }],
+                edges: [
+                  // Main boundary edge defining the filled rectangle
+                  {
+                    fillStyle1: 1,
+                    commands: [
+                      { type: 'M', x: 50, y: 50 },
+                      { type: 'L', x: 200, y: 50 },
+                      { type: 'L', x: 200, y: 200 },
+                      { type: 'L', x: 50, y: 200 },
+                      { type: 'Z' },
+                    ],
+                  },
+                  // Internal edge with fillStyle0 === fillStyle1 (detail line inside the fill)
+                  // This should NOT create a hole in the fill
+                  {
+                    fillStyle0: 1,
+                    fillStyle1: 1,
+                    strokeStyle: 2,
+                    commands: [
+                      { type: 'M', x: 100, y: 100 },
+                      { type: 'L', x: 150, y: 150 },
+                    ],
+                  },
+                ],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      // The shape should render without any holes
+      expect(hasRenderedContent(canvas)).toBe(true);
+      // The fill color should be present (not cut out by internal edge)
+      expect(hasColor(canvas, '#FFCC99')).toBe(true);
+    });
+
+    it('should still render stroke for internal edges', async () => {
+      // Internal edges should contribute to strokes even though they don't affect fills
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#FFFFFF' }],
+                strokes: [{ index: 2, color: '#FF0000', weight: 2 }],
+                edges: [
+                  // Boundary
+                  {
+                    fillStyle1: 1,
+                    commands: [
+                      { type: 'M', x: 50, y: 50 },
+                      { type: 'L', x: 200, y: 50 },
+                      { type: 'L', x: 200, y: 200 },
+                      { type: 'L', x: 50, y: 200 },
+                      { type: 'Z' },
+                    ],
+                  },
+                  // Internal detail line (same fill both sides, but has stroke)
+                  {
+                    fillStyle0: 1,
+                    fillStyle1: 1,
+                    strokeStyle: 2,
+                    commands: [
+                      { type: 'M', x: 75, y: 125 },
+                      { type: 'L', x: 175, y: 125 },
+                    ],
+                  },
+                ],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      // Should have the red stroke rendered
+      expect(hasColor(canvas, '#FF0000')).toBe(true);
+    });
+  });
+
   describe('radial gradient edge cases', () => {
     it('should handle radial gradient fill with empty gradient array', async () => {
       const doc = createMinimalDoc({

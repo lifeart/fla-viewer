@@ -62,6 +62,7 @@ export class FLARenderer {
   private debugSymbolPath: string[] = [];  // Current symbol hierarchy for debug
   private clickHandler: ((e: MouseEvent) => void) | null = null;
   private hiddenLayers: Set<number> = new Set();
+  private hiddenElements: Map<number, Set<number>> = new Map(); // layerIndex -> Set of hidden element indices
   private layerOrder: 'forward' | 'reverse' = 'reverse';
   private nestedLayerOrder: 'forward' | 'reverse' = 'reverse';
   private elementOrder: 'forward' | 'reverse' = 'forward';
@@ -236,6 +237,12 @@ export class FLARenderer {
 
   setHiddenLayers(hiddenLayers: Set<number>): void {
     this.hiddenLayers = new Set(hiddenLayers);
+  }
+
+  setHiddenElements(hiddenElements: Map<number, Set<number>>): void {
+    this.hiddenElements = new Map(
+      Array.from(hiddenElements.entries()).map(([k, v]) => [k, new Set(v)])
+    );
   }
 
   setLayerOrder(order: 'forward' | 'reverse'): void {
@@ -770,7 +777,7 @@ export class FLARenderer {
         continue;
       }
 
-      this.renderLayer(layer, frameIndex, depth);
+      this.renderLayer(layer, frameIndex, depth, i);
     }
   }
 
@@ -792,7 +799,7 @@ export class FLARenderer {
       for (const maskedIdx of maskedLayerIndices) {
         const maskedLayer = timeline.layers[maskedIdx];
         if (maskedLayer) {
-          this.renderLayer(maskedLayer, frameIndex, depth);
+          this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx);
         }
       }
       return;
@@ -828,7 +835,7 @@ export class FLARenderer {
     for (const maskedIdx of maskedLayerIndices) {
       const maskedLayer = timeline.layers[maskedIdx];
       if (maskedLayer) {
-        this.renderLayer(maskedLayer, frameIndex, depth);
+        this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx);
       }
     }
 
@@ -940,7 +947,7 @@ export class FLARenderer {
         continue;
       }
 
-      this.renderLayer(layer, frameIndex, depth);
+      this.renderLayer(layer, frameIndex, depth, i);
     }
 
     if (hasCameraTransform) {
@@ -1049,7 +1056,7 @@ export class FLARenderer {
     this.ctx.transform(invA, invB, invC, invD, invTx, invTy);
   }
 
-  private renderLayer(layer: Layer, frameIndex: number, depth: number): void {
+  private renderLayer(layer: Layer, frameIndex: number, depth: number, layerIndex?: number): void {
     // Find the frame at the current index
     const frame = this.findFrameAtIndex(layer.frames, frameIndex);
     if (!frame) return;
@@ -1065,12 +1072,18 @@ export class FLARenderer {
     // Check if we need to interpolate (tween)
     const nextKeyframe = this.findNextKeyframe(layer.frames, frame);
 
+    // Get hidden elements for this layer (only for main timeline layers with index)
+    const hiddenSet = layerIndex !== undefined ? this.hiddenElements.get(layerIndex) : undefined;
+
     // Render elements based on elementOrder setting
     const elementIndices = this.elementOrder === 'reverse'
       ? [...Array(frame.elements.length).keys()].reverse()
       : [...Array(frame.elements.length).keys()];
 
     for (const elementIndex of elementIndices) {
+      // Skip hidden elements (only for main timeline, depth 0)
+      if (depth === 0 && hiddenSet?.has(elementIndex)) continue;
+
       const element = frame.elements[elementIndex];
 
       // Handle shape tweens with morphShape
@@ -1882,7 +1895,13 @@ export class FLARenderer {
         const endPoint = this.getLastPoint(segmentCmds);
         if (!startPoint || !endPoint) continue;
 
-        if (edge.fillStyle1 !== undefined) {
+        // Skip edges where fillStyle0 === fillStyle1 - these are internal lines
+        // within a filled region, not boundary edges
+        const isInternalEdge = edge.fillStyle0 !== undefined &&
+                               edge.fillStyle1 !== undefined &&
+                               edge.fillStyle0 === edge.fillStyle1;
+
+        if (edge.fillStyle1 !== undefined && !isInternalEdge) {
           if (!fillEdgeContributions.has(edge.fillStyle1)) {
             fillEdgeContributions.set(edge.fillStyle1, []);
           }
