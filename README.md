@@ -45,7 +45,7 @@ A modern, lightweight web viewer for Adobe Animate/Flash Professional `.fla` fil
 | **Audio Playback** | Stream sounds synced to timeline with volume control |
 | **Camera Support** | Auto-detected camera layers with follow mode |
 | **Video Export** | Export to MP4 with WebCodecs (H.264 + AAC audio) |
-| **Debug Mode** | Inspect layers, symbols, and rendering details |
+| **Debug Mode** | Inspect layers, elements, nested symbols with hide/show controls |
 
 ---
 
@@ -103,6 +103,30 @@ FLA Viewer can export your animations as MP4 video files with full audio support
 - Audio: AAC-LC @ 128 kbps
 - Uses modern WebCodecs API for fast, efficient encoding
 - Works in Chrome, Edge, and other Chromium browsers
+
+---
+
+## Debug Mode
+
+Press `D` or click the bug icon to open the debug panel. Features include:
+
+| Feature | Description |
+|---------|-------------|
+| **Layer List** | View all layers with visibility toggles |
+| **Element Inspector** | See elements in each layer with type badges (symbol, shape, bitmap, text, video) |
+| **Nested Symbols** | Expand symbols to view their internal layers and elements (up to 3 levels deep) |
+| **Hide/Show Elements** | Toggle visibility of individual elements for debugging |
+| **Frame Sync** | Panel updates automatically when scrubbing the timeline |
+| **Click Inspection** | Click on canvas to inspect element details in console |
+| **Render Order** | Configure layer, nested layer, and element render order |
+| **Camera Follow** | Enable camera layer tracking for viewport animations |
+
+**Element Types:**
+- **Symbol** (green) — Nested graphic, movieclip, or button instances
+- **Shape** (blue) — Vector shapes with fills and strokes
+- **Bitmap** (orange) — Embedded images
+- **Text** (purple) — Static or dynamic text fields
+- **Video** (red) — Video placeholders
 
 ---
 
