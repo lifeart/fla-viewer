@@ -1864,4 +1864,417 @@ describe('FLAParser', () => {
       expect(doc.bitmaps.has('images/test.png')).toBe(true);
     });
   });
+
+  describe('reference layer filtering', () => {
+    it('should filter transparent reference layers with low alpha', async () => {
+      // Transparent layer with alphaPercent < 50 should be filtered as reference
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Reference Layer" layerType="normal" color="#FF0000" transparent="true" alphaPercent="25">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <fills><FillStyle index="1"><SolidColor color="#FF0000"/></FillStyle></fills>
+                        <edges><Edge fillStyle0="1" edges="!0 0|100 0|100 100|0 100|0 0"/></edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+              <DOMLayer name="Content Layer">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <fills><FillStyle index="1"><SolidColor color="#00FF00"/></FillStyle></fills>
+                        <edges><Edge fillStyle0="1" edges="!0 0|100 0|100 100|0 100|0 0"/></edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      // First layer (transparent with low alpha) should be in referenceLayers
+      expect(doc.timelines[0].referenceLayers.has(0)).toBe(true);
+      // Second layer should not be in referenceLayers
+      expect(doc.timelines[0].referenceLayers.has(1)).toBe(false);
+    });
+
+    it('should filter camera layer with outline mode', async () => {
+      // Camera layer with outline=true should be filtered as reference
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Camera" layerType="normal" outline="true">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="Ramka">
+                        <matrix><Matrix/></matrix>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+              <DOMLayer name="Background">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <fills><FillStyle index="1"><SolidColor color="#0000FF"/></FillStyle></fills>
+                        <edges><Edge fillStyle0="1" edges="!0 0|100 0|100 100|0 100|0 0"/></edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      // Camera layer with outline should be in referenceLayers
+      expect(doc.timelines[0].referenceLayers.has(0)).toBe(true);
+      // Background layer should not be in referenceLayers
+      expect(doc.timelines[0].referenceLayers.has(1)).toBe(false);
+    });
+
+    it('should not filter camera layer without outline mode', async () => {
+      // Camera layer without outline=true should NOT be filtered
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Camera" layerType="normal">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="Ramka">
+                        <matrix><Matrix/></matrix>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      // Camera layer without outline should NOT be in referenceLayers
+      expect(doc.timelines[0].referenceLayers.has(0)).toBe(false);
+    });
+  });
+
+  describe('symbol parsing errors', () => {
+    it('should handle invalid symbol XML gracefully', async () => {
+      // Invalid XML in symbol file - should not crash the parser
+      const invalidSymbolXml = `<?xml version="1.0"?>
+<DOMSymbolItem name="BadSymbol">
+  <timeline>
+    <DOMTimeline name="BadSymbol">
+      <layers>
+        <DOMLayer name="Layer 1">
+          <frames>
+            <!-- Unclosed tag -->
+            <DOMFrame index="0">
+              <elements>
+              </elements>`;  // Missing closing tags
+
+      const validTimelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements></elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const symbols = `<symbols><Include href="BadSymbol.xml"/></symbols>`;
+
+      const fla = await createFlaZip(
+        createDOMDocument({ timelines: validTimelines, symbols }),
+        { 'LIBRARY/BadSymbol.xml': invalidSymbolXml }
+      );
+
+      // Should not throw - gracefully handle invalid symbol
+      const doc = await parser.parse(fla);
+      expect(doc.timelines).toHaveLength(1);
+    });
+  });
+
+  describe('ZIP repair functionality', () => {
+    // Helper to find EOCD offset in a ZIP buffer
+    function findEOCDOffset(bytes: Uint8Array): number {
+      for (let i = bytes.length - 22; i >= 0 && i >= bytes.length - 65557; i--) {
+        if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b &&
+            bytes[i + 2] === 0x05 && bytes[i + 3] === 0x06) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    it('should repair ZIP with extra data after EOCD', async () => {
+      // Create a valid FLA file
+      const validFla = await createFlaZip(createDOMDocument());
+      const validBuffer = await validFla.arrayBuffer();
+      const validBytes = new Uint8Array(validBuffer);
+
+      // Find EOCD and get expected end
+      const eocdOffset = findEOCDOffset(validBytes);
+      expect(eocdOffset).toBeGreaterThan(0);
+
+      const view = new DataView(validBuffer);
+      const commentLength = view.getUint16(eocdOffset + 20, true);
+      const expectedEnd = eocdOffset + 22 + commentLength;
+
+      // Append garbage data after EOCD to corrupt the file
+      const extraBytes = new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00]);
+      const corruptedBytes = new Uint8Array(validBytes.length + extraBytes.length);
+      corruptedBytes.set(validBytes);
+      corruptedBytes.set(extraBytes, validBytes.length);
+
+      const corruptedFile = new File([corruptedBytes], 'corrupted.fla', { type: 'application/octet-stream' });
+
+      // Parser should repair by trimming to EOCD boundary
+      const doc = await parser.parse(corruptedFile);
+      expect(doc.width).toBe(550);
+      expect(doc.height).toBe(400);
+    });
+
+    it('should repair ZIP with incorrect central directory size', async () => {
+      // Create a valid FLA file
+      const validFla = await createFlaZip(createDOMDocument());
+      const validBuffer = await validFla.arrayBuffer();
+      const validBytes = new Uint8Array(validBuffer);
+
+      // Find EOCD
+      const eocdOffset = findEOCDOffset(validBytes);
+      expect(eocdOffset).toBeGreaterThan(0);
+
+      // Create corrupted copy with wrong CD size
+      const corruptedBytes = new Uint8Array(validBuffer.slice(0));
+      const corruptedView = new DataView(corruptedBytes.buffer);
+
+      // Get original CD size and offset
+      const originalCdSize = corruptedView.getUint32(eocdOffset + 12, true);
+
+      // Set incorrect CD size (add some bytes to make it wrong)
+      corruptedView.setUint32(eocdOffset + 12, originalCdSize + 100, true);
+
+      const corruptedFile = new File([corruptedBytes], 'corrupted.fla', { type: 'application/octet-stream' });
+
+      // Parser should repair by patching CD size
+      const doc = await parser.parse(corruptedFile);
+      expect(doc.width).toBe(550);
+      expect(doc.height).toBe(400);
+    });
+
+    it('should fail to repair file without EOCD signature', async () => {
+      // Create a file that looks like a ZIP but has no valid EOCD
+      // Just some random data with ZIP local file header but corrupted EOCD
+      const fakeZipBytes = new Uint8Array([
+        // Local file header signature
+        0x50, 0x4b, 0x03, 0x04,
+        // Some data
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // More garbage - no valid EOCD
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      ]);
+
+      const badFile = new File([fakeZipBytes], 'noeocd.fla', { type: 'application/octet-stream' });
+
+      // Should throw because repair fails (no EOCD found)
+      await expect(parser.parse(badFile)).rejects.toThrow();
+    });
+
+    it('should fail to repair completely corrupted ZIP', async () => {
+      // Create a valid ZIP first, then corrupt it beyond repair
+      const validFla = await createFlaZip(createDOMDocument());
+      const validBuffer = await validFla.arrayBuffer();
+      const validBytes = new Uint8Array(validBuffer);
+
+      // Find EOCD
+      const eocdOffset = findEOCDOffset(validBytes);
+      expect(eocdOffset).toBeGreaterThan(0);
+
+      // Corrupt the central directory itself (not just size in EOCD)
+      const corruptedBytes = new Uint8Array(validBuffer.slice(0));
+      const corruptedView = new DataView(corruptedBytes.buffer);
+
+      // Get CD offset and corrupt the central directory data
+      const cdOffset = corruptedView.getUint32(eocdOffset + 16, true);
+
+      // Overwrite central directory with garbage
+      for (let i = cdOffset; i < eocdOffset && i < corruptedBytes.length; i++) {
+        corruptedBytes[i] = 0xFF;
+      }
+
+      const corruptedFile = new File([corruptedBytes], 'totallycorrupt.fla', { type: 'application/octet-stream' });
+
+      // Should throw because even after repair attempts, ZIP is invalid
+      await expect(parser.parse(corruptedFile)).rejects.toThrow();
+    });
+
+    it('should handle ZIP where trim repair succeeds', async () => {
+      // Create valid ZIP with specific content
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Test Scene">
+            <layers>
+              <DOMLayer name="Test Layer">
+                <frames>
+                  <DOMFrame index="0" duration="10">
+                    <elements>
+                      <DOMShape>
+                        <fills><FillStyle index="1"><SolidColor color="#FF0000"/></FillStyle></fills>
+                        <edges><Edge fillStyle0="1" edges="!0 0|200 0|200 200|0 200|0 0"/></edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const validFla = await createFlaZip(createDOMDocument({
+        width: 800,
+        height: 600,
+        timelines
+      }));
+      const validBuffer = await validFla.arrayBuffer();
+      const validBytes = new Uint8Array(validBuffer);
+
+      // Find EOCD
+      const eocdOffset = findEOCDOffset(validBytes);
+      const view = new DataView(validBuffer);
+      const commentLength = view.getUint16(eocdOffset + 20, true);
+      const expectedEnd = eocdOffset + 22 + commentLength;
+
+      // Append lots of garbage data after EOCD
+      const garbageSize = 1024;
+      const garbage = new Uint8Array(garbageSize);
+      for (let i = 0; i < garbageSize; i++) {
+        garbage[i] = i % 256;
+      }
+
+      const corruptedBytes = new Uint8Array(validBytes.length + garbageSize);
+      corruptedBytes.set(validBytes);
+      corruptedBytes.set(garbage, validBytes.length);
+
+      const corruptedFile = new File([corruptedBytes], 'trailing_garbage.fla', { type: 'application/octet-stream' });
+
+      // Should repair and parse correctly
+      const doc = await parser.parse(corruptedFile);
+      expect(doc.width).toBe(800);
+      expect(doc.height).toBe(600);
+      expect(doc.timelines[0].layers[0].name).toBe('Test Layer');
+    });
+
+    it('should trigger trim repair when JSZip fails on corrupted trailing data', async () => {
+      // Create valid ZIP
+      const validFla = await createFlaZip(createDOMDocument({ width: 320, height: 240 }));
+      const validBuffer = await validFla.arrayBuffer();
+      const validBytes = new Uint8Array(validBuffer);
+
+      const eocdOffset = findEOCDOffset(validBytes);
+      expect(eocdOffset).toBeGreaterThan(0);
+
+      // Create corrupted ZIP by adding a fake second EOCD after the real one
+      // This confuses JSZip because it finds conflicting structures
+      const fakeEocd = new Uint8Array([
+        0x50, 0x4b, 0x05, 0x06,  // EOCD signature
+        0x00, 0x00,              // disk number
+        0x00, 0x00,              // disk with CD
+        0xFF, 0xFF,              // entries on disk (invalid)
+        0xFF, 0xFF,              // total entries (invalid)
+        0xFF, 0xFF, 0xFF, 0xFF,  // CD size (invalid)
+        0xFF, 0xFF, 0xFF, 0xFF,  // CD offset (invalid)
+        0x00, 0x00               // comment length
+      ]);
+
+      const corruptedBytes = new Uint8Array(validBytes.length + fakeEocd.length);
+      corruptedBytes.set(validBytes);
+      corruptedBytes.set(fakeEocd, validBytes.length);
+
+      const corruptedFile = new File([corruptedBytes], 'double_eocd.fla', { type: 'application/octet-stream' });
+
+      // The repair should trim to the first valid EOCD
+      const doc = await parser.parse(corruptedFile);
+      expect(doc.width).toBe(320);
+      expect(doc.height).toBe(240);
+    });
+
+    it('should trigger CD size patch when trim fails', async () => {
+      // Create valid ZIP
+      const validFla = await createFlaZip(createDOMDocument({ width: 640, height: 480 }));
+      const validBuffer = await validFla.arrayBuffer();
+      const corruptedBytes = new Uint8Array(validBuffer.slice(0));
+
+      const eocdOffset = findEOCDOffset(corruptedBytes);
+      expect(eocdOffset).toBeGreaterThan(0);
+
+      const corruptedView = new DataView(corruptedBytes.buffer);
+
+      // Corrupt the CD size to make initial load fail
+      const originalCdSize = corruptedView.getUint32(eocdOffset + 12, true);
+      // Set to a value that's slightly wrong - triggers repair path
+      corruptedView.setUint32(eocdOffset + 12, originalCdSize + 50, true);
+
+      const corruptedFile = new File([corruptedBytes], 'bad_cd_size.fla', { type: 'application/octet-stream' });
+
+      // Should repair by patching CD size back
+      const doc = await parser.parse(corruptedFile);
+      expect(doc.width).toBe(640);
+      expect(doc.height).toBe(480);
+    });
+
+    it('should return null from tryRepairZip when actualCdSize equals cdSize but ZIP still fails', async () => {
+      // Create a ZIP where EOCD is valid but the actual ZIP content is corrupted
+      // so both trim and patch repairs fail
+      const validFla = await createFlaZip(createDOMDocument());
+      const validBuffer = await validFla.arrayBuffer();
+      const corruptedBytes = new Uint8Array(validBuffer.slice(0));
+
+      const eocdOffset = findEOCDOffset(corruptedBytes);
+      const corruptedView = new DataView(corruptedBytes.buffer);
+      const cdOffset = corruptedView.getUint32(eocdOffset + 16, true);
+
+      // Corrupt the local file headers (before CD) to make ZIP unparseable
+      // but keep EOCD and CD size correct so trim/patch don't help
+      for (let i = 0; i < cdOffset && i < 100; i++) {
+        if (i >= 4) { // Don't corrupt the initial PK signature at offset 0
+          corruptedBytes[i] = 0x00;
+        }
+      }
+
+      const corruptedFile = new File([corruptedBytes], 'corrupted_content.fla', { type: 'application/octet-stream' });
+
+      // Should throw because repair can't fix corrupted content
+      await expect(parser.parse(corruptedFile)).rejects.toThrow();
+    });
+  });
 });

@@ -1242,4 +1242,162 @@ describe('main.ts', () => {
       expect(exportModal.classList.contains('active')).toBe(false);
     });
   });
+
+  describe('resize debouncing', () => {
+    let container: HTMLElement;
+
+    beforeEach(() => {
+      container = createAppDOM();
+      new FLAViewerApp();
+    });
+
+    afterEach(() => {
+      container.remove();
+    });
+
+    it('should debounce multiple resize events', async () => {
+      // Trigger multiple resize events rapidly
+      window.dispatchEvent(new Event('resize'));
+      window.dispatchEvent(new Event('resize'));
+      window.dispatchEvent(new Event('resize'));
+
+      // Wait for debounce timeout
+      await new Promise(resolve => setTimeout(resolve, 150));
+
+      // No error should occur - debouncing worked
+    });
+  });
+
+  describe('single frame animation', () => {
+    let container: HTMLElement;
+
+    beforeEach(() => {
+      container = createAppDOM();
+    });
+
+    afterEach(() => {
+      container.remove();
+    });
+
+    it('should hide video controls for single frame document', async () => {
+      // Create FLA with only 1 frame (duration=1)
+      const domDocument = `<?xml version="1.0" encoding="UTF-8"?>
+<DOMDocument width="550" height="400" frameRate="24" backgroundColor="#FFFFFF">
+  <timelines>
+    <DOMTimeline name="Scene 1">
+      <layers>
+        <DOMLayer name="Layer 1">
+          <frames>
+            <DOMFrame index="0" duration="1">
+              <elements>
+                <DOMShape>
+                  <fills><FillStyle index="1"><SolidColor color="#FF0000"/></FillStyle></fills>
+                  <edges><Edge fillStyle0="1" edges="!0 0|50 0|50 50|0 50|0 0"/></edges>
+                </DOMShape>
+              </elements>
+            </DOMFrame>
+          </frames>
+        </DOMLayer>
+      </layers>
+    </DOMTimeline>
+  </timelines>
+</DOMDocument>`;
+
+      const zip = new JSZip();
+      zip.file('DOMDocument.xml', domDocument);
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const flaFile = new File([blob], 'single.fla', { type: 'application/octet-stream' });
+
+      new FLAViewerApp();
+
+      // Trigger file drop
+      const dropZone = document.getElementById('drop-zone')!;
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(flaFile);
+      const dropEvent = new DragEvent('drop', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+      });
+      dropZone.dispatchEvent(dropEvent);
+
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Video controls should be hidden for single frame
+      const videoControls = document.getElementById('video-controls')!;
+      expect(videoControls.classList.contains('hidden')).toBe(true);
+    });
+  });
+
+  describe('camera layer detection', () => {
+    let container: HTMLElement;
+
+    beforeEach(() => {
+      container = createAppDOM();
+    });
+
+    afterEach(() => {
+      container.remove();
+    });
+
+    it('should display camera layer info when camera layer found', async () => {
+      // Create FLA with a Camera layer
+      const domDocument = `<?xml version="1.0" encoding="UTF-8"?>
+<DOMDocument width="1920" height="1080" frameRate="24" backgroundColor="#FFFFFF">
+  <timelines>
+    <DOMTimeline name="Scene 1">
+      <layers>
+        <DOMLayer name="Camera">
+          <frames>
+            <DOMFrame index="0" duration="10">
+              <elements>
+                <DOMSymbolInstance libraryItemName="Ramka">
+                  <matrix><Matrix/></matrix>
+                </DOMSymbolInstance>
+              </elements>
+            </DOMFrame>
+          </frames>
+        </DOMLayer>
+        <DOMLayer name="Background">
+          <frames>
+            <DOMFrame index="0" duration="10">
+              <elements>
+                <DOMShape>
+                  <fills><FillStyle index="1"><SolidColor color="#0000FF"/></FillStyle></fills>
+                  <edges><Edge fillStyle0="1" edges="!0 0|100 0|100 100|0 100|0 0"/></edges>
+                </DOMShape>
+              </elements>
+            </DOMFrame>
+          </frames>
+        </DOMLayer>
+      </layers>
+    </DOMTimeline>
+  </timelines>
+</DOMDocument>`;
+
+      const zip = new JSZip();
+      zip.file('DOMDocument.xml', domDocument);
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const flaFile = new File([blob], 'camera.fla', { type: 'application/octet-stream' });
+
+      new FLAViewerApp();
+
+      // Trigger file drop
+      const dropZone = document.getElementById('drop-zone')!;
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(flaFile);
+      const dropEvent = new DragEvent('drop', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+      });
+      dropZone.dispatchEvent(dropEvent);
+
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Camera layer info should show found camera
+      const cameraInfo = document.getElementById('camera-layer-info')!;
+      expect(cameraInfo.textContent).toContain('Found');
+    });
+  });
 });

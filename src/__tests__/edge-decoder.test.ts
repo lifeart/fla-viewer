@@ -490,5 +490,38 @@ describe('edge-decoder', () => {
       // Cubic parsing should break at '!' and second moveTo should be parsed
       expect(commands.filter(c => c.type === 'M').length).toBeGreaterThanOrEqual(1);
     });
+
+    it('should handle invalid decimal coordinate string', () => {
+      // Tests line 88: NaN return for invalid decimal parsing
+      // 'abc' is not a valid decimal and should cause parsing to fail gracefully
+      const commands = decodeEdges('!abc def');
+      // Should skip invalid coordinates and produce minimal output
+      expect(commands).toHaveLength(0);
+    });
+
+    it('should handle alternate cubic format break case at control point', () => {
+      // Tests line 377: break when invalid control point coords
+      // The format (anchor ; c1 c2 end ) expects valid coords
+      const commands = decodeEdges('!0 0 (0 0 ; abc def 100 100 200 200 )');
+      // Should parse the moveTo and break at invalid coords
+      expect(commands[0]).toEqual({ type: 'M', x: 0, y: 0 });
+    });
+
+    it('should break multi-segment C curve when next tokens contain command char', () => {
+      // Tests line 377: break in multi-segment C curve when next tokens have command chars
+      // After first valid C curve segment, we have 6 tokens but they include '|' command
+      const commands = decodeEdges('!0 0 (; 10 10 20 20 30 30 |50 50 60 60 70 70 80 80 )');
+      // Should parse MoveTo and possibly first C curve, then break at '|'
+      expect(commands[0]).toEqual({ type: 'M', x: 0, y: 0 });
+      // The '|' should trigger line parsing instead
+    });
+
+    it('should break multi-segment C curve when not enough tokens remain', () => {
+      // Tests line 380: break when less than 6 tokens remain
+      // After parsing first C, only 3 tokens remain
+      const commands = decodeEdges('!0 0 (; 10 10 20 20 30 30 40 40 50 )');
+      // Should parse MoveTo, C curve, then break due to insufficient tokens
+      expect(commands[0]).toEqual({ type: 'M', x: 0, y: 0 });
+    });
   });
 });

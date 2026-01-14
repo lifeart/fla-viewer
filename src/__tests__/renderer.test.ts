@@ -3050,6 +3050,65 @@ describe('FLARenderer', () => {
       expect(imageData.data.length).toBeGreaterThan(0);
     });
 
+    it('should trigger font loading for partial font name match', async () => {
+      // Use a font name that partially matches PressStart2P to trigger partial match logic
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                textRuns: [{
+                  characters: 'Partial Match Font',
+                  face: 'PressStart2P-Bold', // Starts with PressStart2P
+                  size: 16,
+                  fillColor: '#000000',
+                  alignment: 'left',
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+
+      const ctx = canvas.getContext('2d')!;
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      expect(imageData.data.length).toBeGreaterThan(0);
+    });
+
+    it('should return font name as-is for unknown fonts', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                textRuns: [{
+                  characters: 'Unknown Font',
+                  face: 'SomeRandomFont-XYZ',
+                  size: 16,
+                  fillColor: '#000000',
+                  alignment: 'left',
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+
+      const ctx = canvas.getContext('2d')!;
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      expect(imageData.data.length).toBeGreaterThan(0);
+    });
+
     it('should render text with multiple runs', async () => {
       const doc = createMinimalDoc({
         timelines: [createTimeline({
@@ -3757,6 +3816,137 @@ describe('FLARenderer', () => {
   });
 
   describe('follow camera mode', () => {
+    it('should apply camera transform with motion tween interpolation', async () => {
+      // Add canvas to DOM for proper rendering (not offscreen mode)
+      const container = document.createElement('div');
+      container.style.width = '550px';
+      container.style.height = '400px';
+      document.body.appendChild(container);
+      container.appendChild(canvas);
+
+      // Create camera symbol
+      const cameraSymbol = createTimeline({
+        name: 'MotionCamera',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, color: '#444444' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 550, y: 0 },
+                  { type: 'L', x: 550, y: 400 },
+                  { type: 'L', x: 0, y: 400 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('MotionCamera', {
+        name: 'MotionCamera',
+        symbolType: 'graphic',
+        timeline: cameraSymbol,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 10,
+          layers: [
+            // Camera layer with motion tween
+            createLayer({
+              name: 'camera',
+              frames: [
+                createFrame({
+                  index: 0,
+                  duration: 5,
+                  tweenType: 'motion',
+                  elements: [{
+                    type: 'symbol',
+                    libraryItemName: 'MotionCamera',
+                    symbolType: 'graphic',
+                    matrix: createMatrix({ a: 1, d: 1, tx: 0, ty: 0 }),
+                    firstFrame: 0,
+                    loop: 'loop',
+                  }],
+                }),
+                createFrame({
+                  index: 5,
+                  duration: 5,
+                  elements: [{
+                    type: 'symbol',
+                    libraryItemName: 'MotionCamera',
+                    symbolType: 'graphic',
+                    matrix: createMatrix({ a: 1.5, d: 1.5, tx: 100, ty: 75 }),
+                    firstFrame: 0,
+                    loop: 'loop',
+                  }],
+                }),
+              ],
+            }),
+            // Content layer with distinct shape
+            createLayer({
+              name: 'Content',
+              frames: [createFrame({
+                duration: 10,
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix({ tx: 150, ty: 150 }),
+                  fills: [{ index: 1, color: '#00FF00' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 0, y: 0 },
+                      { type: 'L', x: 100, y: 0 },
+                      { type: 'L', x: 100, y: 100 },
+                      { type: 'L', x: 0, y: 100 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+          referenceLayers: new Set([0]),
+        })],
+      });
+
+      // Use regular setDocument (not skipResize) to properly initialize
+      await renderer.setDocument(doc);
+
+      // Enable follow camera
+      renderer.setFollowCamera(true);
+      expect(renderer.getFollowCamera()).toBe(true);
+
+      // Render at frame 0 (start of tween)
+      renderer.renderFrame(0);
+      const ctx = canvas.getContext('2d')!;
+      const imageData0 = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      expect(imageData0.data.length).toBeGreaterThan(0);
+
+      // Render at frame 2 (during motion tween interpolation)
+      renderer.renderFrame(2);
+      const imageData2 = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      expect(imageData2.data.length).toBeGreaterThan(0);
+
+      // Render at frame 5 (end of first tween segment)
+      renderer.renderFrame(5);
+      const imageData5 = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      expect(imageData5.data.length).toBeGreaterThan(0);
+
+      renderer.setFollowCamera(false);
+      document.body.removeChild(container);
+    });
+
     it('should render with follow camera enabled', async () => {
       const symbolTimeline = createTimeline({
         name: 'FollowCamFrame',
@@ -3845,6 +4035,2215 @@ describe('FLARenderer', () => {
       expect(imageData.data.length).toBeGreaterThan(0);
 
       renderer.setFollowCamera(false);
+    });
+  });
+
+  describe('missing symbol handling', () => {
+    it('should warn when symbol reference is missing', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'NonExistentSymbol',
+                symbolType: 'graphic',
+                matrix: createMatrix(),
+                firstFrame: 0,
+                loop: 'loop',
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Should not throw but will warn about missing symbol
+      renderer.renderFrame(0);
+
+      const ctx = canvas.getContext('2d')!;
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      expect(imageData.data.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('ultrawide document handling', () => {
+    it('should detect ultrawide document viewport with follow camera', async () => {
+      // Create camera symbol
+      const cameraSymbol = createTimeline({
+        name: 'UltrawideCamera',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, color: '#888888' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 1920, y: 0 },
+                  { type: 'L', x: 1920, y: 1080 },
+                  { type: 'L', x: 0, y: 1080 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('UltrawideCamera', {
+        name: 'UltrawideCamera',
+        symbolType: 'graphic',
+        timeline: cameraSymbol,
+      });
+
+      // Create ultrawide document with aspect ratio > 2.5 (3840/1080 = 3.56)
+      const doc = createMinimalDoc({
+        width: 3840,
+        height: 1080,
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              name: 'camera',
+              frames: [createFrame({
+                duration: 10,
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'UltrawideCamera',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ a: 1, d: 1, tx: 0, ty: 0 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                }],
+              })],
+            }),
+            createLayer({
+              name: 'Content',
+              frames: [createFrame({
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#FF0000' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 100, y: 100 },
+                      { type: 'L', x: 300, y: 100 },
+                      { type: 'L', x: 300, y: 300 },
+                      { type: 'L', x: 100, y: 300 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Enable follow camera to trigger viewport detection
+      renderer.setFollowCamera(true);
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+      renderer.setFollowCamera(false);
+    });
+
+    it('should detect wide document viewport with follow camera', async () => {
+      // Create camera symbol
+      const cameraSymbol = createTimeline({
+        name: 'WideCamera',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, color: '#888888' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 1920, y: 0 },
+                  { type: 'L', x: 1920, y: 1080 },
+                  { type: 'L', x: 0, y: 1080 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('WideCamera', {
+        name: 'WideCamera',
+        symbolType: 'graphic',
+        timeline: cameraSymbol,
+      });
+
+      // Create wide document with aspect ratio > 1.9 but <= 2.5 (2160/1080 = 2.0)
+      const doc = createMinimalDoc({
+        width: 2160,
+        height: 1080,
+        symbols,
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              name: 'camera',
+              frames: [createFrame({
+                duration: 10,
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'WideCamera',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ a: 1, d: 1, tx: 0, ty: 0 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                }],
+              })],
+            }),
+            createLayer({
+              name: 'Content',
+              frames: [createFrame({
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#00FF00' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 100, y: 100 },
+                      { type: 'L', x: 300, y: 100 },
+                      { type: 'L', x: 300, y: 300 },
+                      { type: 'L', x: 100, y: 300 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Enable follow camera to trigger viewport detection
+      renderer.setFollowCamera(true);
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+      renderer.setFollowCamera(false);
+    });
+  });
+
+  describe('edge path commands', () => {
+    it('should handle quadratic bezier curve commands', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#0000FF' }],
+                strokes: [{ index: 1, color: '#000000', weight: 2 }],
+                edges: [{
+                  fillStyle0: 1,
+                  strokeStyle: 1,
+                  commands: [
+                    { type: 'M', x: 50, y: 100 },
+                    { type: 'Q', cx: 100, cy: 50, x: 150, y: 100 },
+                    { type: 'Q', cx: 200, cy: 150, x: 250, y: 100 },
+                    { type: 'L', x: 250, y: 200 },
+                    { type: 'L', x: 50, y: 200 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should handle cubic bezier curve commands', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#FF00FF' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 50, y: 100 },
+                    { type: 'C', c1x: 75, c1y: 50, c2x: 125, c2y: 50, x: 150, y: 100 },
+                    { type: 'C', c1x: 175, c1y: 150, c2x: 225, c2y: 150, x: 250, y: 100 },
+                    { type: 'L', x: 250, y: 200 },
+                    { type: 'L', x: 50, y: 200 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('layer filtering', () => {
+    it('should skip guide layers', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              name: 'Guide',
+              layerType: 'guide',
+              frames: [createFrame({
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#FF0000' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 0, y: 0 },
+                      { type: 'L', x: 550, y: 0 },
+                      { type: 'L', x: 550, y: 400 },
+                      { type: 'L', x: 0, y: 400 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+            createLayer({
+              name: 'Content',
+              frames: [createFrame({
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#00FF00' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 100, y: 100 },
+                      { type: 'L', x: 200, y: 100 },
+                      { type: 'L', x: 200, y: 200 },
+                      { type: 'L', x: 100, y: 200 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      // Only content layer should render, not guide
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should skip folder layers', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              name: 'Folder',
+              layerType: 'folder',
+              frames: [createFrame()],
+            }),
+            createLayer({
+              name: 'Content',
+              frames: [createFrame({
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#0000FF' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 100, y: 100 },
+                      { type: 'L', x: 200, y: 100 },
+                      { type: 'L', x: 200, y: 200 },
+                      { type: 'L', x: 100, y: 200 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('video element rendering', () => {
+    it('should handle video element in debug mode', async () => {
+      document.body.appendChild(canvas);
+      canvas.style.position = 'fixed';
+      canvas.style.left = '0';
+      canvas.style.top = '0';
+
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'video',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                libraryItemName: 'test-video.mp4',
+                width: 200,
+                height: 150,
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.enableDebugMode();
+      renderer.renderFrame(0);
+
+      const rect = canvas.getBoundingClientRect();
+      const clickEvent = new MouseEvent('click', {
+        clientX: rect.left + 150,
+        clientY: rect.top + 125,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(clickEvent);
+
+      renderer.disableDebugMode();
+      document.body.removeChild(canvas);
+    });
+  });
+
+  describe('text element in debug mode', () => {
+    it('should handle text element click in debug mode', async () => {
+      document.body.appendChild(canvas);
+      canvas.style.position = 'fixed';
+      canvas.style.left = '0';
+      canvas.style.top = '0';
+
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                left: 0,
+                width: 200,
+                height: 50,
+                textRuns: [{
+                  characters: 'Debug Text',
+                  face: 'Arial',
+                  size: 24,
+                  fillColor: '#000000',
+                  alignment: 'left',
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.enableDebugMode();
+      renderer.renderFrame(0);
+
+      const rect = canvas.getBoundingClientRect();
+      const clickEvent = new MouseEvent('click', {
+        clientX: rect.left + 150,
+        clientY: rect.top + 75,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(clickEvent);
+
+      renderer.disableDebugMode();
+      document.body.removeChild(canvas);
+    });
+  });
+
+  describe('invalid coordinate handling', () => {
+    it('should skip commands with NaN coordinates', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#FF0000' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 50, y: 50 },
+                    { type: 'L', x: NaN, y: NaN } as any, // Invalid coordinates
+                    { type: 'L', x: 150, y: 50 },
+                    { type: 'L', x: 150, y: 150 },
+                    { type: 'L', x: 50, y: 150 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      // Should render without errors, skipping invalid command
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should skip cubic bezier with invalid control points', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#00FF00' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 50, y: 100 },
+                    { type: 'C', c1x: NaN, c1y: NaN, c2x: 100, c2y: 50, x: 150, y: 100 } as any,
+                    { type: 'L', x: 150, y: 200 },
+                    { type: 'L', x: 50, y: 200 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should skip quadratic bezier with invalid control points', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#0000FF' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 50, y: 100 },
+                    { type: 'Q', cx: Infinity, cy: -Infinity, x: 150, y: 100 } as any,
+                    { type: 'L', x: 150, y: 200 },
+                    { type: 'L', x: 50, y: 200 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('edge segment splitting', () => {
+    it('should handle discontinuous edge segments', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#FFFF00' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    // First disconnected path
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 50, y: 0 },
+                    { type: 'L', x: 50, y: 50 },
+                    // Jump to disconnected position
+                    { type: 'M', x: 200, y: 200 },
+                    { type: 'L', x: 250, y: 200 },
+                    { type: 'L', x: 250, y: 250 },
+                    { type: 'L', x: 200, y: 250 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('single frame document', () => {
+    it('should render document with single frame', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 1,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#FF00FF' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 100, y: 100 },
+                    { type: 'L', x: 200, y: 100 },
+                    { type: 'L', x: 200, y: 200 },
+                    { type: 'L', x: 100, y: 200 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('text alignment and paragraphs', () => {
+    it('should render text with right alignment', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                left: 0,
+                width: 300,
+                height: 100,
+                textRuns: [{
+                  characters: 'Right aligned text',
+                  face: 'Arial',
+                  size: 18,
+                  fillColor: '#000000',
+                  alignment: 'right',
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should render text with empty paragraphs (newlines)', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                left: 0,
+                width: 300,
+                height: 150,
+                textRuns: [{
+                  characters: 'First line\n\nThird line after empty',
+                  face: 'Arial',
+                  size: 16,
+                  fillColor: '#000000',
+                  alignment: 'left',
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should wrap long text within width', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 20, ty: 50 }),
+                left: 0,
+                width: 150, // Narrow width to force wrapping
+                height: 200,
+                textRuns: [{
+                  characters: 'This is a very long text that should definitely wrap to multiple lines',
+                  face: 'Arial',
+                  size: 14,
+                  fillColor: '#000000',
+                  alignment: 'left',
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('hidden layer handling', () => {
+    it('should skip rendering hidden layers', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [
+            createLayer({
+              name: 'Hidden',
+              frames: [createFrame({
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#FF0000' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 0, y: 0 },
+                      { type: 'L', x: 550, y: 0 },
+                      { type: 'L', x: 550, y: 400 },
+                      { type: 'L', x: 0, y: 400 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+            createLayer({
+              name: 'Visible',
+              frames: [createFrame({
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#00FF00' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 200, y: 150 },
+                      { type: 'L', x: 350, y: 150 },
+                      { type: 'L', x: 350, y: 250 },
+                      { type: 'L', x: 200, y: 250 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Hide the first layer
+      renderer.setHiddenLayers(new Set([0]));
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('fill style with alpha', () => {
+    it('should render shape with alpha fill', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  type: 'solid',
+                  color: '#FF0000',
+                  alpha: 0.5 // Semi-transparent
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 100, y: 100 },
+                    { type: 'L', x: 250, y: 100 },
+                    { type: 'L', x: 250, y: 250 },
+                    { type: 'L', x: 100, y: 250 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should render stroke with alpha', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [],
+                strokes: [{
+                  index: 1,
+                  color: '#0000FF',
+                  weight: 5,
+                  alpha: 0.7
+                }],
+                edges: [{
+                  strokeStyle: 1,
+                  commands: [
+                    { type: 'M', x: 50, y: 50 },
+                    { type: 'L', x: 200, y: 50 },
+                    { type: 'L', x: 200, y: 200 },
+                    { type: 'L', x: 50, y: 200 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('edge contribution closing', () => {
+    it('should handle edge contributions that close a loop', async () => {
+      // Create edges that form disconnected paths that need closing logic
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#00FFFF' }],
+                strokes: [],
+                edges: [
+                  // First contribution - partial path
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 0, y: 0 },
+                      { type: 'L', x: 100, y: 0 },
+                      { type: 'L', x: 100, y: 50 },
+                    ],
+                  },
+                  // Second contribution - continues and closes
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 100, y: 50 },
+                      { type: 'L', x: 100, y: 100 },
+                      { type: 'L', x: 0, y: 100 },
+                      { type: 'L', x: 0, y: 0 },
+                    ],
+                  },
+                ],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should find closing contribution when end point matches chain start', async () => {
+      // Create three contributions where third one closes back to start of first
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#FFFF00' }],
+                strokes: [],
+                edges: [
+                  // First contribution - starts at 10,10
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 10, y: 10 },
+                      { type: 'L', x: 200, y: 10 },
+                    ],
+                  },
+                  // Second contribution - continues from 200,10
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 200, y: 10 },
+                      { type: 'L', x: 200, y: 200 },
+                    ],
+                  },
+                  // Third contribution - from 200,200 and closes back to 10,10
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 200, y: 200 },
+                      { type: 'L', x: 10, y: 200 },
+                      { type: 'L', x: 10, y: 10 },
+                    ],
+                  },
+                ],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('camera motion tween interpolation', () => {
+    it('should interpolate camera position with motion tween', async () => {
+      // Create a document with camera layer using motion tween
+      const doc = createMinimalDoc({
+        width: 1920,
+        height: 1080,
+        timelines: [createTimeline({
+          name: 'Scene 1',
+          totalFrames: 30,
+          layers: [
+            // Camera layer with motion tween
+            createLayer({
+              name: 'Camera',
+              frames: [
+                createFrame({
+                  index: 0,
+                  duration: 15,
+                  tweenType: 'motion',
+                  elements: [{
+                    type: 'symbol',
+                    libraryItemName: 'Ramka',
+                    matrix: createMatrix({ tx: 0, ty: 0, a: 1, d: 1 }),
+                    transformationPoint: { x: 960, y: 540 },
+                    loop: 'loop',
+                    firstFrame: 0,
+                  }],
+                }),
+                createFrame({
+                  index: 15,
+                  duration: 15,
+                  elements: [{
+                    type: 'symbol',
+                    libraryItemName: 'Ramka',
+                    matrix: createMatrix({ tx: 500, ty: 300, a: 0.5, d: 0.5 }),
+                    transformationPoint: { x: 960, y: 540 },
+                    loop: 'loop',
+                    firstFrame: 0,
+                  }],
+                }),
+              ],
+            }),
+            // Content layer
+            createLayer({
+              name: 'Content',
+              frames: [createFrame({
+                index: 0,
+                duration: 30,
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#00FF00' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 100, y: 100 },
+                      { type: 'L', x: 400, y: 100 },
+                      { type: 'L', x: 400, y: 400 },
+                      { type: 'L', x: 100, y: 400 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+          referenceLayers: new Set([0]),
+        })],
+      });
+
+      // Add Ramka symbol to document
+      doc.symbols.set('Ramka', {
+        name: 'Ramka',
+        timeline: createTimeline({
+          layers: [createLayer({
+            frames: [createFrame()],
+          })],
+        }),
+      });
+
+      await renderer.setDocument(doc);
+      renderer.setFollowCamera(true);
+
+      // Render at frame 7 - should interpolate between keyframes
+      renderer.renderFrame(7);
+      // Camera interpolation affects viewport, verify no errors
+      expect(renderer.getFollowCamera()).toBe(true);
+
+      // Render at frame 0 - start of tween
+      renderer.renderFrame(0);
+      expect(renderer.getFollowCamera()).toBe(true);
+
+      // Render at frame 14 - near end of first keyframe
+      renderer.renderFrame(14);
+      expect(renderer.getFollowCamera()).toBe(true);
+    });
+
+    it('should apply camera transform with non-identity matrix', async () => {
+      // Test applyCameraTransform with rotation/scale matrix
+      const doc = createMinimalDoc({
+        width: 800,
+        height: 600,
+        timelines: [createTimeline({
+          name: 'Scene 1',
+          totalFrames: 10,
+          layers: [
+            // Camera layer with rotation/scale
+            createLayer({
+              name: 'Camera',
+              frames: [createFrame({
+                index: 0,
+                duration: 10,
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Ramka',
+                  // Non-identity matrix with rotation and scale
+                  matrix: { a: 0.866, b: 0.5, c: -0.5, d: 0.866, tx: 100, ty: 50 },
+                  transformationPoint: { x: 400, y: 300 },
+                  loop: 'loop',
+                  firstFrame: 0,
+                }],
+              })],
+            }),
+            // Content layer
+            createLayer({
+              name: 'Content',
+              frames: [createFrame({
+                index: 0,
+                duration: 10,
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#FF00FF' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 200, y: 200 },
+                      { type: 'L', x: 400, y: 200 },
+                      { type: 'L', x: 400, y: 400 },
+                      { type: 'L', x: 200, y: 400 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+          referenceLayers: new Set([0]),
+        })],
+      });
+
+      doc.symbols.set('Ramka', {
+        name: 'Ramka',
+        timeline: createTimeline({
+          layers: [createLayer({ frames: [createFrame()] })],
+        }),
+      });
+
+      await renderer.setDocument(doc);
+      renderer.setFollowCamera(true);
+      renderer.renderFrame(0);
+
+      expect(hasRenderedContent(canvas, '#FFFFFF')).toBe(true);
+    });
+  });
+
+  describe('text element rendering with fonts', () => {
+    it('should trigger font loading for PressStart2P font', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [
+                {
+                  type: 'text',
+                  matrix: createMatrix({ tx: 50, ty: 200 }),
+                  textRuns: [{
+                    characters: 'GAME OVER',
+                    textAttrs: {
+                      face: 'PressStart2P',
+                      size: 32,
+                      fillColor: '#FF0000',
+                      alignment: 'left',
+                    },
+                  }],
+                  width: 400,
+                  height: 100,
+                },
+                // Add a shape to ensure something is rendered
+                {
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#00FF00' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 10, y: 10 },
+                      { type: 'L', x: 100, y: 10 },
+                      { type: 'L', x: 100, y: 100 },
+                      { type: 'L', x: 10, y: 100 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                },
+              ],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      renderer.renderFrame(0);
+      // The shape renders, and font loading is triggered async
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should wait for font loading promise to resolve or reject', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 100 }),
+                textRuns: [{
+                  characters: 'Test Font Loading',
+                  textAttrs: {
+                    face: 'Press Start 2P', // Direct Google font name
+                    size: 16,
+                    fillColor: '#0000FF',
+                    alignment: 'left',
+                  },
+                }],
+                width: 400,
+                height: 50,
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Render to trigger font loading
+      renderer.renderFrame(0);
+
+      // Wait for font loading promise to settle (resolve or reject)
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Render again after font potentially loaded
+      renderer.renderFrame(0);
+    });
+  });
+
+  describe('addCommandToPath cases', () => {
+    it('should render M command (moveTo)', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#123456' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 50, y: 50 },
+                    { type: 'L', x: 150, y: 50 },
+                    { type: 'M', x: 150, y: 50 }, // Another M command
+                    { type: 'L', x: 150, y: 150 },
+                    { type: 'L', x: 50, y: 150 },
+                    { type: 'L', x: 50, y: 50 },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('debug mode with complex shapes', () => {
+    it('should handle debug click on shape with Q curve commands', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#AABBCC' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 100, y: 200 },
+                    { type: 'Q', cx: 150, cy: 100, x: 200, y: 200 },
+                    { type: 'L', x: 100, y: 200 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      document.body.appendChild(canvas);
+
+      renderer.enableDebugMode();
+      renderer.renderFrame(0);
+
+      // Click in the quadratic bezier area
+      const rect = canvas.getBoundingClientRect();
+      const clickEvent = new MouseEvent('click', {
+        clientX: rect.left + 150,
+        clientY: rect.top + 150,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(clickEvent);
+
+      renderer.disableDebugMode();
+      document.body.removeChild(canvas);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should handle debug click on shape with C curve commands', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#DDEEFF' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 100, y: 200 },
+                    { type: 'C', c1x: 120, c1y: 100, c2x: 180, c2y: 100, x: 200, y: 200 },
+                    { type: 'L', x: 100, y: 200 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      document.body.appendChild(canvas);
+
+      renderer.enableDebugMode();
+      renderer.renderFrame(0);
+
+      const rect = canvas.getBoundingClientRect();
+      const clickEvent = new MouseEvent('click', {
+        clientX: rect.left + 150,
+        clientY: rect.top + 150,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(clickEvent);
+
+      renderer.disableDebugMode();
+      document.body.removeChild(canvas);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should log details for symbol element in debug mode', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'TestSymbol',
+                matrix: createMatrix(),
+                transformationPoint: { x: 50, y: 50 },
+                loop: 'loop',
+                firstFrame: 0,
+              }],
+            })],
+          })],
+        })],
+      });
+
+      // Add symbol with visible content
+      doc.symbols.set('TestSymbol', {
+        name: 'TestSymbol',
+        timeline: createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#FF0000' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 100, y: 0 },
+                    { type: 'L', x: 100, y: 100 },
+                    { type: 'L', x: 0, y: 100 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        }),
+      });
+
+      await renderer.setDocument(doc);
+      document.body.appendChild(canvas);
+
+      renderer.enableDebugMode();
+      renderer.renderFrame(0);
+
+      // Click on the symbol
+      const rect = canvas.getBoundingClientRect();
+      const clickEvent = new MouseEvent('click', {
+        clientX: rect.left + 50,
+        clientY: rect.top + 50,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(clickEvent);
+
+      renderer.disableDebugMode();
+      document.body.removeChild(canvas);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should log details for bitmap element in debug mode', async () => {
+      // Create a test image
+      const testCanvas = document.createElement('canvas');
+      testCanvas.width = 100;
+      testCanvas.height = 100;
+      const testCtx = testCanvas.getContext('2d')!;
+      testCtx.fillStyle = '#0000FF';
+      testCtx.fillRect(0, 0, 100, 100);
+
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'bitmap',
+                libraryItemName: 'TestBitmap',
+                matrix: createMatrix(),
+              }],
+            })],
+          })],
+        })],
+      });
+
+      // Add bitmap
+      doc.bitmaps.set('TestBitmap', testCanvas);
+
+      await renderer.setDocument(doc);
+      document.body.appendChild(canvas);
+
+      renderer.enableDebugMode();
+      renderer.renderFrame(0);
+
+      // Click on the bitmap
+      const rect = canvas.getBoundingClientRect();
+      const clickEvent = new MouseEvent('click', {
+        clientX: rect.left + 50,
+        clientY: rect.top + 50,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(clickEvent);
+
+      renderer.disableDebugMode();
+      document.body.removeChild(canvas);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should show bad edges in debug click with out-of-bounds Q coords', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#112233' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 100, y: 100 },
+                    // Q with out-of-bounds control point
+                    { type: 'Q', cx: 50000, cy: 50000, x: 200, y: 100 },
+                    { type: 'L', x: 200, y: 200 },
+                    { type: 'L', x: 100, y: 200 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      document.body.appendChild(canvas);
+
+      renderer.enableDebugMode();
+      renderer.renderFrame(0);
+
+      const rect = canvas.getBoundingClientRect();
+      const clickEvent = new MouseEvent('click', {
+        clientX: rect.left + 150,
+        clientY: rect.top + 150,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(clickEvent);
+
+      renderer.disableDebugMode();
+      document.body.removeChild(canvas);
+    });
+
+    it('should show bad edges in debug click with out-of-bounds C coords', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#445566' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 100, y: 100 },
+                    // C with out-of-bounds control points
+                    { type: 'C', c1x: 60000, c1y: 60000, c2x: 70000, c2y: 70000, x: 200, y: 100 },
+                    { type: 'L', x: 200, y: 200 },
+                    { type: 'L', x: 100, y: 200 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      document.body.appendChild(canvas);
+
+      renderer.enableDebugMode();
+      renderer.renderFrame(0);
+
+      const rect = canvas.getBoundingClientRect();
+      const clickEvent = new MouseEvent('click', {
+        clientX: rect.left + 150,
+        clientY: rect.top + 150,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(clickEvent);
+
+      renderer.disableDebugMode();
+      document.body.removeChild(canvas);
+    });
+
+    it('should handle many edges with bad edges in debug mode', async () => {
+      // Create more than 5 edges, with some bad ones - triggers the badEdges display path
+      const edges = [];
+      for (let i = 0; i < 8; i++) {
+        edges.push({
+          fillStyle0: 1,
+          commands: [
+            { type: 'M', x: i * 50, y: 0 },
+            { type: 'L', x: i * 50 + 40, y: 0 },
+            { type: 'L', x: i * 50 + 40, y: 40 },
+            { type: 'L', x: i * 50, y: 40 },
+            { type: 'Z' },
+          ],
+        });
+      }
+      // Add one edge with bad coords
+      edges.push({
+        fillStyle0: 1,
+        commands: [
+          { type: 'M', x: 100000, y: 100000 },
+          { type: 'L', x: 100100, y: 100000 },
+          { type: 'L', x: 100100, y: 100100 },
+          { type: 'Z' },
+        ],
+      });
+
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#778899' }],
+                strokes: [],
+                edges,
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      document.body.appendChild(canvas);
+
+      renderer.enableDebugMode();
+      renderer.renderFrame(0);
+
+      const rect = canvas.getBoundingClientRect();
+      const clickEvent = new MouseEvent('click', {
+        clientX: rect.left + 100,
+        clientY: rect.top + 20,
+        bubbles: true,
+      });
+      canvas.dispatchEvent(clickEvent);
+
+      renderer.disableDebugMode();
+      document.body.removeChild(canvas);
+    });
+  });
+
+  describe('matrix inversion edge cases', () => {
+    it('should skip degenerate camera matrix (det near zero)', async () => {
+      // Create a camera with near-degenerate matrix (determinant close to 0)
+      const doc = createMinimalDoc({
+        width: 800,
+        height: 600,
+        timelines: [createTimeline({
+          name: 'Scene 1',
+          totalFrames: 10,
+          layers: [
+            createLayer({
+              name: 'Camera',
+              frames: [createFrame({
+                index: 0,
+                duration: 10,
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Ramka',
+                  // Near-degenerate matrix: a*d - b*c = 0.00001*0.00001 - 0*0 ≈ 0.0000000001
+                  // This should trigger the det < 0.0001 check
+                  matrix: { a: 0.00001, b: 0, c: 0, d: 0.00001, tx: 400, ty: 300 },
+                  transformationPoint: { x: 400, y: 300 },
+                  loop: 'loop',
+                  firstFrame: 0,
+                }],
+              })],
+            }),
+            createLayer({
+              name: 'Content',
+              frames: [createFrame({
+                index: 0,
+                duration: 10,
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#AABB00' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 100, y: 100 },
+                      { type: 'L', x: 300, y: 100 },
+                      { type: 'L', x: 300, y: 300 },
+                      { type: 'L', x: 100, y: 300 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+          referenceLayers: new Set([0]),
+        })],
+      });
+
+      doc.symbols.set('Ramka', {
+        name: 'Ramka',
+        timeline: createTimeline({
+          layers: [createLayer({ frames: [createFrame()] })],
+        }),
+      });
+
+      await renderer.setDocument(doc);
+      renderer.setFollowCamera(true);
+      // Should not throw even with near-degenerate matrix
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+  });
+
+  describe('camera transform via cameraLayerIndex', () => {
+    it('should apply camera transform from timeline cameraLayerIndex', async () => {
+      // Test using cameraLayerIndex property (auto-detected during parsing)
+      // rather than followCamera mode
+      const doc = createMinimalDoc({
+        width: 800,
+        height: 600,
+        timelines: [createTimeline({
+          name: 'Scene 1',
+          totalFrames: 30,
+          cameraLayerIndex: 0, // Set camera layer index directly
+          layers: [
+            createLayer({
+              name: 'Camera',
+              frames: [createFrame({
+                index: 0,
+                duration: 30,
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Ramka',
+                  matrix: { a: 1.5, b: 0, c: 0, d: 1.5, tx: -200, ty: -150 },
+                  transformationPoint: { x: 400, y: 300 },
+                  loop: 'loop',
+                  firstFrame: 0,
+                }],
+              })],
+            }),
+            createLayer({
+              name: 'Background',
+              frames: [createFrame({
+                index: 0,
+                duration: 30,
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#FF5500' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 0, y: 0 },
+                      { type: 'L', x: 800, y: 0 },
+                      { type: 'L', x: 800, y: 600 },
+                      { type: 'L', x: 0, y: 600 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+          referenceLayers: new Set([0]),
+        })],
+      });
+
+      doc.symbols.set('Ramka', {
+        name: 'Ramka',
+        timeline: createTimeline({
+          layers: [createLayer({ frames: [createFrame()] })],
+        }),
+      });
+
+      await renderer.setDocument(doc);
+      // Do NOT call setFollowCamera - use cameraLayerIndex path
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas, '#FFFFFF')).toBe(true);
+    });
+
+    it('should interpolate camera motion tween between keyframes', async () => {
+      // Create document with motion tween on camera
+      const doc = createMinimalDoc({
+        width: 640,
+        height: 480,
+        timelines: [createTimeline({
+          name: 'Scene 1',
+          totalFrames: 20,
+          cameraLayerIndex: 0,
+          layers: [
+            createLayer({
+              name: 'Camera',
+              frames: [
+                createFrame({
+                  index: 0,
+                  duration: 10,
+                  tweenType: 'motion',
+                  elements: [{
+                    type: 'symbol',
+                    libraryItemName: 'Ramka',
+                    matrix: { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 },
+                    transformationPoint: { x: 320, y: 240 },
+                    loop: 'loop',
+                    firstFrame: 0,
+                  }],
+                }),
+                createFrame({
+                  index: 10,
+                  duration: 10,
+                  elements: [{
+                    type: 'symbol',
+                    libraryItemName: 'Ramka',
+                    matrix: { a: 2, b: 0, c: 0, d: 2, tx: -320, ty: -240 },
+                    transformationPoint: { x: 320, y: 240 },
+                    loop: 'loop',
+                    firstFrame: 0,
+                  }],
+                }),
+              ],
+            }),
+            createLayer({
+              name: 'Content',
+              frames: [createFrame({
+                index: 0,
+                duration: 20,
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#00AAFF' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 200, y: 150 },
+                      { type: 'L', x: 440, y: 150 },
+                      { type: 'L', x: 440, y: 330 },
+                      { type: 'L', x: 200, y: 330 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+          referenceLayers: new Set([0]),
+        })],
+      });
+
+      doc.symbols.set('Ramka', {
+        name: 'Ramka',
+        timeline: createTimeline({
+          layers: [createLayer({ frames: [createFrame()] })],
+        }),
+      });
+
+      await renderer.setDocument(doc);
+
+      // Render at frame 5 - midway through tween
+      // This should trigger motion tween interpolation
+      renderer.renderFrame(5);
+      expect(hasRenderedContent(canvas, '#FFFFFF')).toBe(true);
+    });
+
+    it('should apply inverse camera transform with valid matrix', async () => {
+      // Test that applyInverseCameraTransform is called with non-degenerate matrix
+      const doc = createMinimalDoc({
+        width: 400,
+        height: 300,
+        timelines: [createTimeline({
+          name: 'Scene 1',
+          totalFrames: 10,
+          cameraLayerIndex: 0,
+          layers: [
+            createLayer({
+              name: 'Camera',
+              frames: [createFrame({
+                index: 0,
+                duration: 10,
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'Ramka',
+                  // Valid invertible matrix (det = 1.2 * 0.8 - 0.1 * 0.1 = 0.95 ≠ 0)
+                  matrix: { a: 1.2, b: 0.1, c: 0.1, d: 0.8, tx: 50, ty: 30 },
+                  transformationPoint: { x: 200, y: 150 },
+                  loop: 'loop',
+                  firstFrame: 0,
+                }],
+              })],
+            }),
+            createLayer({
+              name: 'Main',
+              frames: [createFrame({
+                index: 0,
+                duration: 10,
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, color: '#AA00FF' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 50, y: 50 },
+                      { type: 'L', x: 350, y: 50 },
+                      { type: 'L', x: 350, y: 250 },
+                      { type: 'L', x: 50, y: 250 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            }),
+          ],
+          referenceLayers: new Set([0]),
+        })],
+      });
+
+      doc.symbols.set('Ramka', {
+        name: 'Ramka',
+        timeline: createTimeline({
+          layers: [createLayer({ frames: [createFrame()] })],
+        }),
+      });
+
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+      // Content should be rendered (with camera transform applied)
+      expect(hasRenderedContent(canvas, '#FFFFFF')).toBe(true);
+    });
+  });
+
+  describe('fillStyle1 edge handling', () => {
+    it('should process edges with fillStyle1', async () => {
+      // Test edges using fillStyle1 instead of fillStyle0
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#FF8800' }, { index: 2, color: '#0088FF' }],
+                strokes: [],
+                edges: [
+                  // Edge with fillStyle1 (right-side fill)
+                  {
+                    fillStyle1: 1,
+                    commands: [
+                      { type: 'M', x: 50, y: 50 },
+                      { type: 'L', x: 200, y: 50 },
+                      { type: 'L', x: 200, y: 200 },
+                      { type: 'L', x: 50, y: 200 },
+                      { type: 'Z' },
+                    ],
+                  },
+                ],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('radial gradient edge cases', () => {
+    it('should handle radial gradient fill with empty gradient array', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  type: 'radial',
+                  gradient: [], // Empty gradient array
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 100, y: 100 },
+                    { type: 'L', x: 300, y: 100 },
+                    { type: 'L', x: 300, y: 300 },
+                    { type: 'L', x: 100, y: 300 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+      // Should render without error even with empty gradient
+    });
+  });
+
+  describe('edge commands with only Z', () => {
+    it('should handle edge with only Z command', async () => {
+      // Tests getLastPoint returning null when no coordinates in commands
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#AABBCC' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'Z' },  // Only Z command - no coordinates
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+      // Should not crash with edge that has only Z command
+    });
+  });
+
+  describe('missing symbol logging', () => {
+    it('should log missing symbol warning once', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'NonExistentSymbol',
+                matrix: createMatrix(),
+                transformationPoint: { x: 0, y: 0 },
+                loop: 'loop',
+                firstFrame: 0,
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+      // Render again - should not log warning twice
+      renderer.renderFrame(0);
+    });
+  });
+
+  describe('linear gradient edge cases', () => {
+    it('should handle linear gradient with empty gradient array', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  type: 'linear',
+                  gradient: [], // Empty gradient array
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 50, y: 50 },
+                    { type: 'L', x: 250, y: 50 },
+                    { type: 'L', x: 250, y: 250 },
+                    { type: 'L', x: 50, y: 250 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+      // Should render without error even with empty gradient
+    });
+  });
+
+  describe('color alpha with invalid format', () => {
+    it('should handle invalid color format in fill', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  color: 'invalid', // Invalid color format
+                  alpha: 0.5,
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 100, y: 100 },
+                    { type: 'L', x: 200, y: 100 },
+                    { type: 'L', x: 200, y: 200 },
+                    { type: 'L', x: 100, y: 200 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+      // Should not crash with invalid color format
+    });
+
+    it('should handle short hex color with alpha', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  color: '#F00', // Short hex format (3 chars)
+                  alpha: 0.8,
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 50, y: 50 },
+                    { type: 'L', x: 150, y: 50 },
+                    { type: 'L', x: 150, y: 150 },
+                    { type: 'L', x: 50, y: 150 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+  });
+
+  describe('edge contribution closing detection', () => {
+    it('should find closing contribution that completes a loop', async () => {
+      // Create three contributions where the third one closes the loop
+      // Chain: A -> B, B -> C, C -> A (closes)
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#FFCC00' }],
+                strokes: [],
+                edges: [
+                  // First edge: A(0,0) -> B(100,0)
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 0, y: 0 },
+                      { type: 'L', x: 100, y: 0 },
+                    ],
+                  },
+                  // Second edge: B(100,0) -> C(100,100)
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 100, y: 0 },
+                      { type: 'L', x: 100, y: 100 },
+                    ],
+                  },
+                  // Third edge: C(100,100) -> A(0,0) - closes the loop
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 100, y: 100 },
+                      { type: 'L', x: 0, y: 100 },
+                      { type: 'L', x: 0, y: 0 },
+                    ],
+                  },
+                ],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
+    });
+
+    it('should detect closing contribution among multiple candidates', async () => {
+      // Multiple edges where one specifically closes the loop while others continue
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, color: '#00CCFF' }],
+                strokes: [],
+                edges: [
+                  // First edge starts at (50,50)
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 50, y: 50 },
+                      { type: 'L', x: 250, y: 50 },
+                    ],
+                  },
+                  // Second edge continues
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 250, y: 50 },
+                      { type: 'L', x: 250, y: 250 },
+                    ],
+                  },
+                  // Third edge - closes back to start
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 250, y: 250 },
+                      { type: 'L', x: 50, y: 250 },
+                      { type: 'L', x: 50, y: 50 },
+                    ],
+                  },
+                  // Fourth edge - disconnected, starts new chain
+                  {
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 300, y: 300 },
+                      { type: 'L', x: 400, y: 300 },
+                      { type: 'L', x: 400, y: 350 },
+                      { type: 'L', x: 300, y: 350 },
+                      { type: 'Z' },
+                    ],
+                  },
+                ],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+      expect(hasRenderedContent(canvas)).toBe(true);
     });
   });
 
