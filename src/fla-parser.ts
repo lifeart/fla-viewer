@@ -46,14 +46,16 @@ export function setParserDebug(value: boolean): void {
 }
 
 export type ProgressCallback = (message: string) => void;
+export type SkipCheckCallback = () => boolean;
 
 export class FLAParser {
   private zip: JSZip | null = null;
   private symbolCache: Map<string, Symbol> = new Map();
   private parser = new DOMParser();
 
-  async parse(file: File, onProgress?: ProgressCallback): Promise<FLADocument> {
+  async parse(file: File, onProgress?: ProgressCallback, isSkipImagesFix?: SkipCheckCallback): Promise<FLADocument> {
     const progress = onProgress || (() => {});
+    const shouldSkipImagesFix = isSkipImagesFix || (() => false);
 
     // Try to load ZIP, handling potentially corrupted files
     progress('Extracting archive...');
@@ -93,7 +95,7 @@ export class FLAParser {
 
     // Parse bitmap items from media section and load images
     progress('Loading images...');
-    const bitmaps = await this.parseBitmaps(root);
+    const bitmaps = await this.parseBitmaps(root, progress, shouldSkipImagesFix);
 
     // Parse sound items from media section and load audio
     progress('Loading audio...');
@@ -1001,11 +1003,11 @@ export class FLAParser {
     return strokes;
   }
 
-  private async parseBitmaps(root: globalThis.Element): Promise<Map<string, BitmapItem>> {
+  private async parseBitmaps(root: globalThis.Element, progress: ProgressCallback, shouldSkipImagesFix: SkipCheckCallback): Promise<Map<string, BitmapItem>> {
     const bitmaps = new Map<string, BitmapItem>();
     const bitmapElements = root.querySelectorAll('media > DOMBitmapItem');
 
-    const loadPromises: Promise<void>[] = [];
+    const bitmapItems: BitmapItem[] = [];
 
     for (const bitmapEl of bitmapElements) {
       const rawName = bitmapEl.getAttribute('name') || '';
@@ -1032,12 +1034,19 @@ export class FLAParser {
       // Store with both normalized and original names
       setWithNormalizedPath(bitmaps, rawName, bitmapItem);
 
-      // Load actual image data from ZIP
-      loadPromises.push(this.loadBitmapImage(bitmapItem));
+      bitmapItems.push(bitmapItem);
     }
 
-    // Wait for all images to load
-    await Promise.all(loadPromises);
+    // Load images sequentially with progress updates
+    const totalImages = bitmapItems.length;
+    for (let i = 0; i < totalImages; i++) {
+      if (shouldSkipImagesFix()) {
+        progress('Skipping remaining images...');
+        break;
+      }
+      progress(`Fixing images ${i + 1}/${totalImages}...`);
+      await this.loadBitmapImage(bitmapItems[i]);
+    }
 
     return bitmaps;
   }

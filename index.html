@@ -172,6 +172,31 @@
       to { transform: rotate(360deg); }
     }
 
+    .loading-content {
+      flex-direction: column;
+    }
+
+    .skip-images-btn {
+      background: transparent;
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      padding: 6px 16px;
+      border-radius: var(--border-radius);
+      cursor: pointer;
+      font-size: 12px;
+      transition: all 0.15s;
+      margin-top: 12px;
+    }
+
+    .skip-images-btn:hover {
+      background: var(--bg-tertiary);
+      border-color: var(--accent);
+    }
+
+    .skip-images-btn.hidden {
+      display: none;
+    }
+
     /* Viewport */
     .viewport {
       flex: 1;
@@ -1009,6 +1034,7 @@
         <div class="loading-content">
           <div class="spinner"></div>
           <span id="loading-text">Loading...</span>
+          <button class="skip-images-btn hidden" id="skip-images-btn">Skip images fix</button>
         </div>
       </div>
 

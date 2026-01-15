@@ -50,6 +50,7 @@ function createAppDOM(): HTMLElement {
     </div>
     <div id="loading">
       <span id="loading-text">Loading...</span>
+      <button id="skip-images-btn" class="hidden">Skip images fix</button>
     </div>
     <div id="viewer">
       <canvas id="stage" width="550" height="400"></canvas>

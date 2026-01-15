@@ -43,6 +43,8 @@ export class FLAViewerApp {
   private exportCancelBtn: HTMLButtonElement;
   private exportCancelled: boolean = false;
   private currentFileName: string = 'animation';
+  private skipImagesBtn: HTMLButtonElement;
+  private skipImagesFix: boolean = false;
 
   constructor() {
     this.parser = new FLAParser();
@@ -80,6 +82,7 @@ export class FLAViewerApp {
     this.exportProgressFill = document.getElementById('export-progress-fill')!;
     this.exportStatus = document.getElementById('export-status')!;
     this.exportCancelBtn = document.getElementById('export-cancel-btn') as HTMLButtonElement;
+    this.skipImagesBtn = document.getElementById('skip-images-btn') as HTMLButtonElement;
     this.debugCloseBtn = document.getElementById('debug-close-btn') as HTMLButtonElement;
 
     this.setupEventListeners();
@@ -131,6 +134,12 @@ export class FLAViewerApp {
     // Download/Export
     this.downloadBtn.addEventListener('click', () => this.startExport());
     this.exportCancelBtn.addEventListener('click', () => this.cancelExport());
+
+    // Skip images fix
+    this.skipImagesBtn.addEventListener('click', () => {
+      this.skipImagesFix = true;
+      this.skipImagesBtn.classList.add('hidden');
+    });
 
     // Timeline scrubbing
     this.timeline.addEventListener('click', (e) => {
@@ -589,11 +598,19 @@ export class FLAViewerApp {
       this.loading.classList.add('active');
       this.viewer.classList.remove('active');
       this.loadingText.textContent = 'Loading...';
+      this.skipImagesFix = false;
+      this.skipImagesBtn.classList.add('hidden');
 
       // Parse FLA file with progress updates
       const doc = await this.parser.parse(file, (message) => {
         this.loadingText.textContent = message;
-      });
+        // Show skip button when fixing images
+        if (message.startsWith('Fixing images')) {
+          this.skipImagesBtn.classList.remove('hidden');
+        } else {
+          this.skipImagesBtn.classList.add('hidden');
+        }
+      }, () => this.skipImagesFix);
       this.currentDoc = doc;
 
       // Create player and wait for fonts to load
@@ -655,6 +672,7 @@ export class FLAViewerApp {
       alert('Failed to load FLA file: ' + (error as Error).message);
       this.loading.classList.remove('active');
       this.dropZone.classList.remove('hidden');
+      this.skipImagesBtn.classList.add('hidden');
     }
   }
 
