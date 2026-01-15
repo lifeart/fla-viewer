@@ -14,6 +14,24 @@ A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no inst
 
 ---
 
+## What is this?
+
+**FLA files** are the source/project files created by Adobe Flash Professional (now Adobe Animate). Unlike compiled `.swf` files, FLA contains the raw assets: vector shapes, timelines, symbols, bitmaps, and audio — everything needed to edit an animation.
+
+**The problem:** Flash Player is dead (EOL 2020), and Adobe Animate costs $23/month. If you have old FLA files from the 2000s-2010s, you can't easily view them anymore.
+
+**This tool** parses FLA files directly in the browser and renders them using HTML5 Canvas. No Flash Player, no Adobe subscription, no uploads to servers — everything runs locally in your browser.
+
+### Use cases
+
+- **Archivists** — Preview legacy Flash animations without Adobe software
+- **Developers** — Inspect FLA structure, extract assets, debug timeline issues
+- **Designers** — Quick preview without launching Animate
+- **Studios** — Convert old animations to MP4 for modern platforms
+- **Educators** — Demonstrate Flash-era animation techniques
+
+---
+
 ## Features
 
 ```
