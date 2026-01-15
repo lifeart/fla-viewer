@@ -1,6 +1,7 @@
 import { FLAParser } from './fla-parser';
 import { FLAPlayer } from './player';
 import { exportVideo, downloadBlob, isWebCodecsSupported } from './video-exporter';
+import { generateSampleFLA } from './sample-generator';
 import type { PlayerState, FLADocument, DisplayElement, Symbol } from './types';
 
 export class FLAViewerApp {
@@ -45,6 +46,7 @@ export class FLAViewerApp {
   private currentFileName: string = 'animation';
   private skipImagesBtn: HTMLButtonElement;
   private skipImagesFix: boolean = false;
+  private loadSampleBtn: HTMLButtonElement;
 
   constructor() {
     this.parser = new FLAParser();
@@ -83,6 +85,7 @@ export class FLAViewerApp {
     this.exportStatus = document.getElementById('export-status')!;
     this.exportCancelBtn = document.getElementById('export-cancel-btn') as HTMLButtonElement;
     this.skipImagesBtn = document.getElementById('skip-images-btn') as HTMLButtonElement;
+    this.loadSampleBtn = document.getElementById('load-sample-btn') as HTMLButtonElement;
     this.debugCloseBtn = document.getElementById('debug-close-btn') as HTMLButtonElement;
 
     this.setupEventListeners();
@@ -113,6 +116,13 @@ export class FLAViewerApp {
       if (files && files.length > 0) {
         this.loadFile(files[0]);
       }
+    });
+
+    // Load sample button
+    this.loadSampleBtn.addEventListener('click', async (e) => {
+      e.stopPropagation(); // Prevent drop zone click handler
+      const sampleFile = await generateSampleFLA();
+      this.loadFile(sampleFile);
     });
 
     // Player controls

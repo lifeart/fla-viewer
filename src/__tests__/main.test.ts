@@ -47,6 +47,7 @@ function createAppDOM(): HTMLElement {
   container.innerHTML = `
     <div id="drop-zone">
       <input type="file" id="file-input" accept=".fla" />
+      <button id="load-sample-btn">Load Sample</button>
     </div>
     <div id="loading">
       <span id="loading-text">Loading...</span>

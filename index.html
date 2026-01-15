@@ -132,6 +132,24 @@
       color: var(--text-secondary);
     }
 
+    .load-sample-btn {
+      display: block;
+      margin: 16px auto 0;
+      background: transparent;
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      padding: 6px 16px;
+      border-radius: var(--border-radius);
+      cursor: pointer;
+      font-size: 11px;
+      transition: all 0.15s;
+    }
+
+    .load-sample-btn:hover {
+      background: var(--bg-tertiary);
+      border-color: var(--accent);
+    }
+
     #file-input {
       display: none;
     }
@@ -1026,6 +1044,7 @@
           </svg>
           <p>Drop FLA file here or click to browse</p>
           <small>Supports Adobe Animate/Flash FLA files</small>
+          <button class="load-sample-btn" id="load-sample-btn">Sample</button>
         </div>
         <input type="file" id="file-input" accept=".fla">
       </div>
