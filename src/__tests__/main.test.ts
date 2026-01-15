@@ -50,6 +50,16 @@ function createAppDOM(): HTMLElement {
       <button id="load-sample-btn">Load Sample</button>
     </div>
     <div id="loading">
+      <div id="loading-stages">
+        <div class="loading-stage" data-stage="extract">Extract</div>
+        <div class="loading-stage" data-stage="symbols">Symbols</div>
+        <div class="loading-stage" data-stage="images">Images</div>
+        <div class="loading-stage" data-stage="audio">Audio</div>
+        <div class="loading-stage" data-stage="timeline">Timeline</div>
+      </div>
+      <div class="loading-progress-bar">
+        <div id="loading-progress-fill"></div>
+      </div>
       <span id="loading-text">Loading...</span>
       <button id="skip-images-btn" class="hidden">Skip images fix</button>
     </div>

@@ -47,6 +47,8 @@ export class FLAViewerApp {
   private skipImagesBtn: HTMLButtonElement;
   private skipImagesFix: boolean = false;
   private loadSampleBtn: HTMLButtonElement;
+  private loadingStages: HTMLElement;
+  private loadingProgressFill: HTMLElement;
 
   constructor() {
     this.parser = new FLAParser();
@@ -86,6 +88,8 @@ export class FLAViewerApp {
     this.exportCancelBtn = document.getElementById('export-cancel-btn') as HTMLButtonElement;
     this.skipImagesBtn = document.getElementById('skip-images-btn') as HTMLButtonElement;
     this.loadSampleBtn = document.getElementById('load-sample-btn') as HTMLButtonElement;
+    this.loadingStages = document.getElementById('loading-stages')!;
+    this.loadingProgressFill = document.getElementById('loading-progress-fill')!;
     this.debugCloseBtn = document.getElementById('debug-close-btn') as HTMLButtonElement;
 
     this.setupEventListeners();
@@ -596,6 +600,76 @@ export class FLAViewerApp {
     return false;
   }
 
+  private readonly loadingStageOrder = ['extract', 'symbols', 'images', 'audio', 'timeline'];
+
+  private updateLoadingStage(message: string): void {
+    // Determine current stage from message
+    let currentStage = '';
+    let progress = 0;
+
+    if (message.startsWith('Extracting') || message.startsWith('Repairing')) {
+      currentStage = 'extract';
+      progress = 10;
+    } else if (message.startsWith('Parsing document')) {
+      currentStage = 'extract';
+      progress = 15;
+    } else if (message.startsWith('Loading symbols')) {
+      currentStage = 'symbols';
+      progress = 20;
+      // Extract progress from "Loading symbols... (X/Y)"
+      const match = message.match(/\((\d+)\/(\d+)\)/);
+      if (match) {
+        const current = parseInt(match[1]);
+        const total = parseInt(match[2]);
+        progress = 20 + (current / total) * 20;
+      }
+    } else if (message.startsWith('Loading images') || message.startsWith('Fixing images') || message.startsWith('Skipping')) {
+      currentStage = 'images';
+      progress = 45;
+      const match = message.match(/(\d+)\/(\d+)/);
+      if (match) {
+        const current = parseInt(match[1]);
+        const total = parseInt(match[2]);
+        progress = 45 + (current / total) * 25;
+      }
+    } else if (message.startsWith('Loading audio')) {
+      currentStage = 'audio';
+      progress = 75;
+    } else if (message.startsWith('Loading videos')) {
+      currentStage = 'audio'; // Combined with audio stage
+      progress = 80;
+    } else if (message.startsWith('Building timeline')) {
+      currentStage = 'timeline';
+      progress = 85;
+    } else if (message.startsWith('Loading fonts') || message.startsWith('Preparing')) {
+      currentStage = 'timeline';
+      progress = 95;
+    }
+
+    // Update stage indicators
+    const stageIndex = this.loadingStageOrder.indexOf(currentStage);
+    const stages = this.loadingStages.querySelectorAll('.loading-stage');
+    stages.forEach((stage, i) => {
+      stage.classList.remove('active', 'done');
+      if (i < stageIndex) {
+        stage.classList.add('done');
+      } else if (i === stageIndex) {
+        stage.classList.add('active');
+      }
+    });
+
+    // Update progress bar
+    this.loadingProgressFill.style.width = `${progress}%`;
+  }
+
+  private resetLoadingStages(): void {
+    const stages = this.loadingStages.querySelectorAll('.loading-stage');
+    stages.forEach(stage => {
+      stage.classList.remove('active', 'done');
+    });
+    this.loadingProgressFill.style.width = '0%';
+  }
+
   private async loadFile(file: File): Promise<void> {
     if (!file.name.toLowerCase().endsWith('.fla')) {
       alert('Please select a valid FLA file');
@@ -610,10 +684,12 @@ export class FLAViewerApp {
       this.loadingText.textContent = 'Loading...';
       this.skipImagesFix = false;
       this.skipImagesBtn.classList.add('hidden');
+      this.resetLoadingStages();
 
       // Parse FLA file with progress updates
       const doc = await this.parser.parse(file, (message) => {
         this.loadingText.textContent = message;
+        this.updateLoadingStage(message);
         // Show skip button when fixing images
         if (message.startsWith('Fixing images')) {
           this.skipImagesBtn.classList.remove('hidden');
@@ -625,11 +701,13 @@ export class FLAViewerApp {
 
       // Create player and wait for fonts to load
       this.loadingText.textContent = 'Loading fonts...';
+      this.updateLoadingStage('Loading fonts...');
       this.player = new FLAPlayer(this.canvas);
       await this.player.setDocument(doc);
       this.player.onStateUpdate((state) => this.updateUI(state));
 
       this.loadingText.textContent = 'Preparing...';
+      this.updateLoadingStage('Preparing...');
 
       // Update info panel
       const totalFrames = this.player.getState().totalFrames;

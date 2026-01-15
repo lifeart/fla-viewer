@@ -52,6 +52,16 @@ export class FLAParser {
   private zip: JSZip | null = null;
   private symbolCache: Map<string, Symbol> = new Map();
   private parser = new DOMParser();
+  private lastYieldTime = 0;
+
+  // Yield to browser if more than 50ms has passed since last yield
+  private async yieldIfNeeded(): Promise<void> {
+    const now = performance.now();
+    if (now - this.lastYieldTime > 50) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      this.lastYieldTime = performance.now();
+    }
+  }
 
   async parse(file: File, onProgress?: ProgressCallback, isSkipImagesFix?: SkipCheckCallback): Promise<FLADocument> {
     const progress = onProgress || (() => {});
@@ -107,7 +117,7 @@ export class FLAParser {
 
     // Parse main timeline (pass dimensions for camera detection)
     progress('Building timeline...');
-    const timelines = this.parseTimelines(root, width, height);
+    const timelines = await this.parseTimelines(root, width, height);
 
     return {
       width,
@@ -283,6 +293,9 @@ export class FLAParser {
       const { path, filename } = symbolFiles[i];
       progress(`Loading symbols... (${i + 1}/${total})`);
 
+      // Yield to browser periodically to keep UI responsive
+      await this.yieldIfNeeded();
+
       const symbolXml = await this.getFileContent(path);
       if (symbolXml) {
         await this.parseAndCacheSymbol(symbolXml, filename);
@@ -312,7 +325,7 @@ export class FLAParser {
         const symbolType = (symbolRoot.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
 
         // Parse symbol's timeline
-        const timelines = this.parseTimelines(symbolRoot);
+        const timelines = await this.parseTimelines(symbolRoot);
         const timeline = timelines[0] || {
           name: name,
           layers: [],
@@ -329,13 +342,13 @@ export class FLAParser {
     }
   }
 
-  private parseTimelines(parent: globalThis.Element, docWidth?: number, docHeight?: number): Timeline[] {
+  private async parseTimelines(parent: globalThis.Element, docWidth?: number, docHeight?: number): Promise<Timeline[]> {
     const timelines: Timeline[] = [];
     const timelineElements = parent.querySelectorAll(':scope > timelines > DOMTimeline, :scope > timeline > DOMTimeline');
 
     for (const tl of timelineElements) {
       const name = tl.getAttribute('name') || 'Timeline';
-      const layers = this.parseLayers(tl);
+      const layers = await this.parseLayers(tl);
 
       // Calculate total frames
       let totalFrames = 1;
@@ -475,11 +488,14 @@ export class FLAParser {
     return referenceLayers;
   }
 
-  private parseLayers(timeline: globalThis.Element): Layer[] {
+  private async parseLayers(timeline: globalThis.Element): Promise<Layer[]> {
     const layers: Layer[] = [];
     const layerElements = timeline.querySelectorAll(':scope > layers > DOMLayer');
 
     for (const layerEl of layerElements) {
+      // Yield to browser periodically to keep UI responsive
+      await this.yieldIfNeeded();
+
       const name = layerEl.getAttribute('name') || 'Layer';
       const color = layerEl.getAttribute('color') || '#000000';
       const visible = layerEl.getAttribute('visible') !== 'false';
@@ -491,7 +507,7 @@ export class FLAParser {
       const layerType = layerEl.getAttribute('layerType') as Layer['layerType'];
       const parentLayerIndex = layerEl.getAttribute('parentLayerIndex');
 
-      const frames = this.parseFrames(layerEl);
+      const frames = await this.parseFrames(layerEl);
 
       layers.push({
         name,
@@ -522,11 +538,14 @@ export class FLAParser {
     return layers;
   }
 
-  private parseFrames(layer: globalThis.Element): Frame[] {
+  private async parseFrames(layer: globalThis.Element): Promise<Frame[]> {
     const frames: Frame[] = [];
     const frameElements = layer.querySelectorAll(':scope > frames > DOMFrame');
 
     for (const frameEl of frameElements) {
+      // Yield to browser periodically to keep UI responsive
+      await this.yieldIfNeeded();
+
       const index = parseInt(frameEl.getAttribute('index') || '0');
       // Duration must be at least 1 to avoid division by zero in tween calculations
       const duration = Math.max(1, parseInt(frameEl.getAttribute('duration') || '1') || 1);
@@ -1044,14 +1063,17 @@ export class FLAParser {
         progress('Skipping remaining images...');
         break;
       }
-      progress(`Fixing images ${i + 1}/${totalImages}...`);
-      await this.loadBitmapImage(bitmapItems[i]);
+      const imageProgress = (algo: string) => {
+        progress(`Fixing images ${i + 1}/${totalImages} [${algo}]`);
+      };
+      imageProgress('loading');
+      await this.loadBitmapImage(bitmapItems[i], imageProgress);
     }
 
     return bitmaps;
   }
 
-  private async loadBitmapImage(bitmapItem: BitmapItem): Promise<void> {
+  private async loadBitmapImage(bitmapItem: BitmapItem, onAlgoProgress?: (algo: string) => void): Promise<void> {
     let imageData: ArrayBuffer | null = null;
     let sourceRef = bitmapItem.href;
 
@@ -1080,7 +1102,7 @@ export class FLAParser {
 
     // Handle Adobe FLA bitmap format (proprietary .dat files)
     if (mimeType === 'application/x-fla-bitmap') {
-      const img = await this.decodeFlaBitmap(imageData, bitmapItem.width, bitmapItem.height);
+      const img = await this.decodeFlaBitmap(imageData, bitmapItem.width, bitmapItem.height, onAlgoProgress);
       if (img) {
         bitmapItem.imageData = img;
       } else if (DEBUG) {
@@ -1176,7 +1198,8 @@ export class FLAParser {
    *
    * Pixel format: ARGB (alpha in byte 0, then RGB), converted to RGBA for Canvas
    */
-  private async decodeFlaBitmap(data: ArrayBuffer, expectedWidth: number, expectedHeight: number): Promise<HTMLImageElement | null> {
+  private async decodeFlaBitmap(data: ArrayBuffer, expectedWidth: number, expectedHeight: number, onAlgoProgress?: (algo: string) => void): Promise<HTMLImageElement | null> {
+    const algoProgress = onAlgoProgress || (() => {});
     const bytes = new Uint8Array(data);
 
     // Parse header
@@ -1357,16 +1380,19 @@ export class FLAParser {
       };
 
       // Try raw deflate first (most common)
+      algoProgress('deflate');
       try {
         pixelData = pako.inflateRaw(compData);
       } catch (rawError) {
         // Raw deflate failed - try dictionary first (gives complete results for some files)
+        algoProgress('dictionary');
         if (DEBUG) console.log(`Raw deflate failed for ${headerWidth}x${headerHeight}, trying dictionary...`);
         try {
           pixelData = pako.inflateRaw(compData, { dictionary: zeroDict } as pako.InflateOptions);
           if (DEBUG) console.log(`Dictionary decompress: ${pixelData.length} bytes for ${headerWidth}x${headerHeight}`);
         } catch (dictError) {
           // Dictionary failed - try streaming recovery (gets partial data)
+          algoProgress('streaming');
           if (DEBUG) console.log(`Dictionary failed, trying streaming for ${headerWidth}x${headerHeight}...`);
           const streamResult = tryStreamingRecovery(false);
 
@@ -1377,6 +1403,7 @@ export class FLAParser {
 
             // If streaming recovered less than 50%, try multi-segment recovery
             if (pixelData.length < expectedSize * 0.5) {
+              algoProgress('multi-segment');
               if (DEBUG) console.log(`Low recovery, trying multi-segment for ${headerWidth}x${headerHeight}...`);
               const multiResult = tryMultiSegmentRecovery();
               if (multiResult && multiResult.length > pixelData.length) {
@@ -1387,6 +1414,7 @@ export class FLAParser {
             }
           } else {
             // Streaming without dict failed - try with dictionary
+            algoProgress('stream+dict');
             if (DEBUG) console.log(`Streaming failed, trying streaming with dictionary for ${headerWidth}x${headerHeight}...`);
             const streamDictResult = tryStreamingRecovery(true);
             if (streamDictResult && streamDictResult.length > 0) {
@@ -1396,6 +1424,7 @@ export class FLAParser {
 
               // If streaming+dict recovered less than 50%, try multi-segment recovery
               if (pixelData.length < expectedSize * 0.5) {
+                algoProgress('multi-segment');
                 if (DEBUG) console.log(`Low recovery, trying multi-segment for ${headerWidth}x${headerHeight}...`);
                 const multiResult = tryMultiSegmentRecovery();
                 if (multiResult && multiResult.length > pixelData.length) {
@@ -1406,6 +1435,7 @@ export class FLAParser {
               }
             } else {
               // All streaming failed - try multi-segment as last resort
+              algoProgress('multi-segment');
               if (DEBUG) console.log(`All streaming failed, trying multi-segment for ${headerWidth}x${headerHeight}...`);
               const multiResult = tryMultiSegmentRecovery();
               if (multiResult && multiResult.length > 0) {
