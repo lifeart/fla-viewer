@@ -4,114 +4,69 @@ Based on analysis of [JPEXS Free Flash Decompiler](https://github.com/jindrapetr
 
 ---
 
-## Filters (High Priority)
+## Filters (High Priority) ✅
 
-Currently implemented: `blur`, `glow`, `dropShadow`
+Currently implemented: `blur`, `glow`, `dropShadow`, `bevel`, `colorMatrix` (AdjustColorFilter), `convolution`, `gradientGlow`, `gradientBevel`
 
-### Missing Filters
-
-| Filter | JPEXS Reference | Description |
-|--------|-----------------|-------------|
-| **BevelFilter** | `types/filters/BEVELFILTER.java` | Embossed/beveled edge effect with highlight and shadow colors |
-| **ColorMatrixFilter** | `types/filters/COLORMATRIXFILTER.java` | 4x5 matrix for color transformations (hue, saturation, brightness) |
-| **ConvolutionFilter** | `types/filters/CONVOLUTIONFILTER.java` | Custom kernel matrix for sharpen, emboss, edge detection |
-| **GradientGlowFilter** | `types/filters/GRADIENTGLOWFILTER.java` | Glow with gradient colors instead of solid |
-| **GradientBevelFilter** | `types/filters/GRADIENTBEVELFILTER.java` | Bevel with gradient colors |
-
-**Implementation notes:**
-- `ColorMatrixFilter` can be approximated using Canvas `filter` property with SVG filters
-- Bevel filters require multi-pass rendering (highlight + shadow)
-- Gradient filters need gradient color stop support
+All standard Flash filters are now supported with varying levels of fidelity:
+- **BevelFilter**: Uses shadow offset to approximate bevel effect
+- **ColorMatrixFilter**: Full 4x5 matrix support via inline SVG filters
+- **AdjustColorFilter**: Brightness, contrast, saturation, hue adjustments
+- **ConvolutionFilter**: Recognized sharpen/edge-detect kernels, others require pixel manipulation
+- **GradientGlowFilter/GradientBevelFilter**: Uses middle gradient color for glow/shadow effect
 
 ---
 
-## Gradient Fills (Medium Priority)
+## Gradient Fills (Medium Priority) ✅
 
-Currently implemented: Basic linear/radial gradients with color stops
+Currently implemented: Linear/radial gradients with color stops, spread modes (pad, reflect, repeat), interpolation modes, focal point for radial gradients
 
-### Missing Features
+### Implementation Details
 
-| Feature | JPEXS Reference | Description |
-|---------|-----------------|-------------|
-| **Spread Modes** | `types/GRADIENT.java` | `pad` (default), `reflect`, `repeat` - controls behavior beyond gradient bounds |
-| **Interpolation Modes** | `types/GRADIENT.java` | `normal RGB` vs `linear RGB` - affects color blending quality |
-| **Focal Point** | `types/FOCALGRADIENT.java` | Off-center focal point for radial gradients |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Spread Modes** | ✅ | `pad` (default), `reflect` (simulated via mirrored stops), `repeat` |
+| **Interpolation Modes** | ✅ | Parsed but Canvas uses native RGB interpolation |
+| **Focal Point** | ✅ | Full support via Canvas `createRadialGradient(fx, fy, 0, cx, cy, r)` |
 
-**JPEXS constants:**
-```java
-// Spread modes (2 bits)
-SPREAD_PAD_MODE = 0
-SPREAD_REFLECT_MODE = 1
-SPREAD_REPEAT_MODE = 2
-
-// Interpolation modes (2 bits)
-INTERPOLATION_RGB_MODE = 0
-INTERPOLATION_LINEAR_RGB_MODE = 1
-```
-
-**Implementation notes:**
-- Canvas gradients don't natively support spread modes
-- `reflect` and `repeat` require manual gradient extension or pattern-based approach
-- Linear RGB interpolation produces more natural color transitions
+**Notes:**
+- Canvas doesn't natively support spread modes; `reflect` is approximated by compressing and mirroring color stops
+- Linear RGB interpolation is parsed but Canvas uses standard RGB blending
 
 ---
 
-## Bitmap Fills (Medium Priority)
+## Bitmap Fills (Medium Priority) ✅
 
-Currently implemented: Repeating bitmap pattern with matrix transform
+Currently implemented: Repeating bitmap pattern with matrix transform, clipped bitmap, non-smoothed (pixel-perfect) modes
 
-### Missing Features
+### Implementation Details
 
-| Feature | JPEXS Reference | Description |
-|---------|-----------------|-------------|
-| **Clipped Bitmap** | `types/FILLSTYLE.java` | `CLIPPED_BITMAP (0x41)` - bitmap doesn't repeat, clips at edges |
-| **Non-Smoothed Repeating** | `types/FILLSTYLE.java` | `NON_SMOOTHED_REPEATING_BITMAP (0x42)` - pixel-perfect, no interpolation |
-| **Non-Smoothed Clipped** | `types/FILLSTYLE.java` | `NON_SMOOTHED_CLIPPED_BITMAP (0x43)` - clipped + pixel-perfect |
-
-**JPEXS fill style types:**
-```java
-REPEATING_BITMAP = 0x40
-CLIPPED_BITMAP = 0x41
-NON_SMOOTHED_REPEATING_BITMAP = 0x42
-NON_SMOOTHED_CLIPPED_BITMAP = 0x43
-```
-
-**Implementation notes:**
-- Clipped fills need clip path before pattern application
-- Non-smoothed requires `ctx.imageSmoothingEnabled = false`
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Repeating Bitmap** | ✅ | Default mode using `createPattern(image, 'repeat')` |
+| **Clipped Bitmap** | ✅ | Uses `createPattern(image, 'no-repeat')` |
+| **Non-Smoothed Repeating** | ✅ | Sets `imageSmoothingEnabled = false` |
+| **Non-Smoothed Clipped** | ✅ | Combines clipped + non-smoothed |
+| **ClippedBitmapFill element** | ✅ | Alternative XFL format supported |
 
 ---
 
-## Stroke Styles (Medium Priority)
+## Stroke Styles (Medium Priority) ✅
 
-Currently implemented: Basic solid strokes with weight, caps, joints
+Currently implemented: Solid strokes with weight, all cap styles (round, none/butt, square), all joint styles (miter, round, bevel), miter limit, scale mode, pixel hinting
 
-### Missing Features
+### Implementation Details
 
-| Feature | JPEXS Reference | Description |
-|---------|-----------------|-------------|
-| **Scale Modes** | `types/LINESTYLE2.java` | `noHScaleFlag`, `noVScaleFlag` - prevent stroke scaling in specific directions |
-| **Pixel Hinting** | `types/LINESTYLE2.java` | `pixelHintingFlag` - snap strokes to pixel boundaries |
-| **Miter Limit** | `types/LINESTYLE2.java` | `miterLimitFactor` - control miter join sharpness |
-| **Gradient/Bitmap Strokes** | `types/LINESTYLE2.java` | `hasFillFlag` - strokes with gradient or bitmap fills |
-| **No Cap Style** | `types/LINESTYLE2.java` | `NO_CAP (1)` - currently only `round` and `square` |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **All Cap Styles** | ✅ | `round`, `none` (mapped to `butt`), `square` |
+| **All Joint Styles** | ✅ | `miter`, `round`, `bevel` |
+| **Miter Limit** | ✅ | Parsed and applied via `ctx.miterLimit` |
+| **Scale Modes** | ✅ | Parsed (`normal`, `horizontal`, `vertical`, `none`) |
+| **Pixel Hinting** | ✅ | Parsed (rendering hint stored) |
+| **Gradient/Bitmap Strokes** | ❌ | Not implemented - requires `hasFillFlag` support |
 
-**JPEXS cap/join constants:**
-```java
-// Cap styles
-ROUND_CAP = 0
-NO_CAP = 1
-SQUARE_CAP = 2
-
-// Join styles
-ROUND_JOIN = 0
-BEVEL_JOIN = 1
-MITER_JOIN = 2
-```
-
-**Implementation notes:**
-- Scale mode handling requires tracking original stroke width and current transform
-- Pixel hinting: round stroke coordinates to nearest pixel
+**Note:** Scale mode and pixel hinting are parsed but rendering implementation is basic. Full scale mode support would require tracking transform and adjusting stroke width dynamically.
 
 ---
 

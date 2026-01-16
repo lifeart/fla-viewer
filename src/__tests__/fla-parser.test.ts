@@ -3117,6 +3117,575 @@ describe('FLAParser', () => {
         expect(shape.fills[0].matrix).toBeUndefined();
       }
     });
+
+    it('should parse clipped BitmapFill', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <fills>
+                          <FillStyle index="1">
+                            <BitmapFill bitmapPath="texture.png" bitmapIsClipped="true"/>
+                          </FillStyle>
+                        </fills>
+                        <edges>
+                          <Edge fillStyle1="1" edges="!0 0|100 0|100 100|0 100|0 0"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        expect(shape.fills[0].type).toBe('bitmap');
+        expect(shape.fills[0].bitmapIsClipped).toBe(true);
+      }
+    });
+
+    it('should parse non-smoothed BitmapFill', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <fills>
+                          <FillStyle index="1">
+                            <BitmapFill bitmapPath="pixel_art.png" allowSmoothing="false"/>
+                          </FillStyle>
+                        </fills>
+                        <edges>
+                          <Edge fillStyle1="1" edges="!0 0|100 0|100 100|0 100|0 0"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        expect(shape.fills[0].type).toBe('bitmap');
+        expect(shape.fills[0].bitmapIsSmoothed).toBe(false);
+      }
+    });
+
+    it('should parse ClippedBitmapFill element', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <fills>
+                          <FillStyle index="1">
+                            <ClippedBitmapFill bitmapPath="photo.jpg" allowSmoothing="false">
+                              <matrix>
+                                <Matrix a="1" d="1" tx="10" ty="20"/>
+                              </matrix>
+                            </ClippedBitmapFill>
+                          </FillStyle>
+                        </fills>
+                        <edges>
+                          <Edge fillStyle1="1" edges="!0 0|100 0|100 100|0 100|0 0"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        expect(shape.fills[0].type).toBe('bitmap');
+        expect(shape.fills[0].bitmapPath).toBe('photo.jpg');
+        expect(shape.fills[0].bitmapIsClipped).toBe(true);
+        expect(shape.fills[0].bitmapIsSmoothed).toBe(false);
+        expect(shape.fills[0].matrix?.tx).toBe(10);
+      }
+    });
+  });
+
+  describe('gradient fills', () => {
+    it('should parse LinearGradient with spread mode', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <fills>
+                          <FillStyle index="1">
+                            <LinearGradient spreadMethod="reflect" interpolationMethod="linearRGB">
+                              <matrix><Matrix a="0.5" d="0.5" tx="100" ty="100"/></matrix>
+                              <GradientEntry color="#FF0000" ratio="0"/>
+                              <GradientEntry color="#0000FF" ratio="1"/>
+                            </LinearGradient>
+                          </FillStyle>
+                        </fills>
+                        <edges>
+                          <Edge fillStyle1="1" edges="!0 0|100 0|100 100|0 100|0 0"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        expect(shape.fills[0].type).toBe('linear');
+        expect(shape.fills[0].spreadMethod).toBe('reflect');
+        expect(shape.fills[0].interpolationMethod).toBe('linearRGB');
+        expect(shape.fills[0].gradient).toHaveLength(2);
+      }
+    });
+
+    it('should parse LinearGradient with repeat spread mode', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <fills>
+                          <FillStyle index="1">
+                            <LinearGradient spreadMethod="repeat">
+                              <GradientEntry color="#00FF00" ratio="0"/>
+                              <GradientEntry color="#FFFF00" ratio="1"/>
+                            </LinearGradient>
+                          </FillStyle>
+                        </fills>
+                        <edges>
+                          <Edge fillStyle1="1" edges="!0 0|100 0|100 100|0 100|0 0"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        expect(shape.fills[0].type).toBe('linear');
+        expect(shape.fills[0].spreadMethod).toBe('repeat');
+      }
+    });
+
+    it('should parse RadialGradient with focal point', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <fills>
+                          <FillStyle index="1">
+                            <RadialGradient focalPointRatio="0.75" spreadMethod="reflect">
+                              <matrix><Matrix a="1" d="1" tx="50" ty="50"/></matrix>
+                              <GradientEntry color="#FFFFFF" ratio="0"/>
+                              <GradientEntry color="#000000" ratio="1"/>
+                            </RadialGradient>
+                          </FillStyle>
+                        </fills>
+                        <edges>
+                          <Edge fillStyle1="1" edges="!0 0|100 0|100 100|0 100|0 0"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        expect(shape.fills[0].type).toBe('radial');
+        expect(shape.fills[0].focalPointRatio).toBe(0.75);
+        expect(shape.fills[0].spreadMethod).toBe('reflect');
+      }
+    });
+
+    it('should parse RadialGradient with negative focal point', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <fills>
+                          <FillStyle index="1">
+                            <RadialGradient focalPointRatio="-0.5">
+                              <GradientEntry color="#FF0000" ratio="0"/>
+                              <GradientEntry color="#0000FF" ratio="1"/>
+                            </RadialGradient>
+                          </FillStyle>
+                        </fills>
+                        <edges>
+                          <Edge fillStyle1="1" edges="!0 0|100 0|100 100|0 100|0 0"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        expect(shape.fills[0].type).toBe('radial');
+        expect(shape.fills[0].focalPointRatio).toBe(-0.5);
+      }
+    });
+
+    it('should default to no spread method for pad mode', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <fills>
+                          <FillStyle index="1">
+                            <LinearGradient>
+                              <GradientEntry color="#000000" ratio="0"/>
+                              <GradientEntry color="#FFFFFF" ratio="1"/>
+                            </LinearGradient>
+                          </FillStyle>
+                        </fills>
+                        <edges>
+                          <Edge fillStyle1="1" edges="!0 0|100 0|100 100|0 100|0 0"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        // Should not have spreadMethod set (defaults to pad)
+        expect(shape.fills[0].spreadMethod).toBeUndefined();
+      }
+    });
+  });
+
+  describe('stroke styles', () => {
+    it('should parse SolidStroke with miter limit', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <fills>
+                          <FillStyle index="1">
+                            <SolidColor color="#FF0000"/>
+                          </FillStyle>
+                        </fills>
+                        <strokes>
+                          <StrokeStyle index="1">
+                            <SolidStroke weight="2" caps="none" joints="miter" miterLimit="10">
+                              <fill><SolidColor color="#000000"/></fill>
+                            </SolidStroke>
+                          </StrokeStyle>
+                        </strokes>
+                        <edges>
+                          <Edge fillStyle1="1" strokeStyle="1" edges="!0 0|100 0|100 100|0 100|0 0"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        expect(shape.strokes).toHaveLength(1);
+        expect(shape.strokes[0].joints).toBe('miter');
+        expect(shape.strokes[0].miterLimit).toBe(10);
+        expect(shape.strokes[0].caps).toBe('none');
+      }
+    });
+
+    it('should parse SolidStroke with scale mode', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <strokes>
+                          <StrokeStyle index="1">
+                            <SolidStroke weight="3" scaleMode="none">
+                              <fill><SolidColor color="#0000FF"/></fill>
+                            </SolidStroke>
+                          </StrokeStyle>
+                        </strokes>
+                        <edges>
+                          <Edge strokeStyle="1" edges="!0 0|100 0"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        expect(shape.strokes[0].scaleMode).toBe('none');
+      }
+    });
+
+    it('should parse SolidStroke with pixel hinting', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <strokes>
+                          <StrokeStyle index="1">
+                            <SolidStroke weight="1" pixelHinting="true">
+                              <fill><SolidColor color="#333333"/></fill>
+                            </SolidStroke>
+                          </StrokeStyle>
+                        </strokes>
+                        <edges>
+                          <Edge strokeStyle="1" edges="!0 0|100 0"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        expect(shape.strokes[0].pixelHinting).toBe(true);
+      }
+    });
+
+    it('should parse stroke with all cap styles', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <strokes>
+                          <StrokeStyle index="1">
+                            <SolidStroke weight="5" caps="square">
+                              <fill><SolidColor color="#FF0000"/></fill>
+                            </SolidStroke>
+                          </StrokeStyle>
+                          <StrokeStyle index="2">
+                            <SolidStroke weight="5" caps="round">
+                              <fill><SolidColor color="#00FF00"/></fill>
+                            </SolidStroke>
+                          </StrokeStyle>
+                          <StrokeStyle index="3">
+                            <SolidStroke weight="5" caps="none">
+                              <fill><SolidColor color="#0000FF"/></fill>
+                            </SolidStroke>
+                          </StrokeStyle>
+                        </strokes>
+                        <edges>
+                          <Edge strokeStyle="1" edges="!0 0|100 0"/>
+                          <Edge strokeStyle="2" edges="!0 20|100 20"/>
+                          <Edge strokeStyle="3" edges="!0 40|100 40"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        expect(shape.strokes).toHaveLength(3);
+        expect(shape.strokes[0].caps).toBe('square');
+        expect(shape.strokes[1].caps).toBe('round');
+        expect(shape.strokes[2].caps).toBe('none');
+      }
+    });
+
+    it('should parse stroke with all joint styles', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMShape>
+                        <strokes>
+                          <StrokeStyle index="1">
+                            <SolidStroke weight="3" joints="miter" miterLimit="8">
+                              <fill><SolidColor color="#FF0000"/></fill>
+                            </SolidStroke>
+                          </StrokeStyle>
+                          <StrokeStyle index="2">
+                            <SolidStroke weight="3" joints="round">
+                              <fill><SolidColor color="#00FF00"/></fill>
+                            </SolidStroke>
+                          </StrokeStyle>
+                          <StrokeStyle index="3">
+                            <SolidStroke weight="3" joints="bevel">
+                              <fill><SolidColor color="#0000FF"/></fill>
+                            </SolidStroke>
+                          </StrokeStyle>
+                        </strokes>
+                        <edges>
+                          <Edge strokeStyle="1" edges="!0 0|50 50|100 0"/>
+                          <Edge strokeStyle="2" edges="!0 20|50 70|100 20"/>
+                          <Edge strokeStyle="3" edges="!0 40|50 90|100 40"/>
+                        </edges>
+                      </DOMShape>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const shape = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(shape.type).toBe('shape');
+      if (shape.type === 'shape') {
+        expect(shape.strokes).toHaveLength(3);
+        expect(shape.strokes[0].joints).toBe('miter');
+        expect(shape.strokes[0].miterLimit).toBe(8);
+        expect(shape.strokes[1].joints).toBe('round');
+        expect(shape.strokes[2].joints).toBe('bevel');
+      }
+    });
   });
 
   describe('video items', () => {
@@ -3356,6 +3925,413 @@ describe('FLAParser', () => {
         expect(element.filters![0].type).toBe('blur');
         expect(element.filters![1].type).toBe('glow');
         expect(element.filters![2].type).toBe('dropShadow');
+      }
+    });
+
+    it('should parse BevelFilter with all attributes', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="TestSymbol" symbolType="graphic">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                        <filters>
+                          <BevelFilter blurX="6" blurY="8" strength="150" highlightColor="#FFFFFF" highlightAlpha="0.9" shadowColor="#333333" shadowAlpha="0.7" distance="5" angle="135" inner="true" knockout="false" quality="2" type="full"/>
+                        </filters>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      if (element.type === 'symbol' && element.filters) {
+        const filter = element.filters[0];
+        expect(filter.type).toBe('bevel');
+        if (filter.type === 'bevel') {
+          expect(filter.blurX).toBe(6);
+          expect(filter.blurY).toBe(8);
+          expect(filter.strength).toBeCloseTo(150 / 255, 2);
+          expect(filter.highlightColor).toBe('#FFFFFF');
+          expect(filter.highlightAlpha).toBe(0.9);
+          expect(filter.shadowColor).toBe('#333333');
+          expect(filter.shadowAlpha).toBe(0.7);
+          expect(filter.distance).toBe(5);
+          expect(filter.angle).toBe(135);
+          expect(filter.inner).toBe(true);
+          expect(filter.knockout).toBe(false);
+          expect(filter.quality).toBe(2);
+          expect(filter.bevelType).toBe('full');
+        }
+      }
+    });
+
+    it('should parse BevelFilter with default values', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="TestSymbol" symbolType="graphic">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                        <filters>
+                          <BevelFilter/>
+                        </filters>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      if (element.type === 'symbol' && element.filters) {
+        const filter = element.filters[0];
+        expect(filter.type).toBe('bevel');
+        if (filter.type === 'bevel') {
+          expect(filter.blurX).toBe(4);
+          expect(filter.blurY).toBe(4);
+          expect(filter.highlightColor).toBe('#FFFFFF');
+          expect(filter.shadowColor).toBe('#000000');
+          expect(filter.distance).toBe(4);
+          expect(filter.angle).toBe(45);
+          expect(filter.bevelType).toBe('inner');
+        }
+      }
+    });
+
+    it('should parse ColorMatrixFilter with matrix values', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="TestSymbol" symbolType="graphic">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                        <filters>
+                          <ColorMatrixFilter matrix="1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0"/>
+                        </filters>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      if (element.type === 'symbol' && element.filters) {
+        const filter = element.filters[0];
+        expect(filter.type).toBe('colorMatrix');
+        if (filter.type === 'colorMatrix') {
+          expect(filter.matrix).toHaveLength(20);
+          // Identity matrix
+          expect(filter.matrix[0]).toBe(1);  // R->R
+          expect(filter.matrix[6]).toBe(1);  // G->G
+          expect(filter.matrix[12]).toBe(1); // B->B
+          expect(filter.matrix[18]).toBe(1); // A->A
+        }
+      }
+    });
+
+    it('should parse AdjustColorFilter with adjustment values', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="TestSymbol" symbolType="graphic">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                        <filters>
+                          <AdjustColorFilter brightness="20" contrast="10" saturation="-50" hue="45"/>
+                        </filters>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      if (element.type === 'symbol' && element.filters) {
+        const filter = element.filters[0];
+        expect(filter.type).toBe('colorMatrix');
+        if (filter.type === 'colorMatrix') {
+          expect(filter.matrix).toHaveLength(20);
+          // The matrix should be a valid 4x5 matrix (20 values)
+          // Values are transformed based on brightness, contrast, saturation, hue
+        }
+      }
+    });
+
+    it('should parse ConvolutionFilter with all attributes', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="TestSymbol" symbolType="graphic">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                        <filters>
+                          <ConvolutionFilter matrixX="3" matrixY="3" matrix="0, -1, 0, -1, 5, -1, 0, -1, 0" divisor="1" bias="0" preserveAlpha="true" clamp="true" color="#000000" alpha="0"/>
+                        </filters>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      if (element.type === 'symbol' && element.filters) {
+        const filter = element.filters[0];
+        expect(filter.type).toBe('convolution');
+        if (filter.type === 'convolution') {
+          expect(filter.matrixX).toBe(3);
+          expect(filter.matrixY).toBe(3);
+          expect(filter.matrix).toHaveLength(9);
+          expect(filter.matrix[4]).toBe(5); // Center value (sharpen kernel)
+          expect(filter.divisor).toBe(1);
+          expect(filter.bias).toBe(0);
+          expect(filter.preserveAlpha).toBe(true);
+          expect(filter.clamp).toBe(true);
+        }
+      }
+    });
+
+    it('should parse GradientGlowFilter with gradient colors', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="TestSymbol" symbolType="graphic">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                        <filters>
+                          <GradientGlowFilter blurX="10" blurY="10" strength="200" distance="8" angle="90" inner="false" knockout="true" quality="2">
+                            <GradientEntry color="#FF0000" alpha="1" ratio="0"/>
+                            <GradientEntry color="#FFFF00" alpha="0.8" ratio="128"/>
+                            <GradientEntry color="#00FF00" alpha="0.5" ratio="255"/>
+                          </GradientGlowFilter>
+                        </filters>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      if (element.type === 'symbol' && element.filters) {
+        const filter = element.filters[0];
+        expect(filter.type).toBe('gradientGlow');
+        if (filter.type === 'gradientGlow') {
+          expect(filter.blurX).toBe(10);
+          expect(filter.blurY).toBe(10);
+          expect(filter.strength).toBeCloseTo(200 / 255, 2);
+          expect(filter.distance).toBe(8);
+          expect(filter.angle).toBe(90);
+          expect(filter.inner).toBe(false);
+          expect(filter.knockout).toBe(true);
+          expect(filter.quality).toBe(2);
+          expect(filter.colors).toHaveLength(3);
+          expect(filter.colors[0].color).toBe('#FF0000');
+          expect(filter.colors[0].ratio).toBe(0);
+          expect(filter.colors[1].color).toBe('#FFFF00');
+          expect(filter.colors[1].alpha).toBe(0.8);
+          expect(filter.colors[2].color).toBe('#00FF00');
+          expect(filter.colors[2].ratio).toBe(255);
+        }
+      }
+    });
+
+    it('should parse GradientBevelFilter with gradient colors', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="TestSymbol" symbolType="graphic">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                        <filters>
+                          <GradientBevelFilter blurX="6" blurY="6" strength="128" distance="4" angle="45" inner="true" knockout="false" quality="1">
+                            <GradientEntry color="#FFFFFF" alpha="1" ratio="0"/>
+                            <GradientEntry color="#808080" alpha="1" ratio="128"/>
+                            <GradientEntry color="#000000" alpha="1" ratio="255"/>
+                          </GradientBevelFilter>
+                        </filters>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      if (element.type === 'symbol' && element.filters) {
+        const filter = element.filters[0];
+        expect(filter.type).toBe('gradientBevel');
+        if (filter.type === 'gradientBevel') {
+          expect(filter.blurX).toBe(6);
+          expect(filter.blurY).toBe(6);
+          expect(filter.strength).toBeCloseTo(128 / 255, 2);
+          expect(filter.distance).toBe(4);
+          expect(filter.angle).toBe(45);
+          expect(filter.inner).toBe(true);
+          expect(filter.knockout).toBe(false);
+          expect(filter.quality).toBe(1);
+          expect(filter.colors).toHaveLength(3);
+          expect(filter.colors[0].color).toBe('#FFFFFF');
+          expect(filter.colors[1].color).toBe('#808080');
+          expect(filter.colors[2].color).toBe('#000000');
+        }
+      }
+    });
+
+    it('should parse GradientGlowFilter with comma-separated attributes', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="TestSymbol" symbolType="graphic">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                        <filters>
+                          <GradientGlowFilter blurX="5" blurY="5" colors="#FF0000, #00FF00" ratios="0, 255" alphas="1, 0.5"/>
+                        </filters>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      if (element.type === 'symbol' && element.filters) {
+        const filter = element.filters[0];
+        expect(filter.type).toBe('gradientGlow');
+        if (filter.type === 'gradientGlow') {
+          expect(filter.colors).toHaveLength(2);
+          expect(filter.colors[0].color).toBe('#FF0000');
+          expect(filter.colors[0].alpha).toBe(1);
+          expect(filter.colors[0].ratio).toBe(0);
+          expect(filter.colors[1].color).toBe('#00FF00');
+          expect(filter.colors[1].alpha).toBe(0.5);
+          expect(filter.colors[1].ratio).toBe(255);
+        }
+      }
+    });
+
+    it('should provide default gradient colors when none specified', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="TestSymbol" symbolType="graphic">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                        <filters>
+                          <GradientGlowFilter blurX="5" blurY="5"/>
+                        </filters>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      if (element.type === 'symbol' && element.filters) {
+        const filter = element.filters[0];
+        expect(filter.type).toBe('gradientGlow');
+        if (filter.type === 'gradientGlow') {
+          // Should have default white-to-black gradient
+          expect(filter.colors.length).toBeGreaterThanOrEqual(2);
+          expect(filter.colors[0].color).toBe('#FFFFFF');
+          expect(filter.colors[filter.colors.length - 1].color).toBe('#000000');
+        }
       }
     });
   });

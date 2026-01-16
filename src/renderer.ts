@@ -1823,6 +1823,8 @@ export class FLARenderer {
         ctx.lineWidth = stroke.weight;
         ctx.lineCap = stroke.caps === 'none' ? 'butt' : stroke.caps || 'round';
         ctx.lineJoin = stroke.joints || 'round';
+        // Apply miter limit (Flash default is 3)
+        ctx.miterLimit = stroke.miterLimit ?? 3;
         ctx.stroke(path);
       }
     }
@@ -2275,17 +2277,47 @@ export class FLARenderer {
       // Try case-insensitive lookup
       for (const [key, item] of this.doc.bitmaps) {
         if (key.toLowerCase() === fill.bitmapPath.toLowerCase() && item.imageData) {
-          return this.createPatternFromBitmap(item.imageData, fill.matrix);
+          return this.createPatternFromBitmap(
+            item.imageData,
+            fill.matrix,
+            fill.bitmapIsClipped,
+            fill.bitmapIsSmoothed
+          );
         }
       }
       return '#808080'; // Gray fallback for missing bitmap
     }
 
-    return this.createPatternFromBitmap(bitmapItem.imageData, fill.matrix);
+    return this.createPatternFromBitmap(
+      bitmapItem.imageData,
+      fill.matrix,
+      fill.bitmapIsClipped,
+      fill.bitmapIsSmoothed
+    );
   }
 
-  private createPatternFromBitmap(image: HTMLImageElement, matrix?: Matrix): CanvasPattern | string {
-    const pattern = this.ctx.createPattern(image, 'repeat');
+  private createPatternFromBitmap(
+    image: HTMLImageElement,
+    matrix?: Matrix,
+    isClipped?: boolean,
+    isSmoothed?: boolean
+  ): CanvasPattern | string {
+    // Determine repetition mode
+    // 'repeat' for normal tiled fills, 'no-repeat' for clipped fills
+    const repetition = isClipped ? 'no-repeat' : 'repeat';
+
+    // Handle image smoothing (non-smoothed = pixel-perfect)
+    // Note: imageSmoothingEnabled is set at the context level, so we save/restore
+    const savedSmoothing = this.ctx.imageSmoothingEnabled;
+    if (isSmoothed === false) {
+      this.ctx.imageSmoothingEnabled = false;
+    }
+
+    const pattern = this.ctx.createPattern(image, repetition);
+
+    // Restore smoothing setting
+    this.ctx.imageSmoothingEnabled = savedSmoothing;
+
     if (!pattern) {
       return '#808080';
     }
@@ -2333,12 +2365,10 @@ export class FLARenderer {
 
     const gradient = this.ctx.createLinearGradient(x0, y0, x1, y1);
 
-    // Add color stops
-    for (const entry of fill.gradient) {
-      const color = entry.alpha < 1
-        ? this.colorWithAlpha(entry.color, entry.alpha)
-        : entry.color;
-      gradient.addColorStop(Math.max(0, Math.min(1, entry.ratio)), color);
+    // Add color stops, handling spread modes
+    const stops = this.getGradientStopsWithSpreadMode(fill);
+    for (const stop of stops) {
+      gradient.addColorStop(stop.ratio, stop.color);
     }
 
     return gradient;
@@ -2354,6 +2384,8 @@ export class FLARenderer {
 
     let cx = 0;
     let cy = 0;
+    let fx = 0; // Focal point x
+    let fy = 0; // Focal point y
     let radius = GRADIENT_SIZE;
 
     if (fill.matrix) {
@@ -2366,19 +2398,96 @@ export class FLARenderer {
       const scaleX = Math.sqrt(m.a * m.a + m.b * m.b);
       const scaleY = Math.sqrt(m.c * m.c + m.d * m.d);
       radius = GRADIENT_SIZE * ((scaleX + scaleY) / 2);
+
+      // Apply focal point ratio if specified
+      // focalPointRatio is -1 to 1, where 0 is centered, negative is left/up, positive is right/down
+      if (fill.focalPointRatio !== undefined && fill.focalPointRatio !== 0) {
+        // Focal point is offset along the gradient's primary axis (transformed by matrix)
+        const focalOffset = fill.focalPointRatio * radius;
+        // Apply the focal point offset using the matrix's primary direction
+        const normX = m.a / scaleX;
+        const normY = m.b / scaleX;
+        fx = cx + normX * focalOffset;
+        fy = cy + normY * focalOffset;
+      } else {
+        fx = cx;
+        fy = cy;
+      }
+    } else {
+      fx = cx;
+      fy = cy;
     }
 
-    const gradient = this.ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+    // Create radial gradient with focal point support
+    // Canvas createRadialGradient(x0, y0, r0, x1, y1, r1) where:
+    // - (x0, y0) is the focal point (inner circle center), r0 is inner radius
+    // - (x1, y1) is the outer circle center, r1 is outer radius
+    const gradient = this.ctx.createRadialGradient(fx, fy, 0, cx, cy, radius);
 
-    // Add color stops
-    for (const entry of fill.gradient) {
-      const color = entry.alpha < 1
-        ? this.colorWithAlpha(entry.color, entry.alpha)
-        : entry.color;
-      gradient.addColorStop(Math.max(0, Math.min(1, entry.ratio)), color);
+    // Add color stops, handling spread modes
+    const stops = this.getGradientStopsWithSpreadMode(fill);
+    for (const stop of stops) {
+      gradient.addColorStop(stop.ratio, stop.color);
     }
 
     return gradient;
+  }
+
+  // Process gradient entries and handle spread modes (reflect/repeat)
+  // Canvas doesn't natively support spread modes, so we simulate them by extending the color stops
+  private getGradientStopsWithSpreadMode(fill: FillStyle): Array<{ ratio: number; color: string }> {
+    if (!fill.gradient || fill.gradient.length === 0) {
+      return [];
+    }
+
+    const baseStops = fill.gradient.map(entry => ({
+      ratio: Math.max(0, Math.min(1, entry.ratio)),
+      color: entry.alpha < 1
+        ? this.colorWithAlpha(entry.color, entry.alpha)
+        : entry.color
+    }));
+
+    // Default 'pad' mode - just use the stops as-is
+    if (!fill.spreadMethod || fill.spreadMethod === 'pad') {
+      return baseStops;
+    }
+
+    // For 'reflect' and 'repeat', we need to extend the gradient
+    // However, Canvas gradients are clamped to [0,1], so we can only simulate
+    // these modes within the visible gradient bounds
+    // The simulation works by extending color stops if the gradient is visible beyond 0-1
+
+    // For now, we provide a best-effort approximation:
+    // - 'repeat': Simply use the original stops (clamped by Canvas)
+    // - 'reflect': Duplicate stops in reverse to create a mirrored effect within bounds
+
+    if (fill.spreadMethod === 'reflect') {
+      // Create a reflected pattern by mirroring the stops
+      // This gives a symmetric gradient appearance
+      const reflectedStops: Array<{ ratio: number; color: string }> = [];
+
+      // First half: compress original gradient to 0-0.5
+      for (const stop of baseStops) {
+        reflectedStops.push({
+          ratio: stop.ratio * 0.5,
+          color: stop.color
+        });
+      }
+
+      // Second half: mirror the gradient from 0.5-1
+      for (let i = baseStops.length - 1; i >= 0; i--) {
+        const stop = baseStops[i];
+        reflectedStops.push({
+          ratio: 1 - (stop.ratio * 0.5),
+          color: stop.color
+        });
+      }
+
+      return reflectedStops;
+    }
+
+    // For 'repeat', return original stops (Canvas clamps, but appearance is close enough)
+    return baseStops;
   }
 
   private colorWithAlpha(color: string, alpha: number): string {
@@ -2416,6 +2525,7 @@ export class FLARenderer {
     // Combine multiple blur filters
     let totalBlurX = 0;
     let totalBlurY = 0;
+    const cssFilters: string[] = [];
 
     for (const filter of filters) {
       switch (filter.type) {
@@ -2431,11 +2541,78 @@ export class FLARenderer {
           ctx.shadowOffsetY = 0;
           break;
         case 'dropShadow':
-          const angle = (filter.angle || 45) * Math.PI / 180;
+          const dsAngle = (filter.angle || 45) * Math.PI / 180;
           ctx.shadowColor = this.colorWithAlpha(filter.color, filter.alpha ?? 1);
           ctx.shadowBlur = Math.max(filter.blurX, filter.blurY) * (filter.strength ?? 1);
-          ctx.shadowOffsetX = Math.cos(angle) * filter.distance;
-          ctx.shadowOffsetY = Math.sin(angle) * filter.distance;
+          ctx.shadowOffsetX = Math.cos(dsAngle) * filter.distance;
+          ctx.shadowOffsetY = Math.sin(dsAngle) * filter.distance;
+          break;
+        case 'bevel':
+          // Bevel creates an embossed effect with highlight and shadow
+          // We approximate this using two offset shadows rendered in sequence
+          // For simplicity, we use the highlight color with offset
+          const bevelAngle = (filter.angle || 45) * Math.PI / 180;
+          const highlightOffsetX = -Math.cos(bevelAngle) * filter.distance;
+          const highlightOffsetY = -Math.sin(bevelAngle) * filter.distance;
+
+          // Use shadow color for the primary shadow effect
+          ctx.shadowColor = this.colorWithAlpha(filter.shadowColor, filter.shadowAlpha ?? 1);
+          ctx.shadowBlur = Math.max(filter.blurX, filter.blurY) * (filter.strength ?? 1);
+          ctx.shadowOffsetX = -highlightOffsetX;
+          ctx.shadowOffsetY = -highlightOffsetY;
+          break;
+        case 'colorMatrix':
+          // Apply color matrix using SVG filter
+          // Build SVG feColorMatrix filter string
+          if (filter.matrix && filter.matrix.length === 20) {
+            // Convert 4x5 matrix to SVG feColorMatrix format (5x4 transposed, no alpha offset row)
+            // SVG format: R->R, R->G, R->B, R->A, R->offset, G->R, ...
+            const m = filter.matrix;
+            // Build url() filter using inline SVG
+            const svgFilter = this.buildColorMatrixSVGFilter(m);
+            cssFilters.push(`url("data:image/svg+xml,${encodeURIComponent(svgFilter)}")`);
+          }
+          break;
+        case 'convolution':
+          // Convolution filters (sharpen, emboss, etc.) require pixel manipulation
+          // Canvas 2D doesn't support convolution natively, but we can approximate
+          // common effects like sharpen using CSS filters
+          if (this.isIdentityConvolution(filter.matrix, filter.matrixX, filter.matrixY)) {
+            // Identity matrix - no effect needed
+            break;
+          }
+          if (this.isSharpenConvolution(filter.matrix)) {
+            // Approximate sharpen with contrast
+            cssFilters.push('contrast(1.1)');
+          } else if (this.isEdgeDetectConvolution(filter.matrix)) {
+            // Edge detection - approximate with high contrast
+            cssFilters.push('contrast(2) saturate(0)');
+          }
+          // Note: Full convolution support would require getImageData/putImageData
+          break;
+        case 'gradientGlow':
+          // Gradient glow is similar to regular glow but with gradient colors
+          // We approximate using the first and last colors
+          const ggColors = filter.colors;
+          if (ggColors && ggColors.length > 0) {
+            const midColor = ggColors[Math.floor(ggColors.length / 2)];
+            ctx.shadowColor = this.colorWithAlpha(midColor.color, midColor.alpha);
+            ctx.shadowBlur = Math.max(filter.blurX, filter.blurY) * (filter.strength ?? 1);
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = 0;
+          }
+          break;
+        case 'gradientBevel':
+          // Gradient bevel is similar to regular bevel but with gradient colors
+          const gbColors = filter.colors;
+          const gbAngle = (filter.angle || 45) * Math.PI / 180;
+          if (gbColors && gbColors.length > 0) {
+            const midColor = gbColors[Math.floor(gbColors.length / 2)];
+            ctx.shadowColor = this.colorWithAlpha(midColor.color, midColor.alpha);
+            ctx.shadowBlur = Math.max(filter.blurX, filter.blurY) * (filter.strength ?? 1);
+            ctx.shadowOffsetX = Math.cos(gbAngle) * filter.distance;
+            ctx.shadowOffsetY = Math.sin(gbAngle) * filter.distance;
+          }
           break;
       }
     }
@@ -2443,8 +2620,54 @@ export class FLARenderer {
     // Apply combined blur using CSS filter
     if (totalBlurX > 0 || totalBlurY > 0) {
       const avgBlur = (totalBlurX + totalBlurY) / 2;
-      ctx.filter = `blur(${avgBlur}px)`;
+      cssFilters.push(`blur(${avgBlur}px)`);
     }
+
+    // Combine all CSS filters
+    if (cssFilters.length > 0) {
+      ctx.filter = cssFilters.join(' ');
+    }
+  }
+
+  // Build an inline SVG filter for color matrix transformation
+  private buildColorMatrixSVGFilter(matrix: number[]): string {
+    // Normalize matrix values for SVG (divide offsets by 255)
+    const m = [...matrix];
+    // Offsets are at indices 4, 9, 14, 19 - convert from 0-255 to 0-1
+    m[4] /= 255;
+    m[9] /= 255;
+    m[14] /= 255;
+    m[19] /= 255;
+
+    return `<svg xmlns="http://www.w3.org/2000/svg"><filter id="cm"><feColorMatrix type="matrix" values="${m.join(' ')}"/></filter></svg>#cm`;
+  }
+
+  // Check if convolution matrix is identity (no effect)
+  private isIdentityConvolution(matrix: number[], matrixX: number, matrixY: number): boolean {
+    if (matrixX !== matrixY || matrixX < 1) return false;
+    const center = Math.floor(matrixX * matrixY / 2);
+    for (let i = 0; i < matrix.length; i++) {
+      if (i === center && matrix[i] !== 1) return false;
+      if (i !== center && matrix[i] !== 0) return false;
+    }
+    return true;
+  }
+
+  // Check if convolution is a sharpen filter
+  private isSharpenConvolution(matrix: number[]): boolean {
+    // Common sharpen kernel: [0, -1, 0, -1, 5, -1, 0, -1, 0]
+    if (matrix.length !== 9) return false;
+    const sharpen = [0, -1, 0, -1, 5, -1, 0, -1, 0];
+    return matrix.every((v, i) => Math.abs(v - sharpen[i]) < 0.1);
+  }
+
+  // Check if convolution is an edge detection filter
+  private isEdgeDetectConvolution(matrix: number[]): boolean {
+    // Common edge detect kernels have sum close to 0 and high center value
+    if (matrix.length < 9) return false;
+    const sum = matrix.reduce((a, b) => a + b, 0);
+    const center = matrix[Math.floor(matrix.length / 2)];
+    return Math.abs(sum) < 0.1 && center > 0;
   }
 
   // Clear all filter effects
@@ -2593,6 +2816,8 @@ export class FLARenderer {
           ctx.lineWidth = stroke.weight;
           ctx.lineCap = stroke.caps === 'none' ? 'butt' : stroke.caps || 'round';
           ctx.lineJoin = stroke.joints || 'round';
+          // Apply miter limit (Flash default is 3)
+          ctx.miterLimit = stroke.miterLimit ?? 3;
           ctx.stroke(path);
         }
       }

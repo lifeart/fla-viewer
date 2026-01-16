@@ -913,28 +913,56 @@ export class FLAParser {
       // Check for linear gradient
       const linearGradient = fillEl.querySelector('LinearGradient');
       if (linearGradient) {
-        fills.push({
+        const fill: FillStyle = {
           index,
           type: 'linear',
           gradient: this.parseGradientEntries(linearGradient),
           matrix: this.parseMatrix(linearGradient.querySelector('matrix > Matrix'))
-        });
+        };
+        // Parse spread method (XFL: spreadMethod attribute)
+        const spreadMethod = linearGradient.getAttribute('spreadMethod');
+        if (spreadMethod === 'reflect' || spreadMethod === 'repeat') {
+          fill.spreadMethod = spreadMethod;
+        }
+        // Parse interpolation method (XFL: interpolationMethod attribute)
+        const interpolation = linearGradient.getAttribute('interpolationMethod');
+        if (interpolation === 'linearRGB') {
+          fill.interpolationMethod = 'linearRGB';
+        }
+        fills.push(fill);
         continue;
       }
 
       // Check for radial gradient
       const radialGradient = fillEl.querySelector('RadialGradient');
       if (radialGradient) {
-        fills.push({
+        const fill: FillStyle = {
           index,
           type: 'radial',
           gradient: this.parseGradientEntries(radialGradient),
           matrix: this.parseMatrix(radialGradient.querySelector('matrix > Matrix'))
-        });
+        };
+        // Parse spread method
+        const spreadMethod = radialGradient.getAttribute('spreadMethod');
+        if (spreadMethod === 'reflect' || spreadMethod === 'repeat') {
+          fill.spreadMethod = spreadMethod;
+        }
+        // Parse interpolation method
+        const interpolation = radialGradient.getAttribute('interpolationMethod');
+        if (interpolation === 'linearRGB') {
+          fill.interpolationMethod = 'linearRGB';
+        }
+        // Parse focal point ratio (XFL: focalPointRatio attribute, -1 to 1)
+        const focalPoint = radialGradient.getAttribute('focalPointRatio');
+        if (focalPoint !== null) {
+          fill.focalPointRatio = parseFloat(focalPoint);
+        }
+        fills.push(fill);
         continue;
       }
 
       // Check for bitmap fill
+      // BitmapFill can be: repeating, clipped, non-smoothed repeating, non-smoothed clipped
       const bitmapFill = fillEl.querySelector('BitmapFill');
       if (bitmapFill) {
         const bitmapPath = bitmapFill.getAttribute('bitmapPath') || '';
@@ -946,6 +974,37 @@ export class FLAParser {
         };
         if (matrixEl) {
           fill.matrix = this.parseMatrix(matrixEl);
+        }
+        // Check for clipped mode (XFL: bitmapIsClipped="true")
+        if (bitmapFill.getAttribute('bitmapIsClipped') === 'true') {
+          fill.bitmapIsClipped = true;
+        }
+        // Check for smoothed mode (default is true, XFL: allowSmoothing="false" means no smoothing)
+        const allowSmoothing = bitmapFill.getAttribute('allowSmoothing');
+        if (allowSmoothing === 'false') {
+          fill.bitmapIsSmoothed = false;
+        }
+        fills.push(fill);
+        continue;
+      }
+
+      // Check for ClippedBitmapFill (alternative XFL format)
+      const clippedBitmapFill = fillEl.querySelector('ClippedBitmapFill');
+      if (clippedBitmapFill) {
+        const bitmapPath = clippedBitmapFill.getAttribute('bitmapPath') || '';
+        const matrixEl = clippedBitmapFill.querySelector('matrix > Matrix');
+        const fill: FillStyle = {
+          index,
+          type: 'bitmap',
+          bitmapPath: normalizePath(bitmapPath),
+          bitmapIsClipped: true,
+        };
+        if (matrixEl) {
+          fill.matrix = this.parseMatrix(matrixEl);
+        }
+        const allowSmoothing = clippedBitmapFill.getAttribute('allowSmoothing');
+        if (allowSmoothing === 'false') {
+          fill.bitmapIsSmoothed = false;
         }
         fills.push(fill);
         continue;
@@ -988,13 +1047,33 @@ export class FLAParser {
         const solidColor = solidStroke.querySelector('fill > SolidColor');
         const color = solidColor?.getAttribute('color') || '#000000';
 
-        strokes.push({
+        const stroke: StrokeStyle = {
           index,
           color,
           weight,
           caps,
           joints
-        });
+        };
+
+        // Parse miter limit (XFL: miterLimit attribute, Flash default is 3)
+        const miterLimit = solidStroke.getAttribute('miterLimit');
+        if (miterLimit !== null) {
+          stroke.miterLimit = parseFloat(miterLimit);
+        }
+
+        // Parse scale mode (XFL: scaleMode attribute)
+        // Values: "normal" (default), "horizontal", "vertical", "none"
+        const scaleMode = solidStroke.getAttribute('scaleMode') as 'normal' | 'horizontal' | 'vertical' | 'none' | null;
+        if (scaleMode && scaleMode !== 'normal') {
+          stroke.scaleMode = scaleMode;
+        }
+
+        // Parse pixel hinting (XFL: pixelHinting attribute)
+        if (solidStroke.getAttribute('pixelHinting') === 'true') {
+          stroke.pixelHinting = true;
+        }
+
+        strokes.push(stroke);
         continue;
       }
 
@@ -1900,10 +1979,248 @@ export class FLAParser {
             quality: parseInt(child.getAttribute('quality') || '1')
           });
           break;
+
+        case 'BevelFilter':
+          filters.push({
+            type: 'bevel',
+            blurX: parseFloat(child.getAttribute('blurX') || '4'),
+            blurY: parseFloat(child.getAttribute('blurY') || '4'),
+            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            highlightColor: child.getAttribute('highlightColor') || '#FFFFFF',
+            highlightAlpha: parseFloat(child.getAttribute('highlightAlpha') || '1'),
+            shadowColor: child.getAttribute('shadowColor') || '#000000',
+            shadowAlpha: parseFloat(child.getAttribute('shadowAlpha') || '1'),
+            distance: parseFloat(child.getAttribute('distance') || '4'),
+            angle: parseFloat(child.getAttribute('angle') || '45'),
+            inner: child.getAttribute('inner') === 'true',
+            knockout: child.getAttribute('knockout') === 'true',
+            quality: parseInt(child.getAttribute('quality') || '1'),
+            bevelType: (child.getAttribute('type') as 'inner' | 'outer' | 'full') || 'inner'
+          });
+          break;
+
+        case 'AdjustColorFilter':
+        case 'ColorMatrixFilter':
+          // ColorMatrixFilter in XFL stores a 4x5 matrix (20 values)
+          // AdjustColorFilter is a simplified version that generates a color matrix
+          const matrixAttr = child.getAttribute('matrix');
+          let matrix: number[] = [];
+
+          if (matrixAttr) {
+            // Parse comma-separated matrix values
+            matrix = matrixAttr.split(',').map(v => parseFloat(v.trim()));
+          } else {
+            // AdjustColorFilter uses individual attributes: brightness, contrast, saturation, hue
+            const brightness = parseFloat(child.getAttribute('brightness') || '0');
+            const contrast = parseFloat(child.getAttribute('contrast') || '0');
+            const saturation = parseFloat(child.getAttribute('saturation') || '0');
+            const hue = parseFloat(child.getAttribute('hue') || '0');
+
+            // Build color matrix from adjustment values
+            matrix = this.buildAdjustColorMatrix(brightness, contrast, saturation, hue);
+          }
+
+          // Ensure we have a valid 20-element matrix
+          if (matrix.length === 20) {
+            filters.push({
+              type: 'colorMatrix',
+              matrix
+            });
+          }
+          break;
+
+        case 'ConvolutionFilter':
+          const matrixX = parseInt(child.getAttribute('matrixX') || '3');
+          const matrixY = parseInt(child.getAttribute('matrixY') || '3');
+          const convMatrixAttr = child.getAttribute('matrix');
+          let convMatrix: number[] = [];
+
+          if (convMatrixAttr) {
+            convMatrix = convMatrixAttr.split(',').map(v => parseFloat(v.trim()));
+          }
+
+          filters.push({
+            type: 'convolution',
+            matrixX,
+            matrixY,
+            matrix: convMatrix,
+            divisor: parseFloat(child.getAttribute('divisor') || '1'),
+            bias: parseFloat(child.getAttribute('bias') || '0'),
+            preserveAlpha: child.getAttribute('preserveAlpha') !== 'false',
+            clamp: child.getAttribute('clamp') !== 'false',
+            color: child.getAttribute('color') || '#000000',
+            alpha: parseFloat(child.getAttribute('alpha') || '0')
+          });
+          break;
+
+        case 'GradientGlowFilter':
+          filters.push({
+            type: 'gradientGlow',
+            blurX: parseFloat(child.getAttribute('blurX') || '4'),
+            blurY: parseFloat(child.getAttribute('blurY') || '4'),
+            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            distance: parseFloat(child.getAttribute('distance') || '4'),
+            angle: parseFloat(child.getAttribute('angle') || '45'),
+            colors: this.parseGradientFilterColors(child),
+            inner: child.getAttribute('inner') === 'true',
+            knockout: child.getAttribute('knockout') === 'true',
+            quality: parseInt(child.getAttribute('quality') || '1')
+          });
+          break;
+
+        case 'GradientBevelFilter':
+          filters.push({
+            type: 'gradientBevel',
+            blurX: parseFloat(child.getAttribute('blurX') || '4'),
+            blurY: parseFloat(child.getAttribute('blurY') || '4'),
+            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            distance: parseFloat(child.getAttribute('distance') || '4'),
+            angle: parseFloat(child.getAttribute('angle') || '45'),
+            colors: this.parseGradientFilterColors(child),
+            inner: child.getAttribute('inner') === 'true',
+            knockout: child.getAttribute('knockout') === 'true',
+            quality: parseInt(child.getAttribute('quality') || '1')
+          });
+          break;
       }
     }
 
     return filters;
+  }
+
+  // Parse gradient colors for GradientGlowFilter and GradientBevelFilter
+  private parseGradientFilterColors(el: globalThis.Element): { color: string; alpha: number; ratio: number }[] {
+    const colors: { color: string; alpha: number; ratio: number }[] = [];
+
+    // XFL stores gradient colors as child elements or attributes
+    // Try child elements first (GradientEntry elements)
+    const gradientEntries = el.querySelectorAll(':scope > GradientEntry');
+    if (gradientEntries.length > 0) {
+      for (const entry of gradientEntries) {
+        colors.push({
+          color: entry.getAttribute('color') || '#000000',
+          alpha: parseFloat(entry.getAttribute('alpha') || '1'),
+          ratio: parseFloat(entry.getAttribute('ratio') || '0')
+        });
+      }
+      return colors;
+    }
+
+    // Try comma-separated attributes
+    const colorsAttr = el.getAttribute('colors');
+    const alphasAttr = el.getAttribute('alphas');
+    const ratiosAttr = el.getAttribute('ratios');
+
+    if (colorsAttr && ratiosAttr) {
+      const colorValues = colorsAttr.split(',').map(c => c.trim());
+      const alphaValues = alphasAttr ? alphasAttr.split(',').map(a => parseFloat(a.trim())) : colorValues.map(() => 1);
+      const ratioValues = ratiosAttr.split(',').map(r => parseFloat(r.trim()));
+
+      for (let i = 0; i < colorValues.length && i < ratioValues.length; i++) {
+        colors.push({
+          color: colorValues[i] || '#000000',
+          alpha: alphaValues[i] ?? 1,
+          ratio: ratioValues[i] ?? 0
+        });
+      }
+    }
+
+    // Default gradient if no colors found
+    if (colors.length === 0) {
+      colors.push(
+        { color: '#FFFFFF', alpha: 1, ratio: 0 },
+        { color: '#000000', alpha: 1, ratio: 255 }
+      );
+    }
+
+    return colors;
+  }
+
+  // Build a color matrix from AdjustColorFilter parameters
+  private buildAdjustColorMatrix(brightness: number, contrast: number, saturation: number, hue: number): number[] {
+    // Start with identity matrix
+    let matrix = [
+      1, 0, 0, 0, 0,  // Red
+      0, 1, 0, 0, 0,  // Green
+      0, 0, 1, 0, 0,  // Blue
+      0, 0, 0, 1, 0   // Alpha
+    ];
+
+    // Apply brightness (add to RGB offsets)
+    // Brightness is typically -100 to 100, map to -255 to 255
+    const b = brightness * 2.55;
+    matrix[4] += b;
+    matrix[9] += b;
+    matrix[14] += b;
+
+    // Apply contrast
+    // Contrast is typically -100 to 100
+    if (contrast !== 0) {
+      const c = (contrast + 100) / 100; // Convert to multiplier
+      const t = 0.5 * (1 - c);
+      matrix = this.multiplyColorMatrices(matrix, [
+        c, 0, 0, 0, t * 255,
+        0, c, 0, 0, t * 255,
+        0, 0, c, 0, t * 255,
+        0, 0, 0, 1, 0
+      ]);
+    }
+
+    // Apply saturation
+    // Saturation is typically -100 to 100
+    if (saturation !== 0) {
+      const s = (saturation + 100) / 100;
+      const sr = (1 - s) * 0.299;
+      const sg = (1 - s) * 0.587;
+      const sb = (1 - s) * 0.114;
+      matrix = this.multiplyColorMatrices(matrix, [
+        sr + s, sg, sb, 0, 0,
+        sr, sg + s, sb, 0, 0,
+        sr, sg, sb + s, 0, 0,
+        0, 0, 0, 1, 0
+      ]);
+    }
+
+    // Apply hue rotation
+    // Hue is typically -180 to 180 degrees
+    if (hue !== 0) {
+      const angle = hue * Math.PI / 180;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      const lumR = 0.299;
+      const lumG = 0.587;
+      const lumB = 0.114;
+
+      matrix = this.multiplyColorMatrices(matrix, [
+        lumR + cos * (1 - lumR) + sin * (-lumR), lumG + cos * (-lumG) + sin * (-lumG), lumB + cos * (-lumB) + sin * (1 - lumB), 0, 0,
+        lumR + cos * (-lumR) + sin * (0.143), lumG + cos * (1 - lumG) + sin * (0.140), lumB + cos * (-lumB) + sin * (-0.283), 0, 0,
+        lumR + cos * (-lumR) + sin * (-(1 - lumR)), lumG + cos * (-lumG) + sin * (lumG), lumB + cos * (1 - lumB) + sin * (lumB), 0, 0,
+        0, 0, 0, 1, 0
+      ]);
+    }
+
+    return matrix;
+  }
+
+  // Multiply two 4x5 color matrices
+  private multiplyColorMatrices(a: number[], b: number[]): number[] {
+    const result = new Array(20).fill(0);
+
+    for (let row = 0; row < 4; row++) {
+      for (let col = 0; col < 5; col++) {
+        let sum = 0;
+        for (let k = 0; k < 4; k++) {
+          sum += a[row * 5 + k] * b[k * 5 + col];
+        }
+        // Add the offset column
+        if (col === 4) {
+          sum += a[row * 5 + 4];
+        }
+        result[row * 5 + col] = sum;
+      }
+    }
+
+    return result;
   }
 
   // Parse ColorTransform from <color> element

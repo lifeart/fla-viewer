@@ -160,7 +160,14 @@ export interface TextRun {
   fillColor: string;
   bold?: boolean;
   italic?: boolean;
+  underline?: boolean;
   letterSpacing?: number;
+  indent?: number; // First-line paragraph indent in twips
+  leftMargin?: number; // Left margin in twips
+  rightMargin?: number; // Right margin in twips
+  url?: string; // Hyperlink URL
+  target?: string; // Link target (_blank, _self, etc.)
+  characterPosition?: 'normal' | 'subscript' | 'superscript';
 }
 
 export interface Shape {
@@ -199,6 +206,11 @@ export interface FillStyle {
   gradient?: GradientEntry[];
   matrix?: Matrix;
   bitmapPath?: string; // Reference to bitmap in library (for bitmap fills)
+  spreadMethod?: 'pad' | 'reflect' | 'repeat'; // Gradient spread mode (default: pad)
+  interpolationMethod?: 'rgb' | 'linearRGB'; // Color interpolation mode (default: rgb)
+  focalPointRatio?: number; // Off-center focal point for radial gradients (-1 to 1)
+  bitmapIsClipped?: boolean; // For bitmap fills: clip instead of repeat
+  bitmapIsSmoothed?: boolean; // For bitmap fills: enable/disable smoothing (default: true)
 }
 
 export interface GradientEntry {
@@ -213,6 +225,9 @@ export interface StrokeStyle {
   weight: number;
   caps?: 'none' | 'round' | 'square';
   joints?: 'miter' | 'round' | 'bevel';
+  miterLimit?: number; // Maximum miter length (default: 3 in Flash)
+  scaleMode?: 'normal' | 'horizontal' | 'vertical' | 'none'; // Stroke scaling behavior
+  pixelHinting?: boolean; // Snap stroke to pixel boundaries
 }
 
 export interface Edge {
@@ -279,7 +294,77 @@ export interface DropShadowFilter {
   quality?: number;
 }
 
-export type Filter = BlurFilter | GlowFilter | DropShadowFilter;
+export interface BevelFilter {
+  type: 'bevel';
+  blurX: number;
+  blurY: number;
+  strength: number; // 0-1 (normalized from 0-255)
+  highlightColor: string;
+  highlightAlpha?: number;
+  shadowColor: string;
+  shadowAlpha?: number;
+  distance: number;
+  angle: number; // in degrees
+  inner?: boolean;
+  knockout?: boolean;
+  quality?: number;
+  bevelType?: 'inner' | 'outer' | 'full'; // XFL: type attribute
+}
+
+export interface ColorMatrixFilter {
+  type: 'colorMatrix';
+  // 4x5 matrix stored as 20 values in row-major order
+  // [r0, r1, r2, r3, r4, g0, g1, g2, g3, g4, b0, b1, b2, b3, b4, a0, a1, a2, a3, a4]
+  // Each row: [R, G, B, A, offset] where output = input * matrix
+  matrix: number[];
+}
+
+export interface ConvolutionFilter {
+  type: 'convolution';
+  matrixX: number; // Width of matrix
+  matrixY: number; // Height of matrix
+  matrix: number[]; // Kernel values (matrixX * matrixY elements)
+  divisor: number; // Divide result by this value
+  bias: number; // Add this to result after division
+  preserveAlpha?: boolean; // Don't apply to alpha channel
+  clamp?: boolean; // Clamp output to 0-255
+  color?: string; // Default color for out-of-bounds pixels
+  alpha?: number; // Default alpha for out-of-bounds pixels
+}
+
+export interface GradientGlowFilter {
+  type: 'gradientGlow';
+  blurX: number;
+  blurY: number;
+  strength: number;
+  distance: number;
+  angle: number;
+  colors: GradientFilterEntry[];
+  inner?: boolean;
+  knockout?: boolean;
+  quality?: number;
+}
+
+export interface GradientBevelFilter {
+  type: 'gradientBevel';
+  blurX: number;
+  blurY: number;
+  strength: number;
+  distance: number;
+  angle: number;
+  colors: GradientFilterEntry[];
+  inner?: boolean;
+  knockout?: boolean;
+  quality?: number;
+}
+
+export interface GradientFilterEntry {
+  color: string;
+  alpha: number;
+  ratio: number; // 0-255 position in gradient
+}
+
+export type Filter = BlurFilter | GlowFilter | DropShadowFilter | BevelFilter | ColorMatrixFilter | ConvolutionFilter | GradientGlowFilter | GradientBevelFilter;
 
 // Shape Tweens (MorphShape)
 export interface MorphCurve {
