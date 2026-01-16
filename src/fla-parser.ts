@@ -37,6 +37,12 @@ import {
   hasWithNormalizedPath,
   getFilename
 } from './path-utils';
+import {
+  parseFLV,
+  getVideoCodecName,
+  getAudioCodecName,
+  getKeyframes
+} from './flv-parser';
 
 // Debug flag - enabled via ?debug=true URL parameter or setParserDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -112,9 +118,9 @@ export class FLAParser {
     progress('Loading audio...');
     const sounds = await this.parseSounds(root);
 
-    // Parse video items from media section
+    // Parse video items from media section and load FLV data
     progress('Loading videos...');
-    const videos = this.parseVideos(root);
+    const videos = await this.parseVideos(root);
 
     // Parse main timeline (pass dimensions for camera detection)
     progress('Building timeline...');
@@ -1184,7 +1190,7 @@ export class FLAParser {
           const linearGradient = fillEl.querySelector('LinearGradient');
           if (linearGradient) {
             const gradient = this.parseGradientEntries(linearGradient);
-            const matrix = this.parseGradientMatrix(linearGradient);
+            const matrix = this.parseMatrix(linearGradient.querySelector('matrix > Matrix'));
             const spreadMethod = (linearGradient.getAttribute('spreadMethod') || 'pad') as 'pad' | 'reflect' | 'repeat';
             const interpolationMethod = (linearGradient.getAttribute('interpolationMethod') || 'rgb') as 'rgb' | 'linearRGB';
 
@@ -1204,7 +1210,7 @@ export class FLAParser {
           const radialGradient = fillEl.querySelector('RadialGradient');
           if (radialGradient) {
             const gradient = this.parseGradientEntries(radialGradient);
-            const matrix = this.parseGradientMatrix(radialGradient);
+            const matrix = this.parseMatrix(radialGradient.querySelector('matrix > Matrix'));
             const spreadMethod = (radialGradient.getAttribute('spreadMethod') || 'pad') as 'pad' | 'reflect' | 'repeat';
             const interpolationMethod = (radialGradient.getAttribute('interpolationMethod') || 'rgb') as 'rgb' | 'linearRGB';
             const focalPointRatio = parseFloat(radialGradient.getAttribute('focalPointRatio') || '0');
@@ -1226,7 +1232,7 @@ export class FLAParser {
           const bitmapFill = fillEl.querySelector('BitmapFill');
           if (bitmapFill) {
             const bitmapPath = normalizePath(bitmapFill.getAttribute('bitmapPath') || '');
-            const matrix = this.parseBitmapMatrix(bitmapFill);
+            const matrix = this.parseMatrix(bitmapFill.querySelector('matrix > Matrix'));
             const bitmapIsClipped = bitmapFill.getAttribute('bitmapIsClipped') === 'true';
             const bitmapIsSmoothed = bitmapFill.getAttribute('bitmapIsSmoothed') !== 'false';
 
@@ -2128,9 +2134,10 @@ export class FLAParser {
     return audioBuffer;
   }
 
-  private parseVideos(root: globalThis.Element): Map<string, VideoItem> {
+  private async parseVideos(root: globalThis.Element): Promise<Map<string, VideoItem>> {
     const videos = new Map<string, VideoItem>();
     const videoElements = root.querySelectorAll('media > DOMVideoItem');
+    const loadPromises: Promise<void>[] = [];
 
     for (const videoEl of videoElements) {
       const name = videoEl.getAttribute('name') || '';
@@ -2155,12 +2162,86 @@ export class FLAParser {
 
       videos.set(name, videoItem);
 
+      // Load and parse FLV data
+      if (href) {
+        loadPromises.push(this.loadVideoFLV(videoItem));
+      }
+
       if (DEBUG) {
         console.log(`Found video: ${name}, ${videoItem.width}x${videoItem.height}, ${videoItem.fps}fps`);
       }
     }
 
+    // Wait for all FLV files to be parsed
+    await Promise.all(loadPromises);
+
     return videos;
+  }
+
+  private async loadVideoFLV(videoItem: VideoItem): Promise<void> {
+    try {
+      // Try to load from bin/ folder first (common for embedded video)
+      let flvData = await this.findFileData(videoItem.href, 'bin');
+
+      // Fallback to LIBRARY folder
+      if (!flvData) {
+        flvData = await this.findFileData(videoItem.href);
+      }
+
+      if (!flvData) {
+        if (DEBUG) {
+          console.warn(`Video file not found: ${videoItem.href}`);
+        }
+        return;
+      }
+
+      // Parse FLV data
+      const parsed = parseFLV(flvData);
+
+      // Store simplified FLV data in VideoItem
+      const keyframes = getKeyframes(parsed.videoTags);
+
+      videoItem.flvData = {
+        hasVideo: parsed.header.hasVideo,
+        hasAudio: parsed.header.hasAudio,
+        videoCodec: parsed.videoCodec !== null ? getVideoCodecName(parsed.videoCodec) : null,
+        audioCodec: parsed.audioCodec !== null ? getAudioCodecName(parsed.audioCodec) : null,
+        duration: parsed.duration,
+        frameCount: parsed.videoTags.length,
+        keyframeCount: keyframes.length,
+        audioSampleRate: parsed.audioTags.length > 0 ? parsed.audioTags[0].sampleRate : undefined,
+        audioChannels: parsed.audioTags.length > 0 ? (parsed.audioTags[0].stereo ? 2 : 1) : undefined
+      };
+
+      // Update duration from FLV if not set in XML
+      if (!videoItem.duration && parsed.duration > 0) {
+        videoItem.duration = parsed.duration;
+      }
+
+      // Update dimensions from FLV metadata if not set
+      if (parsed.metadata.width && parsed.metadata.height) {
+        if (!videoItem.width) videoItem.width = parsed.metadata.width;
+        if (!videoItem.height) videoItem.height = parsed.metadata.height;
+      }
+
+      // Update FPS from FLV metadata if not set
+      if (parsed.metadata.framerate && !videoItem.fps) {
+        videoItem.fps = parsed.metadata.framerate;
+      }
+
+      if (DEBUG) {
+        console.log(`Parsed FLV: ${videoItem.name}, ` +
+          `video: ${videoItem.flvData.videoCodec || 'none'}, ` +
+          `audio: ${videoItem.flvData.audioCodec || 'none'}, ` +
+          `frames: ${videoItem.flvData.frameCount}, ` +
+          `keyframes: ${videoItem.flvData.keyframeCount}, ` +
+          `duration: ${videoItem.flvData.duration.toFixed(2)}s`);
+      }
+    } catch (e) {
+      if (DEBUG) {
+        console.warn(`Failed to parse FLV: ${videoItem.href}`, e);
+      }
+    }
   }
 
   private parseShapeEdges(shape: globalThis.Element): Edge[] {

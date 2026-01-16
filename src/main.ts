@@ -727,7 +727,7 @@ export class FLAViewerApp {
 
   private async loadFile(file: File): Promise<void> {
     if (!file.name.toLowerCase().endsWith('.fla')) {
-      alert('Please select a valid FLA file');
+      alert(`Please select a valid FLA file.\nReceived: "${file.name}" (${file.type || 'unknown type'})`);
       return;
     }
 

@@ -1128,7 +1128,7 @@ export async function exportSVG(
       // Get stroke style
       if (edge.strokeStyle !== undefined) {
         const strokeStyle = shape.strokes.find(s => s.index === edge.strokeStyle);
-        if (strokeStyle) {
+        if (strokeStyle && strokeStyle.color) {
           stroke = strokeStyle.color;
           strokeWidth = strokeStyle.weight;
           if (strokeStyle.caps === 'round') strokeLinecap = ' stroke-linecap="round"';

@@ -43,6 +43,21 @@ export interface VideoItem {
   duration?: number; // Length in seconds
   videoType?: string; // e.g., "h263 media"
   sourceExternalFilepath?: string;
+  // Parsed FLV data (if available)
+  flvData?: ParsedFLVData;
+}
+
+// Simplified FLV data stored in VideoItem (full ParsedFLV is in flv-parser.ts)
+export interface ParsedFLVData {
+  hasVideo: boolean;
+  hasAudio: boolean;
+  videoCodec: string | null;  // Codec name
+  audioCodec: string | null;  // Codec name
+  duration: number;           // In seconds
+  frameCount: number;         // Total video frames
+  keyframeCount: number;      // Number of keyframes
+  audioSampleRate?: number;
+  audioChannels?: number;     // 1 = mono, 2 = stereo
 }
 
 export interface Timeline {

@@ -77,7 +77,6 @@ export class FLARenderer {
   // Key format: "instancePath:symbolName" where instancePath is the path through nested symbols
   private movieClipStates = new Map<string, MovieClipInstanceState>();
   private currentInstancePath: string[] = []; // Stack of instance identifiers for nested symbols
-  private currentParentFrame: number = 0; // Current parent frame index for detecting instance appearance
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -1755,6 +1754,20 @@ export class FLARenderer {
           if (info.length > 0) {
             ctx.fillText(info.join(' • '), centerX, video.height - 20);
           }
+
+          // Show FLV codec info if available
+          if (videoItem.flvData) {
+            const flvInfo: string[] = [];
+            if (videoItem.flvData.videoCodec) {
+              flvInfo.push(videoItem.flvData.videoCodec);
+            }
+            if (videoItem.flvData.audioCodec) {
+              flvInfo.push(videoItem.flvData.audioCodec);
+            }
+            if (flvInfo.length > 0) {
+              ctx.fillText(flvInfo.join(' + '), centerX, video.height - 36);
+            }
+          }
         }
       }
     }
@@ -2997,10 +3010,6 @@ export class FLARenderer {
     const cosY = Math.cos(rotY);
     const sinY = Math.sin(rotY);
 
-    // Rotation around Z-axis (2D rotation)
-    const cosZ = Math.cos(rotZ);
-    const sinZ = Math.sin(rotZ);
-
     // Apply Z-position scaling (objects further away appear smaller)
     const zScale = perspectiveDistance / (perspectiveDistance + zPos);
 
@@ -3337,7 +3346,7 @@ export class FLARenderer {
       const strokeIndex = segment.strokeIndex1 ?? segment.strokeIndex2;
       if (strokeIndex !== undefined) {
         const stroke = strokeStyles.get(strokeIndex);
-        if (stroke) {
+        if (stroke && stroke.color) {
           ctx.strokeStyle = stroke.color;
           ctx.lineWidth = stroke.weight;
           ctx.lineCap = stroke.caps === 'none' ? 'butt' : stroke.caps || 'round';
@@ -3410,7 +3419,7 @@ export class FLARenderer {
    */
   private renderSymbolFromCache(
     symbol: Symbol,
-    instance: SymbolInstance,
+    _instance: SymbolInstance,
     depth: number
   ): void {
     const cacheKey = `${symbol.name}:${symbol.itemID}`;

@@ -1248,7 +1248,7 @@ describe('video-exporter', () => {
                 type: 'shape',
                 matrix: createMatrix(),
                 fills: [],
-                strokes: [{ index: 1, color: '#0000FF', weight: 2 }],
+                strokes: [{ type: 'solid', index: 1, color: '#0000FF', weight: 2 }],
                 edges: [{
                   strokeStyle: 1,
                   commands: [

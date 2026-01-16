@@ -1040,8 +1040,10 @@ describe('main.ts', () => {
       // Wait a bit
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      // Alert should have been called
-      expect(window.alert).toHaveBeenCalledWith('Please select a valid FLA file');
+      // Alert should have been called with file info
+      expect(window.alert).toHaveBeenCalledWith(
+        'Please select a valid FLA file.\nReceived: "test.txt" (text/plain)'
+      );
     });
 
     it('should handle invalid FLA file', async () => {

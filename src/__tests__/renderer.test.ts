@@ -803,6 +803,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix(),
                 fills: [],
                 strokes: [{
+                  type: 'solid',
                   index: 1,
                   color: '#000000',
                   weight: 2,
@@ -1790,6 +1791,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix(),
                 fills: [],
                 strokes: [{
+                  type: 'solid',
                   index: 1,
                   color: '#000000',
                   weight: 5,
@@ -3671,6 +3673,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix(),
                 fills: [],
                 strokes: [{
+                  type: 'solid',
                   index: 1,
                   color: '#FF0000',
                   weight: 3,
@@ -4612,7 +4615,7 @@ describe('FLARenderer', () => {
                 type: 'shape',
                 matrix: createMatrix(),
                 fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
-                strokes: [{ index: 1, color: '#000000', weight: 2 }],
+                strokes: [{ type: 'solid', index: 1, color: '#000000', weight: 2 }],
                 edges: [{
                   fillStyle0: 1,
                   strokeStyle: 1,
@@ -5460,7 +5463,7 @@ describe('FLARenderer', () => {
                 type: 'shape',
                 matrix: createMatrix(),
                 fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
-                strokes: [{ index: 1, color: '#000000', weight: 2 }],
+                strokes: [{ type: 'solid', index: 1, color: '#000000', weight: 2 }],
                 edges: [{
                   fillStyle0: 1,
                   strokeStyle: 1,
@@ -6068,6 +6071,7 @@ describe('FLARenderer', () => {
                 matrix: createMatrix(),
                 fills: [],
                 strokes: [{
+                  type: 'solid',
                   index: 1,
                   color: '#0000FF',
                   weight: 5,
@@ -7262,7 +7266,7 @@ describe('FLARenderer', () => {
                 type: 'shape',
                 matrix: createMatrix(),
                 fills: [{ index: 1, type: 'solid', color: '#FFCC99' }],
-                strokes: [{ index: 2, color: '#000000', weight: 1 }],
+                strokes: [{ type: 'solid', index: 2, color: '#000000', weight: 1 }],
                 edges: [
                   // Main boundary edge defining the filled rectangle
                   {
@@ -7311,7 +7315,7 @@ describe('FLARenderer', () => {
                 type: 'shape',
                 matrix: createMatrix(),
                 fills: [{ index: 1, type: 'solid', color: '#FFFFFF' }],
-                strokes: [{ index: 2, color: '#FF0000', weight: 2 }],
+                strokes: [{ type: 'solid', index: 2, color: '#FF0000', weight: 2 }],
                 edges: [
                   // Boundary
                   {
@@ -8239,7 +8243,7 @@ describe('FLARenderer', () => {
                 type: 'shape',
                 matrix: createMatrix(),
                 fills: [],
-                strokes: [{ index: 1, color: '#000000', weight: 2 }],
+                strokes: [{ type: 'solid', index: 1, color: '#000000', weight: 2 }],
                 edges: [],
               }],
               morphShape: {

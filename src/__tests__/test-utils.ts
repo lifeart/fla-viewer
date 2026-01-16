@@ -602,6 +602,7 @@ export function createStroke(
 ): StrokeStyle {
   const { index = 1, caps, joints } = options;
   return {
+    type: 'solid',
     index,
     color,
     weight,

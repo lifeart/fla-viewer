@@ -111,21 +111,30 @@ FORMAT_SPEEX = 11
 
 ## Video Playback (Low Priority)
 
-Currently implemented: Placeholder rendering only
+Currently implemented: FLV container parsing, placeholder rendering
 
-### Missing Features
+### Implemented Features
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **FLV Parsing** | ✅ | Full FLV container parsing (header, video/audio/script tags) |
+| **Metadata Extraction** | ✅ | Duration, dimensions, framerate, codecs from FLV metadata |
+| **Keyframe Detection** | ✅ | Extract keyframes for seeking support |
+| **Codec Identification** | ✅ | Detect H.263, VP6, AVC, MP3, AAC, etc. |
+
+### Missing Features (Require Codec Decoders)
 
 | Feature | JPEXS Reference | Description |
 |---------|-----------------|-------------|
-| **FLV Parsing** | `xfl/MovieBinDataGenerator.java` | Parse FLV container format |
 | **H.263 Codec** | FLV video tags | Sorenson Spark video decoding |
 | **VP6 Codec** | FLV video tags | On2 VP6 video decoding |
 | **Audio Sync** | FLV audio tags | Synchronize embedded audio with video |
 
 **Implementation notes:**
-- Full video playback requires codec support (possibly via WebAssembly FFmpeg)
+- FLV container parsing is complete - extracts all video/audio tags
+- Full video playback requires codec decoders (possibly via WebAssembly FFmpeg)
 - Consider linking to external video players as interim solution
-- FLV format is well-documented and parseable
+- Video info (codec, duration, frames) is now available in debug panel
 
 ---
 
