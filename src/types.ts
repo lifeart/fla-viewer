@@ -295,6 +295,14 @@ export interface PlayerState {
   fps: number;
 }
 
+// MovieClip instance state for independent playback
+export interface MovieClipInstanceState {
+  playhead: number;        // Current frame within the MovieClip's timeline
+  totalFrames: number;     // Total frames in this MovieClip
+  startParentFrame: number; // Parent frame when this instance first appeared
+  isPlaying: boolean;      // Whether this instance is currently playing
+}
+
 // Filters
 export interface BlurFilter {
   type: 'blur';

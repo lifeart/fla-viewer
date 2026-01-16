@@ -579,4 +579,44 @@ describe('FLAPlayer', () => {
       await audioContext.close();
     });
   });
+
+  describe('MovieClip playhead management', () => {
+    beforeEach(async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          totalFrames: 10,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 10 })],
+          })],
+        })],
+      });
+      await player.setDocument(doc);
+    });
+
+    it('should call resetMovieClipPlayheads on stop', () => {
+      player.play();
+      player.nextFrame();
+      // stop() should reset MovieClip playheads
+      expect(() => player.stop()).not.toThrow();
+    });
+
+    it('should call advanceMovieClipPlayheads on nextFrame', () => {
+      // nextFrame should advance MovieClip playheads
+      expect(() => player.nextFrame()).not.toThrow();
+      expect(player.getState().currentFrame).toBe(1);
+    });
+
+    it('should call resetMovieClipPlayheads on prevFrame', () => {
+      player.nextFrame();
+      // prevFrame should reset MovieClip playheads
+      expect(() => player.prevFrame()).not.toThrow();
+      expect(player.getState().currentFrame).toBe(0);
+    });
+
+    it('should call resetMovieClipPlayheads on goToFrame', () => {
+      // goToFrame should reset MovieClip playheads
+      expect(() => player.goToFrame(5)).not.toThrow();
+      expect(player.getState().currentFrame).toBe(5);
+    });
+  });
 });

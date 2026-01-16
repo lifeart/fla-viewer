@@ -117,6 +117,8 @@ export class FLAPlayer {
   stop(): void {
     this.pause();
     this.state.currentFrame = 0;
+    // Reset MovieClip playheads when stopping
+    this.renderer.resetMovieClipPlayheads();
     this.render();
     this.notifyStateChange();
   }
@@ -193,6 +195,8 @@ export class FLAPlayer {
   nextFrame(): void {
     this.pause();
     this.state.currentFrame = (this.state.currentFrame + 1) % this.state.totalFrames;
+    // Advance MovieClip playheads along with main timeline
+    this.renderer.advanceMovieClipPlayheads();
     this.render();
     this.notifyStateChange();
   }
@@ -200,6 +204,8 @@ export class FLAPlayer {
   prevFrame(): void {
     this.pause();
     this.state.currentFrame = (this.state.currentFrame - 1 + this.state.totalFrames) % this.state.totalFrames;
+    // Reset MovieClip playheads when going backwards (can't easily reverse independent playheads)
+    this.renderer.resetMovieClipPlayheads();
     this.render();
     this.notifyStateChange();
   }
@@ -218,6 +224,8 @@ export class FLAPlayer {
     }
 
     this.state.currentFrame = Math.max(0, Math.min(frame, this.state.totalFrames - 1));
+    // Reset MovieClip playheads when seeking (accurate state would require full replay)
+    this.renderer.resetMovieClipPlayheads();
     this.render();
     this.notifyStateChange();
 
@@ -249,6 +257,11 @@ export class FLAPlayer {
       // Restart audio when looping back to beginning
       if (this.state.currentFrame < prevFrame) {
         this.startAudio();
+        // Reset MovieClip playheads when main timeline loops
+        this.renderer.resetMovieClipPlayheads();
+      } else {
+        // Advance MovieClip playheads along with main timeline
+        this.renderer.advanceMovieClipPlayheads();
       }
 
       this.render();

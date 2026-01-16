@@ -159,7 +159,7 @@ Currently implemented: Button symbols show first frame only, frame labels are pa
 | **Button States** | ❌ | Up, Over, Down, Hit test frames not implemented |
 | **Mouse Events** | ❌ | Click, rollover, rollout detection not implemented |
 | **Hit Area** | ❌ | Not implemented |
-| **MovieClip Independence** | ❌ | Each instance shares parent timeline |
+| **MovieClip Independence** | ✅ | Each instance has independent playhead, auto-advances during playback |
 | **Scenes** | ❌ | Multiple scene support not implemented |
 | **Frame Scripts** | ❌ | ActionScript not executed |
 

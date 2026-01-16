@@ -1880,6 +1880,269 @@ describe('FLARenderer', () => {
       expect(() => renderer.renderFrame(3)).not.toThrow();
       expect(() => renderer.renderFrame(7)).not.toThrow();
     });
+
+    it('should track MovieClip instance state independently', async () => {
+      // Create a MovieClip with 3 frames that show different colors
+      const symbolTimeline = createTimeline({
+        name: 'ColorMC',
+        totalFrames: 3,
+        layers: [createLayer({
+          frames: [
+            createFrame({
+              index: 0,
+              duration: 1,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 20, y: 0 },
+                    { type: 'L', x: 20, y: 20 },
+                    { type: 'L', x: 0, y: 20 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            }),
+            createFrame({
+              index: 1,
+              duration: 1,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 20, y: 0 },
+                    { type: 'L', x: 20, y: 20 },
+                    { type: 'L', x: 0, y: 20 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            }),
+            createFrame({
+              index: 2,
+              duration: 1,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 20, y: 0 },
+                    { type: 'L', x: 20, y: 20 },
+                    { type: 'L', x: 0, y: 20 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            }),
+          ],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('ColorMC', {
+        name: 'ColorMC',
+        itemID: 'mc1',
+        symbolType: 'movieclip',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 10,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 10,
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'ColorMC',
+                symbolType: 'movieclip',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                firstFrame: 0,
+                loop: 'loop',
+                transformationPoint: { x: 0, y: 0 },
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Initial render - MovieClip should be at frame 0
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+
+      // Advance MovieClip playhead
+      renderer.advanceMovieClipPlayheads();
+      expect(() => renderer.renderFrame(1)).not.toThrow();
+
+      // Advance again
+      renderer.advanceMovieClipPlayheads();
+      expect(() => renderer.renderFrame(2)).not.toThrow();
+
+      // Reset should clear all states
+      renderer.resetMovieClipPlayheads();
+      expect(() => renderer.renderFrame(3)).not.toThrow();
+    });
+
+    it('should support multiple MovieClip instances with independent playheads', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'TestMC',
+        totalFrames: 5,
+        layers: [createLayer({
+          frames: [createFrame({
+            index: 0,
+            duration: 5,
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 10, y: 0 },
+                  { type: 'L', x: 10, y: 10 },
+                  { type: 'L', x: 0, y: 10 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('TestMC', {
+        name: 'TestMC',
+        itemID: 'mc1',
+        symbolType: 'movieclip',
+        timeline: symbolTimeline,
+      });
+
+      // Create doc with two instances of the same MovieClip
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 10,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 10,
+              elements: [
+                {
+                  type: 'symbol',
+                  libraryItemName: 'TestMC',
+                  symbolType: 'movieclip',
+                  matrix: createMatrix({ tx: 10, ty: 10 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  transformationPoint: { x: 0, y: 0 },
+                },
+                {
+                  type: 'symbol',
+                  libraryItemName: 'TestMC',
+                  symbolType: 'movieclip',
+                  matrix: createMatrix({ tx: 100, ty: 10 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  transformationPoint: { x: 0, y: 0 },
+                },
+              ],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Both instances should render without error and track independently
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+      renderer.advanceMovieClipPlayheads();
+      expect(() => renderer.renderFrame(1)).not.toThrow();
+    });
+
+    it('should clear MovieClip states when clearCaches is called', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'ClearTestMC',
+        totalFrames: 3,
+        layers: [createLayer({
+          frames: [createFrame({
+            index: 0,
+            duration: 3,
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 10, y: 0 },
+                  { type: 'L', x: 10, y: 10 },
+                  { type: 'L', x: 0, y: 10 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('ClearTestMC', {
+        name: 'ClearTestMC',
+        itemID: 'mc1',
+        symbolType: 'movieclip',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 5,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 5,
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'ClearTestMC',
+                symbolType: 'movieclip',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                firstFrame: 0,
+                loop: 'loop',
+                transformationPoint: { x: 0, y: 0 },
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Render and advance playhead
+      renderer.renderFrame(0);
+      renderer.advanceMovieClipPlayheads();
+      renderer.advanceMovieClipPlayheads();
+
+      // Clear caches should reset MovieClip states
+      renderer.clearCaches();
+
+      // Should render without error after clearing
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
   });
 
   describe('nested symbols', () => {

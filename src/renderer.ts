@@ -21,7 +21,8 @@ import type {
   ColorTransform,
   BlendMode,
   Rectangle,
-  Symbol
+  Symbol,
+  MovieClipInstanceState
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
 
@@ -71,6 +72,12 @@ export class FLARenderer {
   private symbolBitmapCache = new Map<string, { canvas: HTMLCanvasElement, bounds: { width: number, height: number, offsetX: number, offsetY: number } }>();
   private followCamera: boolean = false;
   private manualCameraLayerIndex: number | undefined = undefined;
+
+  // MovieClip instance state tracking for independent playback
+  // Key format: "instancePath:symbolName" where instancePath is the path through nested symbols
+  private movieClipStates = new Map<string, MovieClipInstanceState>();
+  private currentInstancePath: string[] = []; // Stack of instance identifiers for nested symbols
+  private currentParentFrame: number = 0; // Current parent frame index for detecting instance appearance
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -265,6 +272,53 @@ export class FLARenderer {
     this.shapePathCache = new WeakMap<Shape, CachedShapePaths>();
     // Clear symbol bitmap cache
     this.symbolBitmapCache.clear();
+    // Clear MovieClip instance states
+    this.movieClipStates.clear();
+    this.currentInstancePath = [];
+  }
+
+  // Generate a unique key for a MovieClip instance based on its position in the hierarchy
+  private generateInstanceKey(symbolName: string, elementIndex: number): string {
+    const pathKey = this.currentInstancePath.length > 0
+      ? this.currentInstancePath.join('/') + '/'
+      : '';
+    return `${pathKey}${symbolName}@${elementIndex}`;
+  }
+
+  // Get or create state for a MovieClip instance
+  private getOrCreateMovieClipState(
+    key: string,
+    totalFrames: number,
+    parentFrame: number
+  ): MovieClipInstanceState {
+    let state = this.movieClipStates.get(key);
+    if (!state) {
+      // New instance - create initial state
+      state = {
+        playhead: 0,
+        totalFrames,
+        startParentFrame: parentFrame,
+        isPlaying: true
+      };
+      this.movieClipStates.set(key, state);
+    }
+    return state;
+  }
+
+  // Advance all MovieClip playheads by one frame
+  // Called by the player when advancing to the next frame
+  advanceMovieClipPlayheads(): void {
+    for (const state of this.movieClipStates.values()) {
+      if (state.isPlaying && state.totalFrames > 1) {
+        state.playhead = (state.playhead + 1) % state.totalFrames;
+      }
+    }
+  }
+
+  // Reset all MovieClip playheads to frame 0
+  // Called when seeking to a specific frame or restarting
+  resetMovieClipPlayheads(): void {
+    this.movieClipStates.clear();
   }
 
   // Enable/disable following the camera/ramka layer as viewport
@@ -349,6 +403,8 @@ export class FLARenderer {
     this.missingSymbols.clear();
     this.loadedFonts.clear();
     this.loadingFonts.clear();
+    this.movieClipStates.clear();
+    this.currentInstancePath = [];
 
     // Update canvas size (skip for offscreen rendering)
     if (!skipResize) {
@@ -1134,9 +1190,9 @@ export class FLARenderer {
           nextDisplayElement = nextKeyframe.elements[elementIndex];
         }
 
-        this.renderDisplayElementWithTween(element, nextDisplayElement, progress, depth, frameIndex, frame);
+        this.renderDisplayElementWithTween(element, nextDisplayElement, progress, depth, frameIndex, frame, elementIndex);
       } else {
-        this.renderDisplayElement(element, depth, frameIndex);
+        this.renderDisplayElement(element, depth, frameIndex, elementIndex);
       }
     }
   }
@@ -1239,7 +1295,7 @@ export class FLARenderer {
     return 3 * mt2 * (p1 - p0) + 6 * mt * t * (p2 - p1) + 3 * t2 * (p3 - p2);
   }
 
-  private renderDisplayElementWithTween(element: DisplayElement, nextDisplayElement: DisplayElement, progress: number, depth: number, parentFrameIndex: number, frame?: Frame): void {
+  private renderDisplayElementWithTween(element: DisplayElement, nextDisplayElement: DisplayElement, progress: number, depth: number, parentFrameIndex: number, frame?: Frame, elementIndex: number = 0): void {
     if (element.type === 'symbol' && nextDisplayElement.type === 'symbol') {
       // Interpolate matrix transforms
       const startMatrix = element.matrix;
@@ -1293,9 +1349,9 @@ export class FLARenderer {
         ...(interpolatedColorTransform && { colorTransform: interpolatedColorTransform })
       };
 
-      this.renderDisplayElement(tweenedDisplayElement, depth, parentFrameIndex);
+      this.renderDisplayElement(tweenedDisplayElement, depth, parentFrameIndex, elementIndex);
     } else {
-      this.renderDisplayElement(element, depth, parentFrameIndex);
+      this.renderDisplayElement(element, depth, parentFrameIndex, elementIndex);
     }
   }
 
@@ -1438,9 +1494,9 @@ export class FLARenderer {
     };
   }
 
-  private renderDisplayElement(element: DisplayElement, depth: number, parentFrameIndex: number): void {
+  private renderDisplayElement(element: DisplayElement, depth: number, parentFrameIndex: number, elementIndex: number = 0): void {
     if (element.type === 'symbol') {
-      this.renderSymbolInstance(element, depth, parentFrameIndex);
+      this.renderSymbolInstance(element, depth, parentFrameIndex, elementIndex);
     } else if (element.type === 'shape') {
       this.renderShape(element, depth);
     } else if (element.type === 'video') {
@@ -1455,7 +1511,7 @@ export class FLARenderer {
   private missingSymbols = new Set<string>();
   private currentKeyframeStart: number = 0;  // Track keyframe start for loop calculation
 
-  private renderSymbolInstance(instance: SymbolInstance, depth: number, parentFrameIndex: number): void {
+  private renderSymbolInstance(instance: SymbolInstance, depth: number, parentFrameIndex: number, elementIndex: number = 0): void {
     if (!this.doc) return;
 
     // Skip rendering if instance is explicitly set to invisible
@@ -1544,29 +1600,46 @@ export class FLARenderer {
 
     let symbolFrame: number;
 
-    // MovieClips and Buttons play independently from parent timeline
-    // For static rendering without ActionScript, treat them as 'play once'
-    const effectiveLoop = (instance.symbolType === 'movieclip' || instance.symbolType === 'button')
-      ? 'play once'
-      : instance.loop;
+    // MovieClips play independently from parent timeline with their own playhead
+    if (instance.symbolType === 'movieclip') {
+      // Generate unique instance key for this MovieClip
+      const instanceKey = this.generateInstanceKey(instance.libraryItemName, elementIndex);
 
-    if (effectiveLoop === 'single frame') {
-      // Always show the specified firstFrame
-      symbolFrame = firstFrame % totalSymbolFrames;
-    } else if (effectiveLoop === 'loop') {
-      // Sync with parent timeline: advance from firstFrame based on parent frame offset
-      // Loop within the specified frame range (firstFrame to lastFrame)
-      const frameOffset = parentFrameIndex - this.currentKeyframeStart;
-      if (lastFrame !== undefined) {
-        // Loop within the specified range
-        symbolFrame = firstFrame + (frameOffset % frameRange);
-      } else {
-        symbolFrame = (firstFrame + frameOffset) % totalSymbolFrames;
-      }
+      // Get or create instance state
+      const state = this.getOrCreateMovieClipState(
+        instanceKey,
+        totalSymbolFrames,
+        parentFrameIndex
+      );
+
+      // Use the instance's independent playhead
+      symbolFrame = state.playhead % totalSymbolFrames;
+
+      // Push this instance onto the path for nested MovieClips
+      this.currentInstancePath.push(`${instance.libraryItemName}@${elementIndex}`);
+    } else if (instance.symbolType === 'button') {
+      // Buttons show first frame (up state) without ActionScript
+      symbolFrame = 0;
     } else {
-      // 'play once' - advance but clamp at last frame (or effectiveLastFrame)
-      const frameOffset = parentFrameIndex - this.currentKeyframeStart;
-      symbolFrame = Math.min(firstFrame + frameOffset, effectiveLastFrame);
+      // Graphic symbols sync with parent timeline based on loop mode
+      if (instance.loop === 'single frame') {
+        // Always show the specified firstFrame
+        symbolFrame = firstFrame % totalSymbolFrames;
+      } else if (instance.loop === 'loop') {
+        // Sync with parent timeline: advance from firstFrame based on parent frame offset
+        // Loop within the specified frame range (firstFrame to lastFrame)
+        const frameOffset = parentFrameIndex - this.currentKeyframeStart;
+        if (lastFrame !== undefined) {
+          // Loop within the specified range
+          symbolFrame = firstFrame + (frameOffset % frameRange);
+        } else {
+          symbolFrame = (firstFrame + frameOffset) % totalSymbolFrames;
+        }
+      } else {
+        // 'play once' - advance but clamp at last frame (or effectiveLastFrame)
+        const frameOffset = parentFrameIndex - this.currentKeyframeStart;
+        symbolFrame = Math.min(firstFrame + frameOffset, effectiveLastFrame);
+      }
     }
 
     // Render symbol's timeline (with 9-slice scaling if applicable)
@@ -1580,9 +1653,14 @@ export class FLARenderer {
       this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
     }
 
-    // Pop symbol path
+    // Pop symbol path for debugging
     if (this.debugMode) {
       this.debugSymbolPath.pop();
+    }
+
+    // Pop instance path for MovieClips (for nested MovieClip tracking)
+    if (instance.symbolType === 'movieclip') {
+      this.currentInstancePath.pop();
     }
 
     // Clear filters if applied
