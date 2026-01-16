@@ -601,65 +601,128 @@ Edge contributions are collected per fill style, then sorted into connected chai
 
 ## Adobe FLA Bitmap Format (.dat files in bin/)
 
-Source: https://stackoverflow.com/a/78489790 (CC BY-SA 4.0, DaniilSV)
+Reference: [JPEXS Free Flash Decompiler](https://github.com/jindrapetrik/jpexs-decompiler) source code
+- `libsrc/ffdec_lib/src/com/jpexs/decompiler/flash/xfl/ImageBinDataGenerator.java`
+- `libsrc/ffdec_lib/src/com/jpexs/decompiler/flash/xfl/LosslessImageBinDataReader.java`
 
-### Header Structure
+### File Types in bin/ Folder
+
+The bin/ folder can contain multiple file types identified by magic bytes:
+
+| Magic Bytes | Format | Description |
+|-------------|--------|-------------|
+| `03 05` | FLA Bitmap (32-bit) | Lossless ABGR with optional alpha |
+| `03 03` | FLA Bitmap (8-bit) | Palette-indexed |
+| `FF D8 FF` | JPEG | Raw JPEG image data |
+| `89 50 4E 47` | PNG | Raw PNG image data |
+| `FF FB` | MP3 | Audio data |
+
+### FLA Bitmap Header Structure (32-bit: 03 05)
 
 ```
-Offset  Size  Field           Description
-──────────────────────────────────────────────────────────────────
-0       1     Media Type      0x03 = Bitmap, 0x01 = Sound
-1       1     Depth Type      0x05 = 16-bit, 0x03 = 8-bit
-2-3     2     Row Stride      Length of decompressed row data (LE)
-4-5     2     Width           Image width in pixels (LE)
-6-7     2     Height          Image height in pixels (LE)
-8-11    4     RECT X          Always 0
-12-15   4     RECT Width      Width in twips (LE)
-16-19   4     RECT Y          Always 0
-20-23   4     RECT Height     Height in twips (LE)
-24      1     Has Alpha       0 = no alpha, 1 = has alpha
-25      1     Compressed      1 = zlib compressed
-26-27   2     Zlib Header Len 0x0020 typically
-28-29   2     Zlib Header     0x78 0x01
-30+     var   Compressed Data Chunked zlib stream
+Offset  Size  Type    Field           Description
+──────────────────────────────────────────────────────────────────────────
+0-1     2     bytes   magic           0x03 0x05 (32-bit lossless bitmap)
+2-3     2     UI16 LE rowSize         width × 4 (bytes per row)
+4-5     2     UI16 LE width           Image width in pixels
+6-7     2     UI16 LE height          Image height in pixels
+8-11    4     UI32 LE frameLeft       Always 0
+12-15   4     UI32 LE frameRight      Width in twips (÷20 = pixels)
+16-19   4     UI32 LE frameTop        Always 0
+20-23   4     UI32 LE frameBottom     Height in twips (÷20 = pixels)
+24      1     UI8     hasAlpha        0 = no alpha, 1 = has alpha channel
+25      1     UI8     variant         1 = chunked zlib compression
+26+     var           data            Chunked compressed pixel data
 ```
 
-### Compression Format
+### Chunked Compression Format
 
-Data is stored in chunked zlib blocks:
+When `variant=1`, data is stored in chunks (max 2048 bytes each):
+
 ```
-[2 bytes: chunk length][chunk data]...
-[0x0000 = end of stream]
+┌─────────────────────────────────────────────────────────────┐
+│ [UI16 LE: chunk1 length] [chunk1 deflate data]              │
+│ [UI16 LE: chunk2 length] [chunk2 deflate data]              │
+│ ...                                                         │
+│ [UI16 LE: 0x0000] ← terminator                              │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### Pixel Format: ARGB
+The first chunk typically starts with zlib header `78 01` (deflate, no dictionary).
 
-32-bit pixels stored as **ARGB** (Alpha, Red, Green, Blue):
-- Byte 0: Alpha (0-255)
-- Byte 1: Red (0-255)
-- Byte 2: Green (0-255)
-- Byte 3: Blue (0-255)
+### Pixel Format: ABGR (NOT ARGB!)
 
-Canvas ImageData requires RGBA, so conversion needed:
+32-bit pixels are stored as **ABGR** (Alpha, Blue, Green, Red):
+```
+Byte 0: Alpha (0-255)
+Byte 1: Blue  (0-255)  ← Note: Blue before Red!
+Byte 2: Green (0-255)
+Byte 3: Red   (0-255)
+```
+
+Canvas ImageData requires RGBA, so conversion is:
 ```typescript
-// ARGB → RGBA conversion
-rgba[dstIdx + 0] = argb[srcIdx + 1];  // R ← byte 1
-rgba[dstIdx + 1] = argb[srcIdx + 2];  // G ← byte 2
-rgba[dstIdx + 2] = argb[srcIdx + 3];  // B ← byte 3
-rgba[dstIdx + 3] = argb[srcIdx + 0];  // A ← byte 0
+// ABGR → RGBA conversion (per JPEXS source)
+rgba[dstIdx + 0] = abgr[srcIdx + 3];  // R ← byte 3
+rgba[dstIdx + 1] = abgr[srcIdx + 2];  // G ← byte 2
+rgba[dstIdx + 2] = abgr[srcIdx + 1];  // B ← byte 1
+rgba[dstIdx + 3] = abgr[srcIdx + 0];  // A ← byte 0
 ```
 
-### 8-bit Palette Mode (Depth Type = 0x03)
+### Alpha Premultiplication
 
-When depth is 8-bit, a palette follows the header:
+Colors are stored **premultiplied** by alpha. When reading, unmultiply:
+
+```typescript
+// Writer (ImageBinDataGenerator.java):
+if (alpha != 0 && alpha != 255) {
+  alpha = alpha + 1;  // Adjustment for precision
+}
+color = Math.floor(color * alpha / 256);
+
+// Reader (LosslessImageBinDataReader.java):
+if (alpha > 0 && alpha < 255) {
+  color = Math.floor(color * 256 / alpha);
+}
 ```
-[2 bytes: palette entry count (1-256)]
-[N × 3 or 4 bytes: RGB or RGBA palette entries]
-[pixel data as palette indices]
+
+### 8-bit Palette Mode (magic: 03 03)
+
+When first bytes are `03 03`, the format uses palette indexing:
+
+```
+Offset  Size  Field
+──────────────────────────────────────────
+0-1     2     magic (03 03)
+2-25    24    header (same structure as 32-bit)
+26-27   2     palette entry count (1-256) as UI16 LE
+28+     N×4   palette entries (ABGR, 4 bytes each)
+...     var   pixel data as palette indices (1 byte per pixel)
+```
+
+### Sample File Analysis
+
+```
+File: M 1 1635339689.dat (extracted2)
+03 05           magic (32-bit lossless)
+00 40           rowSize = 0x4000 = 16384 (4096 × 4 bytes)
+00 10           width = 0x1000 = 4096 pixels
+56 02           height = 0x0256 = 598 pixels
+00 00 00 00     frameLeft = 0
+00 40 01 00     frameRight = 0x00014000 = 81920 twips (4096 px)
+00 00 00 00     frameTop = 0
+b8 2e 00 00     frameBottom = 0x00002eb8 = 11960 twips (598 px)
+01              hasAlpha = 1 (true)
+01              variant = 1 (chunked compression)
+00 08           chunk length = 0x0800 = 2048 bytes
+78 01           zlib header (deflate, no dict)
+...             compressed ABGR pixel data
 ```
 
 ### Implementation Notes
 
-- Extra bytes beyond width×height×4 are trailing padding (truncate)
-- Some files require preset zlib dictionary (32KB zeros)
-- Decompression offset: byte 30 (standard) or 32 (alternate format)
+- Extra bytes beyond `width × height × 4` are trailing padding (truncate)
+- Some files require preset zlib dictionary (32KB zeros) for decompression
+- Chunked format: concatenate all chunks before inflating, or inflate incrementally
+- JPEG files in bin/ are passed through directly (no conversion needed)
+- Verify `rowSize == width * 4` for consistency check

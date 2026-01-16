@@ -1168,20 +1168,25 @@ export class FLAParser {
   /**
    * Decode Adobe FLA bitmap format (.dat files in bin/ folder).
    *
+   * Reference: JPEXS Free Flash Decompiler
+   * https://github.com/jindrapetrik/jpexs-decompiler
+   * - ImageBinDataGenerator.java (writer)
+   * - LosslessImageBinDataReader.java (reader)
+   *
    * Format structure:
-   * - Bytes 0-1: Format marker (0x03 0x05)
+   * - Bytes 0-1: Format marker (0x03 0x05 for 32-bit, 0x03 0x03 for 8-bit)
    * - Bytes 2-3: Row stride (width * 4, little endian)
    * - Bytes 4-5: Width in pixels (little endian)
    * - Bytes 6-7: Height in pixels (little endian)
-   * - Bytes 8-11: Reserved (zeros)
+   * - Bytes 8-11: frameLeft in twips (always 0)
    * - Bytes 12-15: frameRight in twips (little endian)
-   * - Bytes 16-19: Reserved (zeros)
+   * - Bytes 16-19: frameTop in twips (always 0)
    * - Bytes 20-23: frameBottom in twips (little endian)
-   * - Bytes 24-27: Format flags
-   *   - Byte 26: Sub-format (0 = standard, 2 = alternate)
-   *   - Byte 27: 8 for format 0, 0 for format 2
-   * - Bytes 28-29: Zlib header (0x78 0x01)
-   * - Bytes 30+ (format 0) or 32+ (format 2): Deflate compressed ARGB pixel data
+   * - Byte 24: hasAlpha (0 or 1)
+   * - Byte 25: variant (1 = chunked compression)
+   * - Bytes 26+: Chunked compressed data:
+   *   [UI16 chunk_length][chunk_data]... [UI16 0x0000 terminator]
+   *   First chunk starts with zlib header (0x78 0x01)
    *
    * Decompression strategy (in order of attempts):
    * 1. Raw deflate - works for most well-formed files
@@ -1196,7 +1201,8 @@ export class FLAParser {
    *    - Scans for valid deflate segments after corruption points
    *    - Combines all recovered segments to maximize data recovery
    *
-   * Pixel format: ARGB (alpha in byte 0, then RGB), converted to RGBA for Canvas
+   * Pixel format: ABGR (alpha, blue, green, red), converted to RGBA for Canvas
+   * Colors are stored premultiplied by alpha and must be unmultiplied when reading.
    */
   private async decodeFlaBitmap(data: ArrayBuffer, expectedWidth: number, expectedHeight: number, onAlgoProgress?: (algo: string) => void): Promise<HTMLImageElement | null> {
     const algoProgress = onAlgoProgress || (() => {});
@@ -1479,18 +1485,33 @@ export class FLAParser {
       const imageData = ctx.createImageData(width, height);
       const rgba = imageData.data;
 
-      // Copy pixel data - ARGB format (Adobe FLA native format)
-      // Source: https://stackoverflow.com/a/78489790
-      // ARGB → RGBA conversion for Canvas ImageData
+      // Copy pixel data - ABGR format (Adobe FLA native format per JPEXS decompiler)
+      // Reference: https://github.com/jindrapetrik/jpexs-decompiler
+      // File: libsrc/ffdec_lib/src/com/jpexs/decompiler/flash/xfl/LosslessImageBinDataReader.java
+      // ABGR → RGBA conversion for Canvas ImageData
+      // Also handles alpha premultiplication (colors are stored premultiplied)
       const pixelCount = width * height;
       for (let i = 0; i < pixelCount; i++) {
         const srcIdx = i * 4;
         const dstIdx = i * 4;
         if (srcIdx + 3 < actualPixelData.length) {
-          rgba[dstIdx] = actualPixelData[srcIdx + 1];     // R ← byte 1
-          rgba[dstIdx + 1] = actualPixelData[srcIdx + 2]; // G ← byte 2
-          rgba[dstIdx + 2] = actualPixelData[srcIdx + 3]; // B ← byte 3
-          rgba[dstIdx + 3] = actualPixelData[srcIdx];     // A ← byte 0
+          const a = actualPixelData[srcIdx];     // Alpha (byte 0)
+          let b = actualPixelData[srcIdx + 1];   // Blue  (byte 1)
+          let g = actualPixelData[srcIdx + 2];   // Green (byte 2)
+          let r = actualPixelData[srcIdx + 3];   // Red   (byte 3)
+
+          // Unmultiply alpha (colors are stored premultiplied)
+          // Per JPEXS: if alpha is not 0 or 255, unmultiply using: color = floor(color * 256 / alpha)
+          if (a > 0 && a < 255) {
+            r = Math.min(255, Math.floor(r * 256 / a));
+            g = Math.min(255, Math.floor(g * 256 / a));
+            b = Math.min(255, Math.floor(b * 256 / a));
+          }
+
+          rgba[dstIdx] = r;         // R ← byte 3 (unmultiplied)
+          rgba[dstIdx + 1] = g;     // G ← byte 2 (unmultiplied)
+          rgba[dstIdx + 2] = b;     // B ← byte 1 (unmultiplied)
+          rgba[dstIdx + 3] = a;     // A ← byte 0
         }
       }
 

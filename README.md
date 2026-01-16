@@ -121,7 +121,7 @@ npm run dev     # → localhost:3000
 
 ## Bitmap Recovery
 
-Adobe `.dat` files use deflate-compressed ARGB data. Some files are corrupted or use preset dictionaries.
+Adobe `.dat` files use chunked deflate-compressed ABGR pixel data. Some files are corrupted or use preset dictionaries.
 
 | Strategy | Recovery | Speed |
 |----------|:--------:|:-----:|
