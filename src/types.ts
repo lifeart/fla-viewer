@@ -75,6 +75,11 @@ export interface Frame {
   morphShape?: MorphShape; // For shape tweens
   label?: string; // Frame label name
   labelType?: 'name' | 'comment' | 'anchor'; // Type of frame label
+  // Motion tween properties
+  motionTweenRotate?: 'cw' | 'ccw' | 'none'; // Rotation direction
+  motionTweenRotateTimes?: number; // Number of full rotations
+  motionTweenScale?: boolean; // Enable scale interpolation
+  motionTweenOrientToPath?: boolean; // Orient to motion path
 }
 
 export interface FrameSound {

@@ -122,20 +122,25 @@ Currently implemented: Placeholder rendering only
 
 ---
 
-## Tweening & Animation (Low Priority)
+## Tweening & Animation (Low Priority) ✅
 
-Currently implemented: Motion tweens with linear/custom easing, shape tweens
+Currently implemented: Motion tweens with linear/custom easing, shape tweens, rotation tweens (CW/CCW), scale tweens, color transform tweening
+
+### Implementation Details
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Classic Tween** | ✅ | XFL `tweenType="motion"` fully supported |
+| **Motion Path** | ✅ | `motionTweenOrientToPath` parsed (rendering basic) |
+| **Rotation Tweens** | ✅ | CW/CCW rotation with `motionTweenRotateTimes` count |
+| **Scale Tweens** | ✅ | `motionTweenScale` parsed, scale interpolation via matrix decomposition |
+| **Color Transform Tweening** | ✅ | Full interpolation of all colorTransform values (alpha, RGB multipliers and offsets) |
 
 ### Missing Features
 
-| Feature | JPEXS Reference | Description |
-|---------|-----------------|-------------|
-| **Classic Tween** | XFL `tweenType="motion"` | Legacy motion tween format (pre-CS4) |
-| **Motion Path** | `motionTweenOrientToPath` | Orient objects along motion path |
-| **Rotation Tweens** | `motionTweenRotate` | CW/CCW rotation with count |
-| **Scale Tweens** | `motionTweenScale` | Explicit scale interpolation |
-| **Tint Tweens** | Color transform keyframes | Interpolate between tint colors |
-| **Color Transform Tweening** | Motion tween with color | Interpolate colorTransform values between keyframes |
+| Feature | Description |
+|---------|-------------|
+| **Orient to Path Rendering** | `motionTweenOrientToPath` is parsed but not yet rendered |
 
 **JPEXS easing:**
 ```java

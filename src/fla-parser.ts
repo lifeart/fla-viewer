@@ -553,6 +553,12 @@ export class FLAParser {
       const tweenType = frameEl.getAttribute('tweenType') as 'motion' | 'shape' | undefined;
       const acceleration = frameEl.getAttribute('acceleration');
 
+      // Motion tween properties
+      const motionTweenRotate = frameEl.getAttribute('motionTweenRotate') as 'cw' | 'ccw' | 'none' | null;
+      const motionTweenRotateTimes = frameEl.getAttribute('motionTweenRotateTimes');
+      const motionTweenScale = frameEl.getAttribute('motionTweenScale');
+      const motionTweenOrientToPath = frameEl.getAttribute('motionTweenOrientToPath');
+
       const elements = this.parseElements(frameEl);
       const tweens = this.parseTweens(frameEl);
 
@@ -577,7 +583,11 @@ export class FLAParser {
         sound,
         ...(morphShape && { morphShape }),
         ...(label && { label }),
-        ...(labelType && { labelType })
+        ...(labelType && { labelType }),
+        ...(motionTweenRotate && { motionTweenRotate }),
+        ...(motionTweenRotateTimes && { motionTweenRotateTimes: parseInt(motionTweenRotateTimes) }),
+        ...(motionTweenScale === 'true' && { motionTweenScale: true }),
+        ...(motionTweenOrientToPath === 'true' && { motionTweenOrientToPath: true })
       });
     }
 

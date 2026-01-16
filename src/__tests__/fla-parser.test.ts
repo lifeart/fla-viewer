@@ -1339,6 +1339,153 @@ describe('FLAParser', () => {
     });
   });
 
+  describe('motion tween properties', () => {
+    it('should parse clockwise rotation tween', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0" duration="10" tweenType="motion" motionTweenRotate="cw" motionTweenRotateTimes="2">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="test" symbolType="graphic">
+                        <matrix><Matrix a="1" b="0" c="0" d="1" tx="0" ty="0"/></matrix>
+                        <transformationPoint><Point x="0" y="0"/></transformationPoint>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      expect(frame.motionTweenRotate).toBe('cw');
+      expect(frame.motionTweenRotateTimes).toBe(2);
+    });
+
+    it('should parse counter-clockwise rotation tween', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0" duration="10" tweenType="motion" motionTweenRotate="ccw" motionTweenRotateTimes="3">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="test" symbolType="graphic">
+                        <matrix><Matrix a="1" b="0" c="0" d="1" tx="0" ty="0"/></matrix>
+                        <transformationPoint><Point x="0" y="0"/></transformationPoint>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      expect(frame.motionTweenRotate).toBe('ccw');
+      expect(frame.motionTweenRotateTimes).toBe(3);
+    });
+
+    it('should parse scale tween flag', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0" duration="10" tweenType="motion" motionTweenScale="true">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="test" symbolType="graphic">
+                        <matrix><Matrix a="1" b="0" c="0" d="1" tx="0" ty="0"/></matrix>
+                        <transformationPoint><Point x="0" y="0"/></transformationPoint>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      expect(frame.motionTweenScale).toBe(true);
+    });
+
+    it('should parse orient to path flag', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0" duration="10" tweenType="motion" motionTweenOrientToPath="true">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="test" symbolType="graphic">
+                        <matrix><Matrix a="1" b="0" c="0" d="1" tx="0" ty="0"/></matrix>
+                        <transformationPoint><Point x="0" y="0"/></transformationPoint>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      expect(frame.motionTweenOrientToPath).toBe(true);
+    });
+
+    it('should not set motion tween properties when not specified', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0" duration="10" tweenType="motion">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="test" symbolType="graphic">
+                        <matrix><Matrix a="1" b="0" c="0" d="1" tx="0" ty="0"/></matrix>
+                        <transformationPoint><Point x="0" y="0"/></transformationPoint>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      expect(frame.motionTweenRotate).toBeUndefined();
+      expect(frame.motionTweenRotateTimes).toBeUndefined();
+      expect(frame.motionTweenScale).toBeUndefined();
+      expect(frame.motionTweenOrientToPath).toBeUndefined();
+    });
+  });
+
   describe('bitmap media', () => {
     it('should parse bitmap media item', async () => {
       const media = `

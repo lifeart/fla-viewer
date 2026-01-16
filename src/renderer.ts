@@ -1123,7 +1123,7 @@ export class FLARenderer {
           nextDisplayElement = nextKeyframe.elements[elementIndex];
         }
 
-        this.renderDisplayElementWithTween(element, nextDisplayElement, progress, depth, frameIndex);
+        this.renderDisplayElementWithTween(element, nextDisplayElement, progress, depth, frameIndex, frame);
       } else {
         this.renderDisplayElement(element, depth, frameIndex);
       }
@@ -1228,28 +1228,49 @@ export class FLARenderer {
     return 3 * mt2 * (p1 - p0) + 6 * mt * t * (p2 - p1) + 3 * t2 * (p3 - p2);
   }
 
-  private renderDisplayElementWithTween(element: DisplayElement, nextDisplayElement: DisplayElement, progress: number, depth: number, parentFrameIndex: number): void {
+  private renderDisplayElementWithTween(element: DisplayElement, nextDisplayElement: DisplayElement, progress: number, depth: number, parentFrameIndex: number, frame?: Frame): void {
     if (element.type === 'symbol' && nextDisplayElement.type === 'symbol') {
       // Interpolate matrix transforms
       const startMatrix = element.matrix;
       const endMatrix = nextDisplayElement.matrix;
 
-      const interpolatedMatrix: Matrix = {
-        a: this.lerp(startMatrix.a, endMatrix.a, progress),
-        b: this.lerp(startMatrix.b, endMatrix.b, progress),
-        c: this.lerp(startMatrix.c, endMatrix.c, progress),
-        d: this.lerp(startMatrix.d, endMatrix.d, progress),
-        tx: this.lerp(startMatrix.tx, endMatrix.tx, progress),
-        ty: this.lerp(startMatrix.ty, endMatrix.ty, progress)
-      };
+      let interpolatedMatrix: Matrix;
+
+      // Check for rotation tween (CW/CCW with additional rotations)
+      if (frame?.motionTweenRotate && frame.motionTweenRotate !== 'none') {
+        interpolatedMatrix = this.interpolateMatrixWithRotation(
+          startMatrix,
+          endMatrix,
+          progress,
+          frame.motionTweenRotate,
+          frame.motionTweenRotateTimes || 0
+        );
+      } else {
+        interpolatedMatrix = {
+          a: this.lerp(startMatrix.a, endMatrix.a, progress),
+          b: this.lerp(startMatrix.b, endMatrix.b, progress),
+          c: this.lerp(startMatrix.c, endMatrix.c, progress),
+          d: this.lerp(startMatrix.d, endMatrix.d, progress),
+          tx: this.lerp(startMatrix.tx, endMatrix.tx, progress),
+          ty: this.lerp(startMatrix.ty, endMatrix.ty, progress)
+        };
+      }
+
+      // Interpolate color transform if either element has one
+      const interpolatedColorTransform = this.lerpColorTransform(
+        element.colorTransform,
+        nextDisplayElement.colorTransform,
+        progress
+      );
 
       // Note: Do NOT interpolate firstFrame - it's an offset for the keyframe start,
       // and frameOffset in renderSymbolInstance already handles animation progress.
       // Interpolating firstFrame would cause double-counting and "lagging" animation.
       const tweenedDisplayElement: SymbolInstance = {
         ...element,
-        matrix: interpolatedMatrix
+        matrix: interpolatedMatrix,
         // firstFrame stays as element.firstFrame (the keyframe's starting offset)
+        ...(interpolatedColorTransform && { colorTransform: interpolatedColorTransform })
       };
 
       this.renderDisplayElement(tweenedDisplayElement, depth, parentFrameIndex);
@@ -1258,8 +1279,94 @@ export class FLARenderer {
     }
   }
 
+  private interpolateMatrixWithRotation(
+    startMatrix: Matrix,
+    endMatrix: Matrix,
+    progress: number,
+    direction: 'cw' | 'ccw',
+    additionalRotations: number
+  ): Matrix {
+    // Decompose matrices into scale, rotation, and translation
+    const startScale = Math.sqrt(startMatrix.a * startMatrix.a + startMatrix.b * startMatrix.b);
+    const endScale = Math.sqrt(endMatrix.a * endMatrix.a + endMatrix.b * endMatrix.b);
+
+    const startScaleY = Math.sqrt(startMatrix.c * startMatrix.c + startMatrix.d * startMatrix.d);
+    const endScaleY = Math.sqrt(endMatrix.c * endMatrix.c + endMatrix.d * endMatrix.d);
+
+    // Extract rotation angle
+    let startAngle = Math.atan2(startMatrix.b, startMatrix.a);
+    let endAngle = Math.atan2(endMatrix.b, endMatrix.a);
+
+    // Calculate angle difference with direction
+    let angleDiff = endAngle - startAngle;
+
+    // Add additional full rotations
+    const fullRotation = Math.PI * 2 * additionalRotations;
+
+    if (direction === 'cw') {
+      // Clockwise: ensure positive rotation
+      if (angleDiff < 0) angleDiff += Math.PI * 2;
+      angleDiff += fullRotation;
+    } else {
+      // Counter-clockwise: ensure negative rotation
+      if (angleDiff > 0) angleDiff -= Math.PI * 2;
+      angleDiff -= fullRotation;
+    }
+
+    // Interpolate
+    const angle = startAngle + angleDiff * progress;
+    const scaleX = this.lerp(startScale, endScale, progress);
+    const scaleY = this.lerp(startScaleY, endScaleY, progress);
+    const tx = this.lerp(startMatrix.tx, endMatrix.tx, progress);
+    const ty = this.lerp(startMatrix.ty, endMatrix.ty, progress);
+
+    // Reconstruct matrix
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+
+    return {
+      a: cos * scaleX,
+      b: sin * scaleX,
+      c: -sin * scaleY,
+      d: cos * scaleY,
+      tx,
+      ty
+    };
+  }
+
   private lerp(a: number, b: number, t: number): number {
     return a + (b - a) * t;
+  }
+
+  private lerpColorTransform(start: ColorTransform | undefined, end: ColorTransform | undefined, t: number): ColorTransform | undefined {
+    // If neither has color transform, return undefined
+    if (!start && !end) return undefined;
+
+    // Default values for color transform (identity)
+    const defaultCT: ColorTransform = {
+      alphaMultiplier: 1,
+      redMultiplier: 1,
+      greenMultiplier: 1,
+      blueMultiplier: 1,
+      alphaOffset: 0,
+      redOffset: 0,
+      greenOffset: 0,
+      blueOffset: 0
+    };
+
+    const s = start || defaultCT;
+    const e = end || defaultCT;
+
+    return {
+      alphaMultiplier: this.lerp(s.alphaMultiplier ?? 1, e.alphaMultiplier ?? 1, t),
+      redMultiplier: this.lerp(s.redMultiplier ?? 1, e.redMultiplier ?? 1, t),
+      greenMultiplier: this.lerp(s.greenMultiplier ?? 1, e.greenMultiplier ?? 1, t),
+      blueMultiplier: this.lerp(s.blueMultiplier ?? 1, e.blueMultiplier ?? 1, t),
+      alphaOffset: this.lerp(s.alphaOffset ?? 0, e.alphaOffset ?? 0, t),
+      redOffset: this.lerp(s.redOffset ?? 0, e.redOffset ?? 0, t),
+      greenOffset: this.lerp(s.greenOffset ?? 0, e.greenOffset ?? 0, t),
+      blueOffset: this.lerp(s.blueOffset ?? 0, e.blueOffset ?? 0, t)
+    };
   }
 
   private renderDisplayElement(element: DisplayElement, depth: number, parentFrameIndex: number): void {

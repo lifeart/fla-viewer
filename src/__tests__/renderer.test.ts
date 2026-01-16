@@ -2506,6 +2506,259 @@ describe('FLARenderer', () => {
       renderer.renderFrame(2);
       renderer.renderFrame(4);
     });
+
+    it('should interpolate color transform during motion tween', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'ColorTweenSymbol',
+        totalFrames: 1,
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: '#FFFFFF' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 40, y: 0 },
+                  { type: 'L', x: 40, y: 40 },
+                  { type: 'L', x: 0, y: 40 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('ColorTweenSymbol', {
+        name: 'ColorTweenSymbol',
+        symbolType: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 10,
+          layers: [createLayer({
+            frames: [
+              createFrame({
+                index: 0,
+                duration: 5,
+                tweenType: 'motion',
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'ColorTweenSymbol',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 100, ty: 100 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  transformationPoint: { x: 0, y: 0 },
+                  colorTransform: {
+                    alphaMultiplier: 1,
+                    redMultiplier: 1,
+                    greenMultiplier: 0,
+                    blueMultiplier: 0,
+                  },
+                }],
+              }),
+              createFrame({
+                index: 5,
+                duration: 5,
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'ColorTweenSymbol',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ tx: 100, ty: 100 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  transformationPoint: { x: 0, y: 0 },
+                  colorTransform: {
+                    alphaMultiplier: 0.5,
+                    redMultiplier: 0,
+                    greenMultiplier: 1,
+                    blueMultiplier: 0,
+                  },
+                }],
+              }),
+            ],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Render frames during color transform interpolation
+      // Frame 0: red tint, full alpha
+      renderer.renderFrame(0);
+      // Frame 2: intermediate - should interpolate colorTransform
+      renderer.renderFrame(2);
+      // Frame 4: close to green tint, reduced alpha
+      renderer.renderFrame(4);
+    });
+
+    it('should interpolate rotation with clockwise direction', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'RotateSymbol',
+        totalFrames: 1,
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 50, y: 0 },
+                  { type: 'L', x: 50, y: 20 },
+                  { type: 'L', x: 0, y: 20 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('RotateSymbol', {
+        name: 'RotateSymbol',
+        symbolType: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 20,
+          layers: [createLayer({
+            frames: [
+              createFrame({
+                index: 0,
+                duration: 10,
+                tweenType: 'motion',
+                motionTweenRotate: 'cw',
+                motionTweenRotateTimes: 1,
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'RotateSymbol',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ a: 1, b: 0, c: 0, d: 1, tx: 200, ty: 200 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  transformationPoint: { x: 25, y: 10 },
+                }],
+              }),
+              createFrame({
+                index: 10,
+                duration: 10,
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'RotateSymbol',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ a: 1, b: 0, c: 0, d: 1, tx: 200, ty: 200 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  transformationPoint: { x: 25, y: 10 },
+                }],
+              }),
+            ],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Render frames during clockwise rotation tween
+      renderer.renderFrame(0);
+      renderer.renderFrame(5);
+      renderer.renderFrame(9);
+    });
+
+    it('should interpolate rotation with counter-clockwise direction', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'RotateCCWSymbol',
+        totalFrames: 1,
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: '#FF00FF' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 50, y: 0 },
+                  { type: 'L', x: 50, y: 20 },
+                  { type: 'L', x: 0, y: 20 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('RotateCCWSymbol', {
+        name: 'RotateCCWSymbol',
+        symbolType: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 20,
+          layers: [createLayer({
+            frames: [
+              createFrame({
+                index: 0,
+                duration: 10,
+                tweenType: 'motion',
+                motionTweenRotate: 'ccw',
+                motionTweenRotateTimes: 2,
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'RotateCCWSymbol',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ a: 1, b: 0, c: 0, d: 1, tx: 200, ty: 200 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  transformationPoint: { x: 25, y: 10 },
+                }],
+              }),
+              createFrame({
+                index: 10,
+                duration: 10,
+                elements: [{
+                  type: 'symbol',
+                  libraryItemName: 'RotateCCWSymbol',
+                  symbolType: 'graphic',
+                  matrix: createMatrix({ a: 1, b: 0, c: 0, d: 1, tx: 200, ty: 200 }),
+                  firstFrame: 0,
+                  loop: 'loop',
+                  transformationPoint: { x: 25, y: 10 },
+                }],
+              }),
+            ],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Render frames during counter-clockwise rotation tween
+      renderer.renderFrame(0);
+      renderer.renderFrame(5);
+      renderer.renderFrame(9);
+    });
   });
 
   describe('radial gradient', () => {
