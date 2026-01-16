@@ -1282,6 +1282,11 @@ export class FLARenderer {
   private renderSymbolInstance(instance: SymbolInstance, depth: number, parentFrameIndex: number): void {
     if (!this.doc) return;
 
+    // Skip rendering if instance is explicitly set to invisible
+    if (instance.isVisible === false) {
+      return;
+    }
+
     const symbol = getWithNormalizedPath(this.doc.symbols, instance.libraryItemName);
     if (!symbol) {
       // Log missing symbols only once
@@ -1335,7 +1340,16 @@ export class FLARenderer {
     // - MovieClip symbols: play their own timeline independently (use 'play once' for static rendering)
     // - Button symbols: show first frame (up state)
     const firstFrame = instance.firstFrame || 0;
+    const lastFrame = instance.lastFrame;
     const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
+
+    // Determine effective frame range
+    // If lastFrame is specified, it limits the playback range
+    const effectiveLastFrame = lastFrame !== undefined
+      ? Math.min(lastFrame, totalSymbolFrames - 1)
+      : totalSymbolFrames - 1;
+    const frameRange = effectiveLastFrame - firstFrame + 1;
+
     let symbolFrame: number;
 
     // MovieClips and Buttons play independently from parent timeline
@@ -1349,12 +1363,18 @@ export class FLARenderer {
       symbolFrame = firstFrame % totalSymbolFrames;
     } else if (effectiveLoop === 'loop') {
       // Sync with parent timeline: advance from firstFrame based on parent frame offset
+      // Loop within the specified frame range (firstFrame to lastFrame)
       const frameOffset = parentFrameIndex - this.currentKeyframeStart;
-      symbolFrame = (firstFrame + frameOffset) % totalSymbolFrames;
+      if (lastFrame !== undefined) {
+        // Loop within the specified range
+        symbolFrame = firstFrame + (frameOffset % frameRange);
+      } else {
+        symbolFrame = (firstFrame + frameOffset) % totalSymbolFrames;
+      }
     } else {
-      // 'play once' - advance but clamp at last frame
+      // 'play once' - advance but clamp at last frame (or effectiveLastFrame)
       const frameOffset = parentFrameIndex - this.currentKeyframeStart;
-      symbolFrame = Math.min(firstFrame + frameOffset, totalSymbolFrames - 1);
+      symbolFrame = Math.min(firstFrame + frameOffset, effectiveLastFrame);
     }
 
     // Render symbol's timeline
@@ -1550,11 +1570,19 @@ export class FLARenderer {
 
     // Render each text run
     let yOffset = 0;
+    let isFirstParagraph = true;
+
     for (const run of text.textRuns) {
       // Build font string
       const fontStyle = run.italic ? 'italic ' : '';
       const fontWeight = run.bold ? 'bold ' : '';
-      const fontSize = run.size;
+      let fontSize = run.size;
+
+      // Adjust font size for subscript/superscript
+      if (run.characterPosition === 'subscript' || run.characterPosition === 'superscript') {
+        fontSize = fontSize * 0.7; // Smaller for sub/super
+      }
+
       // Map FLA font names to web font names
       const fontFace = this.mapFontName(run.face || 'sans-serif');
       ctx.font = `${fontStyle}${fontWeight}${fontSize}px ${fontFace}, sans-serif`;
@@ -1568,31 +1596,72 @@ export class FLARenderer {
       // Letter spacing (default 0, can be negative to compress)
       const letterSpacing = run.letterSpacing || 0;
 
-      for (const paragraph of paragraphs) {
+      // Margins (in twips, convert to pixels by dividing by 20)
+      const leftMargin = (run.leftMargin || 0) / 20;
+      const rightMargin = (run.rightMargin || 0) / 20;
+      const indent = (run.indent || 0) / 20;
+
+      // Calculate effective width for wrapping
+      const effectiveWidth = text.width - leftMargin - rightMargin;
+
+      for (let paraIndex = 0; paraIndex < paragraphs.length; paraIndex++) {
+        const paragraph = paragraphs[paraIndex];
         if (paragraph.length === 0) {
           yOffset += lineHeight;
+          isFirstParagraph = false;
           continue;
         }
 
-        // Word wrap within text.width
-        const wrappedLines = this.wrapText(ctx, paragraph, text.width, letterSpacing);
+        // Word wrap within effective width
+        const wrappedLines = this.wrapText(ctx, paragraph, effectiveWidth - (isFirstParagraph ? indent : 0), letterSpacing);
 
-        for (const line of wrappedLines) {
+        for (let lineIndex = 0; lineIndex < wrappedLines.length; lineIndex++) {
+          const line = wrappedLines[lineIndex];
           // Calculate line width for alignment
           const lineWidth = this.measureTextWidth(ctx, line, letterSpacing);
 
-          // Calculate x position based on alignment
-          let xPos = text.left;
+          // Calculate x position based on alignment with margins
+          let xPos = text.left + leftMargin;
+
+          // Apply indent only to first line of first paragraph
+          if (lineIndex === 0 && isFirstParagraph && indent > 0) {
+            xPos += indent;
+          }
+
           if (run.alignment === 'center') {
-            xPos = text.left + (text.width - lineWidth) / 2;
+            xPos = text.left + leftMargin + (effectiveWidth - lineWidth) / 2;
           } else if (run.alignment === 'right') {
-            xPos = text.left + text.width - lineWidth;
+            xPos = text.left + leftMargin + effectiveWidth - lineWidth;
+          }
+
+          // Calculate y position with subscript/superscript offset
+          let renderY = yOffset;
+          if (run.characterPosition === 'subscript') {
+            renderY += run.size * 0.3; // Move down for subscript
+          } else if (run.characterPosition === 'superscript') {
+            renderY -= run.size * 0.2; // Move up for superscript
           }
 
           // Render with letter spacing
-          this.renderTextWithSpacing(ctx, line, xPos, yOffset, letterSpacing);
+          this.renderTextWithSpacing(ctx, line, xPos, renderY, letterSpacing);
+
+          // Render underline if enabled
+          if (run.underline) {
+            ctx.save();
+            ctx.strokeStyle = run.fillColor;
+            ctx.lineWidth = Math.max(1, fontSize / 12);
+            const underlineY = renderY + fontSize + 2;
+            ctx.beginPath();
+            ctx.moveTo(xPos, underlineY);
+            ctx.lineTo(xPos + lineWidth, underlineY);
+            ctx.stroke();
+            ctx.restore();
+          }
+
           yOffset += lineHeight;
         }
+
+        isFirstParagraph = false;
       }
     }
 

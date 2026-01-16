@@ -149,19 +149,19 @@ Currently implemented: Motion tweens with linear/custom easing, shape tweens
 
 ## Interactive Elements (Low Priority)
 
-Currently implemented: Button symbols show first frame only
+Currently implemented: Button symbols show first frame only, frame labels are parsed
 
-### Missing Features
+### Implementation Details
 
-| Feature | Description |
-|---------|-------------|
-| **Button States** | Up, Over, Down, Hit test frames |
-| **Mouse Events** | Click, rollover, rollout detection |
-| **Hit Area** | Use hit frame shape for interaction bounds |
-| **MovieClip Independence** | Each instance maintains own playhead |
-| **Frame Labels** | Named frames for navigation (`DOMFrame.labelType`, `DOMFrame.name`) |
-| **Scenes** | Multiple scene support (`DOMDocument.scenes`) |
-| **Frame Scripts** | ActionScript on frames (informational display only) |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Frame Labels** | ✅ | Parsed from `name` and `labelType` attributes |
+| **Button States** | ❌ | Up, Over, Down, Hit test frames not implemented |
+| **Mouse Events** | ❌ | Click, rollover, rollout detection not implemented |
+| **Hit Area** | ❌ | Not implemented |
+| **MovieClip Independence** | ❌ | Each instance shares parent timeline |
+| **Scenes** | ❌ | Multiple scene support not implemented |
+| **Frame Scripts** | ❌ | ActionScript not executed |
 
 ### keyMode Values (Reference)
 
@@ -177,51 +177,41 @@ Frame keyMode indicates the type of keyframe:
 
 ---
 
-## Symbol Instance Features (Low Priority)
+## Symbol Instance Features (Low Priority) ✅
 
-Currently implemented: Matrix, transformationPoint, loop mode, firstFrame, filters, colorTransform, blendMode
+Currently implemented: Matrix, transformationPoint, loop mode, firstFrame, lastFrame, filters, colorTransform, blendMode, isVisible, centerPoint3D
 
-### Missing Features
+### Implementation Details
 
-| Feature | XFL Reference | Description |
-|---------|---------------|-------------|
-| **3D Transform** | `centerPoint3DX/Y/Z`, `rotationX/Y/Z` | 3D rotation and perspective |
-| **Cache as Bitmap** | `cacheAsBitmap` | Render symbol to bitmap for performance |
-| **Visible** | `isVisible` | Instance visibility flag |
-| **Silent Sound Sync** | `silent` | Mute sound during playback |
-| **Accessibility** | `accName`, `description` | Accessibility properties |
-| **Tracking as Menu** | `trackAsMenu` | Button menu tracking mode |
-| **Last Frame** | `lastFrame` | End frame for graphic symbols |
-
-**Implementation notes:**
-- 3D transforms require matrix3d decomposition or CSS 3D transforms
-- `cacheAsBitmap` is handled as a performance hint, not strictly required
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Visible** | ✅ | `isVisible="false"` skips rendering |
+| **Last Frame** | ✅ | Limits playback range for graphic symbols |
+| **Center Point 3D** | ✅ | Parsed (2D rendering only) |
+| **3D Transform** | ❌ | Would require CSS 3D transforms |
+| **Cache as Bitmap** | ❌ | Performance hint, not implemented |
+| **Silent Sound Sync** | ❌ | Not implemented |
+| **Accessibility** | ❌ | Not implemented |
+| **Tracking as Menu** | ❌ | Not implemented |
 
 ---
 
-## Text Features (Low Priority)
+## Text Features (Low Priority) ✅
 
-Currently implemented: Characters, alignment, size, lineHeight, face, fillColor, bold, italic, letterSpacing
+Currently implemented: Characters, alignment, size, lineHeight, face, fillColor, bold, italic, letterSpacing, underline, indent, leftMargin, rightMargin, url, target, characterPosition (subscript/superscript)
 
-### Missing Features
+### Implementation Details
 
-| Feature | XFL Reference | Description |
-|---------|---------------|-------------|
-| **Underline** | `DOMTextAttrs.underline` | Underline text decoration |
-| **URL/Hyperlinks** | `DOMTextAttrs.url` | Clickable links in text |
-| **Auto Kerning** | `DOMTextAttrs.autoKern` | Automatic character spacing adjustment |
-| **Indent** | `DOMTextAttrs.indent` | First-line paragraph indent |
-| **Left Margin** | `DOMTextAttrs.leftMargin` | Text left margin in twips |
-| **Right Margin** | `DOMTextAttrs.rightMargin` | Text right margin in twips |
-| **Target** | `DOMTextAttrs.target` | Link target frame (for URLs) |
-| **Character Position** | `DOMTextAttrs.characterPosition` | Subscript/superscript positioning |
-| **Rotation** | `DOMTextAttrs.rotation` | Text rotation per character |
-
-**Implementation notes:**
-- Underline can be rendered with `ctx.strokeStyle` and a line below text baseline
-- URLs require click detection and event handling
-- Margins affect text wrapping boundaries
-- Character position (subscript/superscript) requires vertical offset adjustments
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Underline** | ✅ | Rendered with `ctx.strokeStyle` line below text |
+| **URL/Hyperlinks** | ✅ | Parsed and stored (click handling not implemented) |
+| **Indent** | ✅ | First-line paragraph indent in twips |
+| **Left/Right Margin** | ✅ | Affects text wrapping boundaries |
+| **Target** | ✅ | Link target frame (_blank, _self, etc.) |
+| **Character Position** | ✅ | Subscript/superscript with size and position adjustment |
+| **Auto Kerning** | ❌ | Not implemented |
+| **Rotation** | ❌ | Per-character rotation not implemented |
 
 ---
 

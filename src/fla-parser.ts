@@ -562,6 +562,10 @@ export class FLAParser {
       // Parse morph shape for shape tweens
       const morphShape = tweenType === 'shape' ? this.parseMorphShape(frameEl) : undefined;
 
+      // Parse frame label (name attribute is the label text, labelType is the label kind)
+      const label = frameEl.getAttribute('name') || undefined;
+      const labelType = frameEl.getAttribute('labelType') as 'name' | 'comment' | 'anchor' | null;
+
       frames.push({
         index,
         duration,
@@ -571,7 +575,9 @@ export class FLAParser {
         elements,
         tweens,
         sound,
-        ...(morphShape && { morphShape })
+        ...(morphShape && { morphShape }),
+        ...(label && { label }),
+        ...(labelType && { labelType })
       });
     }
 
@@ -719,6 +725,7 @@ export class FLAParser {
     const symbolType = (el.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
     const loop = (el.getAttribute('loop') || 'loop') as 'loop' | 'play once' | 'single frame';
     const firstFrame = el.getAttribute('firstFrame');
+    const lastFrame = el.getAttribute('lastFrame');
 
     const matrixEl = el.querySelector('matrix > Matrix');
     let matrix: Matrix;
@@ -750,6 +757,10 @@ export class FLAParser {
     const blendModeAttr = el.getAttribute('blendMode');
     const blendMode = this.parseBlendMode(blendModeAttr);
 
+    // Parse visibility (default is true if not specified)
+    const isVisibleAttr = el.getAttribute('isVisible');
+    const isVisible = isVisibleAttr === 'false' ? false : undefined; // Only set if explicitly false
+
     return {
       type: 'symbol',
       libraryItemName,
@@ -759,9 +770,11 @@ export class FLAParser {
       centerPoint3D,
       loop,
       firstFrame: firstFrame ? parseInt(firstFrame) : undefined,
+      lastFrame: lastFrame ? parseInt(lastFrame) : undefined,
       ...(filters.length > 0 && { filters }),
       ...(colorTransform && { colorTransform }),
-      ...(blendMode && { blendMode })
+      ...(blendMode && { blendMode }),
+      ...(isVisible === false && { isVisible })
     };
   }
 
@@ -831,11 +844,31 @@ export class FLAParser {
       const fillColor = attrsEl?.getAttribute('fillColor') || '#000000';
       const bold = attrsEl?.getAttribute('bold') === 'true';
       const italic = attrsEl?.getAttribute('italic') === 'true';
+      const underline = attrsEl?.getAttribute('underline') === 'true';
       const letterSpacing = attrsEl?.getAttribute('letterSpacing')
         ? parseFloat(attrsEl.getAttribute('letterSpacing')!)
         : undefined;
 
-      textRuns.push({
+      // Parse additional text attributes
+      const indent = attrsEl?.getAttribute('indent')
+        ? parseFloat(attrsEl.getAttribute('indent')!)
+        : undefined;
+      const leftMargin = attrsEl?.getAttribute('leftMargin')
+        ? parseFloat(attrsEl.getAttribute('leftMargin')!)
+        : undefined;
+      const rightMargin = attrsEl?.getAttribute('rightMargin')
+        ? parseFloat(attrsEl.getAttribute('rightMargin')!)
+        : undefined;
+      const url = attrsEl?.getAttribute('url') || undefined;
+      const target = attrsEl?.getAttribute('target') || undefined;
+
+      // Parse character position (subscript/superscript)
+      const charPosition = attrsEl?.getAttribute('characterPosition');
+      const characterPosition = charPosition === 'subscript' || charPosition === 'superscript'
+        ? charPosition
+        : undefined;
+
+      const run: TextRun = {
         characters,
         alignment,
         size,
@@ -845,7 +878,18 @@ export class FLAParser {
         bold,
         italic,
         letterSpacing
-      });
+      };
+
+      // Only add optional properties if they have values
+      if (underline) run.underline = true;
+      if (indent !== undefined) run.indent = indent;
+      if (leftMargin !== undefined) run.leftMargin = leftMargin;
+      if (rightMargin !== undefined) run.rightMargin = rightMargin;
+      if (url) run.url = url;
+      if (target) run.target = target;
+      if (characterPosition) run.characterPosition = characterPosition;
+
+      textRuns.push(run);
     }
 
     // Parse filters

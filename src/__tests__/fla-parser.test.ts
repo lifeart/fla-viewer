@@ -951,6 +951,392 @@ describe('FLAParser', () => {
       expect(element.textRuns[0].bold).toBe(true);
       expect(element.textRuns[0].italic).toBe(false);
     });
+
+    it('should parse text with underline', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMStaticText left="0" width="200" height="50">
+                        <matrix><Matrix tx="50" ty="50"/></matrix>
+                        <textRuns>
+                          <DOMTextRun>
+                            <characters>Underlined Text</characters>
+                            <textAttrs>
+                              <DOMTextAttrs size="16" fillColor="#0000FF" underline="true"/>
+                            </textAttrs>
+                          </DOMTextRun>
+                        </textRuns>
+                      </DOMStaticText>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(element.type).toBe('text');
+      if (element.type !== 'text') throw new Error('Expected text');
+      expect(element.textRuns[0].underline).toBe(true);
+    });
+
+    it('should parse text with indent and margins', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMStaticText left="0" width="300" height="100">
+                        <matrix><Matrix/></matrix>
+                        <textRuns>
+                          <DOMTextRun>
+                            <characters>Paragraph with margins</characters>
+                            <textAttrs>
+                              <DOMTextAttrs size="12" indent="40" leftMargin="20" rightMargin="30"/>
+                            </textAttrs>
+                          </DOMTextRun>
+                        </textRuns>
+                      </DOMStaticText>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(element.type).toBe('text');
+      if (element.type !== 'text') throw new Error('Expected text');
+      expect(element.textRuns[0].indent).toBe(40);
+      expect(element.textRuns[0].leftMargin).toBe(20);
+      expect(element.textRuns[0].rightMargin).toBe(30);
+    });
+
+    it('should parse text with subscript position', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMStaticText left="0" width="100" height="30">
+                        <matrix><Matrix/></matrix>
+                        <textRuns>
+                          <DOMTextRun>
+                            <characters>H2O</characters>
+                            <textAttrs>
+                              <DOMTextAttrs size="14" characterPosition="subscript"/>
+                            </textAttrs>
+                          </DOMTextRun>
+                        </textRuns>
+                      </DOMStaticText>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(element.type).toBe('text');
+      if (element.type !== 'text') throw new Error('Expected text');
+      expect(element.textRuns[0].characterPosition).toBe('subscript');
+    });
+
+    it('should parse text with superscript position', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMStaticText left="0" width="100" height="30">
+                        <matrix><Matrix/></matrix>
+                        <textRuns>
+                          <DOMTextRun>
+                            <characters>X2</characters>
+                            <textAttrs>
+                              <DOMTextAttrs size="14" characterPosition="superscript"/>
+                            </textAttrs>
+                          </DOMTextRun>
+                        </textRuns>
+                      </DOMStaticText>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(element.type).toBe('text');
+      if (element.type !== 'text') throw new Error('Expected text');
+      expect(element.textRuns[0].characterPosition).toBe('superscript');
+    });
+
+    it('should parse text with URL hyperlink', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMStaticText left="0" width="100" height="20">
+                        <matrix><Matrix/></matrix>
+                        <textRuns>
+                          <DOMTextRun>
+                            <characters>Click here</characters>
+                            <textAttrs>
+                              <DOMTextAttrs size="12" url="https://example.com" target="_blank"/>
+                            </textAttrs>
+                          </DOMTextRun>
+                        </textRuns>
+                      </DOMStaticText>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(element.type).toBe('text');
+      if (element.type !== 'text') throw new Error('Expected text');
+      expect(element.textRuns[0].url).toBe('https://example.com');
+      expect(element.textRuns[0].target).toBe('_blank');
+    });
+  });
+
+  describe('symbol instance features', () => {
+    it('should parse symbol instance with isVisible=false', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="HiddenSymbol" symbolType="graphic" isVisible="false">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(element.type).toBe('symbol');
+      if (element.type !== 'symbol') throw new Error('Expected symbol');
+      expect(element.isVisible).toBe(false);
+    });
+
+    it('should parse symbol instance with lastFrame', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="Animation" symbolType="graphic" firstFrame="5" lastFrame="15" loop="loop">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(element.type).toBe('symbol');
+      if (element.type !== 'symbol') throw new Error('Expected symbol');
+      expect(element.firstFrame).toBe(5);
+      expect(element.lastFrame).toBe(15);
+      expect(element.loop).toBe('loop');
+    });
+
+    it('should not set isVisible when attribute is not false', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="VisibleSymbol" symbolType="graphic">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(element.type).toBe('symbol');
+      if (element.type !== 'symbol') throw new Error('Expected symbol');
+      // isVisible should be undefined (not set) when instance is visible
+      expect(element.isVisible).toBeUndefined();
+    });
+  });
+
+  describe('frame labels', () => {
+    it('should parse frame with name label', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0" name="intro" labelType="name">
+                    <elements></elements>
+                  </DOMFrame>
+                  <DOMFrame index="10" name="middle" labelType="name">
+                    <elements></elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frames = doc.timelines[0].layers[0].frames;
+      expect(frames[0].label).toBe('intro');
+      expect(frames[0].labelType).toBe('name');
+      expect(frames[1].label).toBe('middle');
+      expect(frames[1].labelType).toBe('name');
+    });
+
+    it('should parse frame with comment label', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0" name="This is a developer note" labelType="comment">
+                    <elements></elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      expect(frame.label).toBe('This is a developer note');
+      expect(frame.labelType).toBe('comment');
+    });
+
+    it('should parse frame with anchor label', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0" name="section1" labelType="anchor">
+                    <elements></elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      expect(frame.label).toBe('section1');
+      expect(frame.labelType).toBe('anchor');
+    });
+
+    it('should not set label when frame has no name', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements></elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      expect(frame.label).toBeUndefined();
+      expect(frame.labelType).toBeUndefined();
+    });
   });
 
   describe('bitmap media', () => {

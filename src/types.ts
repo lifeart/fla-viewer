@@ -73,6 +73,8 @@ export interface Frame {
   tweens?: Tween[];
   sound?: FrameSound;
   morphShape?: MorphShape; // For shape tweens
+  label?: string; // Frame label name
+  labelType?: 'name' | 'comment' | 'anchor'; // Type of frame label
 }
 
 export interface FrameSound {
@@ -122,9 +124,11 @@ export interface SymbolInstance {
   centerPoint3D?: Point; // 3D transformation center point
   loop: 'loop' | 'play once' | 'single frame';
   firstFrame?: number;
+  lastFrame?: number; // End frame for graphic symbols (for limited playback range)
   colorTransform?: ColorTransform;
   filters?: Filter[];
   blendMode?: BlendMode;
+  isVisible?: boolean; // Instance visibility (default true)
 }
 
 export interface VideoInstance {
