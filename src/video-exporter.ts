@@ -472,3 +472,300 @@ export async function exportSingleFrame(
   // Convert to PNG
   return canvas.convertToBlob({ type: 'image/png' });
 }
+
+export interface SpriteSheetProgress {
+  currentFrame: number;
+  totalFrames: number;
+  stage: 'rendering' | 'compositing';
+}
+
+export type SpriteSheetProgressCallback = (progress: SpriteSheetProgress) => void;
+
+export interface SpriteSheetOptions {
+  startFrame?: number;
+  endFrame?: number;
+  columns?: number; // Number of columns (auto-calculated if not specified)
+  padding?: number; // Padding between frames in pixels
+  includeJson?: boolean; // Include JSON metadata file
+}
+
+export interface SpriteSheetResult {
+  image: Blob;
+  json?: string; // JSON metadata for game engines
+  columns: number;
+  rows: number;
+  frameWidth: number;
+  frameHeight: number;
+  totalFrames: number;
+}
+
+/**
+ * Export animation frames as a sprite sheet (texture atlas)
+ */
+export interface GIFExportProgress {
+  currentFrame: number;
+  totalFrames: number;
+  stage: 'rendering' | 'encoding' | 'finalizing';
+}
+
+export type GIFProgressCallback = (progress: GIFExportProgress) => void;
+
+export interface GIFExportOptions {
+  startFrame?: number;
+  endFrame?: number;
+  loop?: boolean; // Default: true (loop forever)
+  quality?: number; // 1-30, lower is better quality (default: 10)
+}
+
+/**
+ * Export animation as an animated GIF
+ */
+export async function exportGIF(
+  doc: FLADocument,
+  options: GIFExportOptions = {},
+  onProgress?: GIFProgressCallback,
+  isCancelled?: CancellationCheck
+): Promise<Blob> {
+  // Lazy load gifenc
+  const gifenc = await import('gifenc');
+  const { GIFEncoder, quantize, applyPalette } = gifenc;
+
+  const {
+    startFrame = 0,
+    endFrame = doc.timelines[0]?.totalFrames || 1,
+    loop = true,
+    quality = 10,
+  } = options;
+
+  const width = doc.width;
+  const height = doc.height;
+  const frameRate = doc.frameRate;
+  const totalFrames = Math.max(1, endFrame - startFrame);
+
+  // GIF frame delay is in centiseconds (1/100th of a second)
+  const frameDelay = Math.round(100 / frameRate);
+
+  // Create offscreen canvas for rendering
+  const canvas = new OffscreenCanvas(width, height);
+
+  const mockCanvas = {
+    width,
+    height,
+    style: { width: '', height: '' },
+    getContext: (type: string) => canvas.getContext(type as '2d'),
+    getBoundingClientRect: () => ({ left: 0, top: 0, width, height }),
+  } as unknown as HTMLCanvasElement;
+
+  const renderer = new FLARenderer(mockCanvas);
+  await renderer.setDocument(doc, true);
+
+  // Create GIF encoder
+  const gif = GIFEncoder();
+
+  // Render each frame
+  for (let i = 0; i < totalFrames; i++) {
+    const frameIndex = startFrame + i;
+
+    if (isCancelled?.()) {
+      throw new Error('Export cancelled');
+    }
+
+    onProgress?.({
+      currentFrame: i + 1,
+      totalFrames,
+      stage: 'rendering',
+    });
+
+    // Render frame
+    renderer.renderFrame(frameIndex);
+
+    // Get pixel data
+    const ctx = canvas.getContext('2d')!;
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const { data } = imageData;
+
+    onProgress?.({
+      currentFrame: i + 1,
+      totalFrames,
+      stage: 'encoding',
+    });
+
+    // Convert RGBA to indexed color using gifenc's quantize
+    // quality affects palette size (lower = more colors = better quality)
+    const maxColors = Math.min(256, Math.max(2, Math.round(256 / quality * 25)));
+    const palette = quantize(data, maxColors);
+    const indexedPixels = applyPalette(data, palette);
+
+    // Add frame to GIF
+    gif.writeFrame(indexedPixels, width, height, {
+      palette,
+      delay: frameDelay,
+      repeat: loop ? 0 : -1, // 0 = loop forever, -1 = no loop
+    });
+
+    // Yield periodically
+    if (i % 5 === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  onProgress?.({
+    currentFrame: totalFrames,
+    totalFrames,
+    stage: 'finalizing',
+  });
+
+  // Finish encoding
+  gif.finish();
+
+  // Get the GIF bytes and create a clean ArrayBuffer for Blob compatibility
+  const bytes = gif.bytes();
+  const arrayBuffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(arrayBuffer).set(bytes);
+  return new Blob([arrayBuffer], { type: 'image/gif' });
+}
+
+export async function exportSpriteSheet(
+  doc: FLADocument,
+  options: SpriteSheetOptions = {},
+  onProgress?: SpriteSheetProgressCallback,
+  isCancelled?: CancellationCheck
+): Promise<SpriteSheetResult> {
+  const {
+    startFrame = 0,
+    endFrame = doc.timelines[0]?.totalFrames || 1,
+    padding = 0,
+    includeJson = true
+  } = options;
+
+  const frameWidth = doc.width;
+  const frameHeight = doc.height;
+  const totalFrames = Math.max(1, endFrame - startFrame);
+
+  // Calculate optimal grid layout
+  let columns = options.columns;
+  if (!columns) {
+    // Auto-calculate: aim for roughly square sprite sheet
+    columns = Math.ceil(Math.sqrt(totalFrames));
+  }
+  const rows = Math.ceil(totalFrames / columns);
+
+  // Calculate sprite sheet dimensions
+  const sheetWidth = columns * (frameWidth + padding) - padding;
+  const sheetHeight = rows * (frameHeight + padding) - padding;
+
+  // Create offscreen canvas for individual frames
+  const frameCanvas = new OffscreenCanvas(frameWidth, frameHeight);
+  const mockCanvas = {
+    width: frameWidth,
+    height: frameHeight,
+    style: { width: '', height: '' },
+    getContext: (type: string) => frameCanvas.getContext(type as '2d'),
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: frameWidth, height: frameHeight }),
+  } as unknown as HTMLCanvasElement;
+
+  const renderer = new FLARenderer(mockCanvas);
+  await renderer.setDocument(doc, true);
+
+  // Create sprite sheet canvas
+  const sheetCanvas = new OffscreenCanvas(sheetWidth, sheetHeight);
+  const sheetCtx = sheetCanvas.getContext('2d')!;
+
+  // Clear with transparent background
+  sheetCtx.clearRect(0, 0, sheetWidth, sheetHeight);
+
+  // Render each frame to the sprite sheet
+  for (let i = 0; i < totalFrames; i++) {
+    const frameIndex = startFrame + i;
+
+    if (isCancelled?.()) {
+      throw new Error('Export cancelled');
+    }
+
+    onProgress?.({
+      currentFrame: i + 1,
+      totalFrames,
+      stage: 'rendering',
+    });
+
+    // Render frame
+    renderer.renderFrame(frameIndex);
+
+    // Calculate position on sprite sheet
+    const col = i % columns;
+    const row = Math.floor(i / columns);
+    const x = col * (frameWidth + padding);
+    const y = row * (frameHeight + padding);
+
+    // Copy frame to sprite sheet
+    sheetCtx.drawImage(frameCanvas, x, y);
+
+    // Yield periodically
+    if (i % 10 === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  onProgress?.({
+    currentFrame: totalFrames,
+    totalFrames,
+    stage: 'compositing',
+  });
+
+  // Generate PNG blob
+  const imageBlob = await sheetCanvas.convertToBlob({ type: 'image/png' });
+
+  // Generate JSON metadata for game engines
+  let json: string | undefined;
+  if (includeJson) {
+    const frames: Record<string, {
+      frame: { x: number; y: number; w: number; h: number };
+      sourceSize: { w: number; h: number };
+    }> = {};
+
+    for (let i = 0; i < totalFrames; i++) {
+      const frameIndex = startFrame + i;
+      const col = i % columns;
+      const row = Math.floor(i / columns);
+      const frameNum = String(frameIndex).padStart(5, '0');
+
+      frames[`frame_${frameNum}`] = {
+        frame: {
+          x: col * (frameWidth + padding),
+          y: row * (frameHeight + padding),
+          w: frameWidth,
+          h: frameHeight,
+        },
+        sourceSize: {
+          w: frameWidth,
+          h: frameHeight,
+        },
+      };
+    }
+
+    const metadata = {
+      frames,
+      meta: {
+        app: 'FLA Viewer',
+        version: '1.0',
+        image: 'spritesheet.png',
+        format: 'RGBA8888',
+        size: { w: sheetWidth, h: sheetHeight },
+        scale: 1,
+        framerate: doc.frameRate,
+      },
+    };
+
+    json = JSON.stringify(metadata, null, 2);
+  }
+
+  return {
+    image: imageBlob,
+    json,
+    columns,
+    rows,
+    frameWidth,
+    frameHeight,
+    totalFrames,
+  };
+}

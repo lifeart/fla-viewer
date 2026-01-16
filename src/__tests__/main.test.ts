@@ -106,6 +106,8 @@ function createAppDOM(): HTMLElement {
           <input type="radio" name="export-format" value="mp4" checked />
           <input type="radio" name="export-format" value="png-sequence" />
           <input type="radio" name="export-format" value="png-frame" />
+          <input type="radio" name="export-format" value="gif" />
+          <input type="radio" name="export-format" value="sprite-sheet" />
           <button id="export-start-btn"></button>
           <button id="export-close-btn"></button>
         </div>

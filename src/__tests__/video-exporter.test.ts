@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame } from '../video-exporter';
+import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF } from '../video-exporter';
 import JSZip from 'jszip';
 import {
   createMinimalDoc,
@@ -681,6 +681,309 @@ describe('video-exporter', () => {
 
       expect(blob).toBeInstanceOf(Blob);
       expect(blob.type).toBe('image/png');
+    });
+  });
+
+  describe('exportSpriteSheet', () => {
+    it('should export frames as sprite sheet PNG', async () => {
+      const doc = createMinimalDoc({
+        width: 40,
+        height: 30,
+        frameRate: 12,
+        timelines: [createTimeline({
+          totalFrames: 4,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 4,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 5, y: 5 },
+                    { type: 'L', x: 35, y: 5 },
+                    { type: 'L', x: 35, y: 25 },
+                    { type: 'L', x: 5, y: 25 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const result = await exportSpriteSheet(doc);
+
+      expect(result.image).toBeInstanceOf(Blob);
+      expect(result.image.type).toBe('image/png');
+      expect(result.totalFrames).toBe(4);
+      expect(result.frameWidth).toBe(40);
+      expect(result.frameHeight).toBe(30);
+      // 4 frames should fit in 2x2 grid
+      expect(result.columns).toBe(2);
+      expect(result.rows).toBe(2);
+    });
+
+    it('should include JSON metadata when requested', async () => {
+      const doc = createMinimalDoc({
+        width: 32,
+        height: 32,
+        frameRate: 24,
+        timelines: [createTimeline({
+          totalFrames: 3,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 3 })],
+          })],
+        })],
+      });
+
+      const result = await exportSpriteSheet(doc, { includeJson: true });
+
+      expect(result.json).toBeDefined();
+      const metadata = JSON.parse(result.json!);
+      expect(metadata.frames).toBeDefined();
+      expect(Object.keys(metadata.frames)).toHaveLength(3);
+      expect(metadata.meta.framerate).toBe(24);
+      expect(metadata.meta.app).toBe('FLA Viewer');
+    });
+
+    it('should support custom column count', async () => {
+      const doc = createMinimalDoc({
+        width: 20,
+        height: 20,
+        timelines: [createTimeline({
+          totalFrames: 6,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 6 })],
+          })],
+        })],
+      });
+
+      const result = await exportSpriteSheet(doc, { columns: 3 });
+
+      expect(result.columns).toBe(3);
+      expect(result.rows).toBe(2);
+    });
+
+    it('should support frame range', async () => {
+      const doc = createMinimalDoc({
+        width: 20,
+        height: 20,
+        timelines: [createTimeline({
+          totalFrames: 10,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 10 })],
+          })],
+        })],
+      });
+
+      const result = await exportSpriteSheet(doc, { startFrame: 2, endFrame: 5 });
+
+      expect(result.totalFrames).toBe(3);
+    });
+
+    it('should call progress callback', async () => {
+      const doc = createMinimalDoc({
+        width: 20,
+        height: 20,
+        timelines: [createTimeline({
+          totalFrames: 2,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 2 })],
+          })],
+        })],
+      });
+
+      const progressCalls: { currentFrame: number; stage: string }[] = [];
+      await exportSpriteSheet(doc, {}, (progress) => {
+        progressCalls.push({ currentFrame: progress.currentFrame, stage: progress.stage });
+      });
+
+      expect(progressCalls.length).toBeGreaterThan(0);
+      expect(progressCalls.some(p => p.stage === 'rendering')).toBe(true);
+      expect(progressCalls.some(p => p.stage === 'compositing')).toBe(true);
+    });
+
+    it('should handle cancellation', async () => {
+      const doc = createMinimalDoc({
+        width: 20,
+        height: 20,
+        timelines: [createTimeline({
+          totalFrames: 5,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 5 })],
+          })],
+        })],
+      });
+
+      let frameCount = 0;
+      await expect(
+        exportSpriteSheet(doc, {}, () => { frameCount++; }, () => frameCount >= 2)
+      ).rejects.toThrow('Export cancelled');
+    });
+  });
+
+  describe('exportGIF', () => {
+    it('should export animation as GIF', async () => {
+      const doc = createMinimalDoc({
+        width: 80,
+        height: 60,
+        frameRate: 12,
+        timelines: [createTimeline({
+          totalFrames: 3,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 3,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 10, y: 10 },
+                    { type: 'L', x: 70, y: 10 },
+                    { type: 'L', x: 70, y: 50 },
+                    { type: 'L', x: 10, y: 50 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportGIF(doc);
+
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.type).toBe('image/gif');
+      expect(blob.size).toBeGreaterThan(0);
+    });
+
+    it('should support frame range export', async () => {
+      const doc = createMinimalDoc({
+        width: 40,
+        height: 30,
+        frameRate: 10,
+        timelines: [createTimeline({
+          totalFrames: 10,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 10 })],
+          })],
+        })],
+      });
+
+      const blob = await exportGIF(doc, { startFrame: 2, endFrame: 5 });
+
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.type).toBe('image/gif');
+    });
+
+    it('should support quality option', async () => {
+      const doc = createMinimalDoc({
+        width: 40,
+        height: 30,
+        timelines: [createTimeline({
+          totalFrames: 2,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 2 })],
+          })],
+        })],
+      });
+
+      const highQuality = await exportGIF(doc, { quality: 1 });
+      const lowQuality = await exportGIF(doc, { quality: 30 });
+
+      expect(highQuality).toBeInstanceOf(Blob);
+      expect(lowQuality).toBeInstanceOf(Blob);
+      // Higher quality typically means larger file size due to more colors
+      // But this depends on content, so we just check both are valid
+      expect(highQuality.type).toBe('image/gif');
+      expect(lowQuality.type).toBe('image/gif');
+    });
+
+    it('should call progress callback', async () => {
+      const doc = createMinimalDoc({
+        width: 40,
+        height: 30,
+        timelines: [createTimeline({
+          totalFrames: 2,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 2 })],
+          })],
+        })],
+      });
+
+      const progressCalls: { currentFrame: number; totalFrames: number; stage: string }[] = [];
+      await exportGIF(doc, {}, (progress) => {
+        progressCalls.push({ ...progress });
+      });
+
+      expect(progressCalls.length).toBeGreaterThan(0);
+      expect(progressCalls.some(p => p.stage === 'rendering')).toBe(true);
+      expect(progressCalls.some(p => p.stage === 'encoding')).toBe(true);
+      expect(progressCalls.some(p => p.stage === 'finalizing')).toBe(true);
+    });
+
+    it('should handle cancellation', async () => {
+      const doc = createMinimalDoc({
+        width: 40,
+        height: 30,
+        timelines: [createTimeline({
+          totalFrames: 5,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 5 })],
+          })],
+        })],
+      });
+
+      let frameCount = 0;
+      await expect(
+        exportGIF(doc, {}, () => { frameCount++; }, () => frameCount >= 2)
+      ).rejects.toThrow('Export cancelled');
+    });
+
+    it('should handle single frame animation', async () => {
+      const doc = createMinimalDoc({
+        width: 50,
+        height: 50,
+        frameRate: 24,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 1,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 50, y: 0 },
+                    { type: 'L', x: 50, y: 50 },
+                    { type: 'L', x: 0, y: 50 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportGIF(doc);
+
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.type).toBe('image/gif');
     });
   });
 });

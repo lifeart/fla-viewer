@@ -1,6 +1,6 @@
 import { FLAParser } from './fla-parser';
 import { FLAPlayer } from './player';
-import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame } from './video-exporter';
+import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF } from './video-exporter';
 import { generateSampleFLA } from './sample-generator';
 import type { PlayerState, FLADocument, DisplayElement, Symbol } from './types';
 
@@ -897,6 +897,55 @@ export class FLAViewerApp {
         if (!this.exportCancelled) {
           const frameNum = String(currentFrame).padStart(5, '0');
           downloadBlob(blob, `${this.currentFileName}_frame_${frameNum}.png`);
+        }
+      } else if (format === 'gif') {
+        this.exportHeader.textContent = 'Exporting GIF';
+        const blob = await exportGIF(
+          this.currentDoc,
+          {},
+          (progress) => {
+            const percent = (progress.currentFrame / progress.totalFrames) * 100;
+            this.exportProgressFill.style.width = `${percent}%`;
+
+            if (progress.stage === 'rendering') {
+              this.exportStatus.textContent = `Rendering frame ${progress.currentFrame} / ${progress.totalFrames}`;
+            } else if (progress.stage === 'encoding') {
+              this.exportStatus.textContent = `Encoding frame ${progress.currentFrame} / ${progress.totalFrames}`;
+            } else {
+              this.exportStatus.textContent = 'Finalizing GIF...';
+            }
+          },
+          () => this.exportCancelled
+        );
+
+        if (!this.exportCancelled) {
+          downloadBlob(blob, `${this.currentFileName}.gif`);
+        }
+      } else if (format === 'sprite-sheet') {
+        this.exportHeader.textContent = 'Exporting Sprite Sheet';
+        const result = await exportSpriteSheet(
+          this.currentDoc,
+          { includeJson: true },
+          (progress) => {
+            const percent = (progress.currentFrame / progress.totalFrames) * 100;
+            this.exportProgressFill.style.width = `${percent}%`;
+
+            if (progress.stage === 'rendering') {
+              this.exportStatus.textContent = `Rendering frame ${progress.currentFrame} / ${progress.totalFrames}`;
+            } else {
+              this.exportStatus.textContent = 'Compositing sprite sheet...';
+            }
+          },
+          () => this.exportCancelled
+        );
+
+        if (!this.exportCancelled) {
+          // Download both PNG and JSON
+          downloadBlob(result.image, `${this.currentFileName}_spritesheet.png`);
+          if (result.json) {
+            const jsonBlob = new Blob([result.json], { type: 'application/json' });
+            downloadBlob(jsonBlob, `${this.currentFileName}_spritesheet.json`);
+          }
         }
       }
     } catch (error) {

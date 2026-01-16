@@ -39,12 +39,12 @@ A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no inst
 │  PARSING          │  RENDERING         │  EXPORT               │
 ├───────────────────┼────────────────────┼───────────────────────┤
 │  ✓ FLA/XFL files  │  ✓ Vector shapes   │  ✓ MP4 video (H.264)  │
-│  ✓ Symbols        │  ✓ Gradients       │  ✓ PNG sequence (ZIP) │
-│  ✓ Timelines      │  ✓ Bitmap fills    │  ✓ Single frame PNG   │
-│  ✓ Motion tweens  │  ✓ Filters         │  ✓ AAC audio          │
-│  ✓ Shape tweens   │  ✓ Blend modes     │  ✓ WebCodecs API      │
-│  ✓ Color tweens   │  ✓ Masks           │                       │
-│  ✓ Rotation tweens│  ✓ Text (Google)   │                       │
+│  ✓ Symbols        │  ✓ Gradients       │  ✓ Animated GIF       │
+│  ✓ Timelines      │  ✓ Bitmap fills    │  ✓ PNG sequence (ZIP) │
+│  ✓ Motion tweens  │  ✓ Filters         │  ✓ Sprite sheet+JSON  │
+│  ✓ Shape tweens   │  ✓ Blend modes     │  ✓ Single frame PNG   │
+│  ✓ Color tweens   │  ✓ Masks           │  ✓ AAC audio          │
+│  ✓ Rotation tweens│  ✓ Text (Google)   │  ✓ WebCodecs API      │
 │  ✓ Audio (MP3)    │  ✓ 9-slice scaling │                       │
 │  ✓ Bitmap (.dat)  │                    │                       │
 └───────────────────┴────────────────────┴───────────────────────┘
@@ -63,7 +63,7 @@ A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no inst
 | 🖼️ | **Bitmaps** | PNG, JPG, GIF + Adobe `.dat` with recovery |
 | 🔤 | **Text** | Static/dynamic, word wrap, Google Fonts |
 | 🔊 | **Audio** | Stream sync with volume control |
-| 📹 | **Export** | MP4 video, PNG sequence, single frame |
+| 📹 | **Export** | MP4, PNG sequence, sprite sheet, single frame |
 | 🎥 | **Camera** | Auto-detected camera layers with follow mode |
 
 ### UX
@@ -116,8 +116,10 @@ Click the **Download** button to open export options:
 | Format | Output | Description |
 |--------|--------|-------------|
 | **MP4 Video** | `.mp4` | H.264 video with AAC audio |
+| **Animated GIF** | `.gif` | Animated image (no audio) |
 | **PNG Sequence** | `.zip` | All frames as numbered PNGs |
 | **Current Frame** | `.png` | Single frame snapshot |
+| **Sprite Sheet** | `.png` + `.json` | Texture atlas for game engines |
 
 ### Video Export Specs
 - **Video:** H.264 @ 5 Mbps

@@ -325,16 +325,17 @@ Currently implemented: Edge paths, fill styles, stroke styles
 | Feature | Status | Notes |
 |---------|--------|-------|
 | **MP4 Video** | ✅ | H.264 video with AAC audio via WebCodecs API |
+| **Animated GIF** | ✅ | Animated GIF export using gifenc library |
 | **PNG Sequence** | ✅ | Export frames as numbered PNGs in ZIP file |
 | **Single Frame PNG** | ✅ | Export individual frame as PNG |
-| **GIF Export** | ❌ | Not implemented |
+| **Sprite Sheet** | ✅ | Texture atlas with JSON metadata for game engines |
 | **WebM Export** | ❌ | Not implemented |
-| **Sprite Sheet** | ❌ | Not implemented |
 | **SVG Export** | ❌ | Not implemented |
 
 **Notes:**
 - PNG sequence export supports custom frame prefix, padding, and frame range
 - Video export includes audio mixing for stream sync sounds
+- Sprite sheet exports PNG atlas + JSON metadata (compatible with Phaser, PixiJS, etc.)
 
 ---
 
