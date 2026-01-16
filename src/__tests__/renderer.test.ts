@@ -1029,6 +1029,197 @@ describe('FLARenderer', () => {
     });
   });
 
+  describe('gradient/bitmap strokes', () => {
+    it('should render linear gradient stroke', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [],
+                strokes: [{
+                  index: 1,
+                  type: 'linear',
+                  weight: 3,
+                  gradient: [
+                    { color: '#FF0000', alpha: 1, ratio: 0 },
+                    { color: '#0000FF', alpha: 1, ratio: 1 }
+                  ]
+                }],
+                edges: [{
+                  strokeStyle: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 100, y: 100 },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render radial gradient stroke', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [],
+                strokes: [{
+                  index: 1,
+                  type: 'radial',
+                  weight: 5,
+                  gradient: [
+                    { color: '#FFFF00', alpha: 1, ratio: 0 },
+                    { color: '#00FF00', alpha: 1, ratio: 1 }
+                  ],
+                  focalPointRatio: 0.5
+                }],
+                edges: [{
+                  strokeStyle: 1,
+                  commands: [
+                    { type: 'M', x: 50, y: 50 },
+                    { type: 'L', x: 150, y: 50 },
+                    { type: 'L', x: 100, y: 150 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+  });
+
+  describe('3D transforms', () => {
+    it('should render symbol with 3D rotation', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Box3D',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: '#FF6600' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 80, y: 0 },
+                  { type: 'L', x: 80, y: 80 },
+                  { type: 'L', x: 0, y: 80 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Box3D', {
+        name: 'Box3D',
+        itemID: 'box3d-1',
+        symbolType: 'graphic',
+        timeline: symbolTimeline
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'Box3D',
+                symbolType: 'graphic',
+                matrix: createMatrix({ tx: 100, ty: 100 }),
+                firstFrame: 0,
+                loop: 'single frame',
+                transformationPoint: { x: 40, y: 40 },
+                rotationX: 30,
+                rotationY: 45,
+                z: 50
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+  });
+
+  describe('cache as bitmap', () => {
+    it('should render symbol with cacheAsBitmap', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'CachedSymbol',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: '#3399FF' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 50, y: 0 },
+                  { type: 'L', x: 50, y: 50 },
+                  { type: 'L', x: 0, y: 50 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('CachedSymbol', {
+        name: 'CachedSymbol',
+        itemID: 'cached-1',
+        symbolType: 'graphic',
+        timeline: symbolTimeline
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'CachedSymbol',
+                symbolType: 'graphic',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                firstFrame: 0,
+                loop: 'single frame',
+                transformationPoint: { x: 0, y: 0 },
+                cacheAsBitmap: true
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+  });
+
   describe('text rendering', () => {
     it('should render text element', async () => {
       const doc = createMinimalDoc({
@@ -1054,6 +1245,60 @@ describe('FLARenderer', () => {
       });
       await renderer.setDocument(doc);
 
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render text with auto kerning', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                left: 0,
+                width: 200,
+                height: 50,
+                textRuns: [{
+                  characters: 'WAVE AWAY',
+                  size: 24,
+                  face: 'Arial',
+                  fillColor: '#000000',
+                  autoKern: true
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render text with per-character rotation', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                left: 0,
+                width: 200,
+                height: 50,
+                textRuns: [{
+                  characters: 'ROTATED',
+                  size: 24,
+                  face: 'Arial',
+                  fillColor: '#FF0000',
+                  rotation: 15
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
       expect(() => renderer.renderFrame(0)).not.toThrow();
     });
   });

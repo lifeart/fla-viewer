@@ -64,7 +64,7 @@ Currently implemented: Solid strokes with weight, all cap styles (round, none/bu
 | **Miter Limit** | ✅ | Parsed and applied via `ctx.miterLimit` |
 | **Scale Modes** | ✅ | Parsed (`normal`, `horizontal`, `vertical`, `none`) |
 | **Pixel Hinting** | ✅ | Parsed (rendering hint stored) |
-| **Gradient/Bitmap Strokes** | ❌ | Not implemented - requires `hasFillFlag` support |
+| **Gradient/Bitmap Strokes** | ✅ | Linear/radial gradients and bitmap patterns for strokes |
 
 **Note:** Scale mode and pixel hinting are parsed but rendering implementation is basic. Full scale mode support would require tracking transform and adjusting stroke width dynamically.
 
@@ -131,16 +131,11 @@ Currently implemented: Motion tweens with linear/custom easing, shape tweens, ro
 | Feature | Status | Notes |
 |---------|--------|-------|
 | **Classic Tween** | ✅ | XFL `tweenType="motion"` fully supported |
-| **Motion Path** | ✅ | `motionTweenOrientToPath` parsed (rendering basic) |
+| **Motion Path** | ✅ | `motionTweenOrientToPath` parsed and rendered |
+| **Orient to Path** | ✅ | Instance rotates to follow motion direction |
 | **Rotation Tweens** | ✅ | CW/CCW rotation with `motionTweenRotateTimes` count |
 | **Scale Tweens** | ✅ | `motionTweenScale` parsed, scale interpolation via matrix decomposition |
 | **Color Transform Tweening** | ✅ | Full interpolation of all colorTransform values (alpha, RGB multipliers and offsets) |
-
-### Missing Features
-
-| Feature | Description |
-|---------|-------------|
-| **Orient to Path Rendering** | `motionTweenOrientToPath` is parsed but not yet rendered |
 
 **JPEXS easing:**
 ```java
@@ -193,8 +188,8 @@ Currently implemented: Matrix, transformationPoint, loop mode, firstFrame, lastF
 | **Visible** | ✅ | `isVisible="false"` skips rendering |
 | **Last Frame** | ✅ | Limits playback range for graphic symbols |
 | **Center Point 3D** | ✅ | Parsed (2D rendering only) |
-| **3D Transform** | ❌ | Would require CSS 3D transforms |
-| **Cache as Bitmap** | ❌ | Performance hint, not implemented |
+| **3D Transform** | ✅ | Perspective projection for rotationX/Y/Z and z-depth |
+| **Cache as Bitmap** | ✅ | Renders to offscreen canvas for reuse |
 | **Silent Sound Sync** | ❌ | Not implemented |
 | **Accessibility** | ❌ | Not implemented |
 | **Tracking as Menu** | ❌ | Not implemented |
@@ -215,8 +210,8 @@ Currently implemented: Characters, alignment, size, lineHeight, face, fillColor,
 | **Left/Right Margin** | ✅ | Affects text wrapping boundaries |
 | **Target** | ✅ | Link target frame (_blank, _self, etc.) |
 | **Character Position** | ✅ | Subscript/superscript with size and position adjustment |
-| **Auto Kerning** | ❌ | Not implemented |
-| **Rotation** | ❌ | Per-character rotation not implemented |
+| **Auto Kerning** | ✅ | Common kerning pairs (AV, WA, To, etc.) with adjustments |
+| **Per-Char Rotation** | ✅ | Individual character rotation around center |
 
 ---
 

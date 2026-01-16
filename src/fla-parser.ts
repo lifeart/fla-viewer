@@ -778,6 +778,21 @@ export class FLAParser {
       ? { x: parseFloat(centerPoint3DX || '0'), y: parseFloat(centerPoint3DY || '0') }
       : undefined;
 
+    // Parse 3D rotation properties
+    const rotationXAttr = el.getAttribute('rotationX');
+    const rotationYAttr = el.getAttribute('rotationY');
+    const rotationZAttr = el.getAttribute('rotationZ');
+    const zAttr = el.getAttribute('z');
+
+    const rotationX = rotationXAttr ? parseFloat(rotationXAttr) : undefined;
+    const rotationY = rotationYAttr ? parseFloat(rotationYAttr) : undefined;
+    const rotationZ = rotationZAttr ? parseFloat(rotationZAttr) : undefined;
+    const z = zAttr ? parseFloat(zAttr) : undefined;
+
+    // Parse cache as bitmap
+    const cacheAsBitmapAttr = el.getAttribute('cacheAsBitmap');
+    const cacheAsBitmap = cacheAsBitmapAttr === 'true' ? true : undefined;
+
     // Parse filters
     const filters = this.parseFilters(el);
 
@@ -805,7 +820,12 @@ export class FLAParser {
       ...(filters.length > 0 && { filters }),
       ...(colorTransform && { colorTransform }),
       ...(blendMode && { blendMode }),
-      ...(isVisible === false && { isVisible })
+      ...(isVisible === false && { isVisible }),
+      ...(rotationX !== undefined && { rotationX }),
+      ...(rotationY !== undefined && { rotationY }),
+      ...(rotationZ !== undefined && { rotationZ }),
+      ...(z !== undefined && { z }),
+      ...(cacheAsBitmap && { cacheAsBitmap })
     };
   }
 
@@ -899,6 +919,14 @@ export class FLAParser {
         ? charPosition
         : undefined;
 
+      // Parse auto kerning
+      const autoKernAttr = attrsEl?.getAttribute('autoKern');
+      const autoKern = autoKernAttr === 'true' ? true : undefined;
+
+      // Parse per-character rotation
+      const rotationAttr = attrsEl?.getAttribute('rotation');
+      const rotation = rotationAttr ? parseFloat(rotationAttr) : undefined;
+
       const run: TextRun = {
         characters,
         alignment,
@@ -919,6 +947,8 @@ export class FLAParser {
       if (url) run.url = url;
       if (target) run.target = target;
       if (characterPosition) run.characterPosition = characterPosition;
+      if (autoKern) run.autoKern = autoKern;
+      if (rotation !== undefined) run.rotation = rotation;
 
       textRuns.push(run);
     }
@@ -1111,64 +1141,131 @@ export class FLAParser {
     for (const strokeEl of strokeElements) {
       const index = parseInt(strokeEl.getAttribute('index') || '1');
 
+      // Helper to parse common stroke properties
+      const parseCommonStrokeProps = (strokeNode: globalThis.Element): Partial<StrokeStyle> => {
+        const weight = parseFloat(strokeNode.getAttribute('weight') || '1');
+        const caps = (strokeNode.getAttribute('caps') || 'round') as 'none' | 'round' | 'square';
+        const joints = (strokeNode.getAttribute('joints') || 'round') as 'miter' | 'round' | 'bevel';
+        const miterLimit = strokeNode.getAttribute('miterLimit');
+        const scaleMode = strokeNode.getAttribute('scaleMode') as 'normal' | 'horizontal' | 'vertical' | 'none' | null;
+        const pixelHinting = strokeNode.getAttribute('pixelHinting') === 'true';
+
+        return {
+          weight,
+          caps,
+          joints,
+          ...(miterLimit !== null && { miterLimit: parseFloat(miterLimit) }),
+          ...(scaleMode && scaleMode !== 'normal' && { scaleMode }),
+          ...(pixelHinting && { pixelHinting })
+        };
+      };
+
       // Check for SolidStroke
       const solidStroke = strokeEl.querySelector('SolidStroke');
       if (solidStroke) {
-        const weight = parseFloat(solidStroke.getAttribute('weight') || '1');
-        const caps = (solidStroke.getAttribute('caps') || 'round') as 'none' | 'round' | 'square';
-        const joints = (solidStroke.getAttribute('joints') || 'round') as 'miter' | 'round' | 'bevel';
+        const commonProps = parseCommonStrokeProps(solidStroke);
+        const fillEl = solidStroke.querySelector('fill');
 
-        // Get stroke color from nested fill > SolidColor
-        const solidColor = solidStroke.querySelector('fill > SolidColor');
-        const color = solidColor?.getAttribute('color') || '#000000';
+        if (fillEl) {
+          // Check for SolidColor fill
+          const solidColor = fillEl.querySelector('SolidColor');
+          if (solidColor) {
+            const color = solidColor.getAttribute('color') || '#000000';
+            strokes.push({
+              index,
+              type: 'solid',
+              color,
+              ...commonProps
+            } as StrokeStyle);
+            continue;
+          }
 
-        const stroke: StrokeStyle = {
+          // Check for LinearGradient fill
+          const linearGradient = fillEl.querySelector('LinearGradient');
+          if (linearGradient) {
+            const gradient = this.parseGradientEntries(linearGradient);
+            const matrix = this.parseGradientMatrix(linearGradient);
+            const spreadMethod = (linearGradient.getAttribute('spreadMethod') || 'pad') as 'pad' | 'reflect' | 'repeat';
+            const interpolationMethod = (linearGradient.getAttribute('interpolationMethod') || 'rgb') as 'rgb' | 'linearRGB';
+
+            strokes.push({
+              index,
+              type: 'linear',
+              gradient,
+              matrix,
+              spreadMethod,
+              interpolationMethod,
+              ...commonProps
+            } as StrokeStyle);
+            continue;
+          }
+
+          // Check for RadialGradient fill
+          const radialGradient = fillEl.querySelector('RadialGradient');
+          if (radialGradient) {
+            const gradient = this.parseGradientEntries(radialGradient);
+            const matrix = this.parseGradientMatrix(radialGradient);
+            const spreadMethod = (radialGradient.getAttribute('spreadMethod') || 'pad') as 'pad' | 'reflect' | 'repeat';
+            const interpolationMethod = (radialGradient.getAttribute('interpolationMethod') || 'rgb') as 'rgb' | 'linearRGB';
+            const focalPointRatio = parseFloat(radialGradient.getAttribute('focalPointRatio') || '0');
+
+            strokes.push({
+              index,
+              type: 'radial',
+              gradient,
+              matrix,
+              spreadMethod,
+              interpolationMethod,
+              focalPointRatio,
+              ...commonProps
+            } as StrokeStyle);
+            continue;
+          }
+
+          // Check for BitmapFill
+          const bitmapFill = fillEl.querySelector('BitmapFill');
+          if (bitmapFill) {
+            const bitmapPath = normalizePath(bitmapFill.getAttribute('bitmapPath') || '');
+            const matrix = this.parseBitmapMatrix(bitmapFill);
+            const bitmapIsClipped = bitmapFill.getAttribute('bitmapIsClipped') === 'true';
+            const bitmapIsSmoothed = bitmapFill.getAttribute('bitmapIsSmoothed') !== 'false';
+
+            strokes.push({
+              index,
+              type: 'bitmap',
+              bitmapPath,
+              matrix,
+              bitmapIsClipped,
+              bitmapIsSmoothed,
+              ...commonProps
+            } as StrokeStyle);
+            continue;
+          }
+        }
+
+        // Fallback to black solid stroke
+        strokes.push({
           index,
-          color,
-          weight,
-          caps,
-          joints
-        };
-
-        // Parse miter limit (XFL: miterLimit attribute, Flash default is 3)
-        const miterLimit = solidStroke.getAttribute('miterLimit');
-        if (miterLimit !== null) {
-          stroke.miterLimit = parseFloat(miterLimit);
-        }
-
-        // Parse scale mode (XFL: scaleMode attribute)
-        // Values: "normal" (default), "horizontal", "vertical", "none"
-        const scaleMode = solidStroke.getAttribute('scaleMode') as 'normal' | 'horizontal' | 'vertical' | 'none' | null;
-        if (scaleMode && scaleMode !== 'normal') {
-          stroke.scaleMode = scaleMode;
-        }
-
-        // Parse pixel hinting (XFL: pixelHinting attribute)
-        if (solidStroke.getAttribute('pixelHinting') === 'true') {
-          stroke.pixelHinting = true;
-        }
-
-        strokes.push(stroke);
+          type: 'solid',
+          color: '#000000',
+          ...commonProps
+        } as StrokeStyle);
         continue;
       }
 
-      // Check for DashedStroke (treat similar to SolidStroke for now)
+      // Check for DashedStroke (treat similar to SolidStroke)
       const dashedStroke = strokeEl.querySelector('DashedStroke');
       if (dashedStroke) {
-        const weight = parseFloat(dashedStroke.getAttribute('weight') || '1');
-        const caps = (dashedStroke.getAttribute('caps') || 'round') as 'none' | 'round' | 'square';
-        const joints = (dashedStroke.getAttribute('joints') || 'round') as 'miter' | 'round' | 'bevel';
-
+        const commonProps = parseCommonStrokeProps(dashedStroke);
         const solidColor = dashedStroke.querySelector('fill > SolidColor');
         const color = solidColor?.getAttribute('color') || '#000000';
 
         strokes.push({
           index,
+          type: 'solid',
           color,
-          weight,
-          caps,
-          joints
-        });
+          ...commonProps
+        } as StrokeStyle);
         continue;
       }
     }

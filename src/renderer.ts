@@ -68,6 +68,7 @@ export class FLARenderer {
   private nestedLayerOrder: 'forward' | 'reverse' = 'reverse';
   private elementOrder: 'forward' | 'reverse' = 'forward';
   private shapePathCache = new WeakMap<Shape, CachedShapePaths>();
+  private symbolBitmapCache = new Map<string, { canvas: HTMLCanvasElement, bounds: { width: number, height: number, offsetX: number, offsetY: number } }>();
   private followCamera: boolean = false;
   private manualCameraLayerIndex: number | undefined = undefined;
 
@@ -1258,6 +1259,15 @@ export class FLARenderer {
         };
       }
 
+      // Apply orient-to-path rotation if enabled
+      if (frame?.motionTweenOrientToPath) {
+        interpolatedMatrix = this.applyOrientToPath(
+          interpolatedMatrix,
+          startMatrix,
+          endMatrix
+        );
+      }
+
       // Interpolate color transform if either element has one
       const interpolatedColorTransform = this.lerpColorTransform(
         element.colorTransform,
@@ -1333,6 +1343,55 @@ export class FLARenderer {
       d: cos * scaleY,
       tx,
       ty
+    };
+  }
+
+  /**
+   * Apply orient-to-path rotation to a matrix.
+   * Calculates the tangent angle from the motion path and applies additional rotation.
+   */
+  private applyOrientToPath(
+    interpolatedMatrix: Matrix,
+    startMatrix: Matrix,
+    endMatrix: Matrix
+  ): Matrix {
+    // Calculate the direction of motion (tangent to the path)
+    const dx = endMatrix.tx - startMatrix.tx;
+    const dy = endMatrix.ty - startMatrix.ty;
+
+    // Only apply if there's actual movement
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    if (distance < 0.001) {
+      return interpolatedMatrix;
+    }
+
+    // Calculate tangent angle (direction of motion)
+    const tangentAngle = Math.atan2(dy, dx);
+
+    // Extract current scale from the interpolated matrix
+    const scaleX = Math.sqrt(interpolatedMatrix.a * interpolatedMatrix.a + interpolatedMatrix.b * interpolatedMatrix.b);
+    const scaleY = Math.sqrt(interpolatedMatrix.c * interpolatedMatrix.c + interpolatedMatrix.d * interpolatedMatrix.d);
+
+    // Extract current rotation
+    const currentAngle = Math.atan2(interpolatedMatrix.b, interpolatedMatrix.a);
+
+    // The new angle is the tangent angle plus any existing rotation offset
+    // We preserve the relative rotation from the start
+    const startAngle = Math.atan2(startMatrix.b, startMatrix.a);
+    const rotationOffset = currentAngle - startAngle;
+    const newAngle = tangentAngle + rotationOffset;
+
+    // Reconstruct matrix with new rotation
+    const cos = Math.cos(newAngle);
+    const sin = Math.sin(newAngle);
+
+    return {
+      a: cos * scaleX,
+      b: sin * scaleX,
+      c: -sin * scaleY,
+      d: cos * scaleY,
+      tx: interpolatedMatrix.tx,
+      ty: interpolatedMatrix.ty
     };
   }
 
@@ -1437,12 +1496,23 @@ export class FLARenderer {
     // Check if symbol has 9-slice scaling grid
     const has9SliceGrid = symbol.scale9Grid !== undefined;
 
+    // Check for 3D transforms
+    const has3DTransform = instance.rotationX !== undefined ||
+                           instance.rotationY !== undefined ||
+                           instance.rotationZ !== undefined ||
+                           instance.z !== undefined;
+
     // Apply transformation matrix (skip if using 9-slice, handled separately)
     // Note: The matrix tx/ty already positions the symbol correctly
     // The transformationPoint is metadata about the pivot, but it's already
     // accounted for in how the matrix was calculated by Flash
     if (!has9SliceGrid) {
-      this.applyMatrix(instance.matrix);
+      if (has3DTransform) {
+        // Apply 3D transform using perspective projection
+        this.apply3DTransform(instance);
+      } else {
+        this.applyMatrix(instance.matrix);
+      }
     }
 
     // Calculate which frame to render based on symbol type and loop mode
@@ -1494,6 +1564,10 @@ export class FLARenderer {
     // Render symbol's timeline (with 9-slice scaling if applicable)
     if (has9SliceGrid && symbol.scale9Grid) {
       this.renderSymbolWith9Slice(symbol, instance, symbol.scale9Grid, symbolFrame, depth);
+    } else if (instance.cacheAsBitmap && symbolFrame === 0) {
+      // Use cached bitmap rendering for symbols with cacheAsBitmap enabled
+      // Only cache frame 0 to avoid excessive memory usage
+      this.renderSymbolFromCache(symbol, instance, depth);
     } else {
       this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
     }
@@ -1760,8 +1834,8 @@ export class FLARenderer {
             renderY -= run.size * 0.2; // Move up for superscript
           }
 
-          // Render with letter spacing
-          this.renderTextWithSpacing(ctx, line, xPos, renderY, letterSpacing);
+          // Render with letter spacing, kerning, and rotation
+          this.renderTextWithSpacing(ctx, line, xPos, renderY, letterSpacing, run.autoKern, run.rotation);
 
           // Render underline if enabled
           if (run.underline) {
@@ -1837,23 +1911,73 @@ export class FLARenderer {
     return width;
   }
 
-  // Render text character by character with letter spacing
+  // Render text character by character with letter spacing, kerning, and rotation
   private renderTextWithSpacing(
     ctx: CanvasRenderingContext2D,
     text: string,
     x: number,
     y: number,
-    letterSpacing: number
+    letterSpacing: number,
+    autoKern?: boolean,
+    rotation?: number
   ): void {
-    if (letterSpacing === 0) {
+    // If no special effects, use fast path
+    if (letterSpacing === 0 && !autoKern && !rotation) {
       ctx.fillText(text, x, y);
       return;
     }
-    // Render each character with spacing
+
+    // Render each character with spacing, kerning, and rotation
     let currentX = x;
+
+    // Common kerning pairs (approximated values)
+    // These are rough approximations since we can't access actual font kerning tables
+    const kerningPairs: Record<string, number> = {
+      'AV': -0.08, 'AW': -0.06, 'AY': -0.08, 'AT': -0.08,
+      'AO': -0.03, 'AC': -0.03, 'AG': -0.03, 'AQ': -0.03,
+      'FA': -0.06, 'FO': -0.03, 'LT': -0.08, 'LV': -0.08,
+      'LW': -0.06, 'LY': -0.08, 'PA': -0.06, 'TA': -0.08,
+      'TO': -0.06, 'TR': -0.04, 'Tr': -0.06, 'Tu': -0.04,
+      'Tw': -0.04, 'Ty': -0.04, 'VA': -0.08, 'Ve': -0.03,
+      'Vo': -0.03, 'WA': -0.06, 'We': -0.03, 'Wo': -0.03,
+      'YA': -0.08, 'Ye': -0.04, 'Yo': -0.04, 'av': -0.03,
+      'aw': -0.02, 'ay': -0.03, 'fa': -0.02, 'fe': -0.02,
+      'fo': -0.02, 'ov': -0.02, 'ow': -0.02, 'oy': -0.02,
+      'va': -0.03, 've': -0.02, 'vo': -0.02, 'wa': -0.02,
+      'we': -0.02, 'wo': -0.02, 'ya': -0.02, 'ye': -0.02, 'yo': -0.02
+    };
+
     for (let i = 0; i < text.length; i++) {
-      ctx.fillText(text[i], currentX, y);
-      currentX += ctx.measureText(text[i]).width + letterSpacing;
+      const char = text[i];
+      const charWidth = ctx.measureText(char).width;
+
+      if (rotation) {
+        // Apply per-character rotation
+        ctx.save();
+        const charCenterX = currentX + charWidth / 2;
+        ctx.translate(charCenterX, y);
+        ctx.rotate(rotation * Math.PI / 180);
+        ctx.fillText(char, -charWidth / 2, 0);
+        ctx.restore();
+      } else {
+        ctx.fillText(char, currentX, y);
+      }
+
+      // Calculate next position
+      let advance = charWidth + letterSpacing;
+
+      // Apply kerning adjustment if enabled
+      if (autoKern && i < text.length - 1) {
+        const pair = char + text[i + 1];
+        const kernValue = kerningPairs[pair];
+        if (kernValue !== undefined) {
+          // Kerning value is a fraction of the font size
+          const fontSize = parseFloat(ctx.font);
+          advance += kernValue * fontSize;
+        }
+      }
+
+      currentX += advance;
     }
   }
 
@@ -2006,7 +2130,7 @@ export class FLARenderer {
     for (const [styleIndex, path] of sortedStrokeStyles) {
       const stroke = strokeStyles.get(styleIndex);
       if (stroke) {
-        ctx.strokeStyle = stroke.color;
+        ctx.strokeStyle = this.getStrokeStyle(stroke);
         ctx.lineWidth = stroke.weight;
         ctx.lineCap = stroke.caps === 'none' ? 'butt' : stroke.caps || 'round';
         ctx.lineJoin = stroke.joints || 'round';
@@ -2453,6 +2577,52 @@ export class FLARenderer {
     return '#000000';
   }
 
+  private getStrokeStyle(stroke: StrokeStyle): string | CanvasGradient | CanvasPattern {
+    // Handle solid strokes
+    if (stroke.type === 'solid' || !stroke.type) {
+      return stroke.color || '#000000';
+    }
+
+    // Handle linear gradient strokes
+    if (stroke.type === 'linear' && stroke.gradient && stroke.gradient.length > 0) {
+      return this.createLinearGradient({
+        type: 'linear',
+        index: stroke.index,
+        gradient: stroke.gradient,
+        matrix: stroke.matrix,
+        spreadMethod: stroke.spreadMethod,
+        interpolationMethod: stroke.interpolationMethod
+      });
+    }
+
+    // Handle radial gradient strokes
+    if (stroke.type === 'radial' && stroke.gradient && stroke.gradient.length > 0) {
+      return this.createRadialGradient({
+        type: 'radial',
+        index: stroke.index,
+        gradient: stroke.gradient,
+        matrix: stroke.matrix,
+        spreadMethod: stroke.spreadMethod,
+        interpolationMethod: stroke.interpolationMethod,
+        focalPointRatio: stroke.focalPointRatio
+      });
+    }
+
+    // Handle bitmap strokes
+    if (stroke.type === 'bitmap' && stroke.bitmapPath) {
+      return this.createBitmapPattern({
+        type: 'bitmap',
+        index: stroke.index,
+        bitmapPath: stroke.bitmapPath,
+        matrix: stroke.matrix,
+        bitmapIsClipped: stroke.bitmapIsClipped,
+        bitmapIsSmoothed: stroke.bitmapIsSmoothed
+      });
+    }
+
+    return stroke.color || '#000000';
+  }
+
   private createBitmapPattern(fill: FillStyle): CanvasPattern | string {
     if (!this.doc || !fill.bitmapPath) {
       return '#808080'; // Gray fallback for missing bitmap
@@ -2705,6 +2875,89 @@ export class FLARenderer {
 
   private applyMatrix(matrix: Matrix): void {
     this.ctx.transform(matrix.a, matrix.b, matrix.c, matrix.d, matrix.tx, matrix.ty);
+  }
+
+  /**
+   * Apply 3D transform using perspective projection to 2D canvas.
+   * This simulates 3D rotations by applying appropriate 2D transforms.
+   */
+  private apply3DTransform(instance: SymbolInstance): void {
+    const ctx = this.ctx;
+    const matrix = instance.matrix;
+
+    // Get 3D rotation angles in radians
+    const rotX = (instance.rotationX || 0) * Math.PI / 180;
+    const rotY = (instance.rotationY || 0) * Math.PI / 180;
+    const rotZ = (instance.rotationZ || 0) * Math.PI / 180;
+    const zPos = instance.z || 0;
+
+    // Get the center point for 3D rotation
+    const centerX = instance.centerPoint3D?.x || instance.transformationPoint.x;
+    const centerY = instance.centerPoint3D?.y || instance.transformationPoint.y;
+
+    // First apply the 2D matrix translation
+    ctx.translate(matrix.tx, matrix.ty);
+
+    // Apply perspective projection for 3D effect
+    // Using a simple perspective distance
+    const perspectiveDistance = 1000;
+
+    // Calculate 3D rotation matrices and project to 2D
+    // Rotation around X-axis affects Y scale and skew
+    const cosX = Math.cos(rotX);
+    const sinX = Math.sin(rotX);
+
+    // Rotation around Y-axis affects X scale and skew
+    const cosY = Math.cos(rotY);
+    const sinY = Math.sin(rotY);
+
+    // Rotation around Z-axis (2D rotation)
+    const cosZ = Math.cos(rotZ);
+    const sinZ = Math.sin(rotZ);
+
+    // Apply Z-position scaling (objects further away appear smaller)
+    const zScale = perspectiveDistance / (perspectiveDistance + zPos);
+
+    // Extract scale from original matrix
+    const origScaleX = Math.sqrt(matrix.a * matrix.a + matrix.b * matrix.b);
+    const origScaleY = Math.sqrt(matrix.c * matrix.c + matrix.d * matrix.d);
+
+    // Combine all transformations:
+    // 1. Translate to center point
+    // 2. Apply 3D rotations (projected to 2D)
+    // 3. Apply perspective scale
+    // 4. Translate back
+
+    // Move to transformation center
+    ctx.translate(centerX, centerY);
+
+    // Apply Z rotation (in 2D plane)
+    ctx.rotate(rotZ);
+
+    // Apply Y rotation effect (horizontal compression/skew)
+    // When rotating around Y-axis, the X dimension compresses
+    const scaleXFromRotY = cosY * zScale;
+
+    // Apply X rotation effect (vertical compression/skew)
+    // When rotating around X-axis, the Y dimension compresses
+    const scaleYFromRotX = cosX * zScale;
+
+    // Apply the combined scale
+    ctx.scale(origScaleX * scaleXFromRotY, origScaleY * scaleYFromRotX);
+
+    // Apply skew from 3D rotations
+    // Y rotation creates horizontal skew
+    if (Math.abs(sinY) > 0.001) {
+      ctx.transform(1, 0, sinY * 0.5, 1, 0, 0);
+    }
+
+    // X rotation creates vertical skew
+    if (Math.abs(sinX) > 0.001) {
+      ctx.transform(1, sinX * 0.5, 0, 1, 0, 0);
+    }
+
+    // Translate back from center
+    ctx.translate(-centerX, -centerY);
   }
 
   // Apply filters using Canvas 2D shadow and filter API
@@ -3064,6 +3317,76 @@ export class FLARenderer {
    * - Left/Right edges (4,6): Vertical scaling only
    * - Center (5): Both horizontal and vertical scaling
    */
+
+  /**
+   * Render a symbol using cached bitmap for improved performance.
+   * The symbol is rendered once to an offscreen canvas and then reused.
+   */
+  private renderSymbolFromCache(
+    symbol: Symbol,
+    instance: SymbolInstance,
+    depth: number
+  ): void {
+    const cacheKey = `${symbol.name}:${symbol.itemID}`;
+    let cached = this.symbolBitmapCache.get(cacheKey);
+
+    if (!cached) {
+      // Calculate symbol bounds (estimate based on document size or use a default)
+      const symbolWidth = this.doc?.width || 550;
+      const symbolHeight = this.doc?.height || 400;
+      const padding = 50;
+
+      // Create offscreen canvas
+      const offscreenCanvas = document.createElement('canvas');
+      offscreenCanvas.width = Math.ceil(symbolWidth + padding * 2);
+      offscreenCanvas.height = Math.ceil(symbolHeight + padding * 2);
+      const offCtx = offscreenCanvas.getContext('2d');
+
+      if (!offCtx) {
+        // Fallback to normal rendering
+        this.renderTimeline(symbol.timeline, 0, depth + 1);
+        return;
+      }
+
+      // Temporarily swap context to render to offscreen canvas
+      const savedCtx = this.ctx;
+      const savedScale = this.scale;
+      this.ctx = offCtx;
+      this.scale = 1;
+
+      // Translate to center the content
+      offCtx.translate(padding, padding);
+
+      // Render the symbol's timeline at frame 0
+      this.renderTimeline(symbol.timeline, 0, depth + 1);
+
+      // Restore original context
+      this.ctx = savedCtx;
+      this.scale = savedScale;
+
+      // Cache the result
+      cached = {
+        canvas: offscreenCanvas,
+        bounds: {
+          width: symbolWidth,
+          height: symbolHeight,
+          offsetX: padding,
+          offsetY: padding
+        }
+      };
+      this.symbolBitmapCache.set(cacheKey, cached);
+    }
+
+    // Draw the cached bitmap
+    this.ctx.drawImage(
+      cached.canvas,
+      cached.bounds.offsetX, cached.bounds.offsetY,
+      cached.bounds.width, cached.bounds.height,
+      0, 0,
+      cached.bounds.width, cached.bounds.height
+    );
+  }
+
   private renderSymbolWith9Slice(
     symbol: Symbol,
     instance: SymbolInstance,

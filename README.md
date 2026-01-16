@@ -46,7 +46,8 @@ A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no inst
 │  ✓ Color tweens   │  ✓ Masks           │  ✓ Single frame PNG   │
 │  ✓ Rotation tweens│  ✓ Text (Google)   │  ✓ SVG vector export  │
 │  ✓ Audio (MP3)    │  ✓ 9-slice scaling │  ✓ WebCodecs API      │
-│  ✓ Bitmap (.dat)  │                    │                       │
+│  ✓ Bitmap (.dat)  │  ✓ 3D transforms   │                       │
+│  ✓ Orient to path │  ✓ Gradient strokes│                       │
 └───────────────────┴────────────────────┴───────────────────────┘
 ```
 
@@ -56,12 +57,12 @@ A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no inst
 |:-:|---------|---------|
 | 📦 | **FLA Parsing** | Native Adobe XFL format (ZIP + XML) |
 | 🎬 | **Timeline** | Play, pause, scrub, frame-by-frame |
-| 🔷 | **Shapes** | Fills, strokes, gradients, bitmap patterns |
-| 🎭 | **Symbols** | Graphic, MovieClip, Button with nesting |
-| ✨ | **Tweens** | Motion (easing) and shape morphing |
+| 🔷 | **Shapes** | Fills, strokes, gradients, bitmap patterns, gradient strokes |
+| 🎭 | **Symbols** | Graphic, MovieClip, Button with nesting, 3D transforms |
+| ✨ | **Tweens** | Motion (easing), shape morphing, orient to path |
 | 🎨 | **Effects** | Blur, glow, drop shadow, blend modes, masks |
 | 🖼️ | **Bitmaps** | PNG, JPG, GIF + Adobe `.dat` with recovery |
-| 🔤 | **Text** | Static/dynamic, word wrap, Google Fonts |
+| 🔤 | **Text** | Static/dynamic, word wrap, Google Fonts, kerning |
 | 🔊 | **Audio** | Stream sync with volume control |
 | 📹 | **Export** | MP4, PNG sequence, sprite sheet, single frame |
 | 🎥 | **Camera** | Auto-detected camera layers with follow mode |
@@ -224,13 +225,19 @@ FLA (ZIP) → Parser → Document → Renderer → Canvas
 | Shape Tweens | ✓ |
 | Color Transform Tweens | ✓ |
 | Rotation Tweens (CW/CCW) | ✓ |
+| Orient to Path | ✓ |
 | Filters | ✓ |
 | Masks | ✓ |
 | Color Effects | ✓ |
 | Blend Modes | ✓ |
 | Camera Layer | ✓ |
 | Bitmap Fills | ✓ |
+| Gradient/Bitmap Strokes | ✓ |
 | 9-Slice Scaling | ✓ |
+| 3D Transforms | ✓ |
+| Cache as Bitmap | ✓ |
+| Text Kerning | ✓ |
+| Text Rotation | ✓ |
 | Frame Labels | ✓ |
 | ActionScript | ✗ |
 

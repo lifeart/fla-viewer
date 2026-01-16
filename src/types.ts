@@ -134,6 +134,12 @@ export interface SymbolInstance {
   filters?: Filter[];
   blendMode?: BlendMode;
   isVisible?: boolean; // Instance visibility (default true)
+  // 3D transform properties
+  rotationX?: number; // 3D rotation around X-axis (degrees)
+  rotationY?: number; // 3D rotation around Y-axis (degrees)
+  rotationZ?: number; // 3D rotation around Z-axis (degrees) - note: 2D rotation is in matrix
+  z?: number; // Z position
+  cacheAsBitmap?: boolean; // Performance optimization hint
 }
 
 export interface VideoInstance {
@@ -177,6 +183,8 @@ export interface TextRun {
   url?: string; // Hyperlink URL
   target?: string; // Link target (_blank, _self, etc.)
   characterPosition?: 'normal' | 'subscript' | 'superscript';
+  autoKern?: boolean; // Enable automatic kerning
+  rotation?: number; // Per-character rotation in degrees
 }
 
 export interface Shape {
@@ -230,13 +238,24 @@ export interface GradientEntry {
 
 export interface StrokeStyle {
   index: number;
-  color: string;
+  type: 'solid' | 'linear' | 'radial' | 'bitmap'; // Stroke fill type
+  color?: string; // For solid strokes
   weight: number;
   caps?: 'none' | 'round' | 'square';
   joints?: 'miter' | 'round' | 'bevel';
   miterLimit?: number; // Maximum miter length (default: 3 in Flash)
   scaleMode?: 'normal' | 'horizontal' | 'vertical' | 'none'; // Stroke scaling behavior
   pixelHinting?: boolean; // Snap stroke to pixel boundaries
+  // Gradient properties (for linear/radial strokes)
+  gradient?: GradientEntry[];
+  matrix?: Matrix;
+  spreadMethod?: 'pad' | 'reflect' | 'repeat';
+  interpolationMethod?: 'rgb' | 'linearRGB';
+  focalPointRatio?: number; // For radial gradients
+  // Bitmap properties (for bitmap strokes)
+  bitmapPath?: string;
+  bitmapIsClipped?: boolean;
+  bitmapIsSmoothed?: boolean;
 }
 
 export interface Edge {
