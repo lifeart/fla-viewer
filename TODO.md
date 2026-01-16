@@ -180,6 +180,7 @@ Currently implemented: Motion tweens with linear/custom easing, shape tweens
 | **Rotation Tweens** | `motionTweenRotate` | CW/CCW rotation with count |
 | **Scale Tweens** | `motionTweenScale` | Explicit scale interpolation |
 | **Tint Tweens** | Color transform keyframes | Interpolate between tint colors |
+| **Color Transform Tweening** | Motion tween with color | Interpolate colorTransform values between keyframes |
 
 **JPEXS easing:**
 ```java
@@ -203,8 +204,69 @@ Currently implemented: Button symbols show first frame only
 | **Mouse Events** | Click, rollover, rollout detection |
 | **Hit Area** | Use hit frame shape for interaction bounds |
 | **MovieClip Independence** | Each instance maintains own playhead |
-| **Frame Labels** | Named frames for navigation |
-| **Scenes** | Multiple scene support |
+| **Frame Labels** | Named frames for navigation (`DOMFrame.labelType`, `DOMFrame.name`) |
+| **Scenes** | Multiple scene support (`DOMDocument.scenes`) |
+| **Frame Scripts** | ActionScript on frames (informational display only) |
+
+### keyMode Values (Reference)
+
+Frame keyMode indicates the type of keyframe:
+```
+9728  = Normal keyframe
+17922 = Keyframe with motion tween
+22017 = Keyframe with shape tween
+8195  = Blank keyframe
+```
+
+**Note:** These values are parsed but not used functionally - the `tweenType` attribute determines actual behavior.
+
+---
+
+## Symbol Instance Features (Low Priority)
+
+Currently implemented: Matrix, transformationPoint, loop mode, firstFrame, filters, colorTransform, blendMode
+
+### Missing Features
+
+| Feature | XFL Reference | Description |
+|---------|---------------|-------------|
+| **3D Transform** | `centerPoint3DX/Y/Z`, `rotationX/Y/Z` | 3D rotation and perspective |
+| **Cache as Bitmap** | `cacheAsBitmap` | Render symbol to bitmap for performance |
+| **Visible** | `isVisible` | Instance visibility flag |
+| **Silent Sound Sync** | `silent` | Mute sound during playback |
+| **Accessibility** | `accName`, `description` | Accessibility properties |
+| **Tracking as Menu** | `trackAsMenu` | Button menu tracking mode |
+| **Last Frame** | `lastFrame` | End frame for graphic symbols |
+
+**Implementation notes:**
+- 3D transforms require matrix3d decomposition or CSS 3D transforms
+- `cacheAsBitmap` is handled as a performance hint, not strictly required
+
+---
+
+## Text Features (Low Priority)
+
+Currently implemented: Characters, alignment, size, lineHeight, face, fillColor, bold, italic, letterSpacing
+
+### Missing Features
+
+| Feature | XFL Reference | Description |
+|---------|---------------|-------------|
+| **Underline** | `DOMTextAttrs.underline` | Underline text decoration |
+| **URL/Hyperlinks** | `DOMTextAttrs.url` | Clickable links in text |
+| **Auto Kerning** | `DOMTextAttrs.autoKern` | Automatic character spacing adjustment |
+| **Indent** | `DOMTextAttrs.indent` | First-line paragraph indent |
+| **Left Margin** | `DOMTextAttrs.leftMargin` | Text left margin in twips |
+| **Right Margin** | `DOMTextAttrs.rightMargin` | Text right margin in twips |
+| **Target** | `DOMTextAttrs.target` | Link target frame (for URLs) |
+| **Character Position** | `DOMTextAttrs.characterPosition` | Subscript/superscript positioning |
+| **Rotation** | `DOMTextAttrs.rotation` | Text rotation per character |
+
+**Implementation notes:**
+- Underline can be rendered with `ctx.strokeStyle` and a line below text baseline
+- URLs require click detection and event handling
+- Margins affect text wrapping boundaries
+- Character position (subscript/superscript) requires vertical offset adjustments
 
 ---
 
@@ -247,6 +309,24 @@ Sn             Style change (n = style index)
 (;...);        Cubic bezier segment
 #XX.YY         Hex coordinate (signed int.fraction)
 ```
+
+---
+
+## Layer Features (Low Priority)
+
+Currently implemented: normal, guide, folder, camera, mask, masked layers with visibility, outline, transparency
+
+### Missing Features
+
+| Feature | XFL Reference | Description |
+|---------|---------------|-------------|
+| **Layer Height** | `DOMLayer.heightMode`, `DOMLayer.height` | Custom layer height in timeline |
+| **Layer Color (Outline)** | `DOMLayer.outlineColor` | Custom outline color for editor |
+| **Auto-Named Layers** | `DOMLayer.autoNamed` | System-generated layer names |
+| **Current Frame** | `DOMLayer.current` | Current editing frame marker |
+| **Animation Type** | `DOMLayer.animationType` | IK/armature animation mode |
+
+**Note:** Most layer features are editor-only and don't affect playback rendering.
 
 ---
 
