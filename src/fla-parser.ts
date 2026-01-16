@@ -1151,8 +1151,8 @@ export class FLAParser {
       return 'image/gif';
     }
 
-    // Adobe FLA bitmap format: starts with 03 05 (format marker)
-    if (bytes[0] === 0x03 && bytes[1] === 0x05) {
+    // Adobe FLA bitmap format: 03 05 (32-bit) or 03 03 (8-bit palette)
+    if (bytes[0] === 0x03 && (bytes[1] === 0x05 || bytes[1] === 0x03)) {
       return 'application/x-fla-bitmap';
     }
 
@@ -1208,18 +1208,30 @@ export class FLAParser {
     const algoProgress = onAlgoProgress || (() => {});
     const bytes = new Uint8Array(data);
 
-    // Parse header
+    // Validate magic bytes: must be 03 05 (32-bit) or 03 03 (8-bit)
+    if (bytes[0] !== 0x03 || (bytes[1] !== 0x05 && bytes[1] !== 0x03)) {
+      if (DEBUG) {
+        console.warn(`Invalid FLA bitmap magic: ${bytes[0].toString(16)} ${bytes[1].toString(16)}`);
+      }
+      return null;
+    }
+
+    // Check format type: 03 05 = 32-bit, 03 03 = 8-bit palette
+    const is8Bit = bytes[1] === 0x03;
+
+    // Parse header per JPEXS specification
     const headerWidth = bytes[4] | (bytes[5] << 8);
     const headerHeight = bytes[6] | (bytes[7] << 8);
-    const subFormat = bytes[26];
-
-    // Adobe FLA bitmap format:
-    // - Header: 28 bytes of metadata (magic, dimensions, flags)
-    // - subFormat=0: zlib compressed (78 xx header) at offset 28
-    // - subFormat=2: raw deflate at offset 32 (extended header)
+    const hasAlpha = bytes[24] === 1;
+    const variant = bytes[25];
 
     if (DEBUG) {
-      console.log(`FLA bitmap: ${headerWidth}x${headerHeight}, subFormat=${subFormat}, expected=${expectedWidth}x${expectedHeight}`);
+      console.log(`FLA bitmap: ${headerWidth}x${headerHeight}, hasAlpha=${hasAlpha}, variant=${variant}, is8Bit=${is8Bit}, expected=${expectedWidth}x${expectedHeight}`);
+    }
+
+    // Handle 8-bit palette mode
+    if (is8Bit) {
+      return this.decode8BitFlaBitmap(bytes, headerWidth, headerHeight, hasAlpha);
     }
 
     // Decompress the data using pako
@@ -1228,11 +1240,78 @@ export class FLAParser {
     try {
       let pixelData: Uint8Array;
 
-      // Offset depends on subFormat:
-      // - subFormat=0: zlib header at offset 28, raw deflate at offset 30
-      // - subFormat=2: extended header, raw deflate at offset 32
-      const offset = subFormat === 2 ? 32 : 30;
-      const compData = bytes.slice(offset);
+      // Extract compressed data based on format
+      // Per JPEXS: variant=1 means chunked compression
+      // Chunks start at offset 26 with [UI16 length][data]... [UI16 0x0000]
+      let compData: Uint8Array;
+
+      if (variant === 1) {
+        // Chunked format: read and concatenate all chunks
+        const chunks: Uint8Array[] = [];
+        let pos = 26;
+
+        while (pos + 2 <= bytes.length) {
+          const chunkLen = bytes[pos] | (bytes[pos + 1] << 8);
+          pos += 2;
+
+          if (chunkLen === 0) break; // Terminator
+          if (pos + chunkLen > bytes.length) break; // Truncated
+
+          chunks.push(bytes.slice(pos, pos + chunkLen));
+          pos += chunkLen;
+        }
+
+        // Concatenate all chunks
+        const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
+        compData = new Uint8Array(totalLen);
+        let offset = 0;
+        for (const chunk of chunks) {
+          compData.set(chunk, offset);
+          offset += chunk.length;
+        }
+
+        // Skip zlib header (78 xx) if present - we use raw deflate
+        if (compData.length >= 2 && compData[0] === 0x78) {
+          compData = compData.slice(2);
+        }
+
+        if (DEBUG) {
+          console.log(`Chunked format: ${chunks.length} chunks, ${totalLen} bytes total`);
+        }
+      } else {
+        // Non-chunked: raw data starts at offset 26
+        // Skip zlib header if present
+        let offset = 26;
+        if (bytes[offset] === 0x78) {
+          offset += 2;
+        }
+        compData = bytes.slice(offset);
+      }
+
+      // Validate we have enough compressed data to work with
+      // Empty or very small data (< 4 bytes) cannot be valid deflate stream
+      if (compData.length < 4) {
+        if (DEBUG) {
+          console.warn(`Insufficient compressed data: ${compData.length} bytes`);
+        }
+        return null;
+      }
+
+      // Check if data looks like valid deflate (not all zeros)
+      // First byte of deflate has block type bits that are rarely all zero
+      let hasNonZero = false;
+      for (let i = 0; i < Math.min(compData.length, 16); i++) {
+        if (compData[i] !== 0) {
+          hasNonZero = true;
+          break;
+        }
+      }
+      if (!hasNonZero) {
+        if (DEBUG) {
+          console.warn('Compressed data appears to be all zeros (invalid)');
+        }
+        return null;
+      }
 
       const expectedSize = headerWidth * headerHeight * 4;
 
@@ -1529,6 +1608,87 @@ export class FLAParser {
         console.warn('Failed to decode FLA bitmap:', e);
       }
       return null;
+    }
+  }
+
+  /**
+   * Decode 8-bit palette-indexed FLA bitmap format (magic: 03 03).
+   *
+   * Format per JPEXS:
+   * - Header: 26 bytes (same as 32-bit)
+   * - Palette count: UI16 LE (number of palette entries)
+   * - Palette data: count × 4 bytes (ABGR per entry if hasAlpha, else RGB)
+   * - Pixel data: 1 byte per pixel (palette index)
+   */
+  private decode8BitFlaBitmap(
+    bytes: Uint8Array,
+    width: number,
+    height: number,
+    hasAlpha: boolean
+  ): Promise<HTMLImageElement | null> {
+    try {
+      let pos = 26;
+
+      // Read palette count
+      const paletteCount = bytes[pos] | (bytes[pos + 1] << 8);
+      pos += 2;
+
+      if (DEBUG) {
+        console.log(`8-bit bitmap: ${width}x${height}, palette=${paletteCount} entries, hasAlpha=${hasAlpha}`);
+      }
+
+      // Read palette (ABGR format, 4 bytes each)
+      const palette: { r: number; g: number; b: number; a: number }[] = [];
+      const bytesPerEntry = 4; // Always 4 bytes per JPEXS (ABGR)
+
+      for (let i = 0; i < paletteCount && pos + bytesPerEntry <= bytes.length; i++) {
+        const a = hasAlpha ? bytes[pos] : 255;
+        const b = bytes[pos + 1];
+        const g = bytes[pos + 2];
+        const r = bytes[pos + 3];
+        palette.push({ r, g, b, a });
+        pos += bytesPerEntry;
+      }
+
+      // Remaining bytes are pixel indices
+      const pixelData = bytes.slice(pos);
+      const pixelCount = width * height;
+
+      // Create canvas
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return Promise.resolve(null);
+
+      const imageData = ctx.createImageData(width, height);
+      const rgba = imageData.data;
+
+      // Convert indexed pixels to RGBA
+      for (let i = 0; i < pixelCount && i < pixelData.length; i++) {
+        const index = pixelData[i];
+        const color = palette[index] || { r: 0, g: 0, b: 0, a: 255 };
+        const dstIdx = i * 4;
+        rgba[dstIdx] = color.r;
+        rgba[dstIdx + 1] = color.g;
+        rgba[dstIdx + 2] = color.b;
+        rgba[dstIdx + 3] = color.a;
+      }
+
+      ctx.putImageData(imageData, 0, 0);
+
+      // Convert canvas to image
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => resolve(null);
+        img.src = canvas.toDataURL('image/png');
+      });
+    } catch (e) {
+      if (DEBUG) {
+        console.warn('Failed to decode 8-bit FLA bitmap:', e);
+      }
+      return Promise.resolve(null);
     }
   }
 

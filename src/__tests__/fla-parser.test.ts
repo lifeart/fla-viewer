@@ -988,22 +988,21 @@ describe('FLAParser', () => {
     function createFlaBitmapDat(options: {
       width: number;
       height: number;
-      pixelData?: Uint8Array; // ARGB pixel data (if not provided, creates solid color)
-      subFormat?: number; // 0 = standard, 2 = alternate
+      pixelData?: Uint8Array; // ABGR pixel data (if not provided, creates solid color)
       corruptAt?: number; // Offset to corrupt the deflate stream
       useInvalidData?: boolean; // Use completely invalid data
     }): Uint8Array {
-      const { width, height, subFormat = 0, corruptAt, useInvalidData = false } = options;
+      const { width, height, corruptAt, useInvalidData = false } = options;
 
-      // Create ARGB pixel data if not provided (solid red)
+      // Create ABGR pixel data if not provided (solid red per JPEXS spec)
       let pixelData = options.pixelData;
       if (!pixelData) {
         pixelData = new Uint8Array(width * height * 4);
         for (let i = 0; i < width * height; i++) {
-          pixelData[i * 4 + 0] = 0xFF; // A
-          pixelData[i * 4 + 1] = 0xFF; // R
-          pixelData[i * 4 + 2] = 0x00; // G
-          pixelData[i * 4 + 3] = 0x00; // B
+          pixelData[i * 4 + 0] = 0xFF; // A (alpha)
+          pixelData[i * 4 + 1] = 0x00; // B (blue)
+          pixelData[i * 4 + 2] = 0x00; // G (green)
+          pixelData[i * 4 + 3] = 0xFF; // R (red)
         }
       }
 
@@ -1025,10 +1024,10 @@ describe('FLAParser', () => {
         }
       }
 
-      // Build the header
-      // Header size: 30 for subFormat=0, 32 for subFormat=2
-      const headerSize = subFormat === 2 ? 32 : 30;
-      const totalSize = headerSize + compressed.length;
+      // Build the file per JPEXS spec
+      // Header (26 bytes) + chunk length (2 bytes) + zlib header (2 bytes) + compressed data + terminator (2 bytes)
+      const chunkDataSize = 2 + compressed.length; // zlib header + compressed
+      const totalSize = 26 + 2 + chunkDataSize + 2; // header + chunkLen + chunkData + terminator
       const dat = new Uint8Array(totalSize);
 
       // Bytes 0-1: Format marker
@@ -1051,26 +1050,34 @@ describe('FLAParser', () => {
       // Bytes 8-23: Reserved/twips data (zeros for simplicity)
       // Already zero from Uint8Array initialization
 
-      // Bytes 24-27: Format flags
-      dat[24] = 0; // has_alpha
-      dat[25] = 1; // is_compressed
-      dat[26] = subFormat; // sub_format
-      dat[27] = subFormat === 0 ? 8 : 0;
+      // Bytes 24-25: Flags per JPEXS spec
+      dat[24] = 1; // hasAlpha
+      dat[25] = 1; // variant (1 = chunked compression)
 
-      // Bytes 28-29: Zlib header (for subFormat=0)
-      dat[28] = 0x78;
-      dat[29] = 0x01;
+      // Bytes 26+: Chunked format per JPEXS spec
+      // [UI16 chunk_length][chunk_data with zlib header]...[UI16 0x0000]
+      // For simplicity, we use a single chunk containing all data
+      const chunkData = new Uint8Array(compressed.length + 2);
+      chunkData[0] = 0x78; // zlib header
+      chunkData[1] = 0x01;
+      chunkData.set(compressed, 2);
 
-      // Bytes 30+ (or 32+): Compressed pixel data
-      dat.set(compressed, headerSize);
+      // Write chunk length (UI16 LE)
+      dat[26] = chunkData.length & 0xFF;
+      dat[27] = (chunkData.length >> 8) & 0xFF;
+
+      // Write chunk data starting at offset 28
+      dat.set(chunkData, 28);
+
+      // Write terminator (UI16 0x0000) - already zeros from initialization
 
       return dat;
     }
 
-    it('should decompress valid FLA bitmap with subFormat=0', async () => {
+    it('should decompress valid FLA bitmap with chunked format', async () => {
       const width = 10;
       const height = 10;
-      const datFile = createFlaBitmapDat({ width, height, subFormat: 0 });
+      const datFile = createFlaBitmapDat({ width, height });
 
       const media = `
         <media>
@@ -1093,10 +1100,10 @@ describe('FLAParser', () => {
       expect(bitmap?.imageData).toBeDefined();
     });
 
-    it('should decompress valid FLA bitmap with subFormat=2', async () => {
+    it('should decompress valid FLA bitmap with different dimensions', async () => {
       const width = 8;
       const height = 8;
-      const datFile = createFlaBitmapDat({ width, height, subFormat: 2 });
+      const datFile = createFlaBitmapDat({ width, height });
 
       const media = `
         <media>
@@ -1123,7 +1130,6 @@ describe('FLAParser', () => {
       const datFile = createFlaBitmapDat({
         width,
         height,
-        subFormat: 0,
         corruptAt: 50 // Corrupt after some valid data
       });
 
@@ -1232,7 +1238,6 @@ describe('FLAParser', () => {
       const datFile = createFlaBitmapDat({
         width,
         height,
-        subFormat: 0,
         corruptAt: 30 // Corrupt early in the stream
       });
 
@@ -1285,14 +1290,14 @@ describe('FLAParser', () => {
     it('should use streaming recovery with onData callback for mid-stream corruption', async () => {
       const width = 30;
       const height = 30;
-      // Create larger image data to ensure compression produces enough bytes for mid-stream corruption
+      // Create larger image data in ABGR format per JPEXS spec
       const pixelData = new Uint8Array(width * height * 4);
       for (let i = 0; i < width * height; i++) {
-        // Varied pixel data for better compression testing
-        pixelData[i * 4 + 0] = 0xFF; // A
-        pixelData[i * 4 + 1] = i % 256; // R
-        pixelData[i * 4 + 2] = (i * 2) % 256; // G
-        pixelData[i * 4 + 3] = (i * 3) % 256; // B
+        // Varied pixel data for better compression testing (ABGR format)
+        pixelData[i * 4 + 0] = 0xFF; // A (alpha)
+        pixelData[i * 4 + 1] = (i * 3) % 256; // B (blue)
+        pixelData[i * 4 + 2] = (i * 2) % 256; // G (green)
+        pixelData[i * 4 + 3] = i % 256; // R (red)
       }
 
       // Compress and corrupt mid-stream
@@ -1305,16 +1310,24 @@ describe('FLAParser', () => {
         corruptedCompressed[i] = 0xFF;
       }
 
-      // Build .dat file manually
-      const headerSize = 30;
-      const dat = new Uint8Array(headerSize + corruptedCompressed.length);
+      // Build .dat file in JPEXS chunked format
+      // Header (26) + chunk length (2) + zlib header (2) + compressed + terminator (2)
+      const chunkDataSize = 2 + corruptedCompressed.length; // zlib header + compressed
+      const totalSize = 26 + 2 + chunkDataSize + 2;
+      const dat = new Uint8Array(totalSize);
       dat[0] = 0x03; dat[1] = 0x05;
       dat[2] = (width * 4) & 0xFF; dat[3] = ((width * 4) >> 8) & 0xFF;
       dat[4] = width & 0xFF; dat[5] = (width >> 8) & 0xFF;
       dat[6] = height & 0xFF; dat[7] = (height >> 8) & 0xFF;
-      dat[24] = 0; dat[25] = 1; dat[26] = 0; dat[27] = 8;
+      dat[24] = 1; // hasAlpha
+      dat[25] = 1; // variant (chunked)
+      // Chunk length at offset 26-27
+      dat[26] = chunkDataSize & 0xFF;
+      dat[27] = (chunkDataSize >> 8) & 0xFF;
+      // Zlib header and compressed data at offset 28
       dat[28] = 0x78; dat[29] = 0x01;
-      dat.set(corruptedCompressed, headerSize);
+      dat.set(corruptedCompressed, 30);
+      // Terminator (already zeros)
 
       const media = `
         <media>
@@ -1355,16 +1368,20 @@ describe('FLAParser', () => {
         0x00, // end of block
       ]);
 
-      // Build .dat file
-      const headerSize = 30;
-      const dat = new Uint8Array(headerSize + deflateWithDistanceRef.length);
+      // Build .dat file in JPEXS chunked format
+      const chunkDataSize = 2 + deflateWithDistanceRef.length; // zlib header + data
+      const totalSize = 26 + 2 + chunkDataSize + 2;
+      const dat = new Uint8Array(totalSize);
       dat[0] = 0x03; dat[1] = 0x05;
       dat[2] = (width * 4) & 0xFF; dat[3] = ((width * 4) >> 8) & 0xFF;
       dat[4] = width & 0xFF; dat[5] = (width >> 8) & 0xFF;
       dat[6] = height & 0xFF; dat[7] = (height >> 8) & 0xFF;
-      dat[24] = 0; dat[25] = 1; dat[26] = 0; dat[27] = 8;
+      dat[24] = 1; // hasAlpha
+      dat[25] = 1; // variant (chunked)
+      dat[26] = chunkDataSize & 0xFF;
+      dat[27] = (chunkDataSize >> 8) & 0xFF;
       dat[28] = 0x78; dat[29] = 0x01;
-      dat.set(deflateWithDistanceRef, headerSize);
+      dat.set(deflateWithDistanceRef, 30);
 
       const media = `
         <media>
@@ -1418,16 +1435,20 @@ describe('FLAParser', () => {
         modifiedCompressed[i] = 0xFF;
       }
 
-      // Build .dat file
-      const headerSize = 30;
-      const dat = new Uint8Array(headerSize + modifiedCompressed.length);
+      // Build .dat file in JPEXS chunked format
+      const chunkDataSize = 2 + modifiedCompressed.length; // zlib header + data
+      const totalSize = 26 + 2 + chunkDataSize + 2;
+      const dat = new Uint8Array(totalSize);
       dat[0] = 0x03; dat[1] = 0x05;
       dat[2] = (width * 4) & 0xFF; dat[3] = ((width * 4) >> 8) & 0xFF;
       dat[4] = width & 0xFF; dat[5] = (width >> 8) & 0xFF;
       dat[6] = height & 0xFF; dat[7] = (height >> 8) & 0xFF;
-      dat[24] = 0; dat[25] = 1; dat[26] = 0; dat[27] = 8;
+      dat[24] = 1; // hasAlpha
+      dat[25] = 1; // variant (chunked)
+      dat[26] = chunkDataSize & 0xFF;
+      dat[27] = (chunkDataSize >> 8) & 0xFF;
       dat[28] = 0x78; dat[29] = 0x01;
-      dat.set(modifiedCompressed, headerSize);
+      dat.set(modifiedCompressed, 30);
 
       const media = `
         <media>
