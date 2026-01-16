@@ -2731,6 +2731,123 @@ describe('FLAParser', () => {
       expect(frame.sound!.sync).toBe('event');
       expect(frame.sound!.inPoint44).toBe(22050);
     });
+
+    it('should parse PCM sound format string', async () => {
+      const media = `
+        <media>
+          <DOMSoundItem name="pcm_sound" href="pcm_sound.wav" format="44kHz 16bit Stereo" sampleCount="88200"/>
+        </media>`;
+
+      const fla = await createFlaZip(createDOMDocument({ media }));
+      const doc = await parser.parse(fla);
+
+      expect(doc.sounds.has('pcm_sound')).toBe(true);
+      const sound = doc.sounds.get('pcm_sound');
+      expect(sound!.sampleRate).toBe(44000);
+      expect(sound!.bitDepth).toBe(16);
+      expect(sound!.channels).toBe(2);
+    });
+
+    it('should parse mono PCM format', async () => {
+      const media = `
+        <media>
+          <DOMSoundItem name="mono_pcm" href="mono.wav" format="22kHz 8bit Mono" sampleCount="22050"/>
+        </media>`;
+
+      const fla = await createFlaZip(createDOMDocument({ media }));
+      const doc = await parser.parse(fla);
+
+      const sound = doc.sounds.get('mono_pcm');
+      expect(sound!.sampleRate).toBe(22000);
+      expect(sound!.bitDepth).toBe(8);
+      expect(sound!.channels).toBe(1);
+    });
+
+    it('should parse soundDataHRef for PCM audio in bin folder', async () => {
+      const media = `
+        <media>
+          <DOMSoundItem name="pcm_audio" href="pcm_audio.wav" soundDataHRef="S 1 123456.dat" format="44kHz 16bit Stereo" sampleCount="44100"/>
+        </media>`;
+
+      // Create raw PCM data: 1 second of silence (44100 samples * 2 channels * 2 bytes)
+      const numSamples = 44100;
+      const pcmData = new Uint8Array(numSamples * 2 * 2); // stereo 16-bit
+
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/S 1 123456.dat': pcmData }
+      );
+      const doc = await parser.parse(fla);
+
+      expect(doc.sounds.has('pcm_audio')).toBe(true);
+      const sound = doc.sounds.get('pcm_audio');
+      expect(sound!.soundDataHRef).toBe('S 1 123456.dat');
+      // AudioBuffer should be created from PCM data
+      expect(sound!.audioData).toBeDefined();
+      expect(sound!.audioData!.numberOfChannels).toBe(2);
+      expect(sound!.audioData!.sampleRate).toBe(44000);
+    });
+
+    it('should convert 16-bit PCM to AudioBuffer correctly', async () => {
+      const media = `
+        <media>
+          <DOMSoundItem name="test_pcm" href="test.pcm" format="44kHz 16bit Mono" sampleCount="4"/>
+        </media>`;
+
+      // Create 4 samples of 16-bit mono PCM
+      // Sample values: 0, 16384 (half max), -16384 (half min), 32767 (max)
+      const pcmData = new Uint8Array(8);
+      const dataView = new DataView(pcmData.buffer);
+      dataView.setInt16(0, 0, true);      // 0.0
+      dataView.setInt16(2, 16384, true);  // ~0.5
+      dataView.setInt16(4, -16384, true); // ~-0.5
+      dataView.setInt16(6, 32767, true);  // ~1.0
+
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'LIBRARY/test.pcm': pcmData }
+      );
+      const doc = await parser.parse(fla);
+
+      const sound = doc.sounds.get('test_pcm');
+      expect(sound!.audioData).toBeDefined();
+      expect(sound!.audioData!.numberOfChannels).toBe(1);
+
+      const channelData = sound!.audioData!.getChannelData(0);
+      expect(channelData.length).toBe(4);
+      expect(channelData[0]).toBeCloseTo(0, 2);
+      expect(channelData[1]).toBeCloseTo(0.5, 2);
+      expect(channelData[2]).toBeCloseTo(-0.5, 2);
+      expect(channelData[3]).toBeCloseTo(1.0, 2);
+    });
+
+    it('should convert 8-bit PCM to AudioBuffer correctly', async () => {
+      const media = `
+        <media>
+          <DOMSoundItem name="test_8bit" href="test8.pcm" format="22kHz 8bit Mono" sampleCount="4"/>
+        </media>`;
+
+      // Create 4 samples of 8-bit mono PCM
+      // 8-bit PCM is unsigned: 0=min, 128=center, 255=max
+      const pcmData = new Uint8Array([128, 192, 64, 255]); // center, ~0.5, ~-0.5, max
+
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'LIBRARY/test8.pcm': pcmData }
+      );
+      const doc = await parser.parse(fla);
+
+      const sound = doc.sounds.get('test_8bit');
+      expect(sound!.audioData).toBeDefined();
+      expect(sound!.audioData!.numberOfChannels).toBe(1);
+
+      const channelData = sound!.audioData!.getChannelData(0);
+      expect(channelData.length).toBe(4);
+      expect(channelData[0]).toBeCloseTo(0, 1);     // 128 -> 0
+      expect(channelData[1]).toBeCloseTo(0.5, 1);   // 192 -> 0.5
+      expect(channelData[2]).toBeCloseTo(-0.5, 1);  // 64 -> -0.5
+      expect(channelData[3]).toBeCloseTo(0.99, 1);  // 255 -> ~1.0
+    });
   });
 
   describe('movie clip symbols', () => {

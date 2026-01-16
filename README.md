@@ -63,7 +63,7 @@ A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no inst
 | 🎨 | **Effects** | Blur, glow, drop shadow, blend modes, masks |
 | 🖼️ | **Bitmaps** | PNG, JPG, GIF + Adobe `.dat` with recovery |
 | 🔤 | **Text** | Static/dynamic, word wrap, Google Fonts, kerning |
-| 🔊 | **Audio** | Stream sync with volume control |
+| 🔊 | **Audio** | MP3, PCM (8/16/24/32-bit), stream sync with volume control |
 | 📹 | **Export** | MP4, PNG sequence, sprite sheet, single frame |
 | 🎥 | **Camera** | Auto-detected camera layers with follow mode |
 

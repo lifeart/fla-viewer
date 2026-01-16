@@ -25,8 +25,12 @@ export interface BitmapItem {
 export interface SoundItem {
   name: string;
   href: string; // Filename in archive
+  soundDataHRef?: string; // Binary data filename in bin/ folder for PCM audio
   format?: string; // e.g., "44kHz 16bit Stereo"
   sampleCount?: number;
+  sampleRate?: number; // Parsed sample rate in Hz (e.g., 44100)
+  bitDepth?: number; // Parsed bit depth (e.g., 8, 16)
+  channels?: number; // Parsed channel count (1=mono, 2=stereo)
   audioData?: AudioBuffer; // Loaded audio (if available)
 }
 

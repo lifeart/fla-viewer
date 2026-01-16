@@ -72,14 +72,20 @@ Currently implemented: Solid strokes with weight, all cap styles (round, none/bu
 
 ## Audio Formats (Medium Priority)
 
-Currently implemented: MP3 via Web Audio API
+Currently implemented: MP3 via Web Audio API, Uncompressed PCM (8-bit, 16-bit, 24-bit, 32-bit float)
+
+### Supported Formats
+
+| Format | Status | Notes |
+|--------|--------|-------|
+| **MP3** | ✅ | Via Web Audio API `decodeAudioData()` |
+| **Uncompressed PCM** | ✅ | 8/16/24/32-bit, mono/stereo, little-endian |
 
 ### Missing Formats
 
 | Format | JPEXS Reference | Description |
 |--------|-----------------|-------------|
 | **ADPCM** | `types/sound/SoundFormat.java` | Adaptive PCM, common in older Flash files |
-| **Uncompressed PCM** | `types/sound/SoundFormat.java` | Raw audio (native/little endian) |
 | **NellyMoser** | `types/sound/SoundFormat.java` | Voice codec (8kHz, 16kHz, standard) |
 | **Speex** | `types/sound/SoundFormat.java` | Voice codec (rare) |
 
@@ -97,8 +103,9 @@ FORMAT_SPEEX = 11
 
 **Implementation notes:**
 - ADPCM decoding requires custom decoder (no native browser support)
-- PCM can be directly loaded into AudioBuffer
 - NellyMoser/Speex may require WebAssembly decoders
+- PCM format is detected from `format` attribute (e.g., "44kHz 16bit Stereo")
+- Raw PCM data loaded from `soundDataHRef` in bin/ folder or from `href`
 
 ---
 

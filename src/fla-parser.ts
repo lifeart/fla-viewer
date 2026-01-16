@@ -1954,16 +1954,23 @@ export class FLAParser {
     for (const soundEl of soundElements) {
       const name = soundEl.getAttribute('name') || '';
       const href = soundEl.getAttribute('href') || name;
+      const soundDataHRef = soundEl.getAttribute('soundDataHRef') || undefined;
       const format = soundEl.getAttribute('format') || undefined;
       const sampleCount = soundEl.getAttribute('sampleCount')
         ? parseInt(soundEl.getAttribute('sampleCount')!)
         : undefined;
 
+      // Parse format string to extract sample rate, bit depth, and channels
+      // Format examples: "44kHz 16bit Stereo", "22kHz 8bit Mono", "mp3"
+      const formatInfo = this.parseSoundFormat(format);
+
       const soundItem: SoundItem = {
         name,
         href,
+        soundDataHRef,
         format,
-        sampleCount
+        sampleCount,
+        ...formatInfo
       };
 
       sounds.set(name, soundItem);
@@ -1978,31 +1985,147 @@ export class FLAParser {
     return sounds;
   }
 
+  // Parse sound format string to extract sample rate, bit depth, and channels
+  private parseSoundFormat(format: string | undefined): { sampleRate?: number; bitDepth?: number; channels?: number } {
+    if (!format) return {};
+
+    const result: { sampleRate?: number; bitDepth?: number; channels?: number } = {};
+
+    // Parse sample rate (e.g., "44kHz", "22kHz", "11kHz")
+    const rateMatch = format.match(/(\d+)kHz/i);
+    if (rateMatch) {
+      result.sampleRate = parseInt(rateMatch[1]) * 1000;
+    }
+
+    // Parse bit depth (e.g., "16bit", "8bit")
+    const bitMatch = format.match(/(\d+)bit/i);
+    if (bitMatch) {
+      result.bitDepth = parseInt(bitMatch[1]);
+    }
+
+    // Parse channels (Stereo = 2, Mono = 1)
+    if (/stereo/i.test(format)) {
+      result.channels = 2;
+    } else if (/mono/i.test(format)) {
+      result.channels = 1;
+    }
+
+    return result;
+  }
+
   private async loadSoundAudio(soundItem: SoundItem): Promise<void> {
     // Initialize AudioContext lazily
     if (!this.audioContext) {
       this.audioContext = new AudioContext();
     }
 
-    const audioData = await this.findFileData(soundItem.href);
+    // Check if this is PCM audio (has parsed format info but not MP3)
+    const isPCM = soundItem.sampleRate && soundItem.bitDepth &&
+                  (!soundItem.format || !soundItem.format.toLowerCase().includes('mp3'));
+
+    // Try to load from soundDataHRef first (bin/ folder), then href
+    let audioData: ArrayBuffer | null = null;
+    let sourceRef = '';
+
+    if (soundItem.soundDataHRef) {
+      audioData = await this.findFileData(soundItem.soundDataHRef, 'bin');
+      sourceRef = soundItem.soundDataHRef;
+    }
+
+    if (!audioData) {
+      audioData = await this.findFileData(soundItem.href);
+      sourceRef = soundItem.href;
+    }
 
     if (!audioData) {
       if (DEBUG) {
-        console.warn(`Sound file not found: ${soundItem.href}`);
+        console.warn(`Sound file not found: ${soundItem.href} (soundDataHRef: ${soundItem.soundDataHRef})`);
       }
       return;
     }
 
     try {
-      soundItem.audioData = await this.audioContext.decodeAudioData(audioData);
-      if (DEBUG) {
-        console.log(`Loaded sound: ${soundItem.name}, duration: ${soundItem.audioData.duration.toFixed(2)}s`);
+      if (isPCM) {
+        // Convert raw PCM data to AudioBuffer
+        soundItem.audioData = this.convertPCMToAudioBuffer(
+          audioData,
+          soundItem.sampleRate!,
+          soundItem.bitDepth!,
+          soundItem.channels || 1
+        );
+        if (DEBUG) {
+          console.log(`Loaded PCM sound: ${soundItem.name}, duration: ${soundItem.audioData.duration.toFixed(2)}s, ` +
+                      `${soundItem.sampleRate}Hz ${soundItem.bitDepth}bit ${soundItem.channels === 2 ? 'Stereo' : 'Mono'}`);
+        }
+      } else {
+        // Use browser's built-in decoder for MP3 and other compressed formats
+        soundItem.audioData = await this.audioContext.decodeAudioData(audioData);
+        if (DEBUG) {
+          console.log(`Loaded sound: ${soundItem.name}, duration: ${soundItem.audioData.duration.toFixed(2)}s`);
+        }
       }
     } catch (e) {
       if (DEBUG) {
-        console.warn(`Failed to decode audio: ${soundItem.href}`, e);
+        console.warn(`Failed to decode audio: ${sourceRef}`, e);
       }
     }
+  }
+
+  // Convert raw PCM data to AudioBuffer
+  private convertPCMToAudioBuffer(
+    data: ArrayBuffer,
+    sampleRate: number,
+    bitDepth: number,
+    channels: number
+  ): AudioBuffer {
+    const bytesPerSample = bitDepth / 8;
+    const bytesPerFrame = bytesPerSample * channels;
+    const totalFrames = Math.floor(data.byteLength / bytesPerFrame);
+
+    // Create AudioBuffer with the appropriate number of channels
+    const audioBuffer = this.audioContext!.createBuffer(channels, totalFrames, sampleRate);
+    const dataView = new DataView(data);
+
+    // Extract samples for each channel
+    for (let channel = 0; channel < channels; channel++) {
+      const channelData = audioBuffer.getChannelData(channel);
+
+      for (let frame = 0; frame < totalFrames; frame++) {
+        const byteOffset = frame * bytesPerFrame + channel * bytesPerSample;
+        let sample: number;
+
+        if (bitDepth === 8) {
+          // 8-bit PCM is unsigned (0-255), convert to -1.0 to 1.0
+          const unsigned = dataView.getUint8(byteOffset);
+          sample = (unsigned - 128) / 128;
+        } else if (bitDepth === 16) {
+          // 16-bit PCM is signed little-endian, convert to -1.0 to 1.0
+          const signed = dataView.getInt16(byteOffset, true); // little-endian
+          sample = signed / 32768;
+        } else if (bitDepth === 24) {
+          // 24-bit PCM is signed little-endian
+          const b0 = dataView.getUint8(byteOffset);
+          const b1 = dataView.getUint8(byteOffset + 1);
+          const b2 = dataView.getUint8(byteOffset + 2);
+          let signed = b0 | (b1 << 8) | (b2 << 16);
+          // Sign extend
+          if (signed & 0x800000) {
+            signed |= 0xFF000000;
+          }
+          sample = signed / 8388608;
+        } else if (bitDepth === 32) {
+          // 32-bit PCM could be int or float, assume float
+          sample = dataView.getFloat32(byteOffset, true);
+        } else {
+          // Unsupported bit depth, default to 0
+          sample = 0;
+        }
+
+        channelData[frame] = sample;
+      }
+    }
+
+    return audioBuffer;
   }
 
   private parseVideos(root: globalThis.Element): Map<string, VideoItem> {
