@@ -1,6 +1,6 @@
 import { FLAParser } from './fla-parser';
 import { FLAPlayer } from './player';
-import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF } from './video-exporter';
+import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF, exportWebM, exportSVG } from './video-exporter';
 import { generateSampleFLA } from './sample-generator';
 import type { PlayerState, FLADocument, DisplayElement, Symbol } from './types';
 
@@ -863,6 +863,28 @@ export class FLAViewerApp {
         if (!this.exportCancelled) {
           downloadBlob(blob, `${this.currentFileName}.mp4`);
         }
+      } else if (format === 'webm') {
+        this.exportHeader.textContent = 'Exporting WebM Video';
+        const blob = await exportWebM(
+          this.currentDoc,
+          (progress) => {
+            const percent = (progress.currentFrame / progress.totalFrames) * 100;
+            this.exportProgressFill.style.width = `${percent}%`;
+
+            if (progress.stage === 'encoding') {
+              this.exportStatus.textContent = `Encoding frame ${progress.currentFrame} / ${progress.totalFrames}`;
+            } else if (progress.stage === 'encoding-audio') {
+              this.exportStatus.textContent = 'Encoding audio...';
+            } else {
+              this.exportStatus.textContent = 'Finalizing video...';
+            }
+          },
+          () => this.exportCancelled
+        );
+
+        if (!this.exportCancelled) {
+          downloadBlob(blob, `${this.currentFileName}.webm`);
+        }
       } else if (format === 'png-sequence') {
         this.exportHeader.textContent = 'Exporting PNG Sequence';
         const blob = await exportPNGSequence(
@@ -897,6 +919,20 @@ export class FLAViewerApp {
         if (!this.exportCancelled) {
           const frameNum = String(currentFrame).padStart(5, '0');
           downloadBlob(blob, `${this.currentFileName}_frame_${frameNum}.png`);
+        }
+      } else if (format === 'svg') {
+        this.exportHeader.textContent = 'Exporting SVG';
+        this.exportStatus.textContent = 'Generating SVG...';
+        this.exportProgressFill.style.width = '50%';
+
+        const currentFrame = this.player?.getState().currentFrame || 0;
+        const blob = await exportSVG(this.currentDoc, currentFrame);
+
+        this.exportProgressFill.style.width = '100%';
+
+        if (!this.exportCancelled) {
+          const frameNum = String(currentFrame).padStart(5, '0');
+          downloadBlob(blob, `${this.currentFileName}_frame_${frameNum}.svg`);
         }
       } else if (format === 'gif') {
         this.exportHeader.textContent = 'Exporting GIF';

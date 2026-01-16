@@ -39,13 +39,13 @@ A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no inst
 │  PARSING          │  RENDERING         │  EXPORT               │
 ├───────────────────┼────────────────────┼───────────────────────┤
 │  ✓ FLA/XFL files  │  ✓ Vector shapes   │  ✓ MP4 video (H.264)  │
-│  ✓ Symbols        │  ✓ Gradients       │  ✓ Animated GIF       │
-│  ✓ Timelines      │  ✓ Bitmap fills    │  ✓ PNG sequence (ZIP) │
-│  ✓ Motion tweens  │  ✓ Filters         │  ✓ Sprite sheet+JSON  │
-│  ✓ Shape tweens   │  ✓ Blend modes     │  ✓ Single frame PNG   │
-│  ✓ Color tweens   │  ✓ Masks           │  ✓ AAC audio          │
-│  ✓ Rotation tweens│  ✓ Text (Google)   │  ✓ WebCodecs API      │
-│  ✓ Audio (MP3)    │  ✓ 9-slice scaling │                       │
+│  ✓ Symbols        │  ✓ Gradients       │  ✓ WebM video (VP9)   │
+│  ✓ Timelines      │  ✓ Bitmap fills    │  ✓ Animated GIF       │
+│  ✓ Motion tweens  │  ✓ Filters         │  ✓ PNG sequence (ZIP) │
+│  ✓ Shape tweens   │  ✓ Blend modes     │  ✓ Sprite sheet+JSON  │
+│  ✓ Color tweens   │  ✓ Masks           │  ✓ Single frame PNG   │
+│  ✓ Rotation tweens│  ✓ Text (Google)   │  ✓ SVG vector export  │
+│  ✓ Audio (MP3)    │  ✓ 9-slice scaling │  ✓ WebCodecs API      │
 │  ✓ Bitmap (.dat)  │                    │                       │
 └───────────────────┴────────────────────┴───────────────────────┘
 ```
@@ -116,9 +116,11 @@ Click the **Download** button to open export options:
 | Format | Output | Description |
 |--------|--------|-------------|
 | **MP4 Video** | `.mp4` | H.264 video with AAC audio |
+| **WebM Video** | `.webm` | VP9 video with Opus audio |
 | **Animated GIF** | `.gif` | Animated image (no audio) |
 | **PNG Sequence** | `.zip` | All frames as numbered PNGs |
-| **Current Frame** | `.png` | Single frame snapshot |
+| **Current Frame (PNG)** | `.png` | Single frame raster snapshot |
+| **Current Frame (SVG)** | `.svg` | Single frame vector format |
 | **Sprite Sheet** | `.png` + `.json` | Texture atlas for game engines |
 
 ### Video Export Specs

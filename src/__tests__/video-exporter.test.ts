@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF } from '../video-exporter';
+import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF, exportWebM, exportSVG } from '../video-exporter';
 import JSZip from 'jszip';
 import {
   createMinimalDoc,
@@ -984,6 +984,739 @@ describe('video-exporter', () => {
 
       expect(blob).toBeInstanceOf(Blob);
       expect(blob.type).toBe('image/gif');
+    });
+  });
+
+  describe('exportWebM', () => {
+    it('should export simple animation to WebM blob', async () => {
+      const doc = createMinimalDoc({
+        width: 160,
+        height: 120,
+        frameRate: 12,
+        timelines: [createTimeline({
+          totalFrames: 3,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 3,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  type: 'solid',
+                  color: '#FF0000',
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 50, y: 0 },
+                    { type: 'L', x: 50, y: 50 },
+                    { type: 'L', x: 0, y: 50 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportWebM(doc);
+
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.type).toBe('video/webm');
+      expect(blob.size).toBeGreaterThan(0);
+    });
+
+    it('should call progress callback', async () => {
+      const doc = createMinimalDoc({
+        width: 80,
+        height: 60,
+        frameRate: 10,
+        timelines: [createTimeline({
+          totalFrames: 2,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 2 })],
+          })],
+        })],
+      });
+
+      const progressCalls: { currentFrame: number; stage: string }[] = [];
+
+      await exportWebM(doc, (progress) => {
+        progressCalls.push({
+          currentFrame: progress.currentFrame,
+          stage: progress.stage,
+        });
+      });
+
+      expect(progressCalls.length).toBeGreaterThan(0);
+      expect(progressCalls.some(p => p.stage === 'encoding')).toBe(true);
+      expect(progressCalls.some(p => p.stage === 'finalizing')).toBe(true);
+    });
+
+    it('should cancel when cancellation check returns true', async () => {
+      const doc = createMinimalDoc({
+        width: 80,
+        height: 60,
+        frameRate: 10,
+        timelines: [createTimeline({
+          totalFrames: 10,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 10 })],
+          })],
+        })],
+      });
+
+      let frameCount = 0;
+      const isCancelled = () => {
+        frameCount++;
+        return frameCount > 2;
+      };
+
+      await expect(exportWebM(doc, undefined, isCancelled)).rejects.toThrow('Export cancelled');
+    });
+
+    it('should handle single frame animation', async () => {
+      const doc = createMinimalDoc({
+        width: 80,
+        height: 60,
+        frameRate: 24,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 1,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 10, y: 10 },
+                    { type: 'L', x: 70, y: 10 },
+                    { type: 'L', x: 70, y: 50 },
+                    { type: 'L', x: 10, y: 50 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportWebM(doc);
+
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.size).toBeGreaterThan(0);
+    });
+
+    it('should export animation with audio', async () => {
+      const audioContext = new AudioContext();
+      const sampleRate = audioContext.sampleRate;
+      const duration = 0.5;
+      const audioBuffer = audioContext.createBuffer(2, Math.ceil(sampleRate * duration), sampleRate);
+
+      const leftChannel = audioBuffer.getChannelData(0);
+      const rightChannel = audioBuffer.getChannelData(1);
+      for (let i = 0; i < audioBuffer.length; i++) {
+        leftChannel[i] = Math.sin(2 * Math.PI * 440 * i / sampleRate) * 0.5;
+        rightChannel[i] = Math.sin(2 * Math.PI * 440 * i / sampleRate) * 0.5;
+      }
+
+      const sounds = new Map();
+      sounds.set('test.mp3', {
+        name: 'test.mp3',
+        audioData: audioBuffer,
+      });
+
+      const doc = createMinimalDoc({
+        width: 80,
+        height: 60,
+        frameRate: 12,
+        sounds,
+        timelines: [createTimeline({
+          totalFrames: 6,
+          layers: [createLayer({
+            frames: [createFrame({
+              index: 0,
+              duration: 6,
+              sound: {
+                name: 'test.mp3',
+                sync: 'stream',
+                inPoint44: 0,
+              },
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 10, y: 10 },
+                    { type: 'L', x: 70, y: 10 },
+                    { type: 'L', x: 70, y: 50 },
+                    { type: 'L', x: 10, y: 50 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const progressCalls: { stage: string }[] = [];
+
+      const blob = await exportWebM(doc, (progress) => {
+        progressCalls.push({ stage: progress.stage });
+      });
+
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.type).toBe('video/webm');
+      expect(blob.size).toBeGreaterThan(0);
+
+      // Should have encoding-audio stage
+      expect(progressCalls.some(p => p.stage === 'encoding-audio')).toBe(true);
+
+      await audioContext.close();
+    });
+  });
+
+  describe('exportSVG', () => {
+    it('should export frame as SVG blob', async () => {
+      const doc = createMinimalDoc({
+        width: 100,
+        height: 80,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 1,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 10, y: 10 },
+                    { type: 'L', x: 90, y: 10 },
+                    { type: 'L', x: 90, y: 70 },
+                    { type: 'L', x: 10, y: 70 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportSVG(doc, 0);
+
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.type).toBe('image/svg+xml');
+      expect(blob.size).toBeGreaterThan(0);
+
+      // Verify SVG content
+      const text = await blob.text();
+      expect(text).toContain('<svg');
+      expect(text).toContain('width="100"');
+      expect(text).toContain('height="80"');
+      expect(text).toContain('<path');
+      expect(text).toContain('#FF0000');
+    });
+
+    it('should export shape with stroke', async () => {
+      const doc = createMinimalDoc({
+        width: 100,
+        height: 100,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 1,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [],
+                strokes: [{ index: 1, color: '#0000FF', weight: 2 }],
+                edges: [{
+                  strokeStyle: 1,
+                  commands: [
+                    { type: 'M', x: 10, y: 10 },
+                    { type: 'L', x: 90, y: 90 },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('stroke="#0000FF"');
+      expect(text).toContain('stroke-width="2"');
+    });
+
+    it('should handle text elements', async () => {
+      const doc = createMinimalDoc({
+        width: 200,
+        height: 100,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 1,
+              elements: [{
+                type: 'text',
+                matrix: createMatrix(),
+                left: 10,
+                width: 180,
+                height: 40,
+                textRuns: [{
+                  characters: 'Hello World',
+                  size: 24,
+                  fillColor: '#000000',
+                  face: 'Arial',
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('<text');
+      expect(text).toContain('Hello World');
+      expect(text).toContain('font-size="24"');
+    });
+
+    it('should handle empty document', async () => {
+      const doc = createMinimalDoc({
+        width: 100,
+        height: 100,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [],
+        })],
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('<svg');
+      expect(text).toContain('width="100"');
+    });
+
+    it('should handle linear gradient fill', async () => {
+      const doc = createMinimalDoc({
+        width: 100,
+        height: 100,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 1,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  type: 'linear',
+                  gradient: [
+                    { color: '#FF0000', alpha: 1, ratio: 0 },
+                    { color: '#0000FF', alpha: 1, ratio: 1 },
+                  ],
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 100, y: 0 },
+                    { type: 'L', x: 100, y: 100 },
+                    { type: 'L', x: 0, y: 100 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('<defs>');
+      expect(text).toContain('<linearGradient');
+      expect(text).toContain('url(#grad_');
+    });
+
+    it('should export specific frame', async () => {
+      const doc = createMinimalDoc({
+        width: 100,
+        height: 100,
+        timelines: [createTimeline({
+          totalFrames: 3,
+          layers: [createLayer({
+            frames: [
+              createFrame({
+                index: 0,
+                duration: 1,
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 0, y: 0 },
+                      { type: 'L', x: 50, y: 50 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              }),
+              createFrame({
+                index: 1,
+                duration: 1,
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 25, y: 25 },
+                      { type: 'L', x: 75, y: 75 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              }),
+              createFrame({
+                index: 2,
+                duration: 1,
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
+                  strokes: [],
+                  edges: [{
+                    fillStyle0: 1,
+                    commands: [
+                      { type: 'M', x: 50, y: 50 },
+                      { type: 'L', x: 100, y: 100 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              }),
+            ],
+          })],
+        })],
+      });
+
+      // Export frame 1 (green)
+      const blob = await exportSVG(doc, 1);
+      const text = await blob.text();
+
+      expect(text).toContain('#00FF00');
+      expect(text).not.toContain('#FF0000');
+      expect(text).not.toContain('#0000FF');
+    });
+
+    it('should render graphic symbol with single frame mode at firstFrame', async () => {
+      // Create a symbol with 3 frames (red, green, blue)
+      const symbols = new Map();
+      symbols.set('TestSymbol', {
+        name: 'TestSymbol',
+        itemID: 'test-1',
+        symbolType: 'graphic' as const,
+        timeline: {
+          name: 'TestSymbol',
+          layers: [{
+            name: 'Layer 1',
+            color: '#000000',
+            visible: true,
+            locked: false,
+            outline: false,
+            frames: [
+              {
+                index: 0,
+                duration: 1,
+                keyMode: 9728,
+                elements: [{
+                  type: 'shape' as const,
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, type: 'solid' as const, color: '#FF0000' }],
+                  strokes: [],
+                  edges: [{ fillStyle0: 1, commands: [{ type: 'M' as const, x: 0, y: 0 }, { type: 'L' as const, x: 10, y: 10 }, { type: 'Z' as const }] }],
+                }],
+              },
+              {
+                index: 1,
+                duration: 1,
+                keyMode: 9728,
+                elements: [{
+                  type: 'shape' as const,
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, type: 'solid' as const, color: '#00FF00' }],
+                  strokes: [],
+                  edges: [{ fillStyle0: 1, commands: [{ type: 'M' as const, x: 0, y: 0 }, { type: 'L' as const, x: 10, y: 10 }, { type: 'Z' as const }] }],
+                }],
+              },
+              {
+                index: 2,
+                duration: 1,
+                keyMode: 9728,
+                elements: [{
+                  type: 'shape' as const,
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, type: 'solid' as const, color: '#0000FF' }],
+                  strokes: [],
+                  edges: [{ fillStyle0: 1, commands: [{ type: 'M' as const, x: 0, y: 0 }, { type: 'L' as const, x: 10, y: 10 }, { type: 'Z' as const }] }],
+                }],
+              },
+            ],
+          }],
+          totalFrames: 3,
+          referenceLayers: new Set<number>(),
+        },
+      });
+
+      const doc = createMinimalDoc({
+        width: 100,
+        height: 100,
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 5,
+          layers: [createLayer({
+            frames: [createFrame({
+              index: 0,
+              duration: 5,
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'TestSymbol',
+                symbolType: 'graphic',
+                matrix: createMatrix(),
+                transformationPoint: { x: 0, y: 0 },
+                loop: 'single frame',
+                firstFrame: 1, // Should show green (frame 1)
+              }],
+            })],
+          })],
+        })],
+      });
+
+      // Export at frame 3 - should still show green because it's single frame mode at firstFrame=1
+      const blob = await exportSVG(doc, 3);
+      const text = await blob.text();
+
+      expect(text).toContain('#00FF00'); // Green from symbol's frame 1
+      expect(text).not.toContain('#FF0000');
+      expect(text).not.toContain('#0000FF');
+    });
+
+    it('should render graphic symbol with loop mode advancing with parent timeline', async () => {
+      // Create a symbol with 3 frames (red, green, blue)
+      const symbols = new Map();
+      symbols.set('TestSymbol', {
+        name: 'TestSymbol',
+        itemID: 'test-1',
+        symbolType: 'graphic' as const,
+        timeline: {
+          name: 'TestSymbol',
+          layers: [{
+            name: 'Layer 1',
+            color: '#000000',
+            visible: true,
+            locked: false,
+            outline: false,
+            frames: [
+              {
+                index: 0,
+                duration: 1,
+                keyMode: 9728,
+                elements: [{
+                  type: 'shape' as const,
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, type: 'solid' as const, color: '#FF0000' }],
+                  strokes: [],
+                  edges: [{ fillStyle0: 1, commands: [{ type: 'M' as const, x: 0, y: 0 }, { type: 'L' as const, x: 10, y: 10 }, { type: 'Z' as const }] }],
+                }],
+              },
+              {
+                index: 1,
+                duration: 1,
+                keyMode: 9728,
+                elements: [{
+                  type: 'shape' as const,
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, type: 'solid' as const, color: '#00FF00' }],
+                  strokes: [],
+                  edges: [{ fillStyle0: 1, commands: [{ type: 'M' as const, x: 0, y: 0 }, { type: 'L' as const, x: 10, y: 10 }, { type: 'Z' as const }] }],
+                }],
+              },
+              {
+                index: 2,
+                duration: 1,
+                keyMode: 9728,
+                elements: [{
+                  type: 'shape' as const,
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, type: 'solid' as const, color: '#0000FF' }],
+                  strokes: [],
+                  edges: [{ fillStyle0: 1, commands: [{ type: 'M' as const, x: 0, y: 0 }, { type: 'L' as const, x: 10, y: 10 }, { type: 'Z' as const }] }],
+                }],
+              },
+            ],
+          }],
+          totalFrames: 3,
+          referenceLayers: new Set<number>(),
+        },
+      });
+
+      const doc = createMinimalDoc({
+        width: 100,
+        height: 100,
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 6,
+          layers: [createLayer({
+            frames: [createFrame({
+              index: 0,
+              duration: 6,
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'TestSymbol',
+                symbolType: 'graphic',
+                matrix: createMatrix(),
+                transformationPoint: { x: 0, y: 0 },
+                loop: 'loop',
+                firstFrame: 0,
+              }],
+            })],
+          })],
+        })],
+      });
+
+      // At frame 0: symbol shows frame 0 (red)
+      let blob = await exportSVG(doc, 0);
+      let text = await blob.text();
+      expect(text).toContain('#FF0000');
+
+      // At frame 1: symbol shows frame 1 (green)
+      blob = await exportSVG(doc, 1);
+      text = await blob.text();
+      expect(text).toContain('#00FF00');
+
+      // At frame 2: symbol shows frame 2 (blue)
+      blob = await exportSVG(doc, 2);
+      text = await blob.text();
+      expect(text).toContain('#0000FF');
+
+      // At frame 3: symbol loops back to frame 0 (red)
+      blob = await exportSVG(doc, 3);
+      text = await blob.text();
+      expect(text).toContain('#FF0000');
+    });
+
+    it('should render movieclip at firstFrame regardless of parent timeline', async () => {
+      // Create a movieclip symbol with 3 frames
+      const symbols = new Map();
+      symbols.set('TestClip', {
+        name: 'TestClip',
+        itemID: 'test-1',
+        symbolType: 'movieclip' as const,
+        timeline: {
+          name: 'TestClip',
+          layers: [{
+            name: 'Layer 1',
+            color: '#000000',
+            visible: true,
+            locked: false,
+            outline: false,
+            frames: [
+              {
+                index: 0,
+                duration: 1,
+                keyMode: 9728,
+                elements: [{
+                  type: 'shape' as const,
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, type: 'solid' as const, color: '#FF0000' }],
+                  strokes: [],
+                  edges: [{ fillStyle0: 1, commands: [{ type: 'M' as const, x: 0, y: 0 }, { type: 'L' as const, x: 10, y: 10 }, { type: 'Z' as const }] }],
+                }],
+              },
+              {
+                index: 1,
+                duration: 1,
+                keyMode: 9728,
+                elements: [{
+                  type: 'shape' as const,
+                  matrix: createMatrix(),
+                  fills: [{ index: 1, type: 'solid' as const, color: '#00FF00' }],
+                  strokes: [],
+                  edges: [{ fillStyle0: 1, commands: [{ type: 'M' as const, x: 0, y: 0 }, { type: 'L' as const, x: 10, y: 10 }, { type: 'Z' as const }] }],
+                }],
+              },
+            ],
+          }],
+          totalFrames: 2,
+          referenceLayers: new Set<number>(),
+        },
+      });
+
+      const doc = createMinimalDoc({
+        width: 100,
+        height: 100,
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 5,
+          layers: [createLayer({
+            frames: [createFrame({
+              index: 0,
+              duration: 5,
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'TestClip',
+                symbolType: 'movieclip',
+                matrix: createMatrix(),
+                transformationPoint: { x: 0, y: 0 },
+                loop: 'loop', // Ignored for movieclips
+                firstFrame: 0,
+              }],
+            })],
+          })],
+        })],
+      });
+
+      // MovieClips always show firstFrame in static SVG export
+      // At frame 0, 1, 2, 3, 4 - all should show red (frame 0)
+      for (const frameIdx of [0, 1, 2, 3, 4]) {
+        const blob = await exportSVG(doc, frameIdx);
+        const text = await blob.text();
+        expect(text).toContain('#FF0000'); // Always red
+        expect(text).not.toContain('#00FF00');
+      }
     });
   });
 });
