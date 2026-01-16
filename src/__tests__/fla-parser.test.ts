@@ -396,6 +396,121 @@ describe('FLAParser', () => {
       // Check symbol was loaded
       expect(doc.symbols.has('MySymbol')).toBe(true);
     });
+
+    it('should parse symbol with 9-slice scaling grid', async () => {
+      // scalingGridRect is in twips: "left top right bottom"
+      // 200 400 1800 1600 twips = 10 20 90 80 pixels (divide by 20)
+      // Resulting grid: left=10, top=20, width=80, height=60
+      const symbolXml = `<?xml version="1.0" encoding="UTF-8"?>
+        <DOMSymbolItem name="SlicedButton" symbolType="graphic" scalingGrid="true" scalingGridRect="200 400 1800 1600">
+          <timeline>
+            <DOMTimeline name="SlicedButton">
+              <layers>
+                <DOMLayer name="Layer 1">
+                  <frames>
+                    <DOMFrame index="0">
+                      <elements>
+                        <DOMShape>
+                          <fills><FillStyle index="1"><SolidColor color="#CCCCCC"/></FillStyle></fills>
+                          <strokes></strokes>
+                          <edges><Edge fillStyle0="1" edges="!0 0|100 0|100 100|0 100|0 0"/></edges>
+                        </DOMShape>
+                      </elements>
+                    </DOMFrame>
+                  </frames>
+                </DOMLayer>
+              </layers>
+            </DOMTimeline>
+          </timeline>
+        </DOMSymbolItem>`;
+
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="SlicedButton" symbolType="graphic">
+                        <matrix><Matrix a="2" d="2" tx="50" ty="50"/></matrix>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const symbols = `
+        <symbols>
+          <Include href="SlicedButton.xml"/>
+        </symbols>`;
+
+      const fla = await createFlaZip(
+        createDOMDocument({ timelines, symbols }),
+        { 'LIBRARY/SlicedButton.xml': symbolXml }
+      );
+      const doc = await parser.parse(fla);
+
+      // Check symbol was loaded with scale9Grid
+      expect(doc.symbols.has('SlicedButton')).toBe(true);
+      const symbol = doc.symbols.get('SlicedButton')!;
+      expect(symbol.scale9Grid).toBeDefined();
+      expect(symbol.scale9Grid!.left).toBe(10);
+      expect(symbol.scale9Grid!.top).toBe(20);
+      expect(symbol.scale9Grid!.width).toBe(80);
+      expect(symbol.scale9Grid!.height).toBe(60);
+    });
+
+    it('should not set scale9Grid when scalingGrid is not true', async () => {
+      const symbolXml = `<?xml version="1.0" encoding="UTF-8"?>
+        <DOMSymbolItem name="NoSlice" symbolType="graphic">
+          <timeline>
+            <DOMTimeline name="NoSlice">
+              <layers>
+                <DOMLayer name="Layer 1">
+                  <frames>
+                    <DOMFrame index="0">
+                      <elements></elements>
+                    </DOMFrame>
+                  </frames>
+                </DOMLayer>
+              </layers>
+            </DOMTimeline>
+          </timeline>
+        </DOMSymbolItem>`;
+
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements></elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const symbols = `
+        <symbols>
+          <Include href="NoSlice.xml"/>
+        </symbols>`;
+
+      const fla = await createFlaZip(
+        createDOMDocument({ timelines, symbols }),
+        { 'LIBRARY/NoSlice.xml': symbolXml }
+      );
+      const doc = await parser.parse(fla);
+
+      const symbol = doc.symbols.get('NoSlice')!;
+      expect(symbol.scale9Grid).toBeUndefined();
+    });
   });
 
   describe('text parsing', () => {

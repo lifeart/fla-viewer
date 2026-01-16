@@ -27,7 +27,8 @@ import type {
   MorphShape,
   MorphSegment,
   ColorTransform,
-  BlendMode
+  BlendMode,
+  Rectangle
 } from './types';
 import { decodeEdges } from './edge-decoder';
 import {
@@ -324,6 +325,26 @@ export class FLAParser {
         const itemID = symbolRoot.getAttribute('itemID') || '';
         const symbolType = (symbolRoot.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
 
+        // Parse 9-slice scaling grid if present
+        const scalingGrid = symbolRoot.getAttribute('scalingGrid') === 'true';
+        let scale9Grid: Rectangle | undefined;
+        if (scalingGrid) {
+          const scalingGridRect = symbolRoot.getAttribute('scalingGridRect');
+          if (scalingGridRect) {
+            // Format: "left top right bottom" (in twips)
+            const parts = scalingGridRect.split(' ').map(v => parseFloat(v) / 20);
+            if (parts.length === 4) {
+              const [left, top, right, bottom] = parts;
+              scale9Grid = {
+                left,
+                top,
+                width: right - left,
+                height: bottom - top
+              };
+            }
+          }
+        }
+
         // Parse symbol's timeline
         const timelines = await this.parseTimelines(symbolRoot);
         const timeline = timelines[0] || {
@@ -332,7 +353,7 @@ export class FLAParser {
           totalFrames: 1
         };
 
-        const symbol: Symbol = { name, itemID, symbolType, timeline };
+        const symbol: Symbol = { name, itemID, symbolType, timeline, ...(scale9Grid && { scale9Grid }) };
 
         // Store with both normalized and original names
         setWithNormalizedPath(this.symbolCache, rawName, symbol);

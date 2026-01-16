@@ -1,6 +1,6 @@
 import { FLAParser } from './fla-parser';
 import { FLAPlayer } from './player';
-import { exportVideo, downloadBlob, isWebCodecsSupported } from './video-exporter';
+import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame } from './video-exporter';
 import { generateSampleFLA } from './sample-generator';
 import type { PlayerState, FLADocument, DisplayElement, Symbol } from './types';
 
@@ -39,8 +39,13 @@ export class FLAViewerApp {
   private loadingText: HTMLElement;
   private downloadBtn: HTMLButtonElement;
   private exportModal: HTMLElement;
+  private exportOptions: HTMLElement;
+  private exportProgress: HTMLElement;
+  private exportHeader: HTMLElement;
   private exportProgressFill: HTMLElement;
   private exportStatus: HTMLElement;
+  private exportStartBtn: HTMLButtonElement;
+  private exportCloseBtn: HTMLButtonElement;
   private exportCancelBtn: HTMLButtonElement;
   private exportCancelled: boolean = false;
   private currentFileName: string = 'animation';
@@ -83,8 +88,13 @@ export class FLAViewerApp {
     this.loadingText = document.getElementById('loading-text')!;
     this.downloadBtn = document.getElementById('download-btn') as HTMLButtonElement;
     this.exportModal = document.getElementById('export-modal')!;
+    this.exportOptions = document.getElementById('export-options')!;
+    this.exportProgress = document.getElementById('export-progress')!;
+    this.exportHeader = document.getElementById('export-header')!;
     this.exportProgressFill = document.getElementById('export-progress-fill')!;
     this.exportStatus = document.getElementById('export-status')!;
+    this.exportStartBtn = document.getElementById('export-start-btn') as HTMLButtonElement;
+    this.exportCloseBtn = document.getElementById('export-close-btn') as HTMLButtonElement;
     this.exportCancelBtn = document.getElementById('export-cancel-btn') as HTMLButtonElement;
     this.skipImagesBtn = document.getElementById('skip-images-btn') as HTMLButtonElement;
     this.loadSampleBtn = document.getElementById('load-sample-btn') as HTMLButtonElement;
@@ -146,7 +156,9 @@ export class FLAViewerApp {
     document.addEventListener('fullscreenchange', () => this.updateFullscreenButton());
 
     // Download/Export
-    this.downloadBtn.addEventListener('click', () => this.startExport());
+    this.downloadBtn.addEventListener('click', () => this.showExportModal());
+    this.exportStartBtn.addEventListener('click', () => this.startExport());
+    this.exportCloseBtn.addEventListener('click', () => this.hideExportModal());
     this.exportCancelBtn.addEventListener('click', () => this.cancelExport());
 
     // Skip images fix
@@ -799,38 +811,93 @@ export class FLAViewerApp {
     }
   }
 
+  private showExportModal(): void {
+    // Reset to options view
+    this.exportOptions.style.display = 'block';
+    this.exportProgress.style.display = 'none';
+    this.exportHeader.textContent = 'Export';
+    this.exportModal.classList.add('active');
+  }
+
+  private hideExportModal(): void {
+    this.exportModal.classList.remove('active');
+  }
+
   private async startExport(): Promise<void> {
     if (!this.currentDoc) return;
+
+    // Get selected format
+    const formatRadio = document.querySelector('input[name="export-format"]:checked') as HTMLInputElement;
+    const format = formatRadio?.value || 'mp4';
 
     // Pause playback during export
     this.player?.pause();
 
-    // Show export modal
+    // Switch to progress view
+    this.exportOptions.style.display = 'none';
+    this.exportProgress.style.display = 'block';
     this.exportCancelled = false;
-    this.exportModal.classList.add('active');
     this.exportProgressFill.style.width = '0%';
     this.exportStatus.textContent = 'Preparing...';
 
     try {
-      const blob = await exportVideo(
-        this.currentDoc,
-        (progress) => {
-          const percent = (progress.currentFrame / progress.totalFrames) * 100;
-          this.exportProgressFill.style.width = `${percent}%`;
+      if (format === 'mp4') {
+        this.exportHeader.textContent = 'Exporting Video';
+        const blob = await exportVideo(
+          this.currentDoc,
+          (progress) => {
+            const percent = (progress.currentFrame / progress.totalFrames) * 100;
+            this.exportProgressFill.style.width = `${percent}%`;
 
-          if (progress.stage === 'encoding') {
-            this.exportStatus.textContent = `Encoding frame ${progress.currentFrame} / ${progress.totalFrames}`;
-          } else if (progress.stage === 'encoding-audio') {
-            this.exportStatus.textContent = 'Encoding audio...';
-          } else {
-            this.exportStatus.textContent = 'Finalizing video...';
-          }
-        },
-        () => this.exportCancelled
-      );
+            if (progress.stage === 'encoding') {
+              this.exportStatus.textContent = `Encoding frame ${progress.currentFrame} / ${progress.totalFrames}`;
+            } else if (progress.stage === 'encoding-audio') {
+              this.exportStatus.textContent = 'Encoding audio...';
+            } else {
+              this.exportStatus.textContent = 'Finalizing video...';
+            }
+          },
+          () => this.exportCancelled
+        );
 
-      if (!this.exportCancelled) {
-        downloadBlob(blob, `${this.currentFileName}.mp4`);
+        if (!this.exportCancelled) {
+          downloadBlob(blob, `${this.currentFileName}.mp4`);
+        }
+      } else if (format === 'png-sequence') {
+        this.exportHeader.textContent = 'Exporting PNG Sequence';
+        const blob = await exportPNGSequence(
+          this.currentDoc,
+          { framePrefix: `${this.currentFileName}_` },
+          (progress) => {
+            const percent = (progress.currentFrame / progress.totalFrames) * 100;
+            this.exportProgressFill.style.width = `${percent}%`;
+
+            if (progress.stage === 'rendering') {
+              this.exportStatus.textContent = `Rendering frame ${progress.currentFrame} / ${progress.totalFrames}`;
+            } else {
+              this.exportStatus.textContent = 'Creating ZIP file...';
+            }
+          },
+          () => this.exportCancelled
+        );
+
+        if (!this.exportCancelled) {
+          downloadBlob(blob, `${this.currentFileName}_frames.zip`);
+        }
+      } else if (format === 'png-frame') {
+        this.exportHeader.textContent = 'Exporting Frame';
+        this.exportStatus.textContent = 'Rendering frame...';
+        this.exportProgressFill.style.width = '50%';
+
+        const currentFrame = this.player?.getState().currentFrame || 0;
+        const blob = await exportSingleFrame(this.currentDoc, currentFrame);
+
+        this.exportProgressFill.style.width = '100%';
+
+        if (!this.exportCancelled) {
+          const frameNum = String(currentFrame).padStart(5, '0');
+          downloadBlob(blob, `${this.currentFileName}_frame_${frameNum}.png`);
+        }
       }
     } catch (error) {
       if ((error as Error).message !== 'Export cancelled') {
@@ -838,7 +905,7 @@ export class FLAViewerApp {
         alert('Export failed: ' + (error as Error).message);
       }
     } finally {
-      this.exportModal.classList.remove('active');
+      this.hideExportModal();
     }
   }
 

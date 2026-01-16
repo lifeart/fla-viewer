@@ -298,10 +298,14 @@ Currently implemented: Edge paths, fill styles, stroke styles
 
 ## 9-Slice Scaling (Low Priority)
 
-| Feature | Description |
-|---------|-------------|
-| **scale9Grid** | Define non-scaling regions for UI elements |
-| **9-slice Rendering** | Preserve corners, stretch edges/center |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **scale9Grid Parsing** | ✅ | Parses `scalingGrid` and `scalingGridRect` attributes |
+| **9-slice Rendering** | ❌ | Not implemented - would require complex region-based rendering |
+
+**Notes:**
+- Scale9Grid rectangle is parsed from symbol definitions (left, top, width, height in pixels)
+- Full 9-slice rendering would require dividing the symbol into 9 regions and scaling each appropriately
 
 ---
 
@@ -318,13 +322,19 @@ Currently implemented: Edge paths, fill styles, stroke styles
 
 ## Export Features
 
-| Feature | Description |
-|---------|-------------|
-| **PNG Sequence** | Export frames as numbered PNGs |
-| **GIF Export** | Animated GIF with proper timing |
-| **WebM Export** | VP9/AV1 video export |
-| **Sprite Sheet** | Atlas generation for game engines |
-| **SVG Export** | Vector export of single frames |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **MP4 Video** | ✅ | H.264 video with AAC audio via WebCodecs API |
+| **PNG Sequence** | ✅ | Export frames as numbered PNGs in ZIP file |
+| **Single Frame PNG** | ✅ | Export individual frame as PNG |
+| **GIF Export** | ❌ | Not implemented |
+| **WebM Export** | ❌ | Not implemented |
+| **Sprite Sheet** | ❌ | Not implemented |
+| **SVG Export** | ❌ | Not implemented |
+
+**Notes:**
+- PNG sequence export supports custom frame prefix, padding, and frame range
+- Video export includes audio mixing for stream sync sounds
 
 ---
 

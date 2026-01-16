@@ -258,6 +258,14 @@ export interface Symbol {
   itemID: string;
   symbolType: 'graphic' | 'movieclip' | 'button';
   timeline: Timeline;
+  scale9Grid?: Rectangle; // 9-slice scaling grid
+}
+
+export interface Rectangle {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
 
 // Player state

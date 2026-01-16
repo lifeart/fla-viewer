@@ -340,3 +340,135 @@ export function isWebCodecsSupported(): boolean {
     typeof AudioEncoder !== 'undefined'
   );
 }
+
+export interface PNGSequenceProgress {
+  currentFrame: number;
+  totalFrames: number;
+  stage: 'rendering' | 'zipping';
+}
+
+export type PNGProgressCallback = (progress: PNGSequenceProgress) => void;
+
+export interface PNGSequenceOptions {
+  startFrame?: number;
+  endFrame?: number;
+  framePrefix?: string;
+  padLength?: number;
+}
+
+/**
+ * Export animation frames as a sequence of PNG images packed in a ZIP file
+ */
+export async function exportPNGSequence(
+  doc: FLADocument,
+  options: PNGSequenceOptions = {},
+  onProgress?: PNGProgressCallback,
+  isCancelled?: CancellationCheck
+): Promise<Blob> {
+  // Lazy load JSZip
+  const JSZip = (await import('jszip')).default;
+
+  const {
+    startFrame = 0,
+    endFrame = doc.timelines[0]?.totalFrames || 1,
+    framePrefix = 'frame_',
+    padLength = 5
+  } = options;
+
+  const width = doc.width;
+  const height = doc.height;
+  const totalFrames = Math.max(1, endFrame - startFrame);
+
+  // Create offscreen canvas for rendering
+  const canvas = new OffscreenCanvas(width, height);
+
+  // Create a minimal mock canvas for OffscreenCanvas compatibility
+  const mockCanvas = {
+    width,
+    height,
+    style: { width: '', height: '' },
+    getContext: (type: string) => canvas.getContext(type as '2d'),
+    getBoundingClientRect: () => ({ left: 0, top: 0, width, height }),
+  } as unknown as HTMLCanvasElement;
+
+  const renderer = new FLARenderer(mockCanvas);
+  await renderer.setDocument(doc, true); // true = skip resize
+
+  const zip = new JSZip();
+
+  // Render each frame and add to ZIP
+  for (let i = 0; i < totalFrames; i++) {
+    const frameIndex = startFrame + i;
+
+    // Check cancellation
+    if (isCancelled?.()) {
+      throw new Error('Export cancelled');
+    }
+
+    onProgress?.({
+      currentFrame: i + 1,
+      totalFrames,
+      stage: 'rendering',
+    });
+
+    // Render frame to canvas
+    renderer.renderFrame(frameIndex);
+
+    // Convert to PNG blob
+    const blob = await canvas.convertToBlob({ type: 'image/png' });
+    const arrayBuffer = await blob.arrayBuffer();
+
+    // Create filename with padding
+    const frameNumber = String(frameIndex).padStart(padLength, '0');
+    const filename = `${framePrefix}${frameNumber}.png`;
+
+    zip.file(filename, arrayBuffer);
+
+    // Yield to allow UI updates
+    if (i % 10 === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  onProgress?.({
+    currentFrame: totalFrames,
+    totalFrames,
+    stage: 'zipping',
+  });
+
+  // Generate ZIP file
+  const zipBlob = await zip.generateAsync({ type: 'blob' });
+  return zipBlob;
+}
+
+/**
+ * Export a single frame as PNG
+ */
+export async function exportSingleFrame(
+  doc: FLADocument,
+  frameIndex: number
+): Promise<Blob> {
+  const width = doc.width;
+  const height = doc.height;
+
+  // Create offscreen canvas for rendering
+  const canvas = new OffscreenCanvas(width, height);
+
+  // Create a minimal mock canvas for OffscreenCanvas compatibility
+  const mockCanvas = {
+    width,
+    height,
+    style: { width: '', height: '' },
+    getContext: (type: string) => canvas.getContext(type as '2d'),
+    getBoundingClientRect: () => ({ left: 0, top: 0, width, height }),
+  } as unknown as HTMLCanvasElement;
+
+  const renderer = new FLARenderer(mockCanvas);
+  await renderer.setDocument(doc, true);
+
+  // Render frame
+  renderer.renderFrame(frameIndex);
+
+  // Convert to PNG
+  return canvas.convertToBlob({ type: 'image/png' });
+}

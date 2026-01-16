@@ -101,9 +101,19 @@ function createAppDOM(): HTMLElement {
         <span id="camera-layer-info"></span>
       </div>
       <div id="export-modal">
-        <div id="export-progress-fill"></div>
-        <span id="export-status"></span>
-        <button id="export-cancel-btn"></button>
+        <div id="export-header">Export</div>
+        <div id="export-options">
+          <input type="radio" name="export-format" value="mp4" checked />
+          <input type="radio" name="export-format" value="png-sequence" />
+          <input type="radio" name="export-format" value="png-frame" />
+          <button id="export-start-btn"></button>
+          <button id="export-close-btn"></button>
+        </div>
+        <div id="export-progress" style="display: none;">
+          <div id="export-progress-fill"></div>
+          <span id="export-status"></span>
+          <button id="export-cancel-btn"></button>
+        </div>
       </div>
     </div>
   `;
@@ -1234,19 +1244,22 @@ describe('main.ts', () => {
 
     it('should cancel export when cancel button clicked', async () => {
       const downloadBtn = document.getElementById('download-btn')!;
-      const cancelBtn = document.getElementById('export-cancel-btn')!;
+      const closeBtn = document.getElementById('export-close-btn')!;
 
-      // Start export
+      // Show export modal
       downloadBtn.click();
 
-      // Immediately cancel
-      cancelBtn.click();
+      // Modal should be active
+      const exportModal = document.getElementById('export-modal')!;
+      expect(exportModal.classList.contains('active')).toBe(true);
+
+      // Close modal without starting export
+      closeBtn.click();
 
       // Wait for cleanup
       await new Promise(resolve => setTimeout(resolve, 200));
 
       // Modal should be hidden
-      const exportModal = document.getElementById('export-modal')!;
       expect(exportModal.classList.contains('active')).toBe(false);
     });
   });

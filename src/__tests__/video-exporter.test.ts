@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { exportVideo, downloadBlob, isWebCodecsSupported } from '../video-exporter';
+import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame } from '../video-exporter';
+import JSZip from 'jszip';
 import {
   createMinimalDoc,
   createTimeline,
@@ -470,6 +471,216 @@ describe('video-exporter', () => {
       expect(blob.size).toBeGreaterThan(0);
 
       await audioContext.close();
+    });
+  });
+
+  describe('exportPNGSequence', () => {
+    it('should export frames as PNG sequence in ZIP', async () => {
+      const doc = createMinimalDoc({
+        width: 80,
+        height: 60,
+        frameRate: 12,
+        timelines: [createTimeline({
+          totalFrames: 3,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 3,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 10, y: 10 },
+                    { type: 'L', x: 70, y: 10 },
+                    { type: 'L', x: 70, y: 50 },
+                    { type: 'L', x: 10, y: 50 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportPNGSequence(doc);
+
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.type).toBe('application/zip');
+      expect(blob.size).toBeGreaterThan(0);
+
+      // Verify ZIP contents
+      const zip = await JSZip.loadAsync(blob);
+      const files = Object.keys(zip.files);
+      expect(files).toHaveLength(3);
+      expect(files).toContain('frame_00000.png');
+      expect(files).toContain('frame_00001.png');
+      expect(files).toContain('frame_00002.png');
+    });
+
+    it('should support custom frame prefix and padding', async () => {
+      const doc = createMinimalDoc({
+        width: 40,
+        height: 30,
+        timelines: [createTimeline({
+          totalFrames: 2,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 2 })],
+          })],
+        })],
+      });
+
+      const blob = await exportPNGSequence(doc, {
+        framePrefix: 'img_',
+        padLength: 3,
+      });
+
+      const zip = await JSZip.loadAsync(blob);
+      const files = Object.keys(zip.files);
+      expect(files).toContain('img_000.png');
+      expect(files).toContain('img_001.png');
+    });
+
+    it('should support frame range export', async () => {
+      const doc = createMinimalDoc({
+        width: 40,
+        height: 30,
+        timelines: [createTimeline({
+          totalFrames: 10,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 10 })],
+          })],
+        })],
+      });
+
+      const blob = await exportPNGSequence(doc, {
+        startFrame: 3,
+        endFrame: 6,
+      });
+
+      const zip = await JSZip.loadAsync(blob);
+      const files = Object.keys(zip.files);
+      expect(files).toHaveLength(3);
+      expect(files).toContain('frame_00003.png');
+      expect(files).toContain('frame_00004.png');
+      expect(files).toContain('frame_00005.png');
+    });
+
+    it('should call progress callback', async () => {
+      const doc = createMinimalDoc({
+        width: 40,
+        height: 30,
+        timelines: [createTimeline({
+          totalFrames: 2,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 2 })],
+          })],
+        })],
+      });
+
+      const progressCalls: { currentFrame: number; totalFrames: number; stage: string }[] = [];
+      await exportPNGSequence(doc, {}, (progress) => {
+        progressCalls.push({ ...progress });
+      });
+
+      expect(progressCalls.length).toBeGreaterThan(0);
+      expect(progressCalls.some(p => p.stage === 'rendering')).toBe(true);
+      expect(progressCalls.some(p => p.stage === 'zipping')).toBe(true);
+    });
+
+    it('should handle cancellation', async () => {
+      const doc = createMinimalDoc({
+        width: 40,
+        height: 30,
+        timelines: [createTimeline({
+          totalFrames: 5,
+          layers: [createLayer({
+            frames: [createFrame({ duration: 5 })],
+          })],
+        })],
+      });
+
+      let frameCount = 0;
+      await expect(
+        exportPNGSequence(doc, {}, () => { frameCount++; }, () => frameCount >= 2)
+      ).rejects.toThrow('Export cancelled');
+    });
+  });
+
+  describe('exportSingleFrame', () => {
+    it('should export single frame as PNG', async () => {
+      const doc = createMinimalDoc({
+        width: 100,
+        height: 80,
+        timelines: [createTimeline({
+          totalFrames: 5,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 5,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 20, y: 20 },
+                    { type: 'L', x: 80, y: 20 },
+                    { type: 'L', x: 80, y: 60 },
+                    { type: 'L', x: 20, y: 60 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportSingleFrame(doc, 2);
+
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.type).toBe('image/png');
+      expect(blob.size).toBeGreaterThan(0);
+    });
+
+    it('should export first frame (frame 0)', async () => {
+      const doc = createMinimalDoc({
+        width: 50,
+        height: 50,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#0000FF' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 50, y: 0 },
+                    { type: 'L', x: 50, y: 50 },
+                    { type: 'L', x: 0, y: 50 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportSingleFrame(doc, 0);
+
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.type).toBe('image/png');
     });
   });
 });

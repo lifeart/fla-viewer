@@ -39,12 +39,14 @@ A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no inst
 │  PARSING          │  RENDERING         │  EXPORT               │
 ├───────────────────┼────────────────────┼───────────────────────┤
 │  ✓ FLA/XFL files  │  ✓ Vector shapes   │  ✓ MP4 video (H.264)  │
-│  ✓ Symbols        │  ✓ Gradients       │  ✓ AAC audio          │
-│  ✓ Timelines      │  ✓ Bitmap fills    │  ✓ WebCodecs API      │
-│  ✓ Motion tweens  │  ✓ Filters         │                       │
-│  ✓ Shape tweens   │  ✓ Blend modes     │                       │
-│  ✓ Audio (MP3)    │  ✓ Masks           │                       │
-│  ✓ Bitmap (.dat)  │  ✓ Text (Google)   │                       │
+│  ✓ Symbols        │  ✓ Gradients       │  ✓ PNG sequence (ZIP) │
+│  ✓ Timelines      │  ✓ Bitmap fills    │  ✓ Single frame PNG   │
+│  ✓ Motion tweens  │  ✓ Filters         │  ✓ AAC audio          │
+│  ✓ Shape tweens   │  ✓ Blend modes     │  ✓ WebCodecs API      │
+│  ✓ Color tweens   │  ✓ Masks           │                       │
+│  ✓ Rotation tweens│  ✓ Text (Google)   │                       │
+│  ✓ Audio (MP3)    │  ✓ 9-slice scaling │                       │
+│  ✓ Bitmap (.dat)  │                    │                       │
 └───────────────────┴────────────────────┴───────────────────────┘
 ```
 
@@ -61,7 +63,7 @@ A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no inst
 | 🖼️ | **Bitmaps** | PNG, JPG, GIF + Adobe `.dat` with recovery |
 | 🔤 | **Text** | Static/dynamic, word wrap, Google Fonts |
 | 🔊 | **Audio** | Stream sync with volume control |
-| 📹 | **Export** | MP4 with H.264 video + AAC audio |
+| 📹 | **Export** | MP4 video, PNG sequence, single frame |
 | 🎥 | **Camera** | Auto-detected camera layers with follow mode |
 
 ### UX
@@ -107,15 +109,20 @@ npm run dev     # → localhost:3000
 
 ---
 
-## Video Export
+## Export Options
 
-1. Load FLA file
-2. Click **Download** button
-3. Wait for encoding
-4. Get MP4
+Click the **Download** button to open export options:
 
-**Specs:** H.264 @ 5 Mbps, AAC @ 128 kbps
-**Requires:** Chrome/Edge 94+ (WebCodecs)
+| Format | Output | Description |
+|--------|--------|-------------|
+| **MP4 Video** | `.mp4` | H.264 video with AAC audio |
+| **PNG Sequence** | `.zip` | All frames as numbered PNGs |
+| **Current Frame** | `.png` | Single frame snapshot |
+
+### Video Export Specs
+- **Video:** H.264 @ 5 Mbps
+- **Audio:** AAC @ 128 kbps
+- **Requires:** Chrome/Edge 94+ (WebCodecs API)
 
 ---
 
@@ -210,12 +217,16 @@ FLA (ZIP) → Parser → Document → Renderer → Canvas
 | DOMSoundItem | ✓ |
 | Motion Tweens | ✓ |
 | Shape Tweens | ✓ |
+| Color Transform Tweens | ✓ |
+| Rotation Tweens (CW/CCW) | ✓ |
 | Filters | ✓ |
 | Masks | ✓ |
 | Color Effects | ✓ |
 | Blend Modes | ✓ |
 | Camera Layer | ✓ |
 | Bitmap Fills | ✓ |
+| 9-Slice Scaling | ✓ (parsing) |
+| Frame Labels | ✓ |
 | ActionScript | ✗ |
 
 ---

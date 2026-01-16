@@ -931,6 +931,79 @@
       border-color: var(--accent);
     }
 
+    .export-format-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 20px;
+      text-align: left;
+    }
+
+    .export-format-option {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--border-radius);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .export-format-option:hover {
+      border-color: var(--accent);
+    }
+
+    .export-format-option:has(input:checked) {
+      border-color: var(--accent);
+      background: rgba(0, 122, 255, 0.1);
+    }
+
+    .export-format-option input[type="radio"] {
+      accent-color: var(--accent);
+      width: 16px;
+      height: 16px;
+    }
+
+    .export-format-label {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .export-format-label strong {
+      color: var(--text-primary);
+      font-size: 14px;
+    }
+
+    .export-format-label small {
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    .export-buttons {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+    }
+
+    .export-start-btn {
+      background: var(--accent);
+      border: none;
+      color: white;
+      padding: 8px 24px;
+      border-radius: var(--border-radius);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+
+    .export-start-btn:hover {
+      background: #0066cc;
+    }
+
     /* Download button hidden state */
     .transport-btn.hidden {
       display: none;
@@ -1118,12 +1191,47 @@
 
       <div class="export-modal" id="export-modal">
         <div class="export-content">
-          <div class="export-header">Exporting Video</div>
-          <div class="export-progress-bar">
-            <div class="export-progress-fill" id="export-progress-fill"></div>
+          <div class="export-header" id="export-header">Export</div>
+
+          <!-- Export Options (shown first) -->
+          <div class="export-options" id="export-options">
+            <div class="export-format-group">
+              <label class="export-format-option">
+                <input type="radio" name="export-format" value="mp4" checked>
+                <span class="export-format-label">
+                  <strong>MP4 Video</strong>
+                  <small>H.264 video with audio</small>
+                </span>
+              </label>
+              <label class="export-format-option">
+                <input type="radio" name="export-format" value="png-sequence">
+                <span class="export-format-label">
+                  <strong>PNG Sequence</strong>
+                  <small>Frames as numbered PNGs in ZIP</small>
+                </span>
+              </label>
+              <label class="export-format-option">
+                <input type="radio" name="export-format" value="png-frame">
+                <span class="export-format-label">
+                  <strong>Current Frame</strong>
+                  <small>Single PNG of current frame</small>
+                </span>
+              </label>
+            </div>
+            <div class="export-buttons">
+              <button class="export-start-btn" id="export-start-btn">Export</button>
+              <button class="export-cancel-btn" id="export-close-btn">Cancel</button>
+            </div>
           </div>
-          <div class="export-status" id="export-status">Encoding frame 1 / 1</div>
-          <button class="export-cancel-btn" id="export-cancel-btn">Cancel</button>
+
+          <!-- Export Progress (shown during export) -->
+          <div class="export-progress" id="export-progress" style="display: none;">
+            <div class="export-progress-bar">
+              <div class="export-progress-fill" id="export-progress-fill"></div>
+            </div>
+            <div class="export-status" id="export-status">Preparing...</div>
+            <button class="export-cancel-btn" id="export-cancel-btn">Cancel</button>
+          </div>
         </div>
       </div>
 
