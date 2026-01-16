@@ -2,6 +2,7 @@ import { FLAParser } from './fla-parser';
 import { FLAPlayer } from './player';
 import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF, exportWebM, exportSVG } from './video-exporter';
 import { generateSampleFLA } from './sample-generator';
+import { setEdgeDecoderDebug, setImplicitMoveToAfterClose, setEdgeSplittingOnStyleChange } from './edge-decoder';
 import type { PlayerState, FLADocument, DisplayElement, Symbol } from './types';
 
 export class FLAViewerApp {
@@ -33,6 +34,9 @@ export class FLAViewerApp {
   private nestedOrderSelect: HTMLSelectElement;
   private elementOrderSelect: HTMLSelectElement;
   private followCameraCheckbox: HTMLInputElement;
+  private edgeDebugCheckbox: HTMLInputElement;
+  private implicitMoveToCheckbox: HTMLInputElement;
+  private edgeSplittingCheckbox: HTMLInputElement;
   private cameraLayerInfo: HTMLElement;
   private videoControls: HTMLElement;
   private audioControls: HTMLElement;
@@ -82,6 +86,9 @@ export class FLAViewerApp {
     this.nestedOrderSelect = document.getElementById('nested-order-select') as HTMLSelectElement;
     this.elementOrderSelect = document.getElementById('element-order-select') as HTMLSelectElement;
     this.followCameraCheckbox = document.getElementById('follow-camera-checkbox') as HTMLInputElement;
+    this.edgeDebugCheckbox = document.getElementById('edge-debug-checkbox') as HTMLInputElement;
+    this.implicitMoveToCheckbox = document.getElementById('implicit-moveto-checkbox') as HTMLInputElement;
+    this.edgeSplittingCheckbox = document.getElementById('edge-splitting-checkbox') as HTMLInputElement;
     this.cameraLayerInfo = document.getElementById('camera-layer-info')!;
     this.videoControls = document.getElementById('video-controls')!;
     this.audioControls = document.getElementById('audio-controls')!;
@@ -193,6 +200,42 @@ export class FLAViewerApp {
     // Follow camera toggle
     this.followCameraCheckbox.addEventListener('change', () => {
       this.player?.setFollowCamera(this.followCameraCheckbox.checked);
+    });
+
+    // Edge decoder debug toggle
+    this.edgeDebugCheckbox.addEventListener('change', () => {
+      setEdgeDecoderDebug(this.edgeDebugCheckbox.checked);
+      // Clear caches and re-render to apply changes
+      if (this.player) {
+        this.player.clearCachesAndRender();
+      }
+      if (this.edgeDebugCheckbox.checked) {
+        console.log('Edge debug enabled. Reload file to see edge decoding debug output.');
+      }
+    });
+
+    // Implicit moveTo after close path toggle (experimental)
+    this.implicitMoveToCheckbox.addEventListener('change', () => {
+      setImplicitMoveToAfterClose(this.implicitMoveToCheckbox.checked);
+      // Clear caches and re-render to apply changes
+      if (this.player) {
+        this.player.clearCachesAndRender();
+      }
+      if (this.implicitMoveToCheckbox.checked) {
+        console.log('Implicit MoveTo enabled. Reload file to apply to edge decoding.');
+      }
+    });
+
+    // Edge splitting on style change toggle (experimental)
+    this.edgeSplittingCheckbox.addEventListener('change', () => {
+      setEdgeSplittingOnStyleChange(this.edgeSplittingCheckbox.checked);
+      // Clear caches and re-render to apply changes
+      if (this.player) {
+        this.player.clearCachesAndRender();
+      }
+      if (this.edgeSplittingCheckbox.checked) {
+        console.log('Edge Splitting enabled. Reload file to apply to edge parsing.');
+      }
     });
 
     // Window resize handler

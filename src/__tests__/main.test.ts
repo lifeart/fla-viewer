@@ -98,6 +98,9 @@ function createAppDOM(): HTMLElement {
           <option value="reverse">Reverse</option>
         </select>
         <input type="checkbox" id="follow-camera-checkbox" />
+        <input type="checkbox" id="edge-debug-checkbox" />
+        <input type="checkbox" id="implicit-moveto-checkbox" />
+        <input type="checkbox" id="edge-splitting-checkbox" />
         <span id="camera-layer-info"></span>
       </div>
       <div id="export-modal">
@@ -760,6 +763,19 @@ describe('main.ts', () => {
 
       const changeEvent = new Event('change', { bubbles: true });
       checkbox.dispatchEvent(changeEvent);
+    });
+
+    it('should handle edge debug checkbox change', () => {
+      const checkbox = document.getElementById('edge-debug-checkbox') as HTMLInputElement;
+      expect(checkbox.checked).toBe(false); // Should be disabled by default
+
+      checkbox.checked = true;
+      const changeEvent = new Event('change', { bubbles: true });
+      checkbox.dispatchEvent(changeEvent);
+
+      // Verify it can be toggled back off
+      checkbox.checked = false;
+      checkbox.dispatchEvent(new Event('change', { bubbles: true }));
     });
 
     it('should handle timeline click', () => {

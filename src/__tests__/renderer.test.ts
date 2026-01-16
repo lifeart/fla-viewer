@@ -177,6 +177,45 @@ describe('FLARenderer', () => {
     });
   });
 
+  describe('cache management', () => {
+    it('should clear caches without error', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 100, y: 0 },
+                    { type: 'L', x: 100, y: 100 },
+                    { type: 'L', x: 0, y: 100 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Render to populate cache
+      renderer.renderFrame(0);
+
+      // Clear caches should not throw
+      expect(() => renderer.clearCaches()).not.toThrow();
+
+      // Should still render correctly after clearing caches
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+  });
+
   describe('camera follow', () => {
     it('should toggle camera follow mode', () => {
       renderer.setFollowCamera(true);

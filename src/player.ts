@@ -316,6 +316,12 @@ export class FLAPlayer {
     return this.renderer.getCameraLayers();
   }
 
+  // Clear all caches and force a re-render
+  clearCachesAndRender(): void {
+    this.renderer.clearCaches();
+    this.render();
+  }
+
   updateCanvasSize(): void {
     this.renderer.updateCanvasSize();
     this.render();

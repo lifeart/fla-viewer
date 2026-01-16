@@ -259,6 +259,14 @@ export class FLARenderer {
     this.elementOrder = order;
   }
 
+  // Clear all cached data to force recomputation
+  clearCaches(): void {
+    // Clear shape path cache by creating a new WeakMap
+    this.shapePathCache = new WeakMap<Shape, CachedShapePaths>();
+    // Clear symbol bitmap cache
+    this.symbolBitmapCache.clear();
+  }
+
   // Enable/disable following the camera/ramka layer as viewport
   setFollowCamera(enabled: boolean): void {
     this.followCamera = enabled;

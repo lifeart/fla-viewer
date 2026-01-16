@@ -159,6 +159,10 @@ Press `D` to open. Features:
 - Click-to-inspect on canvas
 - Render order controls
 - Camera follow toggle
+- Edge debug logging (console output)
+- Experimental edge parsing options:
+  - Implicit MoveTo after close path
+  - Edge splitting on style changes
 
 ---
 

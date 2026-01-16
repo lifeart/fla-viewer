@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { decodeEdges, parseEdge, setEdgeDecoderDebug } from '../edge-decoder';
+import { decodeEdges, decodeEdgesWithStyleChanges, parseEdge, parseEdgeWithStyleChanges, setEdgeDecoderDebug, setEdgeSplittingOnStyleChange, setImplicitMoveToAfterClose } from '../edge-decoder';
 import { createConsoleSpy, expectLogContaining, type ConsoleSpy } from './test-utils';
 
 describe('edge-decoder', () => {
@@ -139,11 +139,97 @@ describe('edge-decoder', () => {
     });
 
     describe('Style indicator (S)', () => {
-      it('should skip S command and following number', () => {
+      it('should process path commands with S token', () => {
         const commands = decodeEdges('!0 0 S2 |100 100');
         expect(commands).toHaveLength(2);
         expect(commands[0]).toEqual({ type: 'M', x: 0, y: 0 });
         expect(commands[1]).toEqual({ type: 'L', x: 5, y: 5 });
+      });
+
+      it('should track style changes with decodeEdgesWithStyleChanges', () => {
+        const result = decodeEdgesWithStyleChanges('!0 0 S2 |100 100');
+        expect(result.commands).toHaveLength(2);
+        expect(result.styleChanges).toHaveLength(1);
+        expect(result.styleChanges[0]).toEqual({
+          commandIndex: 1, // Style changes before the lineTo
+          fillStyle1: 2
+        });
+      });
+
+      it('should track multiple style changes', () => {
+        const result = decodeEdgesWithStyleChanges('!0 0 S1 |100 100 S2 |200 200');
+        expect(result.commands).toHaveLength(3);
+        expect(result.styleChanges).toHaveLength(2);
+        expect(result.styleChanges[0].fillStyle1).toBe(1);
+        expect(result.styleChanges[1].fillStyle1).toBe(2);
+      });
+    });
+
+    describe('Close path and subsequent moveTo', () => {
+      it('should not add duplicate moveTo when explicit moveTo follows close', () => {
+        const commands = decodeEdges('!0 0 |100 100 / !200 200 |300 300');
+        const moveCount = commands.filter(c => c.type === 'M').length;
+        expect(moveCount).toBe(2); // Just the two explicit moveTos
+      });
+
+      it('should handle lineTo after close path (without implicit moveTo by default)', () => {
+        // After close (/), lineTo continues from current position
+        // This is the default behavior - no implicit moveTo is added
+        const commands = decodeEdges('!0 0 |100 0 |100 100 / |200 200');
+        // Should have: M, L, L, Z, L (lineTo continues from last position)
+        const moveCount = commands.filter(c => c.type === 'M').length;
+        expect(moveCount).toBe(1); // Only the original explicit moveTo
+      });
+
+      it('should add implicit moveTo when feature is enabled and lineTo follows close', () => {
+        setImplicitMoveToAfterClose(true);
+        try {
+          const commands = decodeEdges('!0 0 |100 0 |100 100 / |200 200');
+          // Should have: M, L, L, Z, M (implicit), L
+          const moveCount = commands.filter(c => c.type === 'M').length;
+          expect(moveCount).toBe(2); // Original moveTo + implicit moveTo
+        } finally {
+          setImplicitMoveToAfterClose(false);
+        }
+      });
+
+      it('should add implicit moveTo when feature is enabled and quadratic follows close', () => {
+        setImplicitMoveToAfterClose(true);
+        try {
+          const commands = decodeEdges('!0 0 |100 100 / [200 200 300 300');
+          const moveCount = commands.filter(c => c.type === 'M').length;
+          expect(moveCount).toBe(2);
+        } finally {
+          setImplicitMoveToAfterClose(false);
+        }
+      });
+
+      it('should position implicit moveTo at close path start when enabled', () => {
+        setImplicitMoveToAfterClose(true);
+        try {
+          // Path starts at (0,0), closes, then continues
+          const commands = decodeEdges('!0 0 |100 0 |100 100 |0 100 / |200 200');
+          // Find the implicit moveTo (should be after Z)
+          const zIndex = commands.findIndex(c => c.type === 'Z');
+          const implicitMove = commands[zIndex + 1];
+          expect(implicitMove.type).toBe('M');
+          // Implicit moveTo should be at (0,0) - the start of the closed path
+          expect((implicitMove as { type: 'M'; x: number; y: number }).x).toBe(0);
+          expect((implicitMove as { type: 'M'; x: number; y: number }).y).toBe(0);
+        } finally {
+          setImplicitMoveToAfterClose(false);
+        }
+      });
+
+      it('should add implicit moveTo for cubic bezier when enabled', () => {
+        setImplicitMoveToAfterClose(true);
+        try {
+          const commands = decodeEdges('!0 0 |100 100 / (; 200 200 300 300 400 400 );');
+          const moveCount = commands.filter(c => c.type === 'M').length;
+          expect(moveCount).toBe(2); // Original + implicit
+        } finally {
+          setImplicitMoveToAfterClose(false);
+        }
       });
     });
 
@@ -357,6 +443,102 @@ describe('edge-decoder', () => {
     });
   });
 
+  describe('parseEdgeWithStyleChanges', () => {
+    let mockElement: {
+      getAttribute: (name: string) => string | null;
+    };
+
+    beforeEach(() => {
+      mockElement = {
+        getAttribute: vi.fn()
+      };
+    });
+
+    it('should return single edge when no style changes', () => {
+      (mockElement.getAttribute as ReturnType<typeof vi.fn>).mockImplementation((name: string) => {
+        if (name === 'fillStyle1') return '1';
+        if (name === 'edges') return '!0 0 |100 100';
+        return null;
+      });
+
+      const edges = parseEdgeWithStyleChanges(mockElement as unknown as Element);
+      expect(edges).toHaveLength(1);
+      expect(edges[0].fillStyle1).toBe(1);
+    });
+
+    it('should split edge on style change', () => {
+      setEdgeSplittingOnStyleChange(true); // Enable experimental feature
+      try {
+        (mockElement.getAttribute as ReturnType<typeof vi.fn>).mockImplementation((name: string) => {
+          if (name === 'fillStyle1') return '1';
+          if (name === 'edges') return '!0 0 |100 100 S2 |200 200';
+          return null;
+        });
+
+        const edges = parseEdgeWithStyleChanges(mockElement as unknown as Element);
+        expect(edges).toHaveLength(2);
+        expect(edges[0].fillStyle1).toBe(1); // Initial style
+        expect(edges[1].fillStyle1).toBe(2); // After S2 style change
+      } finally {
+        setEdgeSplittingOnStyleChange(false); // Disable after test
+      }
+    });
+
+    it('should preserve initial styles from XML attributes', () => {
+      (mockElement.getAttribute as ReturnType<typeof vi.fn>).mockImplementation((name: string) => {
+        if (name === 'fillStyle0') return '1';
+        if (name === 'fillStyle1') return '2';
+        if (name === 'strokeStyle') return '3';
+        if (name === 'edges') return '!0 0 |100 100';
+        return null;
+      });
+
+      const edges = parseEdgeWithStyleChanges(mockElement as unknown as Element);
+      expect(edges[0].fillStyle0).toBe(1);
+      expect(edges[0].fillStyle1).toBe(2);
+      expect(edges[0].strokeStyle).toBe(3);
+    });
+
+    it('should carry over unchanged styles after style change', () => {
+      setEdgeSplittingOnStyleChange(true); // Enable experimental feature
+      try {
+        (mockElement.getAttribute as ReturnType<typeof vi.fn>).mockImplementation((name: string) => {
+          if (name === 'fillStyle0') return '1';
+          if (name === 'fillStyle1') return '2';
+          if (name === 'strokeStyle') return '3';
+          if (name === 'edges') return '!0 0 |100 100 S5 |200 200'; // Only fillStyle1 changes to 5
+          return null;
+        });
+
+        const edges = parseEdgeWithStyleChanges(mockElement as unknown as Element);
+        expect(edges).toHaveLength(2);
+        // First edge has original styles
+        expect(edges[0].fillStyle0).toBe(1);
+        expect(edges[0].fillStyle1).toBe(2);
+        expect(edges[0].strokeStyle).toBe(3);
+        // Second edge has changed fillStyle1, other styles unchanged
+        expect(edges[1].fillStyle0).toBe(1);
+        expect(edges[1].fillStyle1).toBe(5);
+        expect(edges[1].strokeStyle).toBe(3);
+      } finally {
+        setEdgeSplittingOnStyleChange(false); // Disable after test
+      }
+    });
+
+    it('should not split edge when edge splitting is disabled', () => {
+      setEdgeSplittingOnStyleChange(false); // Ensure disabled
+      (mockElement.getAttribute as ReturnType<typeof vi.fn>).mockImplementation((name: string) => {
+        if (name === 'fillStyle1') return '1';
+        if (name === 'edges') return '!0 0 |100 100 S2 |200 200';
+        return null;
+      });
+
+      const edges = parseEdgeWithStyleChanges(mockElement as unknown as Element);
+      expect(edges).toHaveLength(1); // Single edge when splitting disabled
+      expect(edges[0].fillStyle1).toBe(1); // Uses XML attribute style
+    });
+  });
+
   describe('tokenizer edge cases', () => {
     it('should handle adjacent token before open paren with semicolon', () => {
       // Token "0" is adjacent to "(;" without space - tests line 110
@@ -558,6 +740,50 @@ describe('edge-decoder', () => {
     it('should log C command count for cubic curves', () => {
       decodeEdges('!0 0(; 10 10 20 20 30 30)');
       expectLogContaining(consoleSpy, 'C=');
+    });
+  });
+
+  describe('debug parameter', () => {
+    let consoleSpy: ConsoleSpy;
+
+    beforeEach(() => {
+      setEdgeDecoderDebug(false); // Ensure global debug is off
+      consoleSpy = createConsoleSpy();
+    });
+
+    afterEach(() => {
+      consoleSpy.mockRestore();
+    });
+
+    it('should not log when debug parameter is false', () => {
+      decodeEdges('!0 0|100 0|100 100', false);
+      expect(consoleSpy).not.toHaveBeenCalled();
+    });
+
+    it('should log when debug parameter is true', () => {
+      decodeEdges('!0 0|100 0|100 100', true);
+      expect(consoleSpy).toHaveBeenCalled();
+      expectLogContaining(consoleSpy, 'Commands:');
+    });
+
+    it('should override global DEBUG_EDGES when debug parameter is provided', () => {
+      setEdgeDecoderDebug(true);
+      decodeEdges('!0 0|100 0|100 100', false);
+      expect(consoleSpy).not.toHaveBeenCalled();
+      setEdgeDecoderDebug(false);
+    });
+
+    it('should fall back to global DEBUG_EDGES when debug parameter is undefined', () => {
+      setEdgeDecoderDebug(true);
+      decodeEdges('!0 0|100 0|100 100');
+      expect(consoleSpy).toHaveBeenCalled();
+      setEdgeDecoderDebug(false);
+    });
+
+    it('should work with decodeEdgesWithStyleChanges', () => {
+      decodeEdgesWithStyleChanges('!0 0 S2 |100 100', true);
+      expect(consoleSpy).toHaveBeenCalled();
+      expectLogContaining(consoleSpy, 'Style changes:');
     });
   });
 });

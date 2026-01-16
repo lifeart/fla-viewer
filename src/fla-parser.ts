@@ -30,7 +30,7 @@ import type {
   BlendMode,
   Rectangle
 } from './types';
-import { decodeEdges } from './edge-decoder';
+import { decodeEdgesWithStyleChanges } from './edge-decoder';
 import {
   normalizePath,
   setWithNormalizedPath,
@@ -2054,11 +2054,15 @@ export class FLAParser {
       const edgesAttr = edgeEl.getAttribute('edges');
       const pathData = cubicsAttr || edgesAttr || '';
 
+      // Use decodeEdgesWithStyleChanges but ignore style changes for now
+      // (style changes within an edge are rare and the XML attributes are authoritative)
+      const { commands } = decodeEdgesWithStyleChanges(pathData);
+
       edges.push({
         fillStyle0: fillStyle0 ? parseInt(fillStyle0) : undefined,
         fillStyle1: fillStyle1 ? parseInt(fillStyle1) : undefined,
         strokeStyle: strokeStyle ? parseInt(strokeStyle) : undefined,
-        commands: decodeEdges(pathData)
+        commands
       });
     }
 

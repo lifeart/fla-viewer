@@ -272,6 +272,12 @@ describe('FLAPlayer', () => {
     });
   });
 
+  describe('cache management', () => {
+    it('should clear caches and re-render without error', () => {
+      expect(() => player.clearCachesAndRender()).not.toThrow();
+    });
+  });
+
   describe('volume', () => {
     it('should set and get volume', () => {
       player.setVolume(0.5);

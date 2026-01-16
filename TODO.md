@@ -215,23 +215,35 @@ Currently implemented: Characters, alignment, size, lineHeight, face, fillColor,
 
 ---
 
-## Path & Edge Parsing (Low Priority)
+## Path & Edge Parsing (Low Priority) ✅
 
 Currently implemented in `edge-decoder.ts`:
 - MoveTo (`!`), LineTo (`|`), QuadraticCurveTo (`[`), ClosePath (`/`)
 - Cubic bezier via `(;...);` and `(anchor;...);` formats
 - Hex coordinate encoding (`#XX.YY` with two's complement for negatives)
-- Style indicators (`S`)
+- Style indicators (`S`) parsed and tracked
 - Auto-close paths when end matches start
+- Debug logging option for edge decoding
 
-### Missing/Incomplete Features
+### Implementation Details
 
-| Feature | JPEXS Reference | Description |
-|---------|-----------------|-------------|
-| **Mid-Path Style Changes** | `shaperecords/StyleChangeRecord.java` | Style can change mid-edge (fillStyle0/1, lineStyle) without moveTo |
-| **Implicit MoveTo After Close** | XFL spec | After `/` (close), next edge should auto-moveTo to continue |
-| **Delta Coordinates** | `shaperecords/CurvedEdgeRecord.java` | SWF uses delta coords; XFL uses absolute (verify both work) |
-| **EndShapeRecord** | `shaperecords/EndShapeRecord.java` | Explicit shape termination marker |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Mid-Path Style Changes** | ✅ | `Sn` token tracked; style from XML Edge attributes is authoritative |
+| **Absolute Coordinates** | ✅ | XFL uses absolute coords (SWF delta coords are converted) |
+| **EndShapeRecord** | N/A | Implicit in XFL format (not needed) |
+| **Edge Debug Logging** | ✅ | Toggle in debug panel; logs command counts to console |
+
+### Experimental Features (Debug Panel)
+
+These features are disabled by default and can be enabled in the debug panel. They may break rendering of some FLA files:
+
+| Feature | Description |
+|---------|-------------|
+| **Implicit MoveTo** | Adds implicit moveTo command after close path (`/`) when drawing commands follow |
+| **Edge Splitting** | Splits edges into multiple segments when mid-path style changes (`Sn`) are encountered |
+
+**Note:** Style changes via `S` tokens are tracked by `decodeEdgesWithStyleChanges()`. Edge splitting can be enabled experimentally but XML `fillStyle0/1` and `strokeStyle` attributes on Edge elements are the authoritative source for styles.
 
 ### Shape Record Types (SWF Internal)
 
