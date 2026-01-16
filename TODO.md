@@ -280,32 +280,52 @@ Currently implemented: normal, guide, folder, camera, mask, masked layers with v
 
 ---
 
-## Shape Handling (Low Priority)
+## Shape Handling (Low Priority) ✅
 
-Currently implemented: Edge paths, fill styles, stroke styles
+Currently implemented: Edge paths, fill styles, stroke styles, path area calculation, fill side correction, shape fixer, duplicate edge removal
 
-### Missing Features
+### Implementation Details
 
-| Feature | JPEXS Reference | Description |
-|---------|-----------------|-------------|
-| **Shape Fixer** | `xfl/shapefixer/ShapeFixer.java` | Auto-repair broken shapes |
-| **Fill Side Correction** | `xfl/shapefixer/SwitchedFillSidesFixer.java` | Fix inverted fill directions |
-| **Morph Shape Fixer** | `xfl/shapefixer/MorphShapeFixer.java` | Repair broken morph shapes |
-| **Path Area Calculation** | `xfl/shapefixer/PathArea.java` | Calculate signed area for winding determination |
-| **Duplicate Edge Removal** | `XFLConverter.java` | Filter redundant stroke-only edges |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Path Area Calculation** | ✅ | Shoelace formula for winding determination |
+| **Fill Side Correction** | ✅ | Auto-detect and fix inverted fill directions based on path area |
+| **Shape Fixer** | ✅ | Comprehensive repair: duplicate removal, fill correction, chain connection, auto-close |
+| **Duplicate Edge Removal** | ✅ | Merge edges with identical paths, combine fill/stroke styles |
+| **Chain Connection** | ✅ | Connect broken edge chains with epsilon tolerance |
+| **Auto-Close Paths** | ✅ | Automatically close paths that nearly return to start |
+| **Morph Shape Validation** | ✅ | Validate start/end shape compatibility for shape tweens |
+
+**Shape Utilities Location:** `src/shape-utils.ts`
 
 ---
 
-## 9-Slice Scaling (Low Priority)
+## 9-Slice Scaling (Low Priority) ✅
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | **scale9Grid Parsing** | ✅ | Parses `scalingGrid` and `scalingGridRect` attributes |
-| **9-slice Rendering** | ❌ | Not implemented - would require complex region-based rendering |
+| **9-slice Rendering** | ✅ | Full region-based rendering with offscreen canvas |
 
-**Notes:**
-- Scale9Grid rectangle is parsed from symbol definitions (left, top, width, height in pixels)
-- Full 9-slice rendering would require dividing the symbol into 9 regions and scaling each appropriately
+### Implementation Details
+
+9-slice scaling divides the symbol into 9 regions:
+```
++---+---+---+
+| 1 | 2 | 3 |  Corners (1,3,7,9): No scaling
++---+---+---+
+| 4 | 5 | 6 |  Edges (2,8): Horizontal scaling only
++---+---+---+  Edges (4,6): Vertical scaling only
+| 7 | 8 | 9 |  Center (5): Both scales
++---+---+---+
+```
+
+**Features:**
+- Renders symbol to offscreen canvas at original size
+- Divides into 9 regions based on scale9Grid rectangle
+- Draws each region with appropriate scaling
+- Skips 9-slice when scale is approximately 1x (performance optimization)
+- Handles rotation from transform matrix
 
 ---
 

@@ -191,10 +191,11 @@ src/
 ├── main.ts            # UI & controls
 ├── fla-parser.ts      # ZIP/XML parsing + bitmap recovery
 ├── edge-decoder.ts    # XFL edge path decoder
-├── renderer.ts        # Canvas 2D rendering
+├── renderer.ts        # Canvas 2D rendering + 9-slice scaling
 ├── player.ts          # Timeline & audio sync
 ├── video-exporter.ts  # MP4/PNG export (WebCodecs)
 ├── sample-generator.ts # Built-in sample FLA
+├── shape-utils.ts     # Shape fixing & path utilities
 └── types.ts           # TypeScript types
 ```
 
@@ -229,7 +230,7 @@ FLA (ZIP) → Parser → Document → Renderer → Canvas
 | Blend Modes | ✓ |
 | Camera Layer | ✓ |
 | Bitmap Fills | ✓ |
-| 9-Slice Scaling | ✓ (parsing) |
+| 9-Slice Scaling | ✓ |
 | Frame Labels | ✓ |
 | ActionScript | ✗ |
 

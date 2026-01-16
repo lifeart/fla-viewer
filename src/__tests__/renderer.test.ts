@@ -843,6 +843,192 @@ describe('FLARenderer', () => {
     });
   });
 
+  describe('9-slice scaling', () => {
+    it('should render symbol with 9-slice grid', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Button',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: '#3366CC' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 100, y: 0 },
+                  { type: 'L', x: 100, y: 40 },
+                  { type: 'L', x: 0, y: 40 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Button', {
+        name: 'Button',
+        itemID: 'button-1',
+        symbolType: 'graphic',
+        timeline: symbolTimeline,
+        scale9Grid: {
+          left: 10,
+          top: 10,
+          width: 80,
+          height: 20
+        }
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'Button',
+                symbolType: 'graphic',
+                matrix: createMatrix({ a: 2, d: 1.5, tx: 50, ty: 50 }), // Scaled 2x horizontally, 1.5x vertically
+                firstFrame: 0,
+                loop: 'single frame',
+                transformationPoint: { x: 0, y: 0 },
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Should render without errors
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should skip 9-slice when scale is approximately 1', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'Button',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: '#FF6600' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 50, y: 0 },
+                  { type: 'L', x: 50, y: 30 },
+                  { type: 'L', x: 0, y: 30 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Button', {
+        name: 'Button',
+        itemID: 'button-2',
+        symbolType: 'graphic',
+        timeline: symbolTimeline,
+        scale9Grid: {
+          left: 5,
+          top: 5,
+          width: 40,
+          height: 20
+        }
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'Button',
+                symbolType: 'graphic',
+                matrix: createMatrix({ a: 1.005, d: 0.998, tx: 100, ty: 100 }), // Nearly 1x scale
+                firstFrame: 0,
+                loop: 'single frame',
+                transformationPoint: { x: 0, y: 0 },
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Should render without errors (will use normal rendering)
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+
+    it('should render symbol without 9-slice grid normally', async () => {
+      const symbolTimeline = createTimeline({
+        name: 'NormalSymbol',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: '#009900' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 60, y: 0 },
+                  { type: 'L', x: 60, y: 60 },
+                  { type: 'L', x: 0, y: 60 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('NormalSymbol', {
+        name: 'NormalSymbol',
+        itemID: 'normal-1',
+        symbolType: 'graphic',
+        timeline: symbolTimeline
+        // No scale9Grid
+      });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'NormalSymbol',
+                symbolType: 'graphic',
+                matrix: createMatrix({ a: 3, d: 2, tx: 20, ty: 20 }), // Scaled 3x, 2x
+                firstFrame: 0,
+                loop: 'single frame',
+                transformationPoint: { x: 0, y: 0 },
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+
+      // Should render normally without 9-slice
+      expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+  });
+
   describe('text rendering', () => {
     it('should render text element', async () => {
       const doc = createMinimalDoc({

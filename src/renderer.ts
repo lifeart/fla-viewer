@@ -19,7 +19,9 @@ import type {
   Filter,
   MorphShape,
   ColorTransform,
-  BlendMode
+  BlendMode,
+  Rectangle,
+  Symbol
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
 
@@ -1432,11 +1434,16 @@ export class FLARenderer {
       this.debugSymbolPath.push(instance.libraryItemName);
     }
 
-    // Apply transformation matrix
+    // Check if symbol has 9-slice scaling grid
+    const has9SliceGrid = symbol.scale9Grid !== undefined;
+
+    // Apply transformation matrix (skip if using 9-slice, handled separately)
     // Note: The matrix tx/ty already positions the symbol correctly
     // The transformationPoint is metadata about the pivot, but it's already
     // accounted for in how the matrix was calculated by Flash
-    this.applyMatrix(instance.matrix);
+    if (!has9SliceGrid) {
+      this.applyMatrix(instance.matrix);
+    }
 
     // Calculate which frame to render based on symbol type and loop mode
     // In Flash:
@@ -1484,8 +1491,12 @@ export class FLARenderer {
       symbolFrame = Math.min(firstFrame + frameOffset, effectiveLastFrame);
     }
 
-    // Render symbol's timeline
-    this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
+    // Render symbol's timeline (with 9-slice scaling if applicable)
+    if (has9SliceGrid && symbol.scale9Grid) {
+      this.renderSymbolWith9Slice(symbol, instance, symbol.scale9Grid, symbolFrame, depth);
+    } else {
+      this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
+    }
 
     // Pop symbol path
     if (this.debugMode) {
@@ -3032,6 +3043,171 @@ export class FLARenderer {
         edges: startShape.edges
       });
     }
+
+    ctx.restore();
+  }
+
+  /**
+   * Render a symbol with 9-slice scaling.
+   *
+   * 9-slice scaling divides the symbol into 9 regions:
+   * +---+---+---+
+   * | 1 | 2 | 3 |  (top row)
+   * +---+---+---+
+   * | 4 | 5 | 6 |  (middle row)
+   * +---+---+---+
+   * | 7 | 8 | 9 |  (bottom row)
+   * +---+---+---+
+   *
+   * - Corners (1,3,7,9): No scaling
+   * - Top/Bottom edges (2,8): Horizontal scaling only
+   * - Left/Right edges (4,6): Vertical scaling only
+   * - Center (5): Both horizontal and vertical scaling
+   */
+  private renderSymbolWith9Slice(
+    symbol: Symbol,
+    instance: SymbolInstance,
+    scale9Grid: Rectangle,
+    symbolFrame: number,
+    depth: number
+  ): void {
+    const ctx = this.ctx;
+
+    // Calculate the symbol's original bounds
+    // The scale9Grid is defined relative to the symbol's internal coordinates
+    const gridLeft = scale9Grid.left;
+    const gridTop = scale9Grid.top;
+    const gridRight = gridLeft + scale9Grid.width;
+    const gridBottom = gridTop + scale9Grid.height;
+
+    // Get the instance's transformation matrix
+    const m = instance.matrix;
+
+    // Extract scale factors from the matrix
+    // For a 2D affine matrix [a, b, c, d, tx, ty]:
+    // scaleX = sqrt(a² + b²), scaleY = sqrt(c² + d²)
+    const scaleX = Math.sqrt(m.a * m.a + m.b * m.b);
+    const scaleY = Math.sqrt(m.c * m.c + m.d * m.d);
+
+    // If scales are very close to 1, just render normally without 9-slice
+    if (Math.abs(scaleX - 1) < 0.01 && Math.abs(scaleY - 1) < 0.01) {
+      this.applyMatrix(m);
+      this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
+      return;
+    }
+
+    // We need to estimate the symbol's bounds for 9-slice to work
+    // Use the scale9Grid as a hint for the symbol size
+    // Typically the grid is inside the symbol, so we expand it
+    const symbolWidth = gridRight + gridLeft; // Assume symmetric
+    const symbolHeight = gridBottom + gridTop;
+
+    // Calculate the scaled dimensions
+    const scaledWidth = symbolWidth * scaleX;
+    const scaledHeight = symbolHeight * scaleY;
+
+    // Calculate the 9-slice region sizes
+    // Original sizes
+    const leftWidth = gridLeft;
+    const centerWidth = scale9Grid.width;
+    const rightWidth = symbolWidth - gridRight;
+    const topHeight = gridTop;
+    const centerHeight = scale9Grid.height;
+    const bottomHeight = symbolHeight - gridBottom;
+
+    // Scaled center size (corners stay fixed)
+    const scaledCenterWidth = Math.max(0, scaledWidth - leftWidth - rightWidth);
+    const scaledCenterHeight = Math.max(0, scaledHeight - topHeight - bottomHeight);
+
+    // Save current state
+    ctx.save();
+
+    // Apply translation and rotation from the matrix (but not scale)
+    // We'll handle scaling ourselves per-region
+    const rotation = Math.atan2(m.b, m.a);
+    ctx.translate(m.tx, m.ty);
+    ctx.rotate(rotation);
+
+    // Create an offscreen canvas to render the symbol at original size
+    const offscreenCanvas = document.createElement('canvas');
+    const padding = 10; // Add padding to avoid edge clipping
+    offscreenCanvas.width = Math.ceil(symbolWidth + padding * 2);
+    offscreenCanvas.height = Math.ceil(symbolHeight + padding * 2);
+    const offCtx = offscreenCanvas.getContext('2d');
+
+    if (!offCtx) {
+      // Fallback to normal rendering
+      ctx.restore();
+      this.applyMatrix(m);
+      this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
+      return;
+    }
+
+    // Temporarily swap context to render to offscreen canvas
+    const savedCtx = this.ctx;
+    const savedScale = this.scale;
+    this.ctx = offCtx;
+    this.scale = 1;
+
+    // Translate to center the content in the offscreen canvas
+    offCtx.translate(padding, padding);
+
+    // Render the symbol's content to the offscreen canvas
+    this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
+
+    // Restore original context
+    this.ctx = savedCtx;
+    this.scale = savedScale;
+
+    // Now draw the 9 regions with appropriate scaling
+    // Region coordinates in the source (offscreen canvas)
+    const srcRegions = {
+      // x, y, width, height for each region in source
+      topLeft: { x: padding, y: padding, w: leftWidth, h: topHeight },
+      topCenter: { x: padding + leftWidth, y: padding, w: centerWidth, h: topHeight },
+      topRight: { x: padding + leftWidth + centerWidth, y: padding, w: rightWidth, h: topHeight },
+      middleLeft: { x: padding, y: padding + topHeight, w: leftWidth, h: centerHeight },
+      middleCenter: { x: padding + leftWidth, y: padding + topHeight, w: centerWidth, h: centerHeight },
+      middleRight: { x: padding + leftWidth + centerWidth, y: padding + topHeight, w: rightWidth, h: centerHeight },
+      bottomLeft: { x: padding, y: padding + topHeight + centerHeight, w: leftWidth, h: bottomHeight },
+      bottomCenter: { x: padding + leftWidth, y: padding + topHeight + centerHeight, w: centerWidth, h: bottomHeight },
+      bottomRight: { x: padding + leftWidth + centerWidth, y: padding + topHeight + centerHeight, w: rightWidth, h: bottomHeight }
+    };
+
+    // Destination coordinates
+    const dstRegions = {
+      topLeft: { x: 0, y: 0, w: leftWidth, h: topHeight },
+      topCenter: { x: leftWidth, y: 0, w: scaledCenterWidth, h: topHeight },
+      topRight: { x: leftWidth + scaledCenterWidth, y: 0, w: rightWidth, h: topHeight },
+      middleLeft: { x: 0, y: topHeight, w: leftWidth, h: scaledCenterHeight },
+      middleCenter: { x: leftWidth, y: topHeight, w: scaledCenterWidth, h: scaledCenterHeight },
+      middleRight: { x: leftWidth + scaledCenterWidth, y: topHeight, w: rightWidth, h: scaledCenterHeight },
+      bottomLeft: { x: 0, y: topHeight + scaledCenterHeight, w: leftWidth, h: bottomHeight },
+      bottomCenter: { x: leftWidth, y: topHeight + scaledCenterHeight, w: scaledCenterWidth, h: bottomHeight },
+      bottomRight: { x: leftWidth + scaledCenterWidth, y: topHeight + scaledCenterHeight, w: rightWidth, h: bottomHeight }
+    };
+
+    // Draw each region (skip if width or height is 0)
+    const drawRegion = (src: { x: number; y: number; w: number; h: number }, dst: { x: number; y: number; w: number; h: number }) => {
+      if (src.w > 0 && src.h > 0 && dst.w > 0 && dst.h > 0) {
+        ctx.drawImage(
+          offscreenCanvas,
+          src.x, src.y, src.w, src.h,
+          dst.x, dst.y, dst.w, dst.h
+        );
+      }
+    };
+
+    // Draw all 9 regions
+    drawRegion(srcRegions.topLeft, dstRegions.topLeft);
+    drawRegion(srcRegions.topCenter, dstRegions.topCenter);
+    drawRegion(srcRegions.topRight, dstRegions.topRight);
+    drawRegion(srcRegions.middleLeft, dstRegions.middleLeft);
+    drawRegion(srcRegions.middleCenter, dstRegions.middleCenter);
+    drawRegion(srcRegions.middleRight, dstRegions.middleRight);
+    drawRegion(srcRegions.bottomLeft, dstRegions.bottomLeft);
+    drawRegion(srcRegions.bottomCenter, dstRegions.bottomCenter);
+    drawRegion(srcRegions.bottomRight, dstRegions.bottomRight);
 
     ctx.restore();
   }
