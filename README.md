@@ -3,8 +3,8 @@
 [![Deploy to GitHub Pages](https://github.com/lifeart/fla-viewer/actions/workflows/deploy.yml/badge.svg)](https://github.com/lifeart/fla-viewer/actions/workflows/deploy.yml)
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](https://opensource.org/licenses/ISC)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Vite](https://img.shields.io/badge/Vite-6.x-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Zero Dependencies](https://img.shields.io/badge/Runtime%20Deps-0-success)](package.json)
+[![Vite](https://img.shields.io/badge/Vite-7.x-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
+[![Vitest](https://img.shields.io/badge/Tested%20with-Vitest-6E9F18?logo=vitest&logoColor=white)](https://vitest.dev/)
 
 A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no installs — just drag and drop.
 
@@ -201,11 +201,14 @@ src/
 ├── edge-decoder.ts    # XFL edge path decoder
 ├── renderer.ts        # Canvas 2D rendering + 9-slice scaling
 ├── player.ts          # Timeline & audio sync
-├── video-exporter.ts  # MP4/PNG export (WebCodecs)
+├── video-exporter.ts  # MP4/WebM/GIF/PNG export (WebCodecs)
 ├── adpcm-decoder.ts   # SWF ADPCM audio decoder
+├── flv-parser.ts      # FLV video container parsing
 ├── sample-generator.ts # Built-in sample FLA
 ├── shape-utils.ts     # Shape fixing & path utilities
-└── types.ts           # TypeScript types
+├── path-utils.ts      # File path normalization
+├── types.ts           # TypeScript types
+└── __tests__/         # Test suite (10 test files)
 ```
 
 ```
@@ -248,40 +251,65 @@ FLA (ZIP) → Parser → Document → Renderer → Canvas
 | Text Rotation | ✓ |
 | Frame Labels | ✓ |
 | Multiple Scenes | ✓ |
+| FLV Video Parsing | ✓ |
+| Video Playback | ✗ |
 | ActionScript | ✗ |
 
 ---
 
 ## Limitations
 
-- No ActionScript execution
-- Video elements show placeholder only
-- Fonts fall back to system/Google Fonts
-- Some filter options not fully supported
+- No ActionScript execution (no interactivity)
+- Embedded video shows metadata only (FLV parsing supported, playback not implemented)
+- Fonts fall back to Google Fonts (external request) or system fonts
+- Some advanced filter options not fully supported
+- 3D transforms use simplified perspective projection
 
 ---
 
 ## Tech Stack
 
-- **TypeScript** — type safety
-- **Vite** — fast builds
-- **Canvas 2D** — rendering
-- **WebCodecs** — video encoding
-- **Web Audio** — audio playback
-- **JSZip** — archive extraction
-- **Pako** — deflate decompression
+| Category | Technology |
+|----------|------------|
+| **Language** | TypeScript 5.x (strict mode) |
+| **Build** | Vite 7.x |
+| **Testing** | Vitest + Playwright |
+| **Rendering** | Canvas 2D API |
+| **Video Export** | WebCodecs API, mp4-muxer, webm-muxer, gifenc |
+| **Audio** | Web Audio API |
+| **Parsing** | JSZip, Pako (deflate) |
 
 ---
 
-## Contributing
+## Development
 
 ```bash
 git clone https://github.com/lifeart/fla-viewer.git
 cd fla-viewer
 npm install
-npm test        # run tests
-npm run dev     # start dev server
+npm run dev           # start dev server → localhost:3000
+npm test              # run tests
+npm run test:watch    # run tests in watch mode
+npm run test:coverage # run tests with coverage report
+npm run build         # production build
 ```
+
+### Testing
+
+The project includes comprehensive tests using Vitest with Playwright browser testing:
+
+| Test File | Coverage |
+|-----------|----------|
+| `fla-parser.test.ts` | ZIP parsing, bitmap recovery, symbol loading |
+| `renderer.test.ts` | Shape rendering, tweens, filters, 9-slice |
+| `player.test.ts` | Timeline, scenes, audio sync |
+| `edge-decoder.test.ts` | XFL edge format parsing |
+| `video-exporter.test.ts` | MP4/WebM/GIF export |
+| `shape-utils.test.ts` | Path winding, shape repair |
+| `adpcm-decoder.test.ts` | ADPCM audio decoding |
+| `flv-parser.test.ts` | FLV container parsing |
+| `path-utils.test.ts` | Path normalization |
+| `main.test.ts` | UI integration |
 
 ---
 
