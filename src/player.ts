@@ -15,11 +15,18 @@ export class FLAPlayer {
     playing: false,
     currentFrame: 0,
     totalFrames: 1,
-    fps: 24
+    fps: 24,
+    currentScene: 0,
+    totalScenes: 1,
+    sceneName: 'Scene 1',
+    globalFrame: 0,
+    globalTotalFrames: 1
   };
   private animationId: number | null = null;
   private lastFrameTime: number = 0;
   private onStateChange: ((state: PlayerState) => void) | null = null;
+  // Scene frame offsets for calculating global frame position
+  private sceneFrameOffsets: number[] = [];
 
   // Audio playback
   private audioContext: AudioContext | null = null;
@@ -47,17 +54,32 @@ export class FLAPlayer {
     // Wait for renderer to set up document (including font preloading)
     await this.renderer.setDocument(doc);
 
-    // Get total frames from main timeline
+    // Calculate scene frame offsets for global frame navigation
+    this.sceneFrameOffsets = [];
+    let globalTotalFrames = 0;
+    for (const timeline of doc.timelines) {
+      this.sceneFrameOffsets.push(globalTotalFrames);
+      globalTotalFrames += timeline.totalFrames;
+    }
+
+    // Get info from first scene
+    const totalScenes = doc.timelines.length;
     const totalFrames = doc.timelines[0]?.totalFrames || 1;
+    const sceneName = doc.timelines[0]?.name || 'Scene 1';
 
     this.state = {
       playing: false,
       currentFrame: 0,
       totalFrames,
-      fps: doc.frameRate
+      fps: doc.frameRate,
+      currentScene: 0,
+      totalScenes,
+      sceneName,
+      globalFrame: 0,
+      globalTotalFrames
     };
 
-    // Find stream sounds in the timeline
+    // Find stream sounds in the current scene's timeline
     this.findStreamSounds();
 
     this.render();
@@ -66,9 +88,10 @@ export class FLAPlayer {
 
   private findStreamSounds(): void {
     this.streamSounds = [];
-    if (!this.doc || !this.doc.timelines[0]) return;
+    if (!this.doc) return;
 
-    const timeline = this.doc.timelines[0];
+    const timeline = this.doc.timelines[this.state.currentScene];
+    if (!timeline) return;
     for (const layer of timeline.layers) {
       for (const frame of layer.frames) {
         if (frame.sound && frame.sound.sync === 'stream') {
@@ -117,6 +140,11 @@ export class FLAPlayer {
   stop(): void {
     this.pause();
     this.state.currentFrame = 0;
+    this.state.globalFrame = 0;
+    // Reset to first scene
+    if (this.state.currentScene !== 0) {
+      this.goToScene(0);
+    }
     // Reset MovieClip playheads when stopping
     this.renderer.resetMovieClipPlayheads();
     this.render();
@@ -224,6 +252,8 @@ export class FLAPlayer {
     }
 
     this.state.currentFrame = Math.max(0, Math.min(frame, this.state.totalFrames - 1));
+    // Update global frame
+    this.state.globalFrame = this.sceneFrameOffsets[this.state.currentScene] + this.state.currentFrame;
     // Reset MovieClip playheads when seeking (accurate state would require full replay)
     this.renderer.resetMovieClipPlayheads();
     this.render();
@@ -240,6 +270,96 @@ export class FLAPlayer {
     this.goToFrame(frame);
   }
 
+  /**
+   * Seek to a global frame position across all scenes.
+   */
+  seekToGlobalFrame(globalFrame: number): void {
+    globalFrame = Math.max(0, Math.min(globalFrame, this.state.globalTotalFrames - 1));
+
+    // Find which scene this global frame belongs to
+    let targetScene = 0;
+    for (let i = 0; i < this.sceneFrameOffsets.length; i++) {
+      const nextOffset = this.sceneFrameOffsets[i + 1] ?? this.state.globalTotalFrames;
+      if (globalFrame < nextOffset) {
+        targetScene = i;
+        break;
+      }
+    }
+
+    // Switch scene if needed
+    if (targetScene !== this.state.currentScene) {
+      this.switchToScene(targetScene);
+    }
+
+    // Calculate local frame within scene
+    const localFrame = globalFrame - this.sceneFrameOffsets[targetScene];
+    this.goToFrame(localFrame);
+  }
+
+  /**
+   * Go to a specific scene by index (0-based).
+   */
+  goToScene(sceneIndex: number): void {
+    if (!this.doc) return;
+    if (sceneIndex < 0 || sceneIndex >= this.state.totalScenes) return;
+
+    const wasPlaying = this.state.playing;
+    if (wasPlaying) {
+      this.pause();
+    }
+
+    this.switchToScene(sceneIndex);
+    this.state.currentFrame = 0;
+    this.state.globalFrame = this.sceneFrameOffsets[sceneIndex];
+    this.renderer.resetMovieClipPlayheads();
+    this.findStreamSounds();
+    this.render();
+    this.notifyStateChange();
+
+    if (wasPlaying) {
+      this.play();
+    }
+  }
+
+  /**
+   * Go to the next scene. Wraps to first scene if at the end.
+   */
+  nextScene(): void {
+    const nextIndex = (this.state.currentScene + 1) % this.state.totalScenes;
+    this.goToScene(nextIndex);
+  }
+
+  /**
+   * Go to the previous scene. Wraps to last scene if at the beginning.
+   */
+  prevScene(): void {
+    const prevIndex = (this.state.currentScene - 1 + this.state.totalScenes) % this.state.totalScenes;
+    this.goToScene(prevIndex);
+  }
+
+  /**
+   * Get scene names for UI display.
+   */
+  getSceneNames(): string[] {
+    if (!this.doc) return [];
+    return this.doc.timelines.map(t => t.name);
+  }
+
+  /**
+   * Internal: Switch to a different scene without stopping/starting playback.
+   */
+  private switchToScene(sceneIndex: number): void {
+    if (!this.doc) return;
+    const timeline = this.doc.timelines[sceneIndex];
+    if (!timeline) return;
+
+    this.state.currentScene = sceneIndex;
+    this.state.currentFrame = 0;
+    this.state.totalFrames = timeline.totalFrames;
+    this.state.sceneName = timeline.name;
+    this.renderer.setCurrentScene(sceneIndex);
+  }
+
   private animate = (): void => {
     if (!this.state.playing) return;
 
@@ -251,14 +371,23 @@ export class FLAPlayer {
 
     if (elapsed >= frameInterval) {
       this.lastFrameTime = now - (elapsed % frameInterval);
-      const prevFrame = this.state.currentFrame;
-      this.state.currentFrame = (this.state.currentFrame + 1) % this.state.totalFrames;
+      this.state.currentFrame++;
+      this.state.globalFrame++;
 
-      // Restart audio when looping back to beginning
-      if (this.state.currentFrame < prevFrame) {
+      // Check if we've reached the end of the current scene
+      if (this.state.currentFrame >= this.state.totalFrames) {
+        // Move to next scene or loop back to first scene
+        if (this.state.currentScene < this.state.totalScenes - 1) {
+          // Go to next scene
+          this.switchToScene(this.state.currentScene + 1);
+        } else {
+          // Loop back to first scene
+          this.switchToScene(0);
+          this.state.globalFrame = 0;
+          // Reset MovieClip playheads when looping
+          this.renderer.resetMovieClipPlayheads();
+        }
         this.startAudio();
-        // Reset MovieClip playheads when main timeline loops
-        this.renderer.resetMovieClipPlayheads();
       } else {
         // Advance MovieClip playheads along with main timeline
         this.renderer.advanceMovieClipPlayheads();

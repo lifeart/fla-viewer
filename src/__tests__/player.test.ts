@@ -619,4 +619,142 @@ describe('FLAPlayer', () => {
       expect(player.getState().currentFrame).toBe(5);
     });
   });
+
+  describe('multiple scenes', () => {
+    beforeEach(async () => {
+      // Create a document with 3 scenes
+      const doc = createMinimalDoc({
+        timelines: [
+          createTimeline({
+            name: 'Scene 1',
+            totalFrames: 10,
+            layers: [createLayer({
+              frames: [createFrame({ duration: 10 })],
+            })],
+          }),
+          createTimeline({
+            name: 'Scene 2',
+            totalFrames: 20,
+            layers: [createLayer({
+              frames: [createFrame({ duration: 20 })],
+            })],
+          }),
+          createTimeline({
+            name: 'Scene 3',
+            totalFrames: 15,
+            layers: [createLayer({
+              frames: [createFrame({ duration: 15 })],
+            })],
+          }),
+        ],
+      });
+      await player.setDocument(doc);
+    });
+
+    it('should initialize with correct scene state', () => {
+      const state = player.getState();
+      expect(state.currentScene).toBe(0);
+      expect(state.totalScenes).toBe(3);
+      expect(state.sceneName).toBe('Scene 1');
+      expect(state.totalFrames).toBe(10);
+      expect(state.globalTotalFrames).toBe(45); // 10 + 20 + 15
+      expect(state.globalFrame).toBe(0);
+    });
+
+    it('should go to next scene', () => {
+      player.nextScene();
+      const state = player.getState();
+      expect(state.currentScene).toBe(1);
+      expect(state.sceneName).toBe('Scene 2');
+      expect(state.totalFrames).toBe(20);
+      expect(state.currentFrame).toBe(0);
+      expect(state.globalFrame).toBe(10); // Offset of scene 2
+    });
+
+    it('should go to previous scene', () => {
+      player.nextScene(); // Go to scene 2
+      player.prevScene(); // Back to scene 1
+      const state = player.getState();
+      expect(state.currentScene).toBe(0);
+      expect(state.sceneName).toBe('Scene 1');
+    });
+
+    it('should wrap around when going past last scene', () => {
+      player.nextScene(); // Scene 2
+      player.nextScene(); // Scene 3
+      player.nextScene(); // Should wrap to Scene 1
+      const state = player.getState();
+      expect(state.currentScene).toBe(0);
+      expect(state.sceneName).toBe('Scene 1');
+    });
+
+    it('should wrap around when going before first scene', () => {
+      player.prevScene(); // Should wrap to Scene 3
+      const state = player.getState();
+      expect(state.currentScene).toBe(2);
+      expect(state.sceneName).toBe('Scene 3');
+    });
+
+    it('should go to specific scene by index', () => {
+      player.goToScene(2);
+      const state = player.getState();
+      expect(state.currentScene).toBe(2);
+      expect(state.sceneName).toBe('Scene 3');
+      expect(state.totalFrames).toBe(15);
+    });
+
+    it('should not go to invalid scene index', () => {
+      player.goToScene(5); // Invalid index
+      const state = player.getState();
+      expect(state.currentScene).toBe(0); // Should stay at current scene
+    });
+
+    it('should seek to global frame across scenes', () => {
+      // Global frame 15 should be in Scene 2 (frame 5)
+      player.seekToGlobalFrame(15);
+      const state = player.getState();
+      expect(state.currentScene).toBe(1);
+      expect(state.currentFrame).toBe(5);
+      expect(state.globalFrame).toBe(15);
+    });
+
+    it('should seek to global frame in last scene', () => {
+      // Global frame 35 should be in Scene 3 (frame 5)
+      // Scene 1: frames 0-9 (10 frames)
+      // Scene 2: frames 10-29 (20 frames)
+      // Scene 3: frames 30-44 (15 frames)
+      player.seekToGlobalFrame(35);
+      const state = player.getState();
+      expect(state.currentScene).toBe(2);
+      expect(state.currentFrame).toBe(5);
+    });
+
+    it('should clamp global frame to valid range', () => {
+      player.seekToGlobalFrame(100); // Beyond total frames
+      const state = player.getState();
+      expect(state.globalFrame).toBeLessThan(45);
+    });
+
+    it('should get scene names', () => {
+      const names = player.getSceneNames();
+      expect(names).toEqual(['Scene 1', 'Scene 2', 'Scene 3']);
+    });
+
+    it('should reset to first scene on stop', () => {
+      player.goToScene(2);
+      player.goToFrame(5);
+      player.stop();
+      const state = player.getState();
+      expect(state.currentScene).toBe(0);
+      expect(state.currentFrame).toBe(0);
+      expect(state.globalFrame).toBe(0);
+    });
+
+    it('should preserve playing state when changing scenes', () => {
+      player.play();
+      player.nextScene();
+      const state = player.getState();
+      expect(state.playing).toBe(true);
+    });
+  });
 });

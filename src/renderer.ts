@@ -81,6 +81,9 @@ export class FLARenderer {
   private movieClipStates = new Map<string, MovieClipInstanceState>();
   private currentInstancePath: string[] = []; // Stack of instance identifiers for nested symbols
 
+  // Current scene index for multiple scene support
+  private currentScene: number = 0;
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const ctx = canvas.getContext('2d');
@@ -273,6 +276,23 @@ export class FLARenderer {
     this.elementOrder = order;
   }
 
+  /**
+   * Set the current scene index for rendering.
+   */
+  setCurrentScene(sceneIndex: number): void {
+    if (!this.doc) return;
+    if (sceneIndex >= 0 && sceneIndex < this.doc.timelines.length) {
+      this.currentScene = sceneIndex;
+    }
+  }
+
+  /**
+   * Get the current scene index.
+   */
+  getCurrentScene(): number {
+    return this.currentScene;
+  }
+
   // Clear all cached data to force recomputation
   clearCaches(): void {
     // Clear shape path cache by creating a new WeakMap
@@ -334,7 +354,7 @@ export class FLARenderer {
     if (enabled && this.doc) {
       this.manualCameraLayerIndex = this.findCameraLayerByName();
       if (DEBUG && this.manualCameraLayerIndex !== undefined) {
-        const layer = this.doc.timelines[0]?.layers[this.manualCameraLayerIndex];
+        const layer = this.doc.timelines[this.currentScene]?.layers[this.manualCameraLayerIndex];
         console.log(`Follow camera enabled: layer "${layer?.name}" at index ${this.manualCameraLayerIndex}`);
       }
     } else {
@@ -351,9 +371,9 @@ export class FLARenderer {
   // Find camera layer by name (less strict than auto-detection)
   // Returns the index of a layer named ramka/camera/viewport/etc.
   private findCameraLayerByName(): number | undefined {
-    if (!this.doc || !this.doc.timelines[0]) return undefined;
+    if (!this.doc || !this.doc.timelines[this.currentScene]) return undefined;
 
-    const layers = this.doc.timelines[0].layers;
+    const layers = this.doc.timelines[this.currentScene].layers;
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i];
       const nameLower = layer.name.toLowerCase();
@@ -380,10 +400,10 @@ export class FLARenderer {
 
   // Get list of potential camera layers for UI
   getCameraLayers(): { index: number; name: string }[] {
-    if (!this.doc || !this.doc.timelines[0]) return [];
+    if (!this.doc || !this.doc.timelines[this.currentScene]) return [];
 
     const result: { index: number; name: string }[] = [];
-    const layers = this.doc.timelines[0].layers;
+    const layers = this.doc.timelines[this.currentScene].layers;
 
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i];
@@ -575,7 +595,7 @@ export class FLARenderer {
   private detectCameraViewportSize(): { width: number; height: number } | null {
     if (!this.doc || this.manualCameraLayerIndex === undefined) return null;
 
-    const timeline = this.doc.timelines[0];
+    const timeline = this.doc.timelines[this.currentScene];
     if (!timeline) return null;
 
     const cameraLayer = timeline.layers[this.manualCameraLayerIndex];
@@ -721,9 +741,9 @@ export class FLARenderer {
     ctx.fillStyle = doc.backgroundColor;
     ctx.fillRect(0, 0, viewport.width, viewport.height);
 
-    // Render main timeline
-    if (doc.timelines.length > 0) {
-      this.renderTimelineWithCamera(doc.timelines[0], frameIndex, viewport);
+    // Render current scene's timeline
+    if (doc.timelines.length > this.currentScene) {
+      this.renderTimelineWithCamera(doc.timelines[this.currentScene], frameIndex, viewport);
     }
   }
 

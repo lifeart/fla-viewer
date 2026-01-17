@@ -477,8 +477,39 @@
     }
 
     .video-controls.hidden,
-    .audio-controls.hidden {
+    .audio-controls.hidden,
+    .scene-controls.hidden {
       display: none;
+    }
+
+    /* Scene Controls */
+    .scene-controls {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .scene-info {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-secondary);
+      min-width: 80px;
+      text-align: center;
+      user-select: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .scene-info .scene-current {
+      color: var(--text-primary);
+      font-weight: 500;
+    }
+
+    .scene-info .scene-name {
+      color: var(--accent);
+      font-size: 9px;
+      margin-left: 4px;
     }
 
     /* Info Bar */
@@ -1338,6 +1369,17 @@
             <button class="transport-btn" id="next-btn" title="Next Frame">
               <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
             </button>
+
+            <div class="scene-controls hidden" id="scene-controls">
+              <div class="transport-divider"></div>
+              <button class="transport-btn" id="prev-scene-btn" title="Previous Scene (Page Up)">
+                <svg viewBox="0 0 24 24"><path d="M15.41 16.59L10.83 12l4.58-4.59L14 6l-6 6 6 6 1.41-1.41z"/></svg>
+              </button>
+              <span class="scene-info" id="scene-info">1/1</span>
+              <button class="transport-btn" id="next-scene-btn" title="Next Scene (Page Down)">
+                <svg viewBox="0 0 24 24"><path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/></svg>
+              </button>
+            </div>
 
             <div class="timeline-container">
               <div class="timeline" id="timeline">

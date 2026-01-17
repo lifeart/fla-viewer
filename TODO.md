@@ -176,7 +176,7 @@ Currently implemented: Button symbols show first frame (up state), frame labels 
 | **Mouse Events** | ❌ | Click, rollover, rollout detection not implemented |
 | **Hit Area** | ✅ | Detected from frame 4 or "hit" labeled frame, visualized in debug mode |
 | **MovieClip Independence** | ✅ | Each instance has independent playhead, auto-advances during playback |
-| **Scenes** | ❌ | Multiple scene support not implemented |
+| **Scenes** | ✅ | Multiple scenes with navigation, global frame seeking, auto-advance |
 | **Frame Scripts** | ❌ | ActionScript not executed |
 
 ### Hit Area Implementation
@@ -189,6 +189,34 @@ In debug mode:
 - Hit areas are rendered with a semi-transparent cyan overlay
 - Click detection uses the hit area shape for buttons
 - Console shows "BUTTON-HIT-AREA" type when clicking on hit areas
+
+### Scene Support Implementation
+
+Multiple scenes (DOMTimeline elements in XFL) are now fully supported:
+
+**Playback Features:**
+- Scenes play sequentially - when one scene ends, playback auto-advances to the next
+- Loop back to first scene after the last scene completes
+- Stream audio restarts when transitioning between scenes
+
+**Navigation:**
+- `nextScene()` / `prevScene()` - Navigate between scenes (wraps at boundaries)
+- `goToScene(index)` - Jump to specific scene by index
+- `seekToGlobalFrame(frame)` - Seek to any frame across all scenes
+- `getSceneNames()` - Get list of scene names for UI
+
+**UI Controls:**
+- Scene navigation buttons appear when document has multiple scenes
+- Scene info display shows current scene number and name
+- Timeline scrubber spans all scenes with global frame progress
+- Keyboard shortcuts: PageUp (prev scene), PageDown (next scene)
+
+**State Tracking:**
+- `currentScene` - Current scene index (0-based)
+- `totalScenes` - Total number of scenes
+- `sceneName` - Name of current scene
+- `globalFrame` - Frame index across all scenes
+- `globalTotalFrames` - Total frames across all scenes
 
 ### keyMode Values (Reference)
 

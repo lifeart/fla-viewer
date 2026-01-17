@@ -312,9 +312,15 @@ export interface Rectangle {
 // Player state
 export interface PlayerState {
   playing: boolean;
-  currentFrame: number;
-  totalFrames: number;
+  currentFrame: number;      // Current frame within current scene (0-based)
+  totalFrames: number;       // Total frames in current scene
   fps: number;
+  // Scene information
+  currentScene: number;      // Current scene index (0-based)
+  totalScenes: number;       // Total number of scenes
+  sceneName: string;         // Name of current scene
+  globalFrame: number;       // Frame index across all scenes (for scrubbing)
+  globalTotalFrames: number; // Total frames across all scenes
 }
 
 // MovieClip instance state for independent playback

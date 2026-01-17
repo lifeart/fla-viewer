@@ -58,6 +58,11 @@ export class FLAViewerApp {
   private loadSampleBtn: HTMLButtonElement;
   private loadingStages: HTMLElement;
   private loadingProgressFill: HTMLElement;
+  // Scene controls
+  private sceneControls: HTMLElement;
+  private prevSceneBtn: HTMLButtonElement;
+  private nextSceneBtn: HTMLButtonElement;
+  private sceneInfo: HTMLElement;
 
   constructor() {
     this.parser = new FLAParser();
@@ -108,6 +113,11 @@ export class FLAViewerApp {
     this.loadingStages = document.getElementById('loading-stages')!;
     this.loadingProgressFill = document.getElementById('loading-progress-fill')!;
     this.debugCloseBtn = document.getElementById('debug-close-btn') as HTMLButtonElement;
+    // Scene controls
+    this.sceneControls = document.getElementById('scene-controls')!;
+    this.prevSceneBtn = document.getElementById('prev-scene-btn') as HTMLButtonElement;
+    this.nextSceneBtn = document.getElementById('next-scene-btn') as HTMLButtonElement;
+    this.sceneInfo = document.getElementById('scene-info')!;
 
     this.setupEventListeners();
   }
@@ -154,6 +164,10 @@ export class FLAViewerApp {
     this.debugBtn.addEventListener('click', () => this.toggleDebug());
     this.debugCloseBtn?.addEventListener('click', () => this.closeDebug());
 
+    // Scene navigation
+    this.prevSceneBtn?.addEventListener('click', () => this.player?.prevScene());
+    this.nextSceneBtn?.addEventListener('click', () => this.player?.nextScene());
+
     // Audio controls
     this.muteBtn.addEventListener('click', () => this.toggleMute());
     this.volumeSlider.addEventListener('input', () => this.updateVolume());
@@ -174,11 +188,18 @@ export class FLAViewerApp {
       this.skipImagesBtn.classList.add('hidden');
     });
 
-    // Timeline scrubbing
+    // Timeline scrubbing (uses global frames to seek across scenes)
     this.timeline.addEventListener('click', (e) => {
       const rect = this.timeline.getBoundingClientRect();
       const progress = (e.clientX - rect.left) / rect.width;
-      this.player?.seekToProgress(progress);
+      const state = this.player?.getState();
+      if (state && state.totalScenes > 1) {
+        // Seek across all scenes using global frame
+        const globalFrame = Math.floor(progress * (state.globalTotalFrames - 1));
+        this.player?.seekToGlobalFrame(globalFrame);
+      } else {
+        this.player?.seekToProgress(progress);
+      }
     });
 
     // Layer order change
@@ -283,6 +304,14 @@ export class FLAViewerApp {
         case 'f':
         case 'F':
           this.toggleFullscreen();
+          break;
+        case 'PageUp':
+          e.preventDefault();
+          this.player.prevScene();
+          break;
+        case 'PageDown':
+          e.preventDefault();
+          this.player.nextScene();
           break;
       }
     });
@@ -765,12 +794,16 @@ export class FLAViewerApp {
       this.updateLoadingStage('Preparing...');
 
       // Update info panel
-      const totalFrames = this.player.getState().totalFrames;
+      const state = this.player.getState();
+      const sceneInfo = state.totalScenes > 1
+        ? `<span><span class="label">Scenes:</span> <span class="value">${state.totalScenes}</span></span>`
+        : '';
       this.infoPanel.innerHTML = `
         <span><span class="label">File:</span> <span class="value">${file.name}</span></span>
         <span><span class="label">Size:</span> <span class="value">${doc.width}x${doc.height}</span></span>
         <span><span class="label">FPS:</span> <span class="value">${doc.frameRate}</span></span>
-        <span><span class="label">Frames:</span> <span class="value">${totalFrames}</span></span>
+        <span><span class="label">Frames:</span> <span class="value">${state.globalTotalFrames}</span></span>
+        ${sceneInfo}
         <span><span class="label">Symbols:</span> <span class="value">${doc.symbols.size}</span></span>
       `;
 
@@ -780,7 +813,7 @@ export class FLAViewerApp {
 
       // Check if we have audio and multiple frames
       const hasAudio = this.hasLoadedAudio(doc);
-      const hasMultipleFrames = totalFrames > 1;
+      const hasMultipleFrames = state.globalTotalFrames > 1;
 
       // Show/hide controls based on content
       if (hasMultipleFrames) {
@@ -793,6 +826,14 @@ export class FLAViewerApp {
         this.audioControls.classList.remove('hidden');
       } else {
         this.audioControls.classList.add('hidden');
+      }
+
+      // Show/hide scene controls based on whether there are multiple scenes
+      if (state.totalScenes > 1) {
+        this.sceneControls?.classList.remove('hidden');
+        this.updateSceneInfo(state);
+      } else {
+        this.sceneControls?.classList.add('hidden');
       }
 
       // Show download button if WebCodecs supported and has multiple frames
@@ -839,18 +880,34 @@ export class FLAViewerApp {
     this.playBtn.innerHTML = state.playing ? this.pauseIcon : this.playIcon;
 
     // Update frame info (timecode style)
-    this.frameInfo.innerHTML = `<span class="current">${state.currentFrame + 1}</span> / ${state.totalFrames}`;
+    if (state.totalScenes > 1) {
+      // Show scene-aware frame info
+      this.frameInfo.innerHTML = `<span class="current">${state.globalFrame + 1}</span> / ${state.globalTotalFrames}`;
+    } else {
+      this.frameInfo.innerHTML = `<span class="current">${state.currentFrame + 1}</span> / ${state.totalFrames}`;
+    }
 
-    // Update timeline progress
-    const progress = state.totalFrames > 1
-      ? (state.currentFrame / (state.totalFrames - 1)) * 100
-      : 0;
+    // Update timeline progress (use global progress for multi-scene)
+    const progress = state.totalScenes > 1
+      ? (state.globalTotalFrames > 1 ? (state.globalFrame / (state.globalTotalFrames - 1)) * 100 : 0)
+      : (state.totalFrames > 1 ? (state.currentFrame / (state.totalFrames - 1)) * 100 : 0);
     this.timelineProgress.style.width = `${progress}%`;
+
+    // Update scene info if multiple scenes
+    if (state.totalScenes > 1) {
+      this.updateSceneInfo(state);
+    }
 
     // Refresh debug panel when frame changes
     if (this.debugMode && state.currentFrame !== this.lastDebugFrame) {
       this.lastDebugFrame = state.currentFrame;
       this.populateLayerList();
+    }
+  }
+
+  private updateSceneInfo(state: PlayerState): void {
+    if (this.sceneInfo) {
+      this.sceneInfo.innerHTML = `<span class="scene-current">${state.currentScene + 1}</span>/<span class="scene-total">${state.totalScenes}</span> <span class="scene-name">${state.sceneName}</span>`;
     }
   }
 

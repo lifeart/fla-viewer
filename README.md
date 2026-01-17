@@ -41,13 +41,14 @@ A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no inst
 │  ✓ FLA/XFL files  │  ✓ Vector shapes   │  ✓ MP4 video (H.264)  │
 │  ✓ Symbols        │  ✓ Gradients       │  ✓ WebM video (VP9)   │
 │  ✓ Timelines      │  ✓ Bitmap fills    │  ✓ Animated GIF       │
-│  ✓ Motion tweens  │  ✓ Filters         │  ✓ PNG sequence (ZIP) │
-│  ✓ Shape tweens   │  ✓ Blend modes     │  ✓ Sprite sheet+JSON  │
-│  ✓ Color tweens   │  ✓ Masks           │  ✓ Single frame PNG   │
-│  ✓ Rotation tweens│  ✓ Text (Google)   │  ✓ SVG vector export  │
-│  ✓ Audio (MP3)    │  ✓ 9-slice scaling │  ✓ WebCodecs API      │
-│  ✓ Bitmap (.dat)  │  ✓ 3D transforms   │                       │
-│  ✓ Orient to path │  ✓ Gradient strokes│                       │
+│  ✓ Multiple scenes│  ✓ Filters         │  ✓ PNG sequence (ZIP) │
+│  ✓ Motion tweens  │  ✓ Blend modes     │  ✓ Sprite sheet+JSON  │
+│  ✓ Shape tweens   │  ✓ Masks           │  ✓ Single frame PNG   │
+│  ✓ Color tweens   │  ✓ Text (Google)   │  ✓ SVG vector export  │
+│  ✓ Rotation tweens│  ✓ 9-slice scaling │  ✓ WebCodecs API      │
+│  ✓ Audio (MP3)    │  ✓ 3D transforms   │                       │
+│  ✓ Bitmap (.dat)  │  ✓ Gradient strokes│                       │
+│  ✓ Orient to path │                    │                       │
 └───────────────────┴────────────────────┴───────────────────────┘
 ```
 
@@ -56,7 +57,7 @@ A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no inst
 | | Feature | Details |
 |:-:|---------|---------|
 | 📦 | **FLA Parsing** | Native Adobe XFL format (ZIP + XML) |
-| 🎬 | **Timeline** | Play, pause, scrub, frame-by-frame |
+| 🎬 | **Timeline** | Play, pause, scrub, frame-by-frame, multi-scene |
 | 🔷 | **Shapes** | Fills, strokes, gradients, bitmap patterns, gradient strokes |
 | 🎭 | **Symbols** | Graphic, MovieClip, Button with nesting, 3D transforms |
 | ✨ | **Tweens** | Motion (easing), shape morphing, orient to path |
@@ -104,6 +105,7 @@ npm run dev     # → localhost:3000
 | `Space` | Play / Pause |
 | `←` `→` | Previous / Next frame |
 | `Home` `End` | First / Last frame |
+| `PgUp` `PgDn` | Previous / Next scene |
 | `D` | Debug panel |
 | `M` | Mute |
 | `F` | Fullscreen |
@@ -243,6 +245,7 @@ FLA (ZIP) → Parser → Document → Renderer → Canvas
 | Text Kerning | ✓ |
 | Text Rotation | ✓ |
 | Frame Labels | ✓ |
+| Multiple Scenes | ✓ |
 | ActionScript | ✗ |
 
 ---
