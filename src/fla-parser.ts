@@ -1,5 +1,6 @@
 import JSZip from 'jszip';
 import pako from 'pako';
+import { decodeADPCMToAudioBuffer } from './adpcm-decoder';
 import type {
   FLADocument,
   Timeline,
@@ -2041,11 +2042,11 @@ export class FLAParser {
     return sounds;
   }
 
-  // Parse sound format string to extract sample rate, bit depth, and channels
-  private parseSoundFormat(format: string | undefined): { sampleRate?: number; bitDepth?: number; channels?: number } {
+  // Parse sound format string to extract sample rate, bit depth, channels, and compression type
+  private parseSoundFormat(format: string | undefined): { sampleRate?: number; bitDepth?: number; channels?: number; isADPCM?: boolean } {
     if (!format) return {};
 
-    const result: { sampleRate?: number; bitDepth?: number; channels?: number } = {};
+    const result: { sampleRate?: number; bitDepth?: number; channels?: number; isADPCM?: boolean } = {};
 
     // Parse sample rate (e.g., "44kHz", "22kHz", "11kHz")
     const rateMatch = format.match(/(\d+)kHz/i);
@@ -2066,6 +2067,11 @@ export class FLAParser {
       result.channels = 1;
     }
 
+    // Detect ADPCM compression
+    if (/adpcm/i.test(format)) {
+      result.isADPCM = true;
+    }
+
     return result;
   }
 
@@ -2075,8 +2081,9 @@ export class FLAParser {
       this.audioContext = new AudioContext();
     }
 
-    // Check if this is PCM audio (has parsed format info but not MP3)
-    const isPCM = soundItem.sampleRate && soundItem.bitDepth &&
+    // Check audio format type
+    const isADPCM = soundItem.isADPCM === true;
+    const isPCM = !isADPCM && soundItem.sampleRate && soundItem.bitDepth &&
                   (!soundItem.format || !soundItem.format.toLowerCase().includes('mp3'));
 
     // Try to load from soundDataHRef first (bin/ folder), then href
@@ -2101,7 +2108,22 @@ export class FLAParser {
     }
 
     try {
-      if (isPCM) {
+      if (isADPCM) {
+        // Decode ADPCM compressed audio
+        const sampleRate = soundItem.sampleRate || 44100;
+        const channels = soundItem.channels || 1;
+        soundItem.audioData = decodeADPCMToAudioBuffer(
+          this.audioContext,
+          audioData,
+          sampleRate,
+          channels,
+          soundItem.sampleCount
+        );
+        if (DEBUG) {
+          console.log(`Loaded ADPCM sound: ${soundItem.name}, duration: ${soundItem.audioData.duration.toFixed(2)}s, ` +
+                      `${sampleRate}Hz ${channels === 2 ? 'Stereo' : 'Mono'}`);
+        }
+      } else if (isPCM) {
         // Convert raw PCM data to AudioBuffer
         soundItem.audioData = this.convertPCMToAudioBuffer(
           audioData,

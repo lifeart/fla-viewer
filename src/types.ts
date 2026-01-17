@@ -31,6 +31,7 @@ export interface SoundItem {
   sampleRate?: number; // Parsed sample rate in Hz (e.g., 44100)
   bitDepth?: number; // Parsed bit depth (e.g., 8, 16)
   channels?: number; // Parsed channel count (1=mono, 2=stereo)
+  isADPCM?: boolean; // True if audio is ADPCM compressed
   audioData?: AudioBuffer; // Loaded audio (if available)
 }
 
