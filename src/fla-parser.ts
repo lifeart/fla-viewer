@@ -359,7 +359,20 @@ export class FLAParser {
           totalFrames: 1
         };
 
-        const symbol: Symbol = { name, itemID, symbolType, timeline, ...(scale9Grid && { scale9Grid }) };
+        // For button symbols, detect the hit area frame (frame 4 or frame with "hit" label)
+        let hitAreaFrame: number | undefined;
+        if (symbolType === 'button') {
+          hitAreaFrame = this.findButtonHitAreaFrame(timeline);
+        }
+
+        const symbol: Symbol = {
+          name,
+          itemID,
+          symbolType,
+          timeline,
+          ...(scale9Grid && { scale9Grid }),
+          ...(hitAreaFrame !== undefined && { hitAreaFrame })
+        };
 
         // Store with both normalized and original names
         setWithNormalizedPath(this.symbolCache, rawName, symbol);
@@ -367,6 +380,43 @@ export class FLAParser {
     } catch (e) {
       console.warn(`Failed to parse symbol: ${filename}`, e);
     }
+  }
+
+  /**
+   * Find the hit area frame in a button symbol's timeline.
+   * In Flash buttons, the hit area is typically:
+   * - Frame 4 (standard button timeline: Up, Over, Down, Hit)
+   * - Or a frame with label "hit" or "_hit"
+   * Returns the 0-based frame index or undefined if not found.
+   */
+  private findButtonHitAreaFrame(timeline: Timeline): number | undefined {
+    // First, look for a frame with "hit" label in any layer
+    for (const layer of timeline.layers) {
+      for (const frame of layer.frames) {
+        const labelLower = frame.label?.toLowerCase();
+        if (labelLower === 'hit' || labelLower === '_hit') {
+          return frame.index;
+        }
+      }
+    }
+
+    // If no labeled hit frame, check if timeline has at least 4 frames
+    // Frame 4 (index 3) is traditionally the hit area
+    if (timeline.totalFrames >= 4) {
+      // Verify frame 4 has content (not just empty)
+      for (const layer of timeline.layers) {
+        for (const frame of layer.frames) {
+          // Check if this frame covers index 3 (frame 4)
+          if (frame.index <= 3 && frame.index + frame.duration > 3) {
+            if (frame.elements.length > 0) {
+              return 3; // 0-based index for frame 4
+            }
+          }
+        }
+      }
+    }
+
+    return undefined;
   }
 
   private async parseTimelines(parent: globalThis.Element, docWidth?: number, docHeight?: number): Promise<Timeline[]> {

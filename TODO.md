@@ -165,19 +165,30 @@ Currently implemented: Motion tweens with linear/custom easing, shape tweens, ro
 
 ## Interactive Elements (Low Priority)
 
-Currently implemented: Button symbols show first frame only, frame labels are parsed
+Currently implemented: Button symbols show first frame (up state), frame labels are parsed, hit areas detected
 
 ### Implementation Details
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | **Frame Labels** | ✅ | Parsed from `name` and `labelType` attributes |
-| **Button States** | ❌ | Up, Over, Down, Hit test frames not implemented |
+| **Button States** | ⚠️ | Up state rendered, Over/Down not interactive |
 | **Mouse Events** | ❌ | Click, rollover, rollout detection not implemented |
-| **Hit Area** | ❌ | Not implemented |
+| **Hit Area** | ✅ | Detected from frame 4 or "hit" labeled frame, visualized in debug mode |
 | **MovieClip Independence** | ✅ | Each instance has independent playhead, auto-advances during playback |
 | **Scenes** | ❌ | Multiple scene support not implemented |
 | **Frame Scripts** | ❌ | ActionScript not executed |
+
+### Hit Area Implementation
+
+Button hit areas are detected in two ways:
+1. **Frame 4** - Standard Flash button timeline (Up, Over, Down, Hit)
+2. **"hit" label** - Frame with label "hit" or "_hit"
+
+In debug mode:
+- Hit areas are rendered with a semi-transparent cyan overlay
+- Click detection uses the hit area shape for buttons
+- Console shows "BUTTON-HIT-AREA" type when clicking on hit areas
 
 ### keyMode Values (Reference)
 

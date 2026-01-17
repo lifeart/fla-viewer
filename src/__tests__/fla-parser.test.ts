@@ -5630,4 +5630,178 @@ describe('FLAParser', () => {
       expect(doc.timelines[0].layers[1].parentLayerIndex).toBe(0);
     });
   });
+
+  describe('button hit areas', () => {
+    it('should detect hit area on frame 4 for button symbols', async () => {
+      // Button with standard 4-frame timeline: Up, Over, Down, Hit
+      const symbolXml = `<?xml version="1.0" encoding="UTF-8"?>
+<DOMSymbolItem name="MyButton" symbolType="button">
+  <timeline>
+    <DOMTimeline name="MyButton">
+      <layers>
+        <DOMLayer name="Layer 1">
+          <frames>
+            <DOMFrame index="0">
+              <elements>
+                <DOMShape>
+                  <fills><FillStyle index="1"><SolidColor color="#FF0000"/></FillStyle></fills>
+                  <edges><Edge fillStyle0="1" edges="!0 0|0 S1|0 -S1|-S1 0"/></edges>
+                </DOMShape>
+              </elements>
+            </DOMFrame>
+            <DOMFrame index="1">
+              <elements>
+                <DOMShape>
+                  <fills><FillStyle index="1"><SolidColor color="#00FF00"/></FillStyle></fills>
+                  <edges><Edge fillStyle0="1" edges="!0 0|0 S1|0 -S1|-S1 0"/></edges>
+                </DOMShape>
+              </elements>
+            </DOMFrame>
+            <DOMFrame index="2">
+              <elements>
+                <DOMShape>
+                  <fills><FillStyle index="1"><SolidColor color="#0000FF"/></FillStyle></fills>
+                  <edges><Edge fillStyle0="1" edges="!0 0|0 S1|0 -S1|-S1 0"/></edges>
+                </DOMShape>
+              </elements>
+            </DOMFrame>
+            <DOMFrame index="3">
+              <elements>
+                <DOMShape>
+                  <fills><FillStyle index="1"><SolidColor color="#FFFFFF"/></FillStyle></fills>
+                  <edges><Edge fillStyle0="1" edges="!0 0|0 S2|0 -S2|-S2 0"/></edges>
+                </DOMShape>
+              </elements>
+            </DOMFrame>
+          </frames>
+        </DOMLayer>
+      </layers>
+    </DOMTimeline>
+  </timeline>
+</DOMSymbolItem>`;
+
+      const flaFile = await createFlaZip(createDOMDocument(), {
+        'LIBRARY/MyButton.xml': symbolXml
+      });
+      const doc = await parser.parse(flaFile);
+
+      const symbol = doc.symbols.get('MyButton');
+      expect(symbol).toBeDefined();
+      expect(symbol!.symbolType).toBe('button');
+      expect(symbol!.hitAreaFrame).toBe(3); // 0-based index for frame 4
+    });
+
+    it('should detect hit area by "hit" label', async () => {
+      // Button with labeled hit frame
+      const symbolXml = `<?xml version="1.0" encoding="UTF-8"?>
+<DOMSymbolItem name="LabeledButton" symbolType="button">
+  <timeline>
+    <DOMTimeline name="LabeledButton">
+      <layers>
+        <DOMLayer name="Layer 1">
+          <frames>
+            <DOMFrame index="0" name="up">
+              <elements>
+                <DOMShape>
+                  <fills><FillStyle index="1"><SolidColor color="#FF0000"/></FillStyle></fills>
+                  <edges><Edge fillStyle0="1" edges="!0 0|0 S1|0 -S1|-S1 0"/></edges>
+                </DOMShape>
+              </elements>
+            </DOMFrame>
+            <DOMFrame index="1" name="hit">
+              <elements>
+                <DOMShape>
+                  <fills><FillStyle index="1"><SolidColor color="#00FF00"/></FillStyle></fills>
+                  <edges><Edge fillStyle0="1" edges="!0 0|0 S2|0 -S2|-S2 0"/></edges>
+                </DOMShape>
+              </elements>
+            </DOMFrame>
+          </frames>
+        </DOMLayer>
+      </layers>
+    </DOMTimeline>
+  </timeline>
+</DOMSymbolItem>`;
+
+      const flaFile = await createFlaZip(createDOMDocument(), {
+        'LIBRARY/LabeledButton.xml': symbolXml
+      });
+      const doc = await parser.parse(flaFile);
+
+      const symbol = doc.symbols.get('LabeledButton');
+      expect(symbol).toBeDefined();
+      expect(symbol!.symbolType).toBe('button');
+      expect(symbol!.hitAreaFrame).toBe(1); // Frame with "hit" label
+    });
+
+    it('should not set hit area for button with less than 4 frames and no hit label', async () => {
+      // Button with only 1 frame
+      const symbolXml = `<?xml version="1.0" encoding="UTF-8"?>
+<DOMSymbolItem name="SimpleButton" symbolType="button">
+  <timeline>
+    <DOMTimeline name="SimpleButton">
+      <layers>
+        <DOMLayer name="Layer 1">
+          <frames>
+            <DOMFrame index="0">
+              <elements>
+                <DOMShape>
+                  <fills><FillStyle index="1"><SolidColor color="#FF0000"/></FillStyle></fills>
+                  <edges><Edge fillStyle0="1" edges="!0 0|0 S1|0 -S1|-S1 0"/></edges>
+                </DOMShape>
+              </elements>
+            </DOMFrame>
+          </frames>
+        </DOMLayer>
+      </layers>
+    </DOMTimeline>
+  </timeline>
+</DOMSymbolItem>`;
+
+      const flaFile = await createFlaZip(createDOMDocument(), {
+        'LIBRARY/SimpleButton.xml': symbolXml
+      });
+      const doc = await parser.parse(flaFile);
+
+      const symbol = doc.symbols.get('SimpleButton');
+      expect(symbol).toBeDefined();
+      expect(symbol!.symbolType).toBe('button');
+      expect(symbol!.hitAreaFrame).toBeUndefined();
+    });
+
+    it('should not set hit area for graphic symbols', async () => {
+      // Graphic symbol (not a button) with 4 frames
+      const symbolXml = `<?xml version="1.0" encoding="UTF-8"?>
+<DOMSymbolItem name="MyGraphic" symbolType="graphic">
+  <timeline>
+    <DOMTimeline name="MyGraphic">
+      <layers>
+        <DOMLayer name="Layer 1">
+          <frames>
+            <DOMFrame index="0" duration="4">
+              <elements>
+                <DOMShape>
+                  <fills><FillStyle index="1"><SolidColor color="#FF0000"/></FillStyle></fills>
+                  <edges><Edge fillStyle0="1" edges="!0 0|0 S1|0 -S1|-S1 0"/></edges>
+                </DOMShape>
+              </elements>
+            </DOMFrame>
+          </frames>
+        </DOMLayer>
+      </layers>
+    </DOMTimeline>
+  </timeline>
+</DOMSymbolItem>`;
+
+      const flaFile = await createFlaZip(createDOMDocument(), {
+        'LIBRARY/MyGraphic.xml': symbolXml
+      });
+      const doc = await parser.parse(flaFile);
+
+      const symbol = doc.symbols.get('MyGraphic');
+      expect(symbol).toBeDefined();
+      expect(symbol!.symbolType).toBe('graphic');
+      expect(symbol!.hitAreaFrame).toBeUndefined();
+    });
+  });
 });

@@ -35,7 +35,7 @@ export function setRendererDebug(value: boolean): void {
 }
 
 interface DebugElement {
-  type: 'shape' | 'symbol' | 'bitmap' | 'video' | 'text';
+  type: 'shape' | 'symbol' | 'bitmap' | 'video' | 'text' | 'button-hit-area';
   element: DisplayElement;
   path: Path2D;
   transform: DOMMatrix;
@@ -44,6 +44,9 @@ interface DebugElement {
   fillStyles?: Map<number, FillStyle>;
   strokeStyles?: Map<number, StrokeStyle>;
   edges?: Edge[];
+  // For button hit areas
+  isHitArea?: boolean;
+  symbolName?: string;
 }
 
 // Cache for computed shape paths (avoids recomputing every frame)
@@ -218,6 +221,11 @@ export class FLARenderer {
         } else if (el.type === 'bitmap') {
           const bitmap = el.element as BitmapInstance;
           console.log('Library Item:', bitmap.libraryItemName);
+        } else if (el.type === 'button-hit-area') {
+          const button = el.element as SymbolInstance;
+          console.log('Button Symbol:', el.symbolName);
+          console.log('Library Item:', button.libraryItemName);
+          console.log('Hit Area: This is the clickable region (invisible at runtime)');
         }
 
         console.groupEnd();
@@ -1619,6 +1627,23 @@ export class FLARenderer {
     } else if (instance.symbolType === 'button') {
       // Buttons show first frame (up state) without ActionScript
       symbolFrame = 0;
+
+      // Track button hit area for debug click detection
+      if (this.debugMode && symbol.hitAreaFrame !== undefined) {
+        const hitAreaPath = this.buildButtonHitAreaPath(symbol, symbol.hitAreaFrame);
+        if (hitAreaPath) {
+          this.debugElements.push({
+            type: 'button-hit-area',
+            element: instance,
+            path: hitAreaPath,
+            transform: ctx.getTransform(),
+            depth,
+            parentPath: [...this.debugSymbolPath],
+            isHitArea: true,
+            symbolName: symbol.name
+          });
+        }
+      }
     } else {
       // Graphic symbols sync with parent timeline based on loop mode
       if (instance.loop === 'single frame') {
@@ -1652,6 +1677,11 @@ export class FLARenderer {
       this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
     }
 
+    // Draw hit area indicator for buttons in debug mode
+    if (this.debugMode && instance.symbolType === 'button' && symbol.hitAreaFrame !== undefined) {
+      this.drawHitAreaIndicator(symbol, symbol.hitAreaFrame);
+    }
+
     // Pop symbol path for debugging
     if (this.debugMode) {
       this.debugSymbolPath.pop();
@@ -1676,6 +1706,140 @@ export class FLARenderer {
     // Restore blend mode
     if (instance.blendMode) {
       ctx.globalCompositeOperation = savedCompositeOp;
+    }
+
+    ctx.restore();
+  }
+
+  /**
+   * Build a Path2D from the shapes in a button's hit area frame.
+   * The hit area defines the clickable region for the button.
+   */
+  private buildButtonHitAreaPath(symbol: Symbol, hitAreaFrameIndex: number): Path2D | null {
+    const path = new Path2D();
+    let hasContent = false;
+
+    // Iterate through all layers to find shapes at the hit area frame
+    for (const layer of symbol.timeline.layers) {
+      // Skip guide and other non-renderable layers
+      if (layer.layerType === 'guide' || layer.layerType === 'folder') {
+        continue;
+      }
+
+      // Find the frame that contains the hit area frame index
+      for (const frame of layer.frames) {
+        const frameStart = frame.index;
+        const frameEnd = frame.index + frame.duration;
+
+        if (hitAreaFrameIndex >= frameStart && hitAreaFrameIndex < frameEnd) {
+          // This frame covers the hit area frame index
+          for (const element of frame.elements) {
+            if (element.type === 'shape') {
+              // Build path from shape edges
+              const shapePath = this.buildShapePath(element);
+              if (shapePath) {
+                path.addPath(shapePath);
+                hasContent = true;
+              }
+            } else if (element.type === 'symbol') {
+              // For nested symbols, create a bounding rect approximation
+              // This is a simplification - ideally we'd recursively build the path
+              const nestedSymbol = this.doc?.symbols.get(element.libraryItemName);
+              if (nestedSymbol) {
+                // Use a simple rect based on transformation
+                const m = element.matrix;
+                // Approximate bounds (this is simplified)
+                const rect = new Path2D();
+                rect.rect(m.tx - 50, m.ty - 50, 100, 100);
+                path.addPath(rect);
+                hasContent = true;
+              }
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    return hasContent ? path : null;
+  }
+
+  /**
+   * Build a Path2D from a shape's edges (for hit testing).
+   */
+  private buildShapePath(shape: Shape): Path2D | null {
+    const path = new Path2D();
+    let hasContent = false;
+
+    for (const edge of shape.edges) {
+      // Only include edges that have fill or stroke
+      if (edge.fillStyle0 || edge.fillStyle1 || edge.strokeStyle) {
+        for (const cmd of edge.commands) {
+          switch (cmd.type) {
+            case 'M':
+              path.moveTo(cmd.x, cmd.y);
+              hasContent = true;
+              break;
+            case 'L':
+              path.lineTo(cmd.x, cmd.y);
+              break;
+            case 'Q':
+              path.quadraticCurveTo(cmd.cx!, cmd.cy!, cmd.x, cmd.y);
+              break;
+            case 'C':
+              path.bezierCurveTo(cmd.c1x!, cmd.c1y!, cmd.c2x!, cmd.c2y!, cmd.x, cmd.y);
+              break;
+            case 'Z':
+              path.closePath();
+              break;
+          }
+        }
+      }
+    }
+
+    return hasContent ? path : null;
+  }
+
+  /**
+   * Draw a visual indicator showing the button's hit area in debug mode.
+   * The hit area is drawn as a semi-transparent cyan overlay.
+   */
+  private drawHitAreaIndicator(symbol: Symbol, hitAreaFrameIndex: number): void {
+    const ctx = this.ctx;
+    ctx.save();
+
+    // Draw hit area shapes with semi-transparent cyan fill
+    ctx.fillStyle = 'rgba(0, 255, 255, 0.2)';
+    ctx.strokeStyle = 'rgba(0, 255, 255, 0.6)';
+    ctx.lineWidth = 1;
+
+    // Iterate through all layers to find shapes at the hit area frame
+    for (const layer of symbol.timeline.layers) {
+      // Skip guide and other non-renderable layers
+      if (layer.layerType === 'guide' || layer.layerType === 'folder') {
+        continue;
+      }
+
+      // Find the frame that contains the hit area frame index
+      for (const frame of layer.frames) {
+        const frameStart = frame.index;
+        const frameEnd = frame.index + frame.duration;
+
+        if (hitAreaFrameIndex >= frameStart && hitAreaFrameIndex < frameEnd) {
+          // This frame covers the hit area frame index
+          for (const element of frame.elements) {
+            if (element.type === 'shape') {
+              // Draw the shape's path
+              const shapePath = this.buildShapePath(element);
+              if (shapePath) {
+                ctx.fill(shapePath, 'evenodd');
+                ctx.stroke(shapePath);
+              }
+            }
+          }
+          break;
+        }
+      }
     }
 
     ctx.restore();

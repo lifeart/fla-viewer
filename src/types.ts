@@ -297,6 +297,9 @@ export interface Symbol {
   symbolType: 'graphic' | 'movieclip' | 'button';
   timeline: Timeline;
   scale9Grid?: Rectangle; // 9-slice scaling grid
+  // Button-specific: frame index containing the hit area (typically frame 4)
+  // The hit area defines the clickable region and is never rendered
+  hitAreaFrame?: number;
 }
 
 export interface Rectangle {
