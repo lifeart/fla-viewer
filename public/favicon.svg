@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4a9eff"/>
+      <stop offset="100%" style="stop-color:#2563eb"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="16" cy="16" r="15" fill="url(#bg)"/>
+  <!-- Play triangle -->
+  <path d="M12 8 L12 24 L24 16 Z" fill="white"/>
+  <!-- Film sprocket holes -->
+  <rect x="3" y="6" width="3" height="4" rx="0.5" fill="white" opacity="0.6"/>
+  <rect x="3" y="14" width="3" height="4" rx="0.5" fill="white" opacity="0.6"/>
+  <rect x="3" y="22" width="3" height="4" rx="0.5" fill="white" opacity="0.6"/>
+</svg>
