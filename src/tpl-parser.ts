@@ -490,6 +490,34 @@ function parsePLT(text: string, path: string): TPLPalette | null {
  * Parse and render TVG vector drawings into a composite overview image.
  * Returns null if no TVG files could be parsed.
  */
+/** Load a zip thumbnail PNG onto a canvas, scaled to fit */
+async function loadThumbnailToCanvas(
+  zipEntry: JSZip.JSZipObject,
+  width: number,
+  height: number,
+): Promise<HTMLCanvasElement | null> {
+  const data = await zipEntry.async('arraybuffer');
+  const blob = new Blob([data], { type: 'image/png' });
+  const url = URL.createObjectURL(blob);
+  return new Promise<HTMLCanvasElement | null>((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d')!;
+      const scale = Math.min(width / img.width, height / img.height);
+      const dw = img.width * scale;
+      const dh = img.height * scale;
+      ctx.drawImage(img, (width - dw) / 2, (height - dh) / 2, dw, dh);
+      resolve(canvas);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+}
+
 async function renderTVGElements(
   zip: JSZip,
   metadata: TPLMetadata,
@@ -526,6 +554,24 @@ async function renderTVGElements(
     try {
       const buffer = await file.async('arraybuffer');
       const drawing = parseTVG(buffer);
+
+      // For bitmap TVGs, prefer the pre-rendered thumbnail from the zip
+      // (embedded tile PNGs use internal palette colors, not final rendered colors)
+      if (drawing.bitmapTiles.length > 0 && drawing.layers.length === 0) {
+        const tvgName = tvgFiles[i].split('/').pop()!;
+        const dir = tvgFiles[i].substring(0, tvgFiles[i].lastIndexOf('/'));
+        const thumbPath = `${dir}/.thumbnails/.${tvgName}.png`;
+        const thumbFile = zip.file(thumbPath);
+        if (thumbFile) {
+          const thumbCanvas = await loadThumbnailToCanvas(thumbFile, thumbSize, thumbSize);
+          if (thumbCanvas) {
+            renderedCanvases.push(thumbCanvas);
+            parsed++;
+            continue;
+          }
+        }
+      }
+
       // Resolve colors from the project palette (.plt files)
       if (externalColors.length > 0) {
         resolveExternalPalette(drawing, externalColors);
