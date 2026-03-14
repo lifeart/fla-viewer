@@ -432,7 +432,8 @@ function findPNG(data: Uint8Array, start: number, end: number): { start: number;
 
 function parseTGBGTiles(data: Uint8Array, tiles: TVGBitmapTile[]): void {
   // Scan for TBBM (tile) blocks within the TGBG hierarchy
-  // TBBM contains: TBBH (header), TBBD (tile dim), TBBC (clip rect), TBBA (bounds), then PNG data
+  // TBBM contains TBBH header with: TBBD (tile grid size), TBBC (canvas bounds), TBBA (tile rect)
+  // TBBA format: (x, y, width, height) as 4x int32 LE — matches the PNG pixel dimensions
   for (let i = 0; i < data.length - 5; i++) {
     if (data[i] !== 0x54 || data[i+1] !== 0x42 || data[i+2] !== 0x42 || data[i+3] !== 0x4D) continue; // 'TBBM'
 
@@ -441,20 +442,17 @@ function parseTGBGTiles(data: Uint8Array, tiles: TVGBitmapTile[]): void {
 
     const tEnd = tbbm.contentStart + tbbm.contentLen;
 
-    // Parse TBBH which contains TBBC (clip rect)
+    // Find TBBA (tile position/size) within TBBM/TBBH
     let clipX = 0, clipY = 0, clipW = 0, clipH = 0;
-    // Scan for TBBC within TBBM (may be inside TBBH or directly in TBBM)
     for (let j = tbbm.contentStart; j < Math.min(tEnd, tbbm.contentStart + 200) - 5; j++) {
-      if (data[j] === 0x54 && data[j+1] === 0x42 && data[j+2] === 0x42 && data[j+3] === 0x43) { // 'TBBC'
-        const tbbc = readInnerTagAt(data, j);
-        if (tbbc && tbbc.contentLen >= 16) {
-          const dv = new DataView(data.buffer, data.byteOffset + tbbc.contentStart, 16);
-          clipX = dv.getInt32(0, true);
-          clipY = dv.getInt32(4, true);
-          const x2 = dv.getInt32(8, true);
-          const y2 = dv.getInt32(12, true);
-          clipW = x2 - clipX;
-          clipH = y2 - clipY;
+      if (data[j] === 0x54 && data[j+1] === 0x42 && data[j+2] === 0x42 && data[j+3] === 0x41) { // 'TBBA'
+        const tbba = readInnerTagAt(data, j);
+        if (tbba && tbba.contentLen >= 16) {
+          const dv = new DataView(data.buffer, data.byteOffset + tbba.contentStart, 16);
+          clipX = dv.getInt32(0, true);  // x position
+          clipY = dv.getInt32(4, true);  // y position
+          clipW = dv.getInt32(8, true);  // width (matches PNG width)
+          clipH = dv.getInt32(12, true); // height (matches PNG height)
         }
         break;
       }
@@ -462,7 +460,7 @@ function parseTGBGTiles(data: Uint8Array, tiles: TVGBitmapTile[]): void {
 
     // Find PNG in this TBBM
     const png = findPNG(data, tbbm.contentStart, tEnd);
-    if (png && png.end - png.start > 100) { // Skip tiny placeholder PNGs
+    if (png && png.end - png.start > 100 && clipW > 0 && clipH > 0) {
       tiles.push({
         clipX, clipY, clipW, clipH,
         pngData: data.slice(png.start, png.end),
