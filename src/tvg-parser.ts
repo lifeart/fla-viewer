@@ -2,9 +2,18 @@ import pako from 'pako';
 
 // ── Public Types ──
 
+export interface TVGBitmapTile {
+  clipX: number;
+  clipY: number;
+  clipW: number;
+  clipH: number;
+  pngData: Uint8Array;
+}
+
 export interface TVGDrawing {
   layers: TVGArtLayer[];
   palette: TVGPaletteEntry[];
+  bitmapTiles: TVGBitmapTile[];
 }
 
 export interface TVGArtLayer {
@@ -162,6 +171,7 @@ const TAG_TGCO = 'TGCO';
 // const TAG_TGRV = 'TGRV';
 const TAG_TCSC = 'TCSC';
 const TAG_TCID = 'TCID';
+const TAG_TGBG = 'TGBG';
 
 // ── Main Parser ──
 
@@ -183,6 +193,7 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
   const drawing: TVGDrawing = {
     layers: [],
     palette: [],
+    bitmapTiles: [],
   };
 
   // Parse top-level chunks
@@ -247,6 +258,11 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
         break;
       }
     }
+  }
+
+  // If no vector or bitmap data found, scan raw buffer for TGBG bitmap blocks
+  if (drawing.layers.length === 0 && drawing.bitmapTiles.length === 0) {
+    scanForBitmapTiles(new Uint8Array(buffer), drawing);
   }
 
   // Resolve colors: link components' colorId to palette entries
@@ -372,6 +388,161 @@ function readEncodedData(reader: BinaryReader): Uint8Array {
   }
 }
 
+// ── Inner Tag Format (used by TGBG bitmap blocks) ──
+// Format: 4-byte tag + 1-byte type + variable length bytes
+// type 0x01 → 1 length byte, 0x03 → 2 bytes LE, 0x07 → 3 bytes LE
+
+function readInnerTagLength(reader: BinaryReader): number {
+  const type = reader.readU8();
+  if (type === 0x01) return reader.readU8();
+  if (type === 0x03) return reader.readU16LE();
+  if (type === 0x07) { const lo = reader.readU16LE(); const hi = reader.readU8(); return lo | (hi << 16); }
+  return -1;
+}
+
+function readInnerTagAt(data: Uint8Array, pos: number): { tag: string; contentStart: number; contentLen: number } | null {
+  if (pos + 5 > data.length) return null;
+  const tag = String.fromCharCode(data[pos], data[pos+1], data[pos+2], data[pos+3]);
+  const type = data[pos + 4];
+  let len = 0, hdrSize = 5;
+  // Type byte encodes length size: bit pattern determines byte count
+  // Low bit may be leaf/container flag; length bytes determined by upper bits
+  const lenBytes = (type >> 1) & 0x03; // 0→0, 1→1, 2→2, 3→3
+  if (lenBytes === 0) { len = data[pos + 5]; hdrSize = 6; }
+  else if (lenBytes === 1) { len = data[pos + 5] | (data[pos + 6] << 8); hdrSize = 7; }
+  else if (lenBytes === 2 || lenBytes === 3) { len = data[pos + 5] | (data[pos + 6] << 8) | (data[pos + 7] << 16); hdrSize = 8; }
+  else return null;
+  return { tag, contentStart: pos + hdrSize, contentLen: len };
+}
+
+function findPNG(data: Uint8Array, start: number, end: number): { start: number; end: number } | null {
+  for (let i = start; i < end - 8; i++) {
+    if (data[i] === 0x89 && data[i+1] === 0x50 && data[i+2] === 0x4E && data[i+3] === 0x47 &&
+        data[i+4] === 0x0D && data[i+5] === 0x0A && data[i+6] === 0x1A && data[i+7] === 0x0A) {
+      // Find IEND marker
+      for (let e = i + 8; e < end - 7; e++) {
+        if (data[e] === 0x49 && data[e+1] === 0x45 && data[e+2] === 0x4E && data[e+3] === 0x44) {
+          return { start: i, end: e + 8 }; // +8 for IEND length(4) + tag(4) + CRC(4)... actually IEND chunk is len(4)+IEND(4)+CRC(4)=12
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function parseTGBGTiles(data: Uint8Array, tiles: TVGBitmapTile[]): void {
+  // Scan for TBBM (tile) blocks within the TGBG hierarchy
+  // TBBM contains: TBBH (header), TBBD (tile dim), TBBC (clip rect), TBBA (bounds), then PNG data
+  for (let i = 0; i < data.length - 5; i++) {
+    if (data[i] !== 0x54 || data[i+1] !== 0x42 || data[i+2] !== 0x42 || data[i+3] !== 0x4D) continue; // 'TBBM'
+
+    const tbbm = readInnerTagAt(data, i);
+    if (!tbbm || tbbm.contentLen < 10) continue;
+
+    const tEnd = tbbm.contentStart + tbbm.contentLen;
+
+    // Parse TBBH which contains TBBC (clip rect)
+    let clipX = 0, clipY = 0, clipW = 0, clipH = 0;
+    // Scan for TBBC within TBBM (may be inside TBBH or directly in TBBM)
+    for (let j = tbbm.contentStart; j < Math.min(tEnd, tbbm.contentStart + 200) - 5; j++) {
+      if (data[j] === 0x54 && data[j+1] === 0x42 && data[j+2] === 0x42 && data[j+3] === 0x43) { // 'TBBC'
+        const tbbc = readInnerTagAt(data, j);
+        if (tbbc && tbbc.contentLen >= 16) {
+          const dv = new DataView(data.buffer, data.byteOffset + tbbc.contentStart, 16);
+          clipX = dv.getInt32(0, true);
+          clipY = dv.getInt32(4, true);
+          const x2 = dv.getInt32(8, true);
+          const y2 = dv.getInt32(12, true);
+          clipW = x2 - clipX;
+          clipH = y2 - clipY;
+        }
+        break;
+      }
+    }
+
+    // Find PNG in this TBBM
+    const png = findPNG(data, tbbm.contentStart, tEnd);
+    if (png && png.end - png.start > 100) { // Skip tiny placeholder PNGs
+      tiles.push({
+        clipX, clipY, clipW, clipH,
+        pngData: data.slice(png.start, png.end),
+      });
+    }
+
+    // Skip to end of this TBBM
+    i = tEnd - 1;
+  }
+}
+
+/** Scan the entire raw TVG buffer for bitmap tile data (TBBM blocks).
+ *  Searches UNCO/ZLIB blocks for TGBG markers, then extracts all TBBM tiles
+ *  from the containing decoded data (bypassing TGBG length parsing). */
+function scanForBitmapTiles(raw: Uint8Array, drawing: TVGDrawing): void {
+  const scanDecodedForTiles = (decoded: Uint8Array, depth: number): boolean => {
+    // Check if this block contains TGBG
+    let hasTGBG = false;
+    for (let j = 0; j < decoded.length - 4; j++) {
+      if (decoded[j] === 0x54 && decoded[j+1] === 0x47 && decoded[j+2] === 0x42 && decoded[j+3] === 0x47) {
+        hasTGBG = true;
+        break;
+      }
+    }
+
+    if (hasTGBG) {
+      // Scan the entire decoded block for TBBM tiles (don't rely on TGBG length)
+      parseTGBGTiles(decoded, drawing.bitmapTiles);
+      if (drawing.bitmapTiles.length > 0) return true;
+    }
+
+    // Recurse into nested UNCO/ZLIB blocks (e.g. TLAB wrappers)
+    if (depth < 3) {
+      for (let j = 0; j < decoded.length - 8; j++) {
+        if (decoded[j] === 0x55 && decoded[j+1] === 0x4E && decoded[j+2] === 0x43 && decoded[j+3] === 0x4F) { // UNCO
+          const innerLen = decoded[j+4] | (decoded[j+5] << 8) | (decoded[j+6] << 16) | (decoded[j+7] << 24);
+          if (innerLen > 0 && innerLen <= decoded.length - j - 8) {
+            if (scanDecodedForTiles(decoded.slice(j + 8, j + 8 + innerLen), depth + 1)) return true;
+            j += 8 + innerLen - 1;
+          }
+        } else if (decoded[j] === 0x5A && decoded[j+1] === 0x4C && decoded[j+2] === 0x49 && decoded[j+3] === 0x42) { // ZLIB
+          const tl = decoded[j+4] | (decoded[j+5] << 8) | (decoded[j+6] << 16) | (decoded[j+7] << 24);
+          if (tl > 4 && tl <= decoded.length - j - 8) {
+            try {
+              const inner = pako.inflate(decoded.slice(j + 12, j + 12 + tl - 4));
+              if (scanDecodedForTiles(inner, depth + 1)) return true;
+            } catch { /* skip */ }
+            j += 8 + tl - 1;
+          }
+        }
+      }
+    }
+    return false;
+  };
+
+  for (let i = 20; i < raw.length - 8; i++) {
+    const b0 = raw[i], b1 = raw[i+1], b2 = raw[i+2], b3 = raw[i+3];
+    // UNCO block
+    if (b0 === 0x55 && b1 === 0x4E && b2 === 0x43 && b3 === 0x4F) {
+      const len = raw[i+4] | (raw[i+5] << 8) | (raw[i+6] << 16) | (raw[i+7] << 24);
+      if (len <= 0 || len > raw.length - i - 8) continue;
+      const decoded = raw.slice(i + 8, i + 8 + len);
+      if (scanDecodedForTiles(decoded, 0)) return;
+      i += 8 + len - 1;
+    }
+    // ZLIB block
+    if (b0 === 0x5A && b1 === 0x4C && b2 === 0x49 && b3 === 0x42) {
+      const totalLen = raw[i+4] | (raw[i+5] << 8) | (raw[i+6] << 16) | (raw[i+7] << 24);
+      if (totalLen <= 4 || totalLen > raw.length - i - 8) continue;
+      const compressedLen = totalLen - 4;
+      if (compressedLen <= 0 || i + 12 + compressedLen > raw.length) continue;
+      try {
+        const decoded = pako.inflate(raw.slice(i + 12, i + 12 + compressedLen));
+        if (scanDecodedForTiles(decoded, 0)) return;
+      } catch { /* skip */ }
+      i += 8 + totalLen - 1;
+    }
+  }
+}
+
 // ── Main Data Parsing ──
 
 function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
@@ -433,6 +604,17 @@ function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
         drawing.palette = parsePalette(new BinaryReader(data.buffer));
       } catch (_e) {
         // Skip palette errors
+      }
+    } else if (tag === TAG_TGBG) {
+      // Bitmap group — contains tiled PNG data
+      try {
+        const tgbgLen = readInnerTagLength(reader);
+        if (tgbgLen > 0 && tgbgLen <= reader.remaining) {
+          const tgbgData = reader.readBytes(tgbgLen);
+          parseTGBGTiles(tgbgData, drawing.bitmapTiles);
+        }
+      } catch (_e) {
+        // Skip unparseable TGBG
       }
     } else if (tag === TAG_ENDT) {
       break;
@@ -1048,7 +1230,13 @@ export function renderTVGToCanvas(
     }
   }
 
-  if (allPoints.length === 0) return null;
+  if (allPoints.length === 0) {
+    // No vector data — try bitmap tiles
+    if (drawing.bitmapTiles.length > 0) {
+      return renderBitmapTVGToCanvas(drawing.bitmapTiles, width, height);
+    }
+    return null;
+  }
 
   // Compute bounds
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -1094,6 +1282,104 @@ export function renderTVGToCanvas(
   }
 
   return canvas;
+}
+
+function renderBitmapTVGToCanvas(
+  tiles: TVGBitmapTile[],
+  width: number,
+  height: number,
+): HTMLCanvasElement | null {
+  if (tiles.length === 0) return null;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+
+  // Compute overall bounds from tile clip rects
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const tile of tiles) {
+    if (tile.clipW > 0 && tile.clipH > 0) {
+      minX = Math.min(minX, tile.clipX);
+      minY = Math.min(minY, tile.clipY);
+      maxX = Math.max(maxX, tile.clipX + tile.clipW);
+      maxY = Math.max(maxY, tile.clipY + tile.clipH);
+    }
+  }
+
+  // Return canvas — actual bitmap rendering happens asynchronously
+  // Mark the canvas with bitmap data for async loading
+  (canvas as any).__bitmapTiles = tiles;
+  (canvas as any).__bitmapBounds = { minX, minY, maxX, maxY };
+  return canvas;
+}
+
+/** Load bitmap tiles asynchronously onto a canvas */
+export async function loadBitmapTiles(canvas: HTMLCanvasElement): Promise<boolean> {
+  const tiles = (canvas as any).__bitmapTiles as TVGBitmapTile[] | undefined;
+  if (!tiles || tiles.length === 0) return false;
+
+  const bounds = (canvas as any).__bitmapBounds as { minX: number; minY: number; maxX: number; maxY: number };
+  const ctx = canvas.getContext('2d')!;
+  const width = canvas.width;
+  const height = canvas.height;
+
+  // Load all PNG tiles as images
+  const loadImage = (data: Uint8Array): Promise<HTMLImageElement> => {
+    return new Promise((resolve, reject) => {
+      const ab = new ArrayBuffer(data.byteLength);
+      new Uint8Array(ab).set(data);
+      const blob = new Blob([ab], { type: 'image/png' });
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Failed to load PNG tile')); };
+      img.src = url;
+    });
+  };
+
+  const images = await Promise.all(tiles.map(async (tile) => {
+    try {
+      const img = await loadImage(tile.pngData);
+      return { tile, img };
+    } catch {
+      return null;
+    }
+  }));
+
+  const loaded = images.filter((x): x is { tile: TVGBitmapTile; img: HTMLImageElement } => x !== null);
+  if (loaded.length === 0) return false;
+
+  // Compute bounds from actual image sizes if clip rects are all zero
+  let useClipRects = isFinite(bounds.minX) && (bounds.maxX - bounds.minX) > 0;
+
+  if (useClipRects) {
+    const totalW = bounds.maxX - bounds.minX;
+    const totalH = bounds.maxY - bounds.minY;
+    const scale = Math.min(width / totalW, height / totalH);
+    const offsetX = (width - totalW * scale) / 2;
+    const offsetY = (height - totalH * scale) / 2;
+
+    for (const { tile, img } of loaded) {
+      const dx = offsetX + (tile.clipX - bounds.minX) * scale;
+      const dy = offsetY + (tile.clipY - bounds.minY) * scale;
+      const dw = tile.clipW * scale;
+      const dh = tile.clipH * scale;
+      ctx.drawImage(img, dx, dy, dw, dh);
+    }
+  } else {
+    // No clip rect info — composite tiles by stacking largest first
+    // Just draw the largest tile centered
+    const largest = loaded.reduce((a, b) => a.img.width * a.img.height > b.img.width * b.img.height ? a : b);
+    const scale = Math.min(width / largest.img.width, height / largest.img.height);
+    const dw = largest.img.width * scale;
+    const dh = largest.img.height * scale;
+    ctx.drawImage(largest.img, (width - dw) / 2, (height - dh) / 2, dw, dh);
+  }
+
+  // Clean up
+  delete (canvas as any).__bitmapTiles;
+  delete (canvas as any).__bitmapBounds;
+  return true;
 }
 
 function colorKey(c: { r: number; g: number; b: number; a: number } | null): string {

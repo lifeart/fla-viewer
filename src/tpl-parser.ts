@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { parseTVG, renderTVGToCanvas, resolveExternalPalette } from './tvg-parser';
+import { parseTVG, renderTVGToCanvas, resolveExternalPalette, loadBitmapTiles } from './tvg-parser';
 import type { ExternalPaletteColor } from './tvg-parser';
 import type {
   FLADocument,
@@ -532,6 +532,10 @@ async function renderTVGElements(
       }
       const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize);
       if (canvas) {
+        // Load bitmap tiles asynchronously if present
+        if ((canvas as any).__bitmapTiles) {
+          await loadBitmapTiles(canvas);
+        }
         renderedCanvases.push(canvas);
       }
     } catch (_e) {
