@@ -1042,7 +1042,7 @@ describe('main.ts', () => {
 
       // Alert should have been called with file info
       expect(window.alert).toHaveBeenCalledWith(
-        'Please select a valid FLA file.\nReceived: "test.txt" (text/plain)'
+        'Please select a valid FLA or TPL file.\nReceived: "test.txt" (text/plain)'
       );
     });
 

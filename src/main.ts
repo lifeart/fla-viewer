@@ -3,6 +3,8 @@ import { FLAPlayer } from './player';
 import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF, exportWebM, exportSVG } from './video-exporter';
 import { generateSampleFLA } from './sample-generator';
 import { setEdgeDecoderDebug, setImplicitMoveToAfterClose, setEdgeSplittingOnStyleChange } from './edge-decoder';
+import { parseTPL, isTPLFile, type TPLMetadata } from './tpl-parser';
+import JSZip from 'jszip';
 import type { PlayerState, FLADocument, DisplayElement, Symbol } from './types';
 
 export class FLAViewerApp {
@@ -63,6 +65,11 @@ export class FLAViewerApp {
   private prevSceneBtn: HTMLButtonElement;
   private nextSceneBtn: HTMLButtonElement;
   private sceneInfo: HTMLElement;
+  // TPL panel
+  private tplPanel: HTMLElement;
+  private tplPanelContent: HTMLElement;
+  private tplCloseBtn: HTMLButtonElement;
+  private tplTabs: NodeListOf<HTMLButtonElement>;
 
   constructor() {
     this.parser = new FLAParser();
@@ -118,6 +125,11 @@ export class FLAViewerApp {
     this.prevSceneBtn = document.getElementById('prev-scene-btn') as HTMLButtonElement;
     this.nextSceneBtn = document.getElementById('next-scene-btn') as HTMLButtonElement;
     this.sceneInfo = document.getElementById('scene-info')!;
+    // TPL panel
+    this.tplPanel = document.getElementById('tpl-panel')!;
+    this.tplPanelContent = document.getElementById('tpl-panel-content')!;
+    this.tplCloseBtn = document.getElementById('tpl-close-btn') as HTMLButtonElement;
+    this.tplTabs = document.querySelectorAll('.tpl-tab') as NodeListOf<HTMLButtonElement>;
 
     this.setupEventListeners();
   }
@@ -257,6 +269,18 @@ export class FLAViewerApp {
       if (this.edgeSplittingCheckbox.checked) {
         console.log('Edge Splitting enabled. Reload file to apply to edge parsing.');
       }
+    });
+
+    // TPL panel
+    this.tplCloseBtn?.addEventListener('click', () => {
+      this.tplPanel.classList.remove('active');
+    });
+    this.tplTabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        this.tplTabs.forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        this.populateTPLTab(tab.dataset.tab || 'nodes');
+      });
     });
 
     // Window resize handler
@@ -754,10 +778,30 @@ export class FLAViewerApp {
     this.loadingProgressFill.style.width = '0%';
   }
 
+  private tplMetadata: TPLMetadata | null = null;
+
   private async loadFile(file: File): Promise<void> {
-    if (!file.name.toLowerCase().endsWith('.fla')) {
-      alert(`Please select a valid FLA file.\nReceived: "${file.name}" (${file.type || 'unknown type'})`);
+    const name = file.name.toLowerCase();
+    const isTPL = name.endsWith('.tpl.zip') || name.endsWith('.zip');
+    const isFLA = name.endsWith('.fla');
+
+    if (!isFLA && !isTPL) {
+      alert(`Please select a valid FLA or TPL file.\nReceived: "${file.name}" (${file.type || 'unknown type'})`);
       return;
+    }
+
+    // For .zip files, check if it's actually a TPL file
+    if (isTPL && !isFLA) {
+      try {
+        const zip = await JSZip.loadAsync(file);
+        if (!(await isTPLFile(zip))) {
+          alert(`This ZIP file doesn't appear to be a Toon Boom TPL template.\nExpected scene.xstage inside the archive.`);
+          return;
+        }
+      } catch {
+        alert(`Failed to read ZIP file: "${file.name}"`);
+        return;
+      }
     }
 
     try {
@@ -768,19 +812,32 @@ export class FLAViewerApp {
       this.loadingText.textContent = 'Loading...';
       this.skipImagesFix = false;
       this.skipImagesBtn.classList.add('hidden');
+      this.tplMetadata = null;
       this.resetLoadingStages();
 
-      // Parse FLA file with progress updates
-      const doc = await this.parser.parse(file, (message) => {
-        this.loadingText.textContent = message;
-        this.updateLoadingStage(message);
-        // Show skip button when fixing images
-        if (message.startsWith('Fixing images')) {
-          this.skipImagesBtn.classList.remove('hidden');
-        } else {
-          this.skipImagesBtn.classList.add('hidden');
-        }
-      }, () => this.skipImagesFix);
+      let doc: FLADocument;
+
+      if (isTPL && !isFLA) {
+        // Parse TPL file
+        const result = await parseTPL(file, (message) => {
+          this.loadingText.textContent = message;
+          this.updateLoadingStage(message);
+        });
+        doc = result.doc;
+        this.tplMetadata = result.metadata;
+      } else {
+        // Parse FLA file with progress updates
+        doc = await this.parser.parse(file, (message) => {
+          this.loadingText.textContent = message;
+          this.updateLoadingStage(message);
+          // Show skip button when fixing images
+          if (message.startsWith('Fixing images')) {
+            this.skipImagesBtn.classList.remove('hidden');
+          } else {
+            this.skipImagesBtn.classList.add('hidden');
+          }
+        }, () => this.skipImagesFix);
+      }
       this.currentDoc = doc;
 
       // Create player and wait for fonts to load
@@ -798,14 +855,32 @@ export class FLAViewerApp {
       const sceneInfo = state.totalScenes > 1
         ? `<span><span class="label">Scenes:</span> <span class="value">${state.totalScenes}</span></span>`
         : '';
-      this.infoPanel.innerHTML = `
-        <span><span class="label">File:</span> <span class="value">${file.name}</span></span>
-        <span><span class="label">Size:</span> <span class="value">${doc.width}x${doc.height}</span></span>
-        <span><span class="label">FPS:</span> <span class="value">${doc.frameRate}</span></span>
-        <span><span class="label">Frames:</span> <span class="value">${state.globalTotalFrames}</span></span>
-        ${sceneInfo}
-        <span><span class="label">Symbols:</span> <span class="value">${doc.symbols.size}</span></span>
-      `;
+
+      if (this.tplMetadata) {
+        const meta = this.tplMetadata;
+        const paletteInfo = meta.paletteNames.length > 0
+          ? `<span><span class="label">Palettes:</span> <span class="value">${meta.paletteNames.join(', ')}</span></span>`
+          : '';
+        this.infoPanel.innerHTML = `
+          <span><span class="label">File:</span> <span class="value">${file.name}</span></span>
+          <span><span class="label">Format:</span> <span class="value">Toon Boom TPL</span></span>
+          <span><span class="label">Harmony:</span> <span class="value">${meta.harmonyVersion}</span></span>
+          <span><span class="label">Size:</span> <span class="value">${doc.width}x${doc.height}</span></span>
+          <span><span class="label">FPS:</span> <span class="value">${doc.frameRate}</span></span>
+          <span><span class="label">Frames:</span> <span class="value">${state.globalTotalFrames}</span></span>
+          <span><span class="label">Elements:</span> <span class="value">${meta.elementCount}</span></span>
+          ${paletteInfo}
+        `;
+      } else {
+        this.infoPanel.innerHTML = `
+          <span><span class="label">File:</span> <span class="value">${file.name}</span></span>
+          <span><span class="label">Size:</span> <span class="value">${doc.width}x${doc.height}</span></span>
+          <span><span class="label">FPS:</span> <span class="value">${doc.frameRate}</span></span>
+          <span><span class="label">Frames:</span> <span class="value">${state.globalTotalFrames}</span></span>
+          ${sceneInfo}
+          <span><span class="label">Symbols:</span> <span class="value">${doc.symbols.size}</span></span>
+        `;
+      }
 
       // Show viewer
       this.loading.classList.remove('active');
@@ -837,7 +912,7 @@ export class FLAViewerApp {
       }
 
       // Show download button if WebCodecs supported and has multiple frames
-      this.currentFileName = file.name.replace(/\.fla$/i, '');
+      this.currentFileName = file.name.replace(/\.(fla|tpl\.zip|zip)$/i, '');
       if (isWebCodecsSupported() && hasMultipleFrames) {
         this.downloadBtn.classList.remove('hidden');
       } else {
@@ -848,12 +923,23 @@ export class FLAViewerApp {
       this.followCameraCheckbox.checked = false;
       this.updateCameraInfo();
 
+      // Show/hide TPL structure panel
+      if (this.tplMetadata) {
+        this.tplPanel.classList.add('active');
+        // Reset to first tab
+        this.tplTabs.forEach(t => t.classList.remove('active'));
+        this.tplTabs[0]?.classList.add('active');
+        this.populateTPLTab('nodes');
+      } else {
+        this.tplPanel.classList.remove('active');
+      }
+
       // Update initial state
       this.updateUI(this.player.getState());
 
     } catch (error) {
-      console.error('Failed to load FLA file:', error);
-      alert('Failed to load FLA file: ' + (error as Error).message);
+      console.error('Failed to load file:', error);
+      alert('Failed to load file: ' + (error as Error).message);
       this.loading.classList.remove('active');
       this.dropZone.classList.remove('hidden');
       this.skipImagesBtn.classList.add('hidden');
@@ -909,6 +995,141 @@ export class FLAViewerApp {
     if (this.sceneInfo) {
       this.sceneInfo.innerHTML = `<span class="scene-current">${state.currentScene + 1}</span>/<span class="scene-total">${state.totalScenes}</span> <span class="scene-name">${state.sceneName}</span>`;
     }
+  }
+
+  // ── TPL Structure Panel ──
+
+  private populateTPLTab(tabName: string): void {
+    if (!this.tplMetadata) return;
+    const meta = this.tplMetadata;
+    const container = this.tplPanelContent;
+
+    switch (tabName) {
+      case 'nodes':
+        container.innerHTML = this.renderNodeTree(meta.nodeTree, 0);
+        this.attachNodeToggleListeners(container);
+        break;
+      case 'elements':
+        container.innerHTML = this.renderElementList(meta.elements);
+        break;
+      case 'exposure':
+        container.innerHTML = this.renderExposureSheet(meta.exposures);
+        break;
+      case 'palettes':
+        container.innerHTML = this.renderPalettes(meta.palettes);
+        break;
+    }
+  }
+
+  private renderNodeTree(nodes: import('./tpl-parser').TPLNode[], depth: number): string {
+    if (!nodes || nodes.length === 0) return '<div style="color:var(--text-secondary);padding:8px">No nodes</div>';
+
+    return nodes.map(node => {
+      if (node.type === 'group') {
+        const hasChildren = node.children && node.children.length > 0;
+        const collapsed = depth > 1;
+        return `
+          <div class="tpl-node">
+            <div class="tpl-node-header">
+              ${hasChildren ? `<span class="tpl-node-toggle ${collapsed ? 'collapsed' : ''}">&#9660;</span>` : '<span style="width:12px"></span>'}
+              <span class="tpl-node-icon group">G</span>
+              <span class="tpl-node-name" title="${this.escapeHtml(node.name)}">${this.escapeHtml(node.name)}</span>
+              ${hasChildren ? `<span class="tpl-node-type">${node.children!.length}</span>` : ''}
+            </div>
+            ${hasChildren ? `<div class="tpl-node-children ${collapsed ? 'collapsed' : ''}">${this.renderNodeTree(node.children!, depth + 1)}</div>` : ''}
+          </div>`;
+      } else {
+        const iconClass = this.getModuleIconClass(node.moduleType || '');
+        const iconLetter = this.getModuleIconLetter(node.moduleType || '');
+        return `
+          <div class="tpl-node">
+            <div class="tpl-node-header">
+              <span style="width:12px"></span>
+              <span class="tpl-node-icon ${iconClass}">${iconLetter}</span>
+              <span class="tpl-node-name" title="${this.escapeHtml(node.name)}">${this.escapeHtml(node.name)}</span>
+              <span class="tpl-node-type">${this.escapeHtml(node.moduleType || '')}</span>
+            </div>
+          </div>`;
+      }
+    }).join('');
+  }
+
+  private attachNodeToggleListeners(container: HTMLElement): void {
+    container.querySelectorAll('.tpl-node-toggle').forEach(toggle => {
+      toggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const header = (toggle as HTMLElement).closest('.tpl-node-header')!;
+        const children = header.nextElementSibling as HTMLElement;
+        if (!children) return;
+        toggle.classList.toggle('collapsed');
+        children.classList.toggle('collapsed');
+      });
+    });
+  }
+
+  private getModuleIconClass(type: string): string {
+    if (type === 'READ') return 'read';
+    if (type === 'PEG') return 'peg';
+    if (type === 'COMPOSITE') return 'composite';
+    if (['GAUSSIANBLUR-PLUGIN', 'GLOW', 'FADE', 'MATTE_BLUR', 'MATTE_RESIZE',
+         'COLOR_OVERRIDE_TVG', 'CUTTER', 'COLOR2BW', 'CONTRAST', 'COLOR_LEVELS'].includes(type)) return 'effect';
+    return 'other';
+  }
+
+  private getModuleIconLetter(type: string): string {
+    if (type === 'READ') return 'R';
+    if (type === 'PEG') return 'P';
+    if (type === 'COMPOSITE') return 'C';
+    if (type === 'CUTTER') return 'X';
+    if (type === 'MasterController') return 'M';
+    return type.charAt(0) || '?';
+  }
+
+  private renderElementList(elements: import('./tpl-parser').TPLElement[]): string {
+    if (elements.length === 0) return '<div style="color:var(--text-secondary);padding:8px">No elements</div>';
+    return elements.map(el => `
+      <div class="tpl-element" title="${this.escapeHtml(el.folder)}">
+        <span class="tpl-element-id">${el.id}</span>
+        <span class="tpl-element-name">${this.escapeHtml(el.name)}</span>
+        <span class="tpl-element-count">${el.drawingCount} dwg</span>
+      </div>
+    `).join('');
+  }
+
+  private renderExposureSheet(exposures: import('./tpl-parser').TPLExposure[]): string {
+    if (exposures.length === 0) return '<div style="color:var(--text-secondary);padding:8px">No exposure data</div>';
+    return `<table class="tpl-exposure-table">
+      <thead><tr><th>Element</th><th>Drawing</th><th>Frames</th></tr></thead>
+      <tbody>
+        ${exposures.map(exp => `
+          <tr>
+            <td title="${this.escapeHtml(exp.columnName)}">${this.escapeHtml(exp.elementName)}</td>
+            <td>${exp.frames.length > 0 ? this.escapeHtml(exp.frames[0].drawing) : '-'}</td>
+            <td class="tpl-exposure-frames">${exp.frames.map(f => f.start === f.end ? `${f.start}` : `${f.start}-${f.end}`).join(', ')}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>`;
+  }
+
+  private renderPalettes(palettes: import('./tpl-parser').TPLPalette[]): string {
+    if (palettes.length === 0) return '<div style="color:var(--text-secondary);padding:8px">No palettes</div>';
+    return palettes.map(pal => `
+      <div class="tpl-palette-section">
+        <div class="tpl-palette-title">${this.escapeHtml(pal.name)} (${pal.colors.length})</div>
+        ${pal.colors.map(c => `
+          <div class="tpl-color">
+            <span class="tpl-color-swatch" style="background:rgba(${c.r},${c.g},${c.b},${c.a / 255})"></span>
+            <span class="tpl-color-name">${this.escapeHtml(c.name)}</span>
+            <span class="tpl-color-value">${c.r},${c.g},${c.b}</span>
+          </div>
+        `).join('')}
+      </div>
+    `).join('');
+  }
+
+  private escapeHtml(str: string): string {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
   private showExportModal(): void {

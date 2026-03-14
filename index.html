@@ -697,6 +697,261 @@
       color: var(--text-primary);
     }
 
+    /* TPL Structure Panel */
+    .tpl-panel {
+      display: none;
+      position: absolute;
+      left: 8px;
+      top: 8px;
+      width: 280px;
+      max-height: calc(100% - 16px);
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      overflow: hidden;
+      z-index: 100;
+      font-size: 11px;
+    }
+
+    .tpl-panel.active {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .tpl-panel-header {
+      padding: 8px 10px;
+      background: var(--bg-tertiary);
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .tpl-panel-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .tpl-tabs {
+      display: flex;
+      gap: 2px;
+    }
+
+    .tpl-tab {
+      flex: 1;
+      padding: 4px 6px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 3px;
+      color: var(--text-secondary);
+      font-size: 10px;
+      cursor: pointer;
+      text-align: center;
+    }
+
+    .tpl-tab:hover {
+      background: var(--bg-tertiary);
+    }
+
+    .tpl-tab.active {
+      background: var(--accent-color);
+      color: #fff;
+      border-color: var(--accent-color);
+    }
+
+    .tpl-panel-content {
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 6px;
+      flex: 1;
+    }
+
+    /* TPL Node Tree */
+    .tpl-node {
+      padding: 2px 0;
+    }
+
+    .tpl-node-header {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 4px;
+      border-radius: 3px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .tpl-node-header:hover {
+      background: var(--bg-tertiary);
+    }
+
+    .tpl-node-toggle {
+      font-size: 8px;
+      width: 12px;
+      text-align: center;
+      color: var(--text-secondary);
+      transition: transform 0.15s;
+    }
+
+    .tpl-node-toggle.collapsed {
+      transform: rotate(-90deg);
+    }
+
+    .tpl-node-icon {
+      width: 14px;
+      height: 14px;
+      border-radius: 2px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 8px;
+      font-weight: bold;
+      color: #fff;
+      flex-shrink: 0;
+    }
+
+    .tpl-node-icon.group { background: #5b7fb5; }
+    .tpl-node-icon.read { background: #4caf50; }
+    .tpl-node-icon.peg { background: #ff9800; }
+    .tpl-node-icon.composite { background: #9c27b0; }
+    .tpl-node-icon.effect { background: #e91e63; }
+    .tpl-node-icon.other { background: #607d8b; }
+
+    .tpl-node-name {
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .tpl-node-type {
+      color: var(--text-secondary);
+      font-size: 9px;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+
+    .tpl-node-children {
+      margin-left: 14px;
+      border-left: 1px solid var(--border-color);
+      padding-left: 4px;
+    }
+
+    .tpl-node-children.collapsed {
+      display: none;
+    }
+
+    /* TPL Element list */
+    .tpl-element {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 6px;
+      border-radius: 3px;
+    }
+
+    .tpl-element:hover {
+      background: var(--bg-tertiary);
+    }
+
+    .tpl-element-id {
+      color: var(--text-secondary);
+      font-size: 9px;
+      width: 24px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+
+    .tpl-element-name {
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .tpl-element-count {
+      color: var(--text-secondary);
+      font-size: 9px;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+
+    /* TPL Exposure Sheet */
+    .tpl-exposure-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 10px;
+    }
+
+    .tpl-exposure-table th {
+      background: var(--bg-tertiary);
+      padding: 3px 4px;
+      text-align: left;
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border-color);
+      position: sticky;
+      top: 0;
+    }
+
+    .tpl-exposure-table td {
+      padding: 2px 4px;
+      border-bottom: 1px solid var(--border-color);
+      color: var(--text-primary);
+    }
+
+    .tpl-exposure-frames {
+      color: var(--text-secondary);
+      font-size: 9px;
+    }
+
+    /* TPL Palette colors */
+    .tpl-palette-section {
+      margin-bottom: 10px;
+    }
+
+    .tpl-palette-title {
+      font-weight: 600;
+      color: var(--text-primary);
+      padding: 4px 0;
+      border-bottom: 1px solid var(--border-color);
+      margin-bottom: 4px;
+    }
+
+    .tpl-color {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 4px;
+      border-radius: 3px;
+    }
+
+    .tpl-color:hover {
+      background: var(--bg-tertiary);
+    }
+
+    .tpl-color-swatch {
+      width: 16px;
+      height: 16px;
+      border-radius: 3px;
+      border: 1px solid var(--border-color);
+      flex-shrink: 0;
+    }
+
+    .tpl-color-name {
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .tpl-color-value {
+      color: var(--text-secondary);
+      font-size: 9px;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+
     /* Debug Panel */
     .debug-panel {
       display: none;
@@ -1384,11 +1639,11 @@
           <svg class="drop-zone-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
           </svg>
-          <p>Drop FLA file here or click to browse</p>
-          <small>Supports Adobe Animate/Flash FLA files</small>
+          <p>Drop FLA or TPL file here or click to browse</p>
+          <small>Supports Adobe Animate/Flash FLA and Toon Boom Harmony TPL files</small>
           <button class="load-sample-btn" id="load-sample-btn" aria-label="Load sample FLA file">Sample</button>
         </div>
-        <input type="file" id="file-input" accept=".fla" aria-label="Select FLA file to view">
+        <input type="file" id="file-input" accept=".fla,.zip" aria-label="Select FLA or TPL file to view">
       </section>
 
       <div class="loading-overlay" id="loading">
@@ -1488,6 +1743,22 @@
       <div class="viewport" id="viewer">
         <div class="canvas-container">
           <canvas id="stage"></canvas>
+        </div>
+
+        <div class="tpl-panel" id="tpl-panel">
+          <div class="tpl-panel-header">
+            <div class="tpl-panel-title">
+              <span>TPL Structure</span>
+              <button class="debug-close-btn" id="tpl-close-btn" title="Close">&times;</button>
+            </div>
+            <div class="tpl-tabs">
+              <button class="tpl-tab active" data-tab="nodes">Nodes</button>
+              <button class="tpl-tab" data-tab="elements">Elements</button>
+              <button class="tpl-tab" data-tab="exposure">Exposure</button>
+              <button class="tpl-tab" data-tab="palettes">Palettes</button>
+            </div>
+          </div>
+          <div class="tpl-panel-content" id="tpl-panel-content"></div>
         </div>
 
         <div class="debug-panel" id="debug-panel">
