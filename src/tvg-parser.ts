@@ -296,14 +296,20 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
             comp.color = { r: entry.r, g: entry.g, b: entry.b, a: entry.a };
           }
         }
-        // Fills: use paletteIndex as TPAL index, but skip "Line" entries
-        // (Line is a stroke color; palIdx→Line on fills is typically a default/unset value)
+        // Fills: use paletteIndex as TPAL index to get colorId for external palette resolution.
+        // Set colorId from TPAL entry's id so resolveExternalPalette can override with .plt colors.
+        // Only fall back to TPAL RGBA if the entry's id is 0 (no external reference).
         if (comp.componentType === 0 && comp.color === null && comp.paletteIndex !== null) {
           const idx = comp.paletteIndex;
           if (idx >= 0 && idx < drawing.palette.length) {
             const entry = drawing.palette[idx];
             const nameLower = entry.name.toLowerCase();
             if (entry.a > 0 && nameLower !== 'line') {
+              if (entry.id !== 0n && comp.colorId === null) {
+                // Set colorId for external palette resolution
+                comp.colorId = entry.id;
+              }
+              // Set TPAL color as fallback (external palette will override if matched)
               comp.color = { r: entry.r, g: entry.g, b: entry.b, a: entry.a };
             }
           }
@@ -666,6 +672,7 @@ function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type']): TVGArtL
 
     const shape: TVGShape = { shapeType, components: [] };
 
+    let lastTGTBWidth: number | null = null;
     for (let c = 0; c < componentCount && reader.pos < shapeEnd; c++) {
       // Find next TGVS
       if (!scanToTag(reader, TAG_TGVS)) break;
@@ -674,8 +681,14 @@ function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type']): TVGArtL
       if (vsLen > reader.remaining) break;
 
       const vsEnd = reader.pos + vsLen;
-      const comp = parseComponent(reader, vsEnd);
-      if (comp) shape.components.push(comp);
+      const comp = parseComponent(reader, vsEnd, lastTGTBWidth);
+      if (comp) {
+        shape.components.push(comp);
+        // Track last tGTB width for "reference to previous" inheritance
+        if (comp.strokeWidth !== null && comp.strokeWidth > 0.1) {
+          lastTGTBWidth = comp.strokeWidth;
+        }
+      }
 
       reader.pos = vsEnd; // Ensure we advance past the TGVS block
     }
@@ -685,6 +698,23 @@ function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type']): TVGArtL
     }
 
     reader.pos = shapeEnd; // Ensure we advance past the TGLY block
+  }
+
+  // Type-5 path borrowing: type-5 shapes' N-1 pencil components
+  // borrow paths from the preceding type-1 shape's N fill components.
+  for (let si = 1; si < layer.shapes.length; si++) {
+    const shape = layer.shapes[si];
+    if (shape.shapeType !== 5) continue;
+    const prev = layer.shapes[si - 1];
+    if (prev.shapeType !== 1) continue;
+
+    const prevFills = prev.components.filter(c => c.componentType === 0 && c.path && c.path.segments.length > 0);
+    const pencils = shape.components.filter(c => c.componentType === 4 && (!c.path || c.path.segments.length === 0));
+
+    // Assign paths from fill components to pencil components
+    for (let pi = 0; pi < pencils.length && pi < prevFills.length; pi++) {
+      pencils[pi].path = prevFills[pi].path;
+    }
   }
 
   return layer;
@@ -707,7 +737,7 @@ function scanToTag(reader: BinaryReader, tag: string): boolean {
 
 // ── Component Parsing ──
 
-function parseComponent(reader: BinaryReader, endPos: number): TVGComponent | null {
+function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: number | null): TVGComponent | null {
   const comp: TVGComponent = {
     componentType: -1,
     colorId: null,
@@ -745,6 +775,10 @@ function parseComponent(reader: BinaryReader, endPos: number): TVGComponent | nu
       if (len > reader.remaining) { reader.skip(Math.min(len, reader.remaining)); } else {
         const tbEnd = reader.pos + len;
         comp.strokeWidth = parseTGTBMaxWidth(reader, len);
+        // tGTB type=0x00 means "reference to previous" — inherit width from previous component
+        if (comp.strokeWidth === null && prevTGTBWidth != null) {
+          comp.strokeWidth = prevTGTBWidth;
+        }
         reader.pos = tbEnd;
       }
     } else if (tag === 'tGTI') {
@@ -908,7 +942,9 @@ function parseTGTBMaxWidth(reader: BinaryReader, len: number): number | null {
   try {
     const type = reader.readU8();
     if (type === 0x00) {
-      // Reference to previous thickness - can't extract width
+      // Reference to previous thickness profile.
+      // The remaining bytes contain a reference ID but no width data.
+      // Width will be inherited from the previous component's tGTB width.
       return null;
     }
     if (type !== 0x01) return null;
@@ -976,6 +1012,9 @@ function parseTGBP(reader: BinaryReader, len: number): TVGPath | null {
   //   0 off-curve + on-curve = Line-to
   //   1 off-curve + on-curve = Quadratic bezier
   //   2 off-curve + on-curve = Cubic bezier
+  // This is equivalent to cpsdqs/tvg's segment-type bitstream interpretation:
+  //   "1" = line (1 point), "01" = quadratic (2 points), "001" = cubic (3 points)
+  // Bit 0 is for the moveTo point (always on-curve, never checked in segment loop).
   const onCurve: boolean[] = [];
   for (let i = 0; i < numPoints; i++) {
     const byteIdx = Math.floor(i / 8);
@@ -1022,7 +1061,6 @@ function parseTGBP(reader: BinaryReader, len: number): TVGPath | null {
           segments.push({ type: 'C', c1x: cp1.x, c1y: cp1.y, c2x: cp2.x, c2y: cp2.y, x: endPt.x, y: endPt.y });
         } else {
           // More than 2 off-curve: split into multiple cubics
-          // (rare, but handle gracefully)
           for (let i = 0; i < controlCount; i += 2) {
             if (i + 1 < controlCount) {
               const cp1 = points[controlStart + i];
@@ -1176,9 +1214,10 @@ export function resolveExternalPalette(
   for (const layer of drawing.layers) {
     for (const shape of layer.shapes) {
       for (const comp of shape.components) {
-        if (comp.color === null && comp.colorId !== null) {
+        if (comp.colorId !== null) {
           const ext = extMap.get(comp.colorId);
           if (ext) {
+            // External palette always overrides (more authoritative than internal TPAL)
             comp.color = { r: ext.r, g: ext.g, b: ext.b, a: ext.a };
           }
         }
@@ -1207,28 +1246,21 @@ export function renderTVGToCanvas(
   drawing: TVGDrawing,
   width: number,
   height: number,
+  viewport?: number,
 ): HTMLCanvasElement | null {
-  // Collect all paths to compute bounds
-  const allPoints: { x: number; y: number }[] = [];
+  // Check for any vector data
+  let hasVectors = false;
   for (const layer of drawing.layers) {
     for (const shape of layer.shapes) {
       for (const comp of shape.components) {
-        if (comp.path) {
-          for (const seg of comp.path.segments) {
-            allPoints.push({ x: seg.x, y: seg.y });
-            if (seg.type === 'Q') {
-              allPoints.push({ x: seg.cx, y: seg.cy });
-            } else if (seg.type === 'C') {
-              allPoints.push({ x: seg.c1x, y: seg.c1y });
-              allPoints.push({ x: seg.c2x, y: seg.c2y });
-            }
-          }
-        }
+        if (comp.path && comp.path.segments.length > 0) { hasVectors = true; break; }
       }
+      if (hasVectors) break;
     }
+    if (hasVectors) break;
   }
 
-  if (allPoints.length === 0) {
+  if (!hasVectors) {
     // No vector data — try bitmap tiles
     if (drawing.bitmapTiles.length > 0) {
       return renderBitmapTVGToCanvas(drawing.bitmapTiles, width, height);
@@ -1236,46 +1268,104 @@ export function renderTVGToCanvas(
     return null;
   }
 
-  // Compute bounds
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const p of allPoints) {
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
-  }
-
-  const drawingWidth = maxX - minX;
-  const drawingHeight = maxY - minY;
-  if (drawingWidth < 0.01 || drawingHeight < 0.01) return null;
-
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d')!;
 
-  // Scale and center the drawing within the canvas
-  const padding = 4;
-  const availW = width - padding * 2;
-  const availH = height - padding * 2;
-  const scale = Math.min(availW / drawingWidth, availH / drawingHeight);
-  const offsetX = padding + (availW - drawingWidth * scale) / 2 - minX * scale;
-  // Flip Y axis: TVG uses Y-up (math coordinates), canvas uses Y-down
-  const offsetY = padding + (availH - drawingHeight * scale) / 2 + maxY * scale;
+  // Use field chart viewport if provided (e.g., 336 = 12 fields × 28 units/field).
+  // The viewport defines a square centered at origin in TVG coordinate space.
+  // If no viewport, auto-fit to path bounds.
+  let scale: number;
+  let offsetX: number;
+  let offsetY: number;
+  let viewportSize: number;
 
-  ctx.setTransform(scale, 0, 0, -scale, offsetX, offsetY);
+  if (viewport && viewport > 0) {
+    // Field chart viewport: use viewport as the coordinate space size,
+    // centered on content centroid for proper framing.
+    viewportSize = viewport;
 
-  // Compute a reasonable default stroke width based on drawing scale
-  // (pencil thickness from tGTI is often in internal units, too thin to see)
-  const defaultStrokeWidth = Math.max(drawingWidth, drawingHeight) * 0.008;
+    // Compute content center
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const layer of drawing.layers) {
+      for (const shape of layer.shapes) {
+        for (const comp of shape.components) {
+          if (comp.path) {
+            for (const seg of comp.path.segments) {
+              if (seg.x < minX) minX = seg.x;
+              if (seg.y < minY) minY = seg.y;
+              if (seg.x > maxX) maxX = seg.x;
+              if (seg.y > maxY) maxY = seg.y;
+            }
+          }
+        }
+      }
+    }
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
 
-  // Render layers in order: color, line, overlay
-  // Skip underlay (tUAA) — it contains construction/guide geometry, not final art
-  const layerOrder: TVGArtLayer['type'][] = ['underlay', 'color', 'line', 'overlay'];
-  for (const layerType of layerOrder) {
+    scale = Math.min(width, height) / viewportSize;
+    // Center drawing in canvas with Y-flip
+    offsetX = width / 2 - centerX * scale;
+    offsetY = height / 2 + centerY * scale;
+    ctx.setTransform(scale, 0, 0, -scale, offsetX, offsetY);
+  } else {
+    // Auto-fit to path bounds
+    const allPoints: { x: number; y: number }[] = [];
+    for (const layer of drawing.layers) {
+      for (const shape of layer.shapes) {
+        for (const comp of shape.components) {
+          if (comp.path) {
+            for (const seg of comp.path.segments) {
+              allPoints.push({ x: seg.x, y: seg.y });
+              if (seg.type === 'Q') allPoints.push({ x: seg.cx, y: seg.cy });
+              else if (seg.type === 'C') { allPoints.push({ x: seg.c1x, y: seg.c1y }); allPoints.push({ x: seg.c2x, y: seg.c2y }); }
+            }
+          }
+        }
+      }
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of allPoints) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const drawingWidth = maxX - minX;
+    const drawingHeight = maxY - minY;
+    if (drawingWidth < 0.01 || drawingHeight < 0.01) return null;
+    viewportSize = Math.max(drawingWidth, drawingHeight);
+
+    const padding = 4;
+    const availW = width - padding * 2;
+    const availH = height - padding * 2;
+    scale = Math.min(availW / drawingWidth, availH / drawingHeight);
+    offsetX = padding + (availW - drawingWidth * scale) / 2 - minX * scale;
+    offsetY = padding + (availH - drawingHeight * scale) / 2 + maxY * scale;
+    ctx.setTransform(scale, 0, 0, -scale, offsetX, offsetY);
+  }
+
+  // Default stroke width: 1 TVG unit ≈ 1 pixel at standard viewport/canvas ratio
+  const defaultStrokeWidth = 1.0;
+
+  // Toon Boom art layer order (bottom to top): underlay, color, line, overlay.
+  // Note: overlay is the TOP layer, above line art.
+  const fillOrder: TVGArtLayer['type'][] = ['underlay', 'color', 'line', 'overlay'];
+  const strokeOrder: TVGArtLayer['type'][] = ['underlay', 'color', 'line', 'overlay'];
+
+  // Two-pass rendering: fills first (all layers), then strokes on top.
+  for (const layerType of fillOrder) {
     for (const layer of drawing.layers) {
       if (layer.type !== layerType) continue;
-      renderLayer(ctx, layer, defaultStrokeWidth);
+      renderLayerPass(ctx, layer, defaultStrokeWidth, 'fill');
+    }
+  }
+  for (const layerType of strokeOrder) {
+    for (const layer of drawing.layers) {
+      if (layer.type !== layerType) continue;
+      renderLayerPass(ctx, layer, defaultStrokeWidth, 'stroke');
     }
   }
 
@@ -1380,101 +1470,189 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement): Promise<boolea
   return true;
 }
 
-function colorKey(c: { r: number; g: number; b: number; a: number } | null): string {
-  return c ? `${c.r},${c.g},${c.b},${c.a}` : 'none';
-}
 
-function renderLayer(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defaultStrokeWidth: number): void {
+function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defaultStrokeWidth: number, pass: 'fill' | 'stroke'): void {
   for (const shape of layer.shapes) {
     // Separate fill components from stroke/pencil components
     const fillComps = shape.components.filter(c => c.componentType === 0 && c.path && c.path.segments.length > 1 && !isDegenerate(c.path));
     const strokeComps = shape.components.filter(c => (c.componentType === 4 || c.componentType === 2) && c.path && c.path.segments.length > 0);
 
-    // Group fill components by color, preserving order.
-    // Consecutive fills with the same color are chain-linked into one path.
-    // Different colors start a new fill group.
-    if (fillComps.length > 0) {
-      // Resolve effective color: components without their own color inherit from the
-      // most recent preceding colored component (leader/follower pattern)
-      type FillGroup = { color: { r: number; g: number; b: number; a: number } | null; comps: typeof fillComps };
-      const groups: FillGroup[] = [];
-      let currentGroup: FillGroup | null = null;
-      let lastSeenColor: { r: number; g: number; b: number; a: number } | null = null;
+    // Fill rendering: group fill components by color, then chain each group
+    // into closed regions. Colorless boundary components are shared across groups.
+    if (pass === 'fill' && fillComps.length > 0) {
+      const TOL = 0.5;
 
-      for (const comp of fillComps) {
-        if (comp.color) lastSeenColor = comp.color;
-        const effectiveColor = comp.color ?? lastSeenColor;
-        const key = colorKey(effectiveColor);
-        if (!currentGroup || colorKey(currentGroup.color) !== key) {
-          currentGroup = { color: effectiveColor, comps: [] };
-          groups.push(currentGroup);
+      // Separate colored fills from colorless boundary fills
+      const colorKey = (c: { r: number; g: number; b: number; a: number }) => `${c.r},${c.g},${c.b},${c.a}`;
+      const colorGroups = new Map<string, number[]>(); // colorKey -> fill indices
+      const boundaryIndices: number[] = []; // colorless fills
+
+      for (let i = 0; i < fillComps.length; i++) {
+        const comp = fillComps[i];
+        if (comp.color) {
+          const key = colorKey(comp.color);
+          if (!colorGroups.has(key)) colorGroups.set(key, []);
+          colorGroups.get(key)!.push(i);
+        } else {
+          boundaryIndices.push(i);
         }
-        currentGroup.comps.push(comp);
       }
 
-      // Render each color group
-      for (const group of groups) {
-        const combinedPath = new Path2D();
-        let lastX = NaN, lastY = NaN;
-        let hasContour = false;
-
-        for (const comp of group.comps) {
-          const segs = comp.path!.segments;
-          const firstSeg = segs[0]; // always 'M'
-
-          // Check if this component continues from where the last one ended
-          const continues = !isNaN(lastX) &&
-            Math.abs(firstSeg.x - lastX) < 0.5 &&
-            Math.abs(firstSeg.y - lastY) < 0.5;
-
-          if (!continues) {
-            if (hasContour) combinedPath.closePath();
-            combinedPath.moveTo(firstSeg.x, firstSeg.y);
-            hasContour = true;
-          }
-
-          for (let i = 1; i < segs.length; i++) {
-            const seg = segs[i];
-            switch (seg.type) {
-              case 'M': combinedPath.moveTo(seg.x, seg.y); break;
-              case 'L': combinedPath.lineTo(seg.x, seg.y); break;
-              case 'Q': combinedPath.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y); break;
-              case 'C': combinedPath.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y); break;
-            }
-          }
-
-          const lastSeg = segs[segs.length - 1];
-          lastX = lastSeg.x;
-          lastY = lastSeg.y;
+      // If only one color (or no colors), use original single-chain approach
+      // For multi-color shapes, chain each color group + shared boundaries
+      const colorKeys = Array.from(colorGroups.keys());
+      if (colorKeys.length <= 1) {
+        // Single color: chain all fills together (original behavior)
+        chainAndFillComponents(ctx, fillComps, fillComps.map((_, i) => i), TOL);
+      } else {
+        // Multi-color: chain each color group separately, including shared boundaries
+        for (const key of colorKeys) {
+          const groupIndices = [...colorGroups.get(key)!, ...boundaryIndices];
+          chainAndFillComponents(ctx, fillComps, groupIndices, TOL);
         }
-
-        if (hasContour) combinedPath.closePath();
-
-        if (group.color) {
-          ctx.fillStyle = `rgba(${group.color.r},${group.color.g},${group.color.b},${group.color.a / 255})`;
-          ctx.fill(combinedPath, 'evenodd');
-        }
-        // Skip fills with no resolved color — they need the project palette
       }
     }
 
     // Render stroke/pencil components individually
-    for (const comp of strokeComps) {
-      const path = buildPath2D(comp.path!);
-      const color = comp.color;
+    if (pass === 'stroke') {
+      for (const comp of strokeComps) {
+        const path = buildPath2D(comp.path!);
+        const color = comp.color;
 
-      if (color) {
-        ctx.strokeStyle = `rgba(${color.r},${color.g},${color.b},${color.a / 255})`;
-      } else {
-        ctx.strokeStyle = '#000';
+        if (color) {
+          ctx.strokeStyle = `rgba(${color.r},${color.g},${color.b},${color.a / 255})`;
+        } else {
+          ctx.strokeStyle = '#000';
+        }
+        // Use explicit thickness if available; pencil strokes (ct=4) fall back to
+        // proportional default; brush strokes (ct=2) without explicit width are invisible
+        // boundary strokes used by Toon Boom for fill region definition.
+        let sw: number;
+        if (comp.strokeWidth !== null) {
+          sw = comp.strokeWidth;
+        } else if (comp.componentType === 4) {
+          sw = defaultStrokeWidth;
+        } else {
+          continue; // ct=2 brush strokes without explicit width are invisible boundaries
+        }
+        if (sw < 0.1) continue;
+        ctx.lineWidth = sw;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke(path);
       }
-      // Use explicit thickness if available; fall back to proportional default
-      const sw = comp.strokeWidth !== null ? comp.strokeWidth : defaultStrokeWidth;
-      ctx.lineWidth = sw;
-      ctx.lineCap = 'round';
+    }
+  }
+}
+
+/** Chain a subset of fill components by endpoint matching and render filled paths. */
+function chainAndFillComponents(
+  ctx: CanvasRenderingContext2D,
+  allFillComps: TVGComponent[],
+  indices: number[],
+  TOL: number,
+): void {
+  const compInfos = indices.map(idx => {
+    const segs = allFillComps[idx].path!.segments;
+    return {
+      ci: idx,
+      startX: segs[0].x, startY: segs[0].y,
+      endX: segs[segs.length - 1].x, endY: segs[segs.length - 1].y,
+    };
+  });
+
+  // Greedy chain building: link components by matching endpoints
+  const used = new Set<number>();
+  const chains: { ci: number; reversed: boolean; startX: number; startY: number; endX: number; endY: number }[][] = [];
+  for (let i = 0; i < compInfos.length; i++) {
+    if (used.has(i)) continue;
+    used.add(i);
+    const chain: typeof chains[0] = [{ ...compInfos[i], reversed: false }];
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const tail = chain[chain.length - 1];
+      const head = chain[0];
+      if (Math.abs(head.startX - tail.endX) < TOL && Math.abs(head.startY - tail.endY) < TOL) break;
+      for (let j = 0; j < compInfos.length; j++) {
+        if (used.has(j)) continue;
+        const c = compInfos[j];
+        if (Math.abs(c.startX - tail.endX) < TOL && Math.abs(c.startY - tail.endY) < TOL) {
+          chain.push({ ...c, reversed: false }); used.add(j); changed = true; break;
+        }
+        if (Math.abs(c.endX - tail.endX) < TOL && Math.abs(c.endY - tail.endY) < TOL) {
+          chain.push({ ci: c.ci, startX: c.endX, startY: c.endY, endX: c.startX, endY: c.startY, reversed: true });
+          used.add(j); changed = true; break;
+        }
+      }
+      if (changed) continue;
+      for (let j = 0; j < compInfos.length; j++) {
+        if (used.has(j)) continue;
+        const c = compInfos[j];
+        if (Math.abs(c.endX - head.startX) < TOL && Math.abs(c.endY - head.startY) < TOL) {
+          chain.unshift({ ...c, reversed: false }); used.add(j); changed = true; break;
+        }
+        if (Math.abs(c.startX - head.startX) < TOL && Math.abs(c.startY - head.startY) < TOL) {
+          chain.unshift({ ci: c.ci, startX: c.endX, startY: c.endY, endX: c.startX, endY: c.startY, reversed: true });
+          used.add(j); changed = true; break;
+        }
+      }
+    }
+    chains.push(chain);
+  }
+
+  // Render each chain
+  for (const chain of chains) {
+    let fillColor: { r: number; g: number; b: number; a: number } | null = null;
+    for (const info of chain) {
+      const comp = allFillComps[info.ci];
+      if (comp.color) { fillColor = comp.color; break; }
+    }
+    if (!fillColor) continue;
+
+    const head = chain[0], tail = chain[chain.length - 1];
+    const isClosed = Math.abs(head.startX - tail.endX) + Math.abs(head.startY - tail.endY) < TOL * 2;
+
+    const path = new Path2D();
+    let isFirst = true;
+    for (const info of chain) {
+      const comp = allFillComps[info.ci];
+      const segs = comp.path!.segments;
+      if (!info.reversed) {
+        for (let si = 0; si < segs.length; si++) {
+          const seg = segs[si];
+          if (si === 0) {
+            if (isFirst) { path.moveTo(seg.x, seg.y); isFirst = false; }
+            else path.lineTo(seg.x, seg.y);
+          } else if (seg.type === 'C') path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
+          else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y);
+          else path.lineTo(seg.x, seg.y);
+        }
+      } else {
+        const lastSeg = segs[segs.length - 1];
+        if (isFirst) { path.moveTo(lastSeg.x, lastSeg.y); isFirst = false; }
+        else path.lineTo(lastSeg.x, lastSeg.y);
+        for (let si = segs.length - 1; si >= 1; si--) {
+          const seg = segs[si];
+          const dest = segs[si - 1];
+          if (seg.type === 'C') path.bezierCurveTo(seg.c2x, seg.c2y, seg.c1x, seg.c1y, dest.x, dest.y);
+          else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, dest.x, dest.y);
+          else path.lineTo(dest.x, dest.y);
+        }
+      }
+    }
+    if (isClosed) path.closePath();
+
+    const fillStyle = `rgba(${fillColor.r},${fillColor.g},${fillColor.b},${fillColor.a / 255})`;
+    if (isClosed) {
+      ctx.strokeStyle = fillStyle;
+      ctx.lineWidth = 0.3;
       ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
       ctx.stroke(path);
     }
+    ctx.fillStyle = fillStyle;
+    ctx.fill(path, 'evenodd');
   }
 }
 

@@ -34,10 +34,14 @@ export interface TPLMetadata {
   exposures: TPLExposure[];
 }
 
+/** Units per field in TVG coordinate space. fieldChart × this = viewport size in TVG units. */
+export const TVG_UNITS_PER_FIELD = 28;
+
 export interface TPLElement {
   id: number;
   name: string;
   folder: string;
+  fieldChart: number;
   drawingCount: number;
   drawings: string[];
 }
@@ -304,6 +308,7 @@ function parseElements(xmlDoc: Document): TPLElement[] {
       id: parseInt(el.getAttribute('id') || '0', 10),
       name: el.getAttribute('elementName') || '',
       folder: el.getAttribute('elementFolder') || '',
+      fieldChart: parseInt(el.getAttribute('fieldChart') || '12', 10),
       drawingCount: drawings.length,
       drawings,
     });
@@ -512,6 +517,12 @@ async function renderTVGElements(
     }
   }
 
+  // Build element lookup by folder name to get fieldChart
+  const elementByFolder = new Map<string, TPLElement>();
+  for (const el of metadata.elements) {
+    elementByFolder.set(el.folder, el);
+  }
+
   // Render a subset of TVG files into small canvases
   const maxElements = 48;
   const step = Math.max(1, Math.floor(tvgFiles.length / maxElements));
@@ -530,7 +541,19 @@ async function renderTVGElements(
       if (externalColors.length > 0) {
         resolveExternalPalette(drawing, externalColors);
       }
-      const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize);
+      // Determine viewport from element's fieldChart
+      let viewportSize: number | undefined;
+      const pathParts = tvgFiles[i].split('/');
+      const elemFolder = pathParts.find((_, idx) =>
+        idx > 0 && pathParts[idx - 1] === 'elements'
+      );
+      if (elemFolder) {
+        const elem = elementByFolder.get(elemFolder);
+        if (elem) {
+          viewportSize = elem.fieldChart * TVG_UNITS_PER_FIELD;
+        }
+      }
+      const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize, viewportSize);
       if (canvas) {
         // Load bitmap tiles asynchronously if present
         if ((canvas as any).__bitmapTiles) {
