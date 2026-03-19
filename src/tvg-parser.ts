@@ -1713,20 +1713,24 @@ function chainAndFillComponents(
     chains.push(chain);
   }
 
-  // Render each chain
+  // Build a single compound path from all chains for evenodd fill.
+  // Chained components are connected via lineTo, unchained ones start new sub-paths.
+  let fillColor: { r: number; g: number; b: number; a: number } | null = null;
   for (const chain of chains) {
-    let fillColor: { r: number; g: number; b: number; a: number } | null = null;
     for (const info of chain) {
       const comp = allFillComps[info.ci];
       if (comp.color) { fillColor = comp.color; break; }
     }
-    if (!fillColor) continue;
+    if (fillColor) break;
+  }
+  if (!fillColor) return;
 
+  const path = new Path2D();
+  for (const chain of chains) {
+    let isFirst = true;
     const head = chain[0], tail = chain[chain.length - 1];
     const isClosed = Math.abs(head.startX - tail.endX) + Math.abs(head.startY - tail.endY) < TOL * 2;
 
-    const path = new Path2D();
-    let isFirst = true;
     for (const info of chain) {
       const comp = allFillComps[info.ci];
       const segs = comp.path!.segments;
@@ -1754,18 +1758,11 @@ function chainAndFillComponents(
       }
     }
     if (isClosed) path.closePath();
-
-    const fillStyle = `rgba(${fillColor.r},${fillColor.g},${fillColor.b},${fillColor.a / 255})`;
-    if (isClosed) {
-      ctx.strokeStyle = fillStyle;
-      ctx.lineWidth = 0.3;
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      ctx.stroke(path);
-    }
-    ctx.fillStyle = fillStyle;
-    ctx.fill(path, 'evenodd');
   }
+
+  const fillStyle = `rgba(${fillColor.r},${fillColor.g},${fillColor.b},${fillColor.a / 255})`;
+  ctx.fillStyle = fillStyle;
+  ctx.fill(path, 'evenodd');
 }
 
 /** Check if a path is degenerate (all points collinear — forms a line, not a shape). */
