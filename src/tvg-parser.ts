@@ -1294,9 +1294,7 @@ export function renderTVGToCanvas(
   if (viewport && viewport > 0) {
     // Field chart viewport: use viewport as the coordinate space size,
     // centered on content centroid for proper framing.
-    viewportSize = viewport;
-
-    // Compute content center
+    // Auto-expand viewport if content exceeds it to prevent clipping.
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const layer of drawing.layers) {
       for (const shape of layer.shapes) {
@@ -1312,11 +1310,13 @@ export function renderTVGToCanvas(
         }
       }
     }
+    const contentExtent = Math.max(maxX - minX, maxY - minY);
+    viewportSize = Math.max(viewport, contentExtent * 1.25);
+
     const centerX = (minX + maxX) / 2;
     const centerY = (minY + maxY) / 2;
 
     scale = Math.min(width, height) / viewportSize;
-    // Center drawing in canvas with Y-flip
     offsetX = width / 2 - centerX * scale;
     offsetY = height / 2 + centerY * scale;
     ctx.setTransform(scale, 0, 0, -scale, offsetX, offsetY);
@@ -1365,13 +1365,50 @@ export function renderTVGToCanvas(
   const fillOrder: TVGArtLayer['type'][] = ['underlay', 'color', 'line', 'overlay'];
   const strokeOrder: TVGArtLayer['type'][] = ['underlay', 'color', 'line', 'overlay'];
 
-  // Two-pass rendering: fills first (all layers), then strokes on top.
+  // Three-pass rendering: fills clipped to stroke boundaries, then strokes on top.
+  //
+  // In Toon Boom, strokes define the visible boundaries of fill regions. Fills can
+  // extend slightly beyond stroke outlines. To fix this, we:
+  //   1. Render fills to a temporary offscreen canvas
+  //   2. Erase fill pixels under all stroke outlines (including invisible boundaries)
+  //      using globalCompositeOperation 'destination-out'
+  //   3. Composite the clipped fills onto the main canvas
+  //   4. Render visible strokes on top (covering the erased boundary gap)
+  //
+  const fillCanvas = document.createElement('canvas');
+  fillCanvas.width = width;
+  fillCanvas.height = height;
+  const fillCtx = fillCanvas.getContext('2d')!;
+  // Copy the same transform so fills render at the same position
+  fillCtx.setTransform(ctx.getTransform());
+
+  // Pass 1: Render all fills to the offscreen canvas
   for (const layerType of fillOrder) {
     for (const layer of drawing.layers) {
       if (layer.type !== layerType) continue;
-      renderLayerPass(ctx, layer, defaultStrokeWidth, 'fill');
+      renderLayerPass(fillCtx, layer, defaultStrokeWidth, 'fill');
     }
   }
+
+  // Pass 2: Erase fill pixels that fall under stroke outlines (including invisible boundaries).
+  // This clips fills to the interior regions defined by strokes.
+  fillCtx.save();
+  fillCtx.globalCompositeOperation = 'destination-out';
+  for (const layerType of strokeOrder) {
+    for (const layer of drawing.layers) {
+      if (layer.type !== layerType) continue;
+      renderStrokeMask(fillCtx, layer, defaultStrokeWidth);
+    }
+  }
+  fillCtx.restore();
+
+  // Composite clipped fills onto main canvas
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0); // identity — fillCanvas is already in pixel space
+  ctx.drawImage(fillCanvas, 0, 0);
+  ctx.restore();
+
+  // Pass 3: Render visible strokes on top
   for (const layerType of strokeOrder) {
     for (const layer of drawing.layers) {
       if (layer.type !== layerType) continue;
@@ -1555,6 +1592,52 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
           ctx.lineJoin = 'round';
           ctx.stroke(path);
         }
+      }
+    }
+  }
+}
+
+/**
+ * Render all stroke outlines (including invisible boundary strokes) as an opaque mask.
+ * Used with globalCompositeOperation 'destination-out' to erase fill pixels under strokes,
+ * preventing fill overflow past stroke boundaries.
+ *
+ * This renders ALL stroke/boundary components (ct=2 and ct=4) as opaque white,
+ * including invisible boundary strokes (ct=2 without explicit strokeWidth) which
+ * define fill region edges in Toon Boom.
+ */
+function renderStrokeMask(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defaultStrokeWidth: number): void {
+  for (const shape of layer.shapes) {
+    const strokeComps = shape.components.filter(c => (c.componentType === 4 || c.componentType === 2) && c.path && c.path.segments.length > 0);
+
+    for (const comp of strokeComps) {
+      // For the mask, determine stroke width:
+      // - Explicit strokeWidth from the component
+      // - ct=4 pencil: use defaultStrokeWidth
+      // - ct=2 invisible boundary: use a thin boundary width to erase fill overflow
+      let sw: number;
+      if (comp.strokeWidth !== null) {
+        sw = comp.strokeWidth;
+      } else if (comp.componentType === 4) {
+        sw = defaultStrokeWidth;
+      } else {
+        // Invisible boundary strokes: use a thin width to mask fill overflow.
+        // This should be thin enough to be covered by the visible strokes drawn on top,
+        // but wide enough to erase the fill overflow at the boundary.
+        sw = 0.5;
+      }
+      if (sw < 0.05) continue;
+
+      // Variable-width stroke: render as filled outline
+      if (comp.thicknessProfile && comp.thicknessProfile.points.length >= 2 && comp.path) {
+        renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, 'rgba(255,255,255,1)');
+      } else {
+        const path = buildPath2D(comp.path!);
+        ctx.strokeStyle = 'rgba(255,255,255,1)';
+        ctx.lineWidth = sw;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke(path);
       }
     }
   }
