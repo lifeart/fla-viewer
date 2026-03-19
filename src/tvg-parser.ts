@@ -26,6 +26,10 @@ export interface TVGShape {
   components: TVGComponent[];
 }
 
+export interface TVGThicknessProfile {
+  points: { loc: number; leftOffset: number; rightOffset: number }[];
+}
+
 export interface TVGComponent {
   componentType: number; // 0=fill, 1=unknown, 2=stroke, 4=pencil
   colorId: bigint | null;
@@ -34,6 +38,7 @@ export interface TVGComponent {
   transform: TVGTransform | null;
   path: TVGPath | null;
   strokeWidth: number | null;
+  thicknessProfile: TVGThicknessProfile | null;
 }
 
 export interface TVGTransform {
@@ -746,6 +751,7 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
     transform: null,
     path: null,
     strokeWidth: null,
+    thicknessProfile: null,
   };
 
   while (reader.pos < endPos - 4) {
@@ -770,11 +776,15 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
       comp.path = parseTGBP(reader, bpLen);
       reader.pos = bpEnd;
     } else if (tag === 'tGTB') {
-      // Pencil thickness: extract max width from thickness control points
+      // Pencil thickness: extract thickness profile and max width
       const len = reader.readU32LE();
       if (len > reader.remaining) { reader.skip(Math.min(len, reader.remaining)); } else {
         const tbEnd = reader.pos + len;
-        comp.strokeWidth = parseTGTBMaxWidth(reader, len);
+        const result = parseTGTB(reader, len);
+        if (result) {
+          comp.strokeWidth = result.maxWidth;
+          comp.thicknessProfile = result.profile;
+        }
         // tGTB type=0x00 means "reference to previous" — inherit width from previous component
         if (comp.strokeWidth === null && prevTGTBWidth != null) {
           comp.strokeWidth = prevTGTBWidth;
@@ -930,21 +940,19 @@ function parseTGCO(reader: BinaryReader, comp: TVGComponent, len: number): void 
 // ── tGTB Parsing (Pencil Thickness) ──
 
 /**
- * Parse tGTB pencil thickness data and extract the maximum stroke width.
- * tGTB format: type(u8) + id(u32) + 0xCF marker + pointCount(u32) + points...
+ * Parse tGTB pencil thickness data, returning the full profile and max width.
+ * tGTB format: type(u8) + id(u32) + 0xCF marker + mystery(u8) + pointCount(u32) + points...
  * Each point: location(f32) + left_offset(f32) + left_cp1(2xf32) + left_cp2(2xf32)
  *             + right_offset(f32) + right_cp1(2xf32) + right_cp2(2xf32) = 11 floats
  */
-function parseTGTBMaxWidth(reader: BinaryReader, len: number): number | null {
+function parseTGTB(reader: BinaryReader, len: number): { maxWidth: number; profile: TVGThicknessProfile } | null {
   if (len < 10) return null;
   const startPos = reader.pos;
 
   try {
     const type = reader.readU8();
     if (type === 0x00) {
-      // Reference to previous thickness profile.
-      // The remaining bytes contain a reference ID but no width data.
-      // Width will be inherited from the previous component's tGTB width.
+      // Reference to previous thickness profile — no data here
       return null;
     }
     if (type !== 0x01) return null;
@@ -953,28 +961,30 @@ function parseTGTBMaxWidth(reader: BinaryReader, len: number): number | null {
     const marker = reader.readU8();
     if (marker !== 0xCF) return null;
 
-    // Skip 1 mystery byte
-    reader.readU8();
+    reader.readU8(); // mystery byte
 
     const pointCount = reader.readU32LE();
     if (pointCount === 0 || pointCount > 1000) return null;
 
-    // Each point: 11 f32 values = 44 bytes
     const needed = pointCount * 44;
     if (reader.remaining < needed) return null;
 
     let maxWidth = 0;
+    const points: { loc: number; leftOffset: number; rightOffset: number }[] = [];
+
     for (let i = 0; i < pointCount; i++) {
-      reader.readF32LE(); // location (0..1)
+      const loc = reader.readF32LE();         // location (0..1)
       const leftOffset = reader.readF32LE();  // left side offset from center
       reader.skip(16); // left bezier control points (4 f32)
       const rightOffset = reader.readF32LE(); // right side offset from center
       reader.skip(16); // right bezier control points (4 f32)
+      points.push({ loc, leftOffset, rightOffset });
       const width = leftOffset + rightOffset;
       if (width > maxWidth) maxWidth = width;
     }
 
-    return maxWidth > 0 ? maxWidth : null;
+    if (maxWidth <= 0) return null;
+    return { maxWidth, profile: { points } };
   } catch (_e) {
     reader.pos = startPos;
     return null;
@@ -1516,14 +1526,11 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
     // Render stroke/pencil components individually
     if (pass === 'stroke') {
       for (const comp of strokeComps) {
-        const path = buildPath2D(comp.path!);
         const color = comp.color;
+        const fillStyle = color
+          ? `rgba(${color.r},${color.g},${color.b},${color.a / 255})`
+          : '#000';
 
-        if (color) {
-          ctx.strokeStyle = `rgba(${color.r},${color.g},${color.b},${color.a / 255})`;
-        } else {
-          ctx.strokeStyle = '#000';
-        }
         // Use explicit thickness if available; pencil strokes (ct=4) fall back to
         // proportional default; brush strokes (ct=2) without explicit width are invisible
         // boundary strokes used by Toon Boom for fill region definition.
@@ -1536,13 +1543,118 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
           continue; // ct=2 brush strokes without explicit width are invisible boundaries
         }
         if (sw < 0.1) continue;
-        ctx.lineWidth = sw;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.stroke(path);
+
+        // Variable-width stroke: render as filled outline using thickness profile
+        if (comp.thicknessProfile && comp.thicknessProfile.points.length >= 2 && comp.path) {
+          renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, fillStyle);
+        } else {
+          const path = buildPath2D(comp.path!);
+          ctx.strokeStyle = fillStyle;
+          ctx.lineWidth = sw;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.stroke(path);
+        }
       }
     }
   }
+}
+
+/** Render a variable-width stroke as a filled outline using the thickness profile. */
+function renderVariableWidthStroke(
+  ctx: CanvasRenderingContext2D,
+  path: TVGPath,
+  profile: TVGThicknessProfile,
+  fillStyle: string,
+): void {
+  const segs = path.segments;
+  if (segs.length < 2) return;
+
+  // Sample points along the path with tangent normals
+  const samplePoints: { x: number; y: number; nx: number; ny: number }[] = [];
+
+  // Collect all endpoints (simplified: linear interpolation between segment endpoints)
+  const pts: { x: number; y: number }[] = [];
+  for (const seg of segs) {
+    pts.push({ x: seg.x, y: seg.y });
+  }
+
+  // Compute cumulative arc lengths
+  const arcLens: number[] = [0];
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i].x - pts[i - 1].x;
+    const dy = pts[i].y - pts[i - 1].y;
+    arcLens.push(arcLens[i - 1] + Math.sqrt(dx * dx + dy * dy));
+  }
+  const totalLen = arcLens[arcLens.length - 1];
+  if (totalLen < 0.01) return;
+
+  // Sample at regular intervals
+  const numSamples = Math.max(20, Math.min(80, Math.ceil(totalLen / 2)));
+  for (let i = 0; i <= numSamples; i++) {
+    const t = i / numSamples;
+    const targetLen = t * totalLen;
+
+    // Find segment containing this arc length
+    let segIdx = 1;
+    while (segIdx < arcLens.length - 1 && arcLens[segIdx] < targetLen) segIdx++;
+
+    const segStart = arcLens[segIdx - 1];
+    const segEnd = arcLens[segIdx];
+    const segT = segEnd > segStart ? (targetLen - segStart) / (segEnd - segStart) : 0;
+
+    const x = pts[segIdx - 1].x + (pts[segIdx].x - pts[segIdx - 1].x) * segT;
+    const y = pts[segIdx - 1].y + (pts[segIdx].y - pts[segIdx - 1].y) * segT;
+
+    // Tangent and normal
+    const dx = pts[segIdx].x - pts[segIdx - 1].x;
+    const dy = pts[segIdx].y - pts[segIdx - 1].y;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    // Normal perpendicular to tangent
+    samplePoints.push({ x, y, nx: -dy / len, ny: dx / len });
+  }
+
+  // Interpolate thickness at each sample point
+  const leftPoints: { x: number; y: number }[] = [];
+  const rightPoints: { x: number; y: number }[] = [];
+
+  for (let i = 0; i <= numSamples; i++) {
+    const t = i / numSamples;
+    const pt = samplePoints[i];
+
+    // Interpolate thickness from profile
+    let leftW = profile.points[0].leftOffset;
+    let rightW = profile.points[0].rightOffset;
+    for (let j = 1; j < profile.points.length; j++) {
+      if (profile.points[j].loc >= t) {
+        const prev = profile.points[j - 1];
+        const next = profile.points[j];
+        const lt = next.loc > prev.loc ? (t - prev.loc) / (next.loc - prev.loc) : 0;
+        leftW = prev.leftOffset + (next.leftOffset - prev.leftOffset) * lt;
+        rightW = prev.rightOffset + (next.rightOffset - prev.rightOffset) * lt;
+        break;
+      }
+      leftW = profile.points[j].leftOffset;
+      rightW = profile.points[j].rightOffset;
+    }
+
+    leftPoints.push({ x: pt.x + pt.nx * leftW, y: pt.y + pt.ny * leftW });
+    rightPoints.push({ x: pt.x - pt.nx * rightW, y: pt.y - pt.ny * rightW });
+  }
+
+  // Build filled outline: left side forward, then right side reversed
+  const outlinePath = new Path2D();
+  outlinePath.moveTo(leftPoints[0].x, leftPoints[0].y);
+  for (let i = 1; i < leftPoints.length; i++) {
+    outlinePath.lineTo(leftPoints[i].x, leftPoints[i].y);
+  }
+  for (let i = rightPoints.length - 1; i >= 0; i--) {
+    outlinePath.lineTo(rightPoints[i].x, rightPoints[i].y);
+  }
+  outlinePath.closePath();
+
+  ctx.fillStyle = fillStyle;
+  ctx.fill(outlinePath);
 }
 
 /** Chain a subset of fill components by endpoint matching and render filled paths. */
