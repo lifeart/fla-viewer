@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import { parseTVG, renderTVGToCanvas, resolveExternalPalette, loadBitmapTiles } from './tvg-parser';
 import type { ExternalPaletteColor } from './tvg-parser';
+import { parseSceneGraph, renderCompositeFrame } from './tpl-compositor';
 import type {
   FLADocument,
   Timeline,
@@ -190,22 +191,55 @@ export async function parseTPL(
   progress('Loading thumbnails...');
   let thumbnails = await loadFrameThumbnails(zip, progress);
 
-  // If no frame thumbnails, try rendering TVG drawings
+  // If no frame thumbnails, try scene graph compositing first, then TVG grid fallback
   if (thumbnails.size === 0) {
-    progress('Parsing TVG drawings...');
-    const tvgRendered = await renderTVGElements(zip, metadata, progress);
-    if (tvgRendered) {
-      thumbnails.set(0, tvgRendered);
-      metadata.totalFrames = 1;
-    } else {
-      // Fall back to element thumbnail PNGs
-      progress('Loading element thumbnails...');
-      const elementThumbs = await loadElementThumbnails(zip, progress);
-      if (elementThumbs.length > 0) {
-        progress('Composing element overview...');
-        const overview = await composeElementOverview(elementThumbs, metadata.width, metadata.height);
-        thumbnails.set(0, overview);
+    // Try scene graph compositing (Phase 4: full node graph evaluation)
+    try {
+      progress('Evaluating scene graph...');
+      const sceneGraph = parseSceneGraph(xmlDoc, metadata.elements);
+
+      if (sceneGraph.rootOutputId) {
+        // Build external palette for color resolution
+        const externalColors: ExternalPaletteColor[] = [];
+        for (const palette of metadata.palettes) {
+          for (const color of palette.colors) {
+            if (color.type === 'solid') {
+              externalColors.push({ r: color.r, g: color.g, b: color.b, a: color.a, id: color.id });
+            }
+          }
+        }
+
+        const composited = await renderCompositeFrame(
+          sceneGraph, 1, zip, externalColors,
+          metadata.width, metadata.height, progress,
+        );
+        if (composited) {
+          const img = await canvasToImage(composited);
+          thumbnails.set(0, img);
+          metadata.totalFrames = 1;
+        }
+      }
+    } catch (_e) {
+      // Scene graph compositing failed, fall through to TVG grid
+    }
+
+    // Fallback: render TVG drawings as a grid
+    if (thumbnails.size === 0) {
+      progress('Parsing TVG drawings...');
+      const tvgRendered = await renderTVGElements(zip, metadata, progress);
+      if (tvgRendered) {
+        thumbnails.set(0, tvgRendered);
         metadata.totalFrames = 1;
+      } else {
+        // Fall back to element thumbnail PNGs
+        progress('Loading element thumbnails...');
+        const elementThumbs = await loadElementThumbnails(zip, progress);
+        if (elementThumbs.length > 0) {
+          progress('Composing element overview...');
+          const overview = await composeElementOverview(elementThumbs, metadata.width, metadata.height);
+          thumbnails.set(0, overview);
+          metadata.totalFrames = 1;
+        }
       }
     }
   }
@@ -765,6 +799,17 @@ async function composeElementOverview(
   ctx.fillText(`Rig Overview — ${count} element drawings`, canvasWidth / 2, canvasHeight - 15);
 
   // Convert canvas to image
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.src = canvas.toDataURL('image/png');
+  });
+}
+
+/**
+ * Convert a canvas to an HTMLImageElement.
+ */
+function canvasToImage(canvas: HTMLCanvasElement): Promise<HTMLImageElement> {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => resolve(img);
