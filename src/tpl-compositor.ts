@@ -437,17 +437,20 @@ export async function renderCompositeFrame(
     inProgress.add(nodeId);
 
     const node = graph.nodes.get(nodeId);
-    if (!node) { evalCache.set(nodeId, null); inProgress.delete(nodeId); return null; }
+    if (!node) {
+      if (depth < 5) console.warn(`[Compositor] Node not found: ${nodeId}`);
+      evalCache.set(nodeId, null); inProgress.delete(nodeId); return null;
+    }
 
     let result: CompositeResult | null = null;
 
     switch (node.type) {
       case 'READ': {
-        if (!node.drawingCol) break;
+        if (!node.drawingCol) { if (depth < 5) console.warn(`[Compositor] READ ${node.name}: no drawingCol`); break; }
         const drawing = resolveDrawing(graph, node.drawingCol, frame);
-        if (!drawing) break;
+        if (!drawing) { if (depth < 5) console.warn(`[Compositor] READ ${node.name}: no exposure for frame ${frame}`); break; }
         const canvas = await loadTVG(drawing.elementId, drawing.drawingName);
-        if (!canvas) break;
+        if (!canvas) { if (depth < 5) console.warn(`[Compositor] READ ${node.name}: TVG load failed for ${drawing.drawingName}`); break; }
         result = { canvas, opacity: 1 };
         break;
       }
