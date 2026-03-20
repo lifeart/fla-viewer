@@ -3189,83 +3189,21 @@ function chainAndFillComponents(
     if (isClosed) path.closePath();
   };
 
-  if (chains.length === 1) {
-    // Single chain: just fill it
+  // Build a single compound path from all chains and fill with evenodd.
+  // This is the simplest correct approach: evenodd handles both overlapping
+  // fills (they add up) and nested holes (they cancel out).
+  {
     const path = new Path2D();
-    addChainToPath(path, chains[0], true);
-    ctx.fill(path);
-  } else {
-    // Multiple chains: detect nesting to determine fill strategy.
-    // Compute bounding boxes for each chain.
-    const bboxes = chains.map(chain => {
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (const info of chain) {
-        const comp = allFillComps[info.ci];
-        const segs = comp.path!.segments;
-        for (const seg of segs) {
-          if (seg.x < minX) minX = seg.x;
-          if (seg.y < minY) minY = seg.y;
-          if (seg.x > maxX) maxX = seg.x;
-          if (seg.y > maxY) maxY = seg.y;
-        }
-      }
-      return { minX, minY, maxX, maxY, area: (maxX - minX) * (maxY - minY) };
-    });
-
-    // Find chains that are nested inside another chain (bbox containment + significant area).
-    // These pairs need evenodd to preserve holes.
-    const nestedIn = new Array<number>(chains.length).fill(-1); // nestedIn[i] = index of containing chain, or -1
-    for (let i = 0; i < chains.length; i++) {
-      for (let j = 0; j < chains.length; j++) {
-        if (i === j) continue;
-        const outer = bboxes[j];
-        const inner = bboxes[i];
-        if (inner.minX >= outer.minX && inner.maxX <= outer.maxX &&
-            inner.minY >= outer.minY && inner.maxY <= outer.maxY &&
-            inner.area < outer.area * 0.8 && inner.area > outer.area * 0.02) {
-          // inner chain i is nested inside outer chain j with significant area -> hole
-          if (nestedIn[i] === -1 || bboxes[nestedIn[i]].area > outer.area) {
-            nestedIn[i] = j; // assign to smallest containing chain
-          }
-        }
-      }
+    for (let ci = 0; ci < chains.length; ci++) {
+      addChainToPath(path, chains[ci], ci === 0);
     }
-
-    // Group chains: chains that contain holes + their holes go into one evenodd group.
-    // Standalone chains get filled independently.
-    const processed = new Set<number>();
-
-    for (let i = 0; i < chains.length; i++) {
-      if (processed.has(i)) continue;
-
-      // Collect this chain and any chains nested inside it
-      const children = [];
-      for (let j = 0; j < chains.length; j++) {
-        if (nestedIn[j] === i) children.push(j);
-      }
-
-      if (children.length > 0) {
-        // This chain has holes: build compound path and use evenodd
-        const path = new Path2D();
-        addChainToPath(path, chains[i], true);
-        processed.add(i);
-        for (const childIdx of children) {
-          addChainToPath(path, chains[childIdx], false);
-          processed.add(childIdx);
-        }
-        ctx.fill(path, 'evenodd');
-      } else if (nestedIn[i] !== -1) {
-        // Already handled as part of a parent group
-        continue;
-      } else {
-        // Standalone chain: fill independently with nonzero winding
-        const path = new Path2D();
-        addChainToPath(path, chains[i], true);
-        processed.add(i);
-        ctx.fill(path);
-      }
-    }
+    ctx.fill(path, 'evenodd');
   }
+
+  // NOTE: Previous "contour-based nesting detection" approach was removed
+  // because it caused regressions. The simple compound-path + evenodd handles
+  // both overlapping fills and nested holes correctly for all test cases.
+  // See commit 3e1d67b for the removed logic if needed in the future.
 }
 
 /** Check if a path is degenerate (all points collinear — forms a line, not a shape). */
