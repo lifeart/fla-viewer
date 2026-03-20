@@ -80,6 +80,7 @@ export type TVGSegment =
 export interface TVGPaletteEntry {
   name: string;
   id: bigint;
+  paletteName: string;
   r: number;
   g: number;
   b: number;
@@ -1219,7 +1220,7 @@ function parsePalette(reader: BinaryReader): TVGPaletteEntry[] {
   reader.readU32LE(); // startMarker 0x79
 
   for (let i = 0; i < colorCount && reader.remaining > 4; i++) {
-    const entry: TVGPaletteEntry = { name: '', id: 0n, r: 0, g: 0, b: 0, a: 255 };
+    const entry: TVGPaletteEntry = { name: '', id: 0n, paletteName: '', r: 0, g: 0, b: 0, a: 255 };
 
     // Read header u16
     if (reader.remaining < 2) break;
@@ -1260,7 +1261,17 @@ function parsePalette(reader: BinaryReader): TVGPaletteEntry[] {
           entry.id = reader.readU64LE();
         }
 
-        // Skip rest (project name etc.)
+        // Source palette name (u32 charCount + UTF-16LE string)
+        const remainingInTCID = idEnd - reader.pos;
+        if (remainingInTCID >= 4) {
+          const palNameCharCount = reader.readU32LE();
+          if (palNameCharCount > 0 && palNameCharCount < 1000 && (idEnd - reader.pos) >= palNameCharCount * 2) {
+            const palNameBytes = reader.readBytes(palNameCharCount * 2);
+            entry.paletteName = decodeUTF16LE(palNameBytes);
+          }
+        }
+
+        // Skip rest
         reader.pos = idEnd;
       } else {
         // Check if this is the terminator (0x79 0x00 0x00 0x00)
@@ -1298,6 +1309,8 @@ function decodeUTF16LE(bytes: Uint8Array): string {
 export interface ExternalPaletteColor {
   r: number; g: number; b: number; a: number;
   id: string; // hex ID string like "0xABC123"
+  name?: string; // color entry name (e.g., "Skin", "Hair")
+  paletteName?: string; // source palette file name without .plt (e.g., "Anna")
 }
 
 /**
@@ -1320,6 +1333,31 @@ export function resolveExternalPalette(
     }
   }
 
+  // Build a name-based lookup: paletteName -> colorName -> ExternalPaletteColor
+  // Used as fallback when ID matching fails
+  const nameMap = new Map<string, Map<string, ExternalPaletteColor>>();
+  for (const color of externalColors) {
+    if (color.paletteName && color.name) {
+      let byName = nameMap.get(color.paletteName);
+      if (!byName) {
+        byName = new Map();
+        nameMap.set(color.paletteName, byName);
+      }
+      // First entry wins (don't overwrite)
+      if (!byName.has(color.name)) {
+        byName.set(color.name, color);
+      }
+    }
+  }
+
+  // Build TPAL id -> entry map for fallback lookup
+  const tpalById = new Map<bigint, TVGPaletteEntry>();
+  for (const entry of drawing.palette) {
+    if (entry.id !== 0n) {
+      tpalById.set(entry.id, entry);
+    }
+  }
+
   for (const layer of drawing.layers) {
     for (const shape of layer.shapes) {
       for (const comp of shape.components) {
@@ -1328,6 +1366,18 @@ export function resolveExternalPalette(
           if (ext) {
             // External palette always overrides (more authoritative than internal TPAL)
             comp.color = { r: ext.r, g: ext.g, b: ext.b, a: ext.a };
+          } else {
+            // Fallback: match by palette name + color entry name
+            const tpalEntry = tpalById.get(comp.colorId);
+            if (tpalEntry && tpalEntry.paletteName && tpalEntry.name) {
+              const byName = nameMap.get(tpalEntry.paletteName);
+              if (byName) {
+                const named = byName.get(tpalEntry.name);
+                if (named) {
+                  comp.color = { r: named.r, g: named.g, b: named.b, a: named.a };
+                }
+              }
+            }
           }
         }
       }
