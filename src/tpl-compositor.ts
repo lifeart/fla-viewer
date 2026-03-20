@@ -26,6 +26,8 @@ export interface SceneGraph {
   /** Field chart dimensions from <metrics> element */
   fieldX: number;
   fieldY: number;
+  /** Unit aspect ratio from <metrics> (unitAspectRatioX / unitAspectRatioY) */
+  unitAspectRatio: number;
 }
 
 export interface SceneNode {
@@ -69,10 +71,13 @@ export interface FunctionKeyframe {
  * Parse the scene graph from scene.xstage XML.
  */
 export function parseSceneGraph(xmlDoc: Document, elements: TPLElement[]): SceneGraph {
-  // Parse <metrics> for field chart dimensions
+  // Parse <metrics> for field chart dimensions and unit aspect ratio
   const metricsEl = xmlDoc.querySelector('metrics');
   const fieldX = parseFloat(metricsEl?.getAttribute('numberOfUnitsX') || '24') || 24;
   const fieldY = parseFloat(metricsEl?.getAttribute('numberOfUnitsY') || '24') || 24;
+  const unitAspectRatioX = parseFloat(metricsEl?.getAttribute('unitAspectRatioX') || '4') || 4;
+  const unitAspectRatioY = parseFloat(metricsEl?.getAttribute('unitAspectRatioY') || '3') || 3;
+  const unitAspectRatio = unitAspectRatioX / unitAspectRatioY;
 
   const graph: SceneGraph = {
     nodes: new Map(),
@@ -83,6 +88,7 @@ export function parseSceneGraph(xmlDoc: Document, elements: TPLElement[]): Scene
     rootOutputId: null,
     fieldX,
     fieldY,
+    unitAspectRatio,
   };
 
   // Parse columns
@@ -351,13 +357,16 @@ function buildTransformMatrix(
   const pivotX = getAttr('pivot.x', 0);
   const pivotY = getAttr('pivot.y', 0);
 
-  // Convert field units to pixels
-  const pixelsPerFieldX = canvasWidth / fieldX;
-  const pixelsPerFieldY = canvasHeight / fieldY;
-  const pixelX = px * pixelsPerFieldX;
-  const pixelY = -py * pixelsPerFieldY; // Y-flip: TVG Y-up → Canvas Y-down
-  const pivotPxX = pivotX * pixelsPerFieldX;
-  const pivotPxY = -pivotY * pixelsPerFieldY;
+  // Convert field units to pixels.
+  // The TVG renderer uses scale = min(canvasW, canvasH) / viewportSize where
+  // viewportSize = fieldY * TVG_UNITS_PER_FIELD. One field = TVG_UNITS_PER_FIELD TVG units.
+  // So pixels per field = TVG_UNITS_PER_FIELD * min(canvasW, canvasH) / (fieldY * TVG_UNITS_PER_FIELD)
+  //                     = min(canvasW, canvasH) / fieldY
+  const pixelsPerField = Math.min(canvasWidth, canvasHeight) / fieldY;
+  const pixelX = px * pixelsPerField;
+  const pixelY = -py * pixelsPerField; // Y-flip: TVG Y-up → Canvas Y-down
+  const pivotPxX = pivotX * pixelsPerField;
+  const pivotPxY = -pivotY * pixelsPerField;
 
   // Build transform: translate to pivot → scale → rotate → skew → translate by pos → translate back from pivot
   const m = new DOMMatrix();
@@ -444,14 +453,15 @@ export async function renderCompositeFrame(
         resolveExternalPalette(drawing, externalColors);
       }
 
-      const viewportSize = element.fieldChart * TVG_UNITS_PER_FIELD;
-      // Scale element render size: element's field chart relative to the project's field chart.
-      // An element with fieldChart=12 on a project with fieldX=24 should render at half canvas width.
-      const fieldRatio = element.fieldChart / graph.fieldX;
-      const elemW = Math.round(canvasWidth * fieldRatio);
-      const elemH = Math.round(canvasHeight * fieldRatio);
-      const canvas = renderTVGToCanvas(drawing, elemW, elemH, viewportSize,
-        artLayerFilter ? { artLayerFilter } : undefined);
+      // Use the PROJECT's field chart as the viewport so all elements share the same
+      // coordinate space. This ensures body parts at different TVG positions appear at
+      // the correct locations on the output canvas, even without PEG transforms.
+      const viewportSize = graph.fieldY * TVG_UNITS_PER_FIELD;
+      const renderOpts: { artLayerFilter?: 'all' | 'color' | 'line' | 'overlay'; centerOnOrigin: boolean } = {
+        centerOnOrigin: true,
+      };
+      if (artLayerFilter) renderOpts.artLayerFilter = artLayerFilter;
+      const canvas = renderTVGToCanvas(drawing, canvasWidth, canvasHeight, viewportSize, renderOpts);
 
       if (canvas && (canvas as any).__bitmapTiles) {
         await loadBitmapTiles(canvas);
@@ -616,9 +626,13 @@ export async function renderCompositeFrame(
       case 'VISIBILITY': {
         const inputs = graph.inEdges.get(nodeId) || [];
         if (inputs.length === 0) break;
-        // Check if visible
-        const softRender = node.attrs.get('softrender');
-        if (softRender && softRender.value === 0) break; // hidden
+        // In Toon Boom, VISIBILITY has oglrender (preview) and softrender (render).
+        // We use oglrender for visibility. Both parsed from "true"/"false" strings where
+        // "true" -> NaN -> 0, "false" -> NaN -> 0. We need the raw XML value.
+        // Since parseFloat("true") and parseFloat("false") both give NaN -> 0,
+        // and the column name is what really drives animated visibility,
+        // we default to visible (pass through) unless a column explicitly says hidden.
+        // For now, always pass through - animated visibility requires column evaluation.
         result = await evaluateNode(inputs[0].sourceId, depth + 1);
         break;
       }
@@ -733,6 +747,13 @@ export async function renderCompositeFrame(
         }
         // Fallback: pass through
         result = child;
+        break;
+      }
+
+      case 'COLOR_CARD': {
+        // Solid color background card - no inputs.
+        // COLOR_CARD stores color as nested XML children which our parser doesn't capture.
+        // Skip for now - the white background is the default canvas clear color anyway.
         break;
       }
 
