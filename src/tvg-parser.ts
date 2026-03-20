@@ -2683,21 +2683,45 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement): Promise<boolea
   };
 
   if (useClipRects) {
-    const totalW = bounds.maxX - bounds.minX;
-    const totalH = bounds.maxY - bounds.minY;
-    const scale = Math.min(width / totalW, height / totalH);
-    const offsetX = (width - totalW * scale) / 2;
-    const offsetY = (height - totalH * scale) / 2;
+    // Composite tiles at native resolution on an intermediate canvas first,
+    // then scale once to output. This prevents sub-pixel gaps between tiles
+    // caused by per-tile floating-point coordinate rounding.
+    const nativeW = Math.round(bounds.maxX - bounds.minX);
+    const nativeH = Math.round(bounds.maxY - bounds.minY);
+    const nativeCanvas = document.createElement('canvas');
+    nativeCanvas.width = nativeW;
+    nativeCanvas.height = nativeH;
+    const nativeCtx = nativeCanvas.getContext('2d')!;
 
     for (const { tile, img } of loaded) {
-      const dx = offsetX + (tile.clipX - bounds.minX) * scale;
-      const dy = offsetY + (tile.clipY - bounds.minY) * scale;
-      const dw = tile.clipW * scale;
-      const dh = tile.clipH * scale;
-      drawTile(img, dx, dy, dw, dh);
+      const dx = tile.clipX - bounds.minX;
+      const dy = tile.clipY - bounds.minY;
+      if (!needsChannelSwap) {
+        nativeCtx.drawImage(img, dx, dy, tile.clipW, tile.clipH);
+      } else {
+        // Channel swap at native resolution
+        const tc = document.createElement('canvas');
+        tc.width = img.width; tc.height = img.height;
+        const tctx = tc.getContext('2d')!;
+        tctx.drawImage(img, 0, 0);
+        const imgData = tctx.getImageData(0, 0, tc.width, tc.height);
+        const d = imgData.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const g = d[i], r = d[i+1], a = d[i+2], b = d[i+3];
+          d[i] = r; d[i+1] = g; d[i+2] = b; d[i+3] = a;
+        }
+        tctx.putImageData(imgData, 0, 0);
+        nativeCtx.drawImage(tc, 0, 0, tc.width, tc.height, dx, dy, tile.clipW, tile.clipH);
+      }
     }
+
+    // Scale the composited result to output size
+    const scale = Math.min(width / nativeW, height / nativeH);
+    const dw = nativeW * scale;
+    const dh = nativeH * scale;
+    ctx.drawImage(nativeCanvas, (width - dw) / 2, (height - dh) / 2, dw, dh);
   } else {
-    // No clip rect info — composite tiles by stacking largest first
+    // No clip rect info — draw the largest tile centered
     const largest = loaded.reduce((a, b) => a.img.width * a.img.height > b.img.width * b.img.height ? a : b);
     const scale = Math.min(width / largest.img.width, height / largest.img.height);
     const dw = largest.img.width * scale;
