@@ -893,15 +893,15 @@ function buildDocument(
   const bitmaps = new Map<string, BitmapItem>();
   const frames: Frame[] = [];
 
-  // If we have thumbnails, use the first one to determine actual render size
+  // Use the thumbnail's native resolution as the document size.
+  // This prevents blurry upscaling (e.g., 320x240 thumbnails scaled to 4096x3112).
+  // The FLA player will fit-to-viewport anyway, so native thumbnail size looks sharp.
   let renderWidth = metadata.width;
   let renderHeight = metadata.height;
   const firstThumb = thumbnails.get(0);
-  if (firstThumb) {
-    // Thumbnails may be smaller than the actual canvas size.
-    // We'll scale them to fit the document dimensions.
-    renderWidth = metadata.width;
-    renderHeight = metadata.height;
+  if (firstThumb && firstThumb.naturalWidth > 0) {
+    renderWidth = firstThumb.naturalWidth;
+    renderHeight = firstThumb.naturalHeight;
   }
 
   for (let i = 0; i < metadata.totalFrames; i++) {
