@@ -64,6 +64,14 @@ export interface TPLExposure {
   frames: { start: number; end: number; drawing: string }[];
 }
 
+export interface TPLGradientStop {
+  pos: number; // 0-100
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
 export interface TPLPaletteColor {
   type: 'solid' | 'gradient';
   name: string;
@@ -72,6 +80,8 @@ export interface TPLPaletteColor {
   g: number;
   b: number;
   a: number;
+  gradientType?: 'linear' | 'radial';
+  stops?: TPLGradientStop[];
 }
 
 export interface TPLPalette {
@@ -523,13 +533,43 @@ function parsePLT(text: string, path: string): TPLPalette | null {
     }
 
     // Gradient format: Gradient  Name  0xID  Linear/Radial
-    const gradMatch = line.match(/^Gradient\s+(\S+)\s+(0x\w+)/);
+    // Followed by { pos R G B A, ... } on subsequent lines
+    const gradMatch = line.match(/^Gradient\s+(\S+)\s+(0x\w+)\s+(Linear|Radial)/i);
     if (gradMatch) {
+      const gradientType = gradMatch[3].toLowerCase() === 'radial' ? 'radial' as const : 'linear' as const;
+      const stops: TPLGradientStop[] = [];
+
+      // Parse stop lines inside { ... } block
+      for (let j = i + 1; j < lines.length; j++) {
+        const stopLine = lines[j].trim();
+        if (stopLine.startsWith('{')) continue; // opening brace line
+        if (stopLine.startsWith('}') || stopLine === '') break; // closing brace or blank
+
+        // Stop format: "pos R G B A" (possibly with leading { or trailing , or })
+        const cleaned = stopLine.replace(/[{},]/g, '').trim();
+        const stopMatch = cleaned.match(/^\s*([\d.]+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
+        if (stopMatch) {
+          stops.push({
+            pos: parseFloat(stopMatch[1]),
+            r: parseInt(stopMatch[2], 10),
+            g: parseInt(stopMatch[3], 10),
+            b: parseInt(stopMatch[4], 10),
+            a: parseInt(stopMatch[5], 10),
+          });
+        }
+
+        if (stopLine.includes('}')) break; // end of block
+      }
+
+      // Use the first stop color as the fallback solid color
+      const firstStop = stops.length > 0 ? stops[0] : { r: 128, g: 128, b: 128, a: 255 };
       colors.push({
         type: 'gradient',
         name: gradMatch[1],
         id: gradMatch[2],
-        r: 128, g: 128, b: 128, a: 255, // placeholder
+        r: firstStop.r, g: firstStop.g, b: firstStop.b, a: firstStop.a,
+        gradientType,
+        stops,
       });
     }
   }
@@ -559,6 +599,13 @@ async function renderTVGElements(
     for (const color of palette.colors) {
       if (color.type === 'solid') {
         externalColors.push({ r: color.r, g: color.g, b: color.b, a: color.a, id: color.id, name: color.name, paletteName: palette.name });
+      } else if (color.type === 'gradient' && color.stops && color.stops.length > 0) {
+        externalColors.push({
+          r: color.r, g: color.g, b: color.b, a: color.a,
+          id: color.id, name: color.name, paletteName: palette.name,
+          gradientType: color.gradientType,
+          stops: color.stops,
+        });
       }
     }
   }
