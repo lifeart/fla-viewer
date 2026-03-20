@@ -1452,18 +1452,29 @@ export function resolveExternalPalette(
             // Fallback: match by palette name + color entry name
             const tpalEntry = tpalById.get(comp.colorId);
             if (tpalEntry && tpalEntry.paletteName && tpalEntry.name) {
-              // Try fuzzy palette name matching (exact -> case-insensitive -> word overlap)
-              const byName = fuzzyFindPalette(tpalEntry.paletteName);
-              if (byName) {
-                const named = byName.get(tpalEntry.name);
-                if (named) {
-                  comp.color = { r: named.r, g: named.g, b: named.b, a: named.a };
-                }
-              } else {
-                // Last resort: match color name across ALL palettes
-                const globalMatch = globalNameMap.get(tpalEntry.name);
-                if (globalMatch) {
-                  comp.color = { r: globalMatch.r, g: globalMatch.g, b: globalMatch.b, a: globalMatch.a };
+              // Guard: if the TPAL entry already has a valid non-default color
+              // (a > 0 and not pure black), the inline color is authoritative for
+              // this element.  Name-based fuzzy/global matching can pull in a
+              // colour from a *different* palette namespace with the same name
+              // but different RGB values, so skip it when the TPAL colour is
+              // already meaningful.
+              const tpalHasColor = tpalEntry.a > 0 &&
+                !(tpalEntry.r === 0 && tpalEntry.g === 0 && tpalEntry.b === 0);
+
+              if (!tpalHasColor) {
+                // Try fuzzy palette name matching (exact -> case-insensitive -> word overlap)
+                const byName = fuzzyFindPalette(tpalEntry.paletteName);
+                if (byName) {
+                  const named = byName.get(tpalEntry.name);
+                  if (named) {
+                    comp.color = { r: named.r, g: named.g, b: named.b, a: named.a };
+                  }
+                } else {
+                  // Last resort: match color name across ALL palettes
+                  const globalMatch = globalNameMap.get(tpalEntry.name);
+                  if (globalMatch) {
+                    comp.color = { r: globalMatch.r, g: globalMatch.g, b: globalMatch.b, a: globalMatch.a };
+                  }
                 }
               }
             }
