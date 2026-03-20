@@ -1516,6 +1516,8 @@ export interface TVGRenderOptions {
   /** Supersampling factor for antialiasing (e.g., 2 for 2x supersampling).
    *  Renders internally at width*SS x height*SS then downsamples. */
   supersample?: number;
+  /** Skip flood-fill clipping for faster rendering (e.g., grid thumbnails). */
+  skipClipping?: boolean;
 }
 
 export function renderTVGToCanvas(
@@ -1701,6 +1703,9 @@ export function renderTVGToCanvas(
     }
   }
 
+  // Skip flood-fill clipping if requested (fast mode for grid thumbnails)
+  const skipClipping = options?.skipClipping ?? false;
+
   // Check if drawing has stroke components for clipping.
   // Flood-fill clipping requires boundary strokes (ct=2 without explicit strokeWidth)
   // which Toon Boom uses to define sealed fill regions. Drawings with only pencil
@@ -1722,7 +1727,7 @@ export function renderTVGToCanvas(
     }
   }
 
-  if (hasStrokes && hasBoundaryStrokes) {
+  if (hasStrokes && hasBoundaryStrokes && !skipClipping) {
     // Pass 2: Dilated flood-fill to clip fills to stroke boundaries
     // Uses 2x resolution mask (Approach C) for better sub-pixel gap closure,
     // with adaptive dilation radius (Approach A) based on stroke density.

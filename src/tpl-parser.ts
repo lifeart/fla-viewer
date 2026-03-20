@@ -187,93 +187,52 @@ export async function parseTPL(
   metadata.palettes = await loadPalettes(zip);
   metadata.paletteNames = metadata.palettes.map(p => p.name);
 
-  // Load thumbnail images
-  progress('Loading thumbnails...');
-  let thumbnails = await loadFrameThumbnails(zip, progress);
+  // Always render TVG vector art as the primary display.
+  // Pre-rendered frame thumbnails are used as fallback for animation playback
+  // when per-frame compositor rendering isn't available yet.
+  let thumbnails = new Map<number, HTMLImageElement>();
 
-  // If no frame thumbnails, try scene graph compositing first, then TVG grid fallback
-  if (thumbnails.size === 0) {
-    // Try scene graph compositing (Phase 4: full node graph evaluation)
-    try {
-      progress('Evaluating scene graph...');
-      const sceneGraph = parseSceneGraph(xmlDoc, metadata.elements);
+  // Step 1: Render TVG vector art as the primary display (frame 0)
+  progress('Rendering TVG vector art...');
+  const tvgRendered = await renderTVGElements(zip, metadata, progress);
+  if (tvgRendered) {
+    thumbnails.set(0, tvgRendered);
+  }
 
-      if (sceneGraph.rootOutputId) {
-        // Build external palette for color resolution
-        const externalColors: ExternalPaletteColor[] = [];
-        for (const palette of metadata.palettes) {
-          for (const color of palette.colors) {
-            if (color.type === 'solid') {
-              externalColors.push({ r: color.r, g: color.g, b: color.b, a: color.a, id: color.id, name: color.name, paletteName: palette.name });
-            }
-          }
-        }
-
-        // Cap compositor resolution to avoid excessive memory/CPU usage
-        // while preserving the aspect ratio
-        const maxDim = 1920;
-        let compW = metadata.width;
-        let compH = metadata.height;
-        if (compW > maxDim || compH > maxDim) {
-          const scale = maxDim / Math.max(compW, compH);
-          compW = Math.round(compW * scale);
-          compH = Math.round(compH * scale);
-        }
-
-        const composited = await renderCompositeFrame(
-          sceneGraph, 1, zip, externalColors,
-          compW, compH, progress,
-        );
-        if (composited) {
-          // Verify compositor canvas has actual visible content before using it.
-          // If empty, fall through to TVG grid rendering which always works.
-          const compCtx = composited.getContext('2d');
-          let hasContent = false;
-          if (compCtx) {
-            // Sample across the canvas (not just top-left corner)
-            for (const [sx, sy] of [[0, 0], [composited.width / 2, composited.height / 2], [composited.width / 4, composited.height * 3 / 4]]) {
-              const checkData = compCtx.getImageData(Math.floor(sx), Math.floor(sy), Math.min(100, composited.width - Math.floor(sx)), Math.min(100, composited.height - Math.floor(sy)));
-              for (let i = 0; i < checkData.data.length; i += 4) {
-                if (checkData.data[i + 3] > 0 && (checkData.data[i] < 250 || checkData.data[i + 1] < 250 || checkData.data[i + 2] < 250)) {
-                  hasContent = true; break;
-                }
-              }
-              if (hasContent) break;
-            }
-          }
-          if (hasContent) {
-            const img = await canvasToImage(composited);
-            thumbnails.set(0, img);
-            metadata.totalFrames = 1;
-          }
-          // If no content, fall through to TVG grid
+  // Step 2: Load pre-rendered frame thumbnails for animation playback (frames 1+)
+  progress('Loading frame thumbnails...');
+  const frameThumbs = await loadFrameThumbnails(zip, progress);
+  if (frameThumbs.size > 0) {
+    // Use frame thumbnails for animation frames.
+    // If we have a TVG render for frame 0, keep it as the first frame
+    // and add the pre-rendered thumbnails for the remaining frames.
+    if (thumbnails.has(0)) {
+      // Replace frame 0 with our vector render, use pre-rendered for rest
+      for (const [frameIdx, img] of frameThumbs) {
+        if (frameIdx > 0 || !thumbnails.has(0)) {
+          thumbnails.set(frameIdx, img);
         }
       }
-    } catch (_e) {
-      // Scene graph compositing failed, fall through to TVG grid
+      // Set total frames to match the animation length
+      metadata.totalFrames = Math.max(metadata.totalFrames, frameThumbs.size);
+    } else {
+      // No TVG render succeeded, use all pre-rendered thumbnails
+      thumbnails = frameThumbs;
     }
+  } else if (thumbnails.size === 0) {
+    // No frame thumbs either — try element thumbnail PNGs
+    progress('Loading element thumbnails...');
+    const elementThumbs = await loadElementThumbnails(zip, progress);
+    if (elementThumbs.length > 0) {
+      progress('Composing element overview...');
+      const overview = await composeElementOverview(elementThumbs, metadata.width, metadata.height);
+      thumbnails.set(0, overview);
+    }
+  }
 
-    // Fallback: render TVG drawings as a grid
-    if (thumbnails.size === 0) {
-      progress('Rendering TVG elements...');
-      console.log('[TPL] Compositor produced no content, falling back to TVG grid');
-      const tvgRendered = await renderTVGElements(zip, metadata, progress);
-      console.log('[TPL] TVG grid result:', tvgRendered ? 'success' : 'null');
-      if (tvgRendered) {
-        thumbnails.set(0, tvgRendered);
-        metadata.totalFrames = 1;
-      } else {
-        // Fall back to element thumbnail PNGs
-        progress('Loading element thumbnails...');
-        const elementThumbs = await loadElementThumbnails(zip, progress);
-        if (elementThumbs.length > 0) {
-          progress('Composing element overview...');
-          const overview = await composeElementOverview(elementThumbs, metadata.width, metadata.height);
-          thumbnails.set(0, overview);
-          metadata.totalFrames = 1;
-        }
-      }
-    }
+  // Ensure at least 1 frame
+  if (thumbnails.size > 0 && metadata.totalFrames < 1) {
+    metadata.totalFrames = thumbnails.size;
   }
 
   // Build FLADocument from thumbnails
@@ -633,7 +592,7 @@ async function renderTVGElements(
           viewportSize = elem.fieldChart * TVG_UNITS_PER_FIELD;
         }
       }
-      const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize, viewportSize);
+      const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize, viewportSize, { skipClipping: true });
       if (canvas) {
         // Load bitmap tiles asynchronously if present
         if ((canvas as any).__bitmapTiles) {
