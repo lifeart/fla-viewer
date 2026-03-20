@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html><head><title>Debug Element</title></head>
+<body style="background:#fff;margin:20px;">
+<div id="out" style="display:flex;gap:10px;"></div>
+<script type="module">
+import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
+import { parseTVG, resolveExternalPalette, renderTVGToCanvas } from './src/tvg-parser.ts';
+
+const ZIP = './sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
+const ELEMENT = new URLSearchParams(location.search).get('e') || 'color';
+const DRAWING = new URLSearchParams(location.search).get('d') || '1';
+const SIZE = 320;
+
+async function main() {
+  const zip = await JSZip.loadAsync(await (await fetch(ZIP)).arrayBuffer());
+  const prefix = Object.keys(zip.files).find(f => f.includes(ELEMENT + '/'))?.split(ELEMENT)[0] + ELEMENT + '/';
+  const palFiles = Object.keys(zip.files).filter(f => f.startsWith(prefix + 'palette-library/') && f.endsWith('.plt'));
+  const pals = {};
+  for (const pf of palFiles) {
+    pals[pf.split('/').pop().replace('.plt','')] = await zip.file(pf).async('text');
+  }
+
+  const drawingName = ELEMENT + '-' + DRAWING;
+  const tvg = zip.file(prefix + drawingName + '.tvg');
+  if (!tvg) { document.getElementById('out').textContent = 'Not found: ' + drawingName; document.title = 'DONE'; return; }
+
+  const d = parseTVG(await tvg.async('arraybuffer'));
+  for (const [n,x] of Object.entries(pals)) resolveExternalPalette(d, x, n);
+
+  const thumb = zip.file(prefix + '.thumbnails/.' + drawingName + '.tvg.png');
+  const out = document.getElementById('out');
+
+  if (thumb) {
+    const tBuf = await thumb.async('arraybuffer');
+    const img = new Image();
+    img.src = URL.createObjectURL(new Blob([tBuf], {type:'image/png'}));
+    img.style.width = SIZE + 'px'; img.style.height = SIZE + 'px';
+    img.style.border = '1px solid #ccc';
+    const div = document.createElement('div');
+    div.innerHTML = '<h3>Reference</h3>';
+    div.appendChild(img);
+    out.appendChild(div);
+  }
+
+  const canvas = renderTVGToCanvas(d, SIZE, SIZE, 336);
+  if (canvas) {
+    canvas.style.width = SIZE + 'px'; canvas.style.height = SIZE + 'px';
+    canvas.style.border = '1px solid #ccc';
+    const div = document.createElement('div');
+    div.innerHTML = '<h3>Our Render</h3>';
+    div.appendChild(canvas);
+    out.appendChild(div);
+  }
+
+  document.title = 'DONE';
+}
+main().catch(e => { document.title = 'DONE'; console.error(e); });
+</script>
+</body></html>

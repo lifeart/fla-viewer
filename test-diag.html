@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head><title>TVG Diagnostic</title></head>
+<body>
+<pre id="out">Loading...</pre>
+<canvas id="c1" width="640" height="640" style="border:1px solid #ccc"></canvas>
+<canvas id="c2" width="640" height="640" style="border:1px solid #ccc"></canvas>
+<script type="module">
+import JSZip from 'jszip';
+import { parseTVG, renderTVGToCanvas, resolveExternalPalette } from './src/tvg-parser.ts';
+
+const ZIP_PATH = 'sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
+const TARGET = 'F-Hand_OL_1_F-12';
+
+async function main() {
+  const resp = await fetch(ZIP_PATH);
+  const zip = await JSZip.loadAsync(await resp.arrayBuffer());
+
+  // Load palettes
+  const palettes = [];
+  const pltPaths = [];
+  zip.forEach(p => { if (p.endsWith('.plt') && p.includes('palette-library/')) pltPaths.push(p); });
+  for (const p of pltPaths) {
+    const text = await zip.file(p).async('text');
+    for (const line of text.split('\n')) {
+      const m = line.match(/^Solid\s+(\S+)\s+(0x\w+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
+      if (m) palettes.push({ r: +m[3], g: +m[4], b: +m[5], a: +m[6], id: m[2] });
+    }
+  }
+
+  const tvgFiles = [];
+  zip.forEach(p => { if (p.endsWith('.tvg')) tvgFiles.push(p); });
+  const tvgPath = tvgFiles.find(p => p.includes(TARGET + '.tvg'));
+  if (!tvgPath) { document.getElementById('out').textContent = 'NOT FOUND'; return; }
+
+  const buf = await zip.file(tvgPath).async('arraybuffer');
+  const drawing = parseTVG(buf);
+  resolveExternalPalette(drawing, palettes);
+
+  // Dump structure
+  const lines = [];
+  lines.push(`Drawing: ${TARGET}`);
+  lines.push(`Layers: ${drawing.layers.length}`);
+  for (const layer of drawing.layers) {
+    lines.push(`\n  Layer: ${layer.type} (${layer.shapes.length} shapes)`);
+    for (let si = 0; si < layer.shapes.length; si++) {
+      const shape = layer.shapes[si];
+      lines.push(`    Shape ${si}: type=${shape.shapeType}, ${shape.components.length} components`);
+      for (let ci = 0; ci < shape.components.length; ci++) {
+        const comp = shape.components[ci];
+        const segs = comp.path ? comp.path.segments.length : 0;
+        const color = comp.color ? `rgba(${comp.color.r},${comp.color.g},${comp.color.b},${comp.color.a})` : 'none';
+        const sw = comp.strokeWidth;
+        let bbox = '';
+        if (comp.path && segs > 0) {
+          let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+          for (const s of comp.path.segments) {
+            minX=Math.min(minX,s.x); minY=Math.min(minY,s.y);
+            maxX=Math.max(maxX,s.x); maxY=Math.max(maxY,s.y);
+          }
+          bbox = ` bbox=(${minX.toFixed(1)},${minY.toFixed(1)})-(${maxX.toFixed(1)},${maxY.toFixed(1)})`;
+        }
+        const first = comp.path && segs > 0 ? `start=(${comp.path.segments[0].x.toFixed(1)},${comp.path.segments[0].y.toFixed(1)})` : '';
+        const last = comp.path && segs > 0 ? `end=(${comp.path.segments[segs-1].x.toFixed(1)},${comp.path.segments[segs-1].y.toFixed(1)})` : '';
+        const xf = comp.transform ? `xf=[${comp.transform.a.toFixed(3)},${comp.transform.b.toFixed(3)},${comp.transform.c.toFixed(3)},${comp.transform.d.toFixed(3)},tx=${comp.transform.tx.toFixed(1)},ty=${comp.transform.ty.toFixed(1)}]` : 'xf=none';
+        const segTypes = comp.path ? comp.path.segments.map(s => s.type).join(',') : '';
+        const segDetail = comp.path ? comp.path.segments.map(s => {
+          if (s.type === 'C') return `C(cp1=${s.c1x.toFixed(1)},${s.c1y.toFixed(1)} cp2=${s.c2x.toFixed(1)},${s.c2y.toFixed(1)} → ${s.x.toFixed(1)},${s.y.toFixed(1)})`;
+          if (s.type === 'Q') return `Q(cp=${s.cx.toFixed(1)},${s.cy.toFixed(1)} → ${s.x.toFixed(1)},${s.y.toFixed(1)})`;
+          return `${s.type}(${s.x.toFixed(1)},${s.y.toFixed(1)})`;
+        }).join(' ') : '';
+        lines.push(`      Comp ${ci}: ct=${comp.componentType} segs=${segs} types=[${segTypes}] color=${color} sw=${sw} ${xf}${bbox}\n        ${segDetail}`);
+      }
+    }
+  }
+  document.getElementById('out').textContent = lines.join('\n');
+
+  // Render fills only (no strokes) on c1
+  const c1 = document.getElementById('c1');
+  const ctx1 = c1.getContext('2d');
+  // Compute bounds
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for (const l of drawing.layers) for (const s of l.shapes) for (const c of s.components) if (c.path)
+    for (const seg of c.path.segments) { minX=Math.min(minX,seg.x); minY=Math.min(minY,seg.y); maxX=Math.max(maxX,seg.x); maxY=Math.max(maxY,seg.y); }
+  const cX=(minX+maxX)/2, cY=(minY+maxY)/2;
+  const scale = 640/336;
+  const offX = 320 - cX*scale, offY = 320 + cY*scale;
+
+  // Draw each fill component as a separate colored shape
+  const colors = ['#ff0000','#00ff00','#0000ff','#ff00ff','#ffff00','#00ffff',
+                  '#ff8800','#8800ff','#0088ff','#ff0088','#88ff00','#00ff88',
+                  '#880000','#008800','#000088','#888800','#880088','#008888'];
+  let compIdx = 0;
+  ctx1.setTransform(scale, 0, 0, -scale, offX, offY);
+  for (const layer of drawing.layers) {
+    for (const shape of layer.shapes) {
+      for (const comp of shape.components) {
+        if (comp.componentType !== 0 || !comp.path || comp.path.segments.length <= 1) continue;
+        const path = new Path2D();
+        for (let i = 0; i < comp.path.segments.length; i++) {
+          const seg = comp.path.segments[i];
+          if (i === 0) path.moveTo(seg.x, seg.y);
+          else if (seg.type === 'C') path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
+          else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y);
+          else path.lineTo(seg.x, seg.y);
+        }
+        ctx1.fillStyle = colors[compIdx % colors.length] + '40';
+        ctx1.strokeStyle = colors[compIdx % colors.length];
+        ctx1.lineWidth = 0.5;
+        ctx1.fill(path);
+        ctx1.stroke(path);
+        // Label
+        const seg0 = comp.path.segments[0];
+        ctx1.save();
+        ctx1.setTransform(1,0,0,1,0,0);
+        const px = seg0.x * scale + offX;
+        const py = -seg0.y * scale + offY;
+        ctx1.fillStyle = colors[compIdx % colors.length];
+        ctx1.font = '10px monospace';
+        ctx1.fillText(`${layer.type[0]}${compIdx}`, px, py);
+        ctx1.restore();
+        ctx1.setTransform(scale, 0, 0, -scale, offX, offY);
+        compIdx++;
+      }
+    }
+  }
+
+  // Draw strokes only on c2
+  const c2 = document.getElementById('c2');
+  const ctx2 = c2.getContext('2d');
+  ctx2.setTransform(scale, 0, 0, -scale, offX, offY);
+  compIdx = 0;
+  for (const layer of drawing.layers) {
+    for (const shape of layer.shapes) {
+      for (const comp of shape.components) {
+        if (comp.componentType !== 2 && comp.componentType !== 4) continue;
+        if (!comp.path || comp.path.segments.length === 0) continue;
+        const path = new Path2D();
+        for (let i = 0; i < comp.path.segments.length; i++) {
+          const seg = comp.path.segments[i];
+          if (i === 0) path.moveTo(seg.x, seg.y);
+          else if (seg.type === 'C') path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
+          else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y);
+          else path.lineTo(seg.x, seg.y);
+        }
+        const color = comp.color ? `rgb(${comp.color.r},${comp.color.g},${comp.color.b})` : '#000';
+        ctx2.strokeStyle = color;
+        let sw = comp.strokeWidth;
+        if (sw === null) {
+          if (comp.componentType === 4) sw = 1.0;
+          else { ctx2.strokeStyle = '#ff000080'; sw = 0.5; } // invisible boundary in red
+        }
+        ctx2.lineWidth = sw;
+        ctx2.lineCap = 'round';
+        ctx2.lineJoin = 'round';
+        ctx2.stroke(path);
+        compIdx++;
+      }
+    }
+  }
+}
+main().catch(e => { document.getElementById('out').textContent = 'Error: ' + e.message; console.error(e); });
+</script>
+</body>
+</html>

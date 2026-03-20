@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>TVG Viewport Calibration</title>
+  <style>
+    body { font-family: sans-serif; background: #eee; padding: 20px; }
+    .pair { display: inline-block; margin: 10px; background: white; padding: 10px;
+            border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,.2); vertical-align: top; }
+    .pair canvas { border: 1px solid #ccc; display: inline-block; }
+    .pair img { width: 320px; height: 320px; border: 1px solid #ccc; display: inline-block; }
+    .labels { display: flex; gap: 5px; }
+    .labels span { flex: 1; text-align: center; font-size: 11px; color: #666; }
+    h3 { margin: 5px 0; font-size: 13px; }
+    #info { font-family: monospace; font-size: 12px; margin-top: 10px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>TVG Viewport Calibration (fieldChart=12, 28 units/field, viewport=336)</h1>
+  <div id="info">Loading...</div>
+  <div id="output"></div>
+
+  <script type="module">
+    import JSZip from 'jszip';
+    import { parseTVG, renderTVGToCanvas, resolveExternalPalette, loadBitmapTiles } from './src/tvg-parser.ts';
+
+    const ZIP_PATH = 'sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
+    const UNITS_PER_FIELD = 28;
+    const FIELD_CHART = 12;
+    const VIEWPORT_SIZE = FIELD_CHART * UNITS_PER_FIELD; // 336
+
+    // Drawings with element-embedded thumbnails for comparison
+    const DRAWINGS = [
+      { tvgName: 'F-Hand_OL_1_F-11', thumbPath: 'elements/F-Hand_OL_1_F/.thumbnails/.F-Hand_OL_1_F-11.tvg.png' },
+      { tvgName: 'F-Hand_OL_1_F-23', thumbPath: 'elements/F-Hand_OL_1_F/.thumbnails/.F-Hand_OL_1_F-23.tvg.png' },
+      { tvgName: 'F-Hand_OL_1_F-26', thumbPath: 'elements/F-Hand_OL_1_F/.thumbnails/.F-Hand_OL_1_F-26.tvg.png' },
+      { tvgName: 'F-Hand_OL_1_F-21', thumbPath: 'elements/F-Hand_OL_1_F/.thumbnails/.F-Hand_OL_1_F-21.tvg.png' },
+      { tvgName: 'F-Hand_OL_1_F-12', thumbPath: 'elements/F-Hand_OL_1_F/.thumbnails/.F-Hand_OL_1_F-12.tvg.png' },
+      { tvgName: 'F-Hand_OL_1_F-14', thumbPath: 'elements/F-Hand_OL_1_F/.thumbnails/.F-Hand_OL_1_F-14.tvg.png' },
+      { tvgName: 'F-Hand_OL_1_F-24', thumbPath: 'elements/F-Hand_OL_1_F/.thumbnails/.F-Hand_OL_1_F-24.tvg.png' },
+      { tvgName: 'Number_Body-1', thumbPath: 'elements/Number_Body/.thumbnails/.Number_Body-1.tvg.png' },
+      { tvgName: 'F_3_symbol-1', thumbPath: 'elements/F_3_symbol/.thumbnails/.F_3_symbol-1.tvg.png' },
+      { tvgName: 'F_3_symbol-2', thumbPath: 'elements/F_3_symbol/.thumbnails/.F_3_symbol-2.tvg.png' },
+      { tvgName: 'Lipsync_MC_HNDL_1-3', thumbPath: 'elements/MC_Emotions/.thumbnails/.Lipsync_MC_HNDL_1-3.tvg.png' },
+    ];
+
+    async function main() {
+      const resp = await fetch(ZIP_PATH);
+      const buf = await resp.arrayBuffer();
+      const zip = await JSZip.loadAsync(buf);
+
+      // Load palettes
+      const palettes = [];
+      const pltPaths = [];
+      zip.forEach((path) => { if (path.endsWith('.plt') && path.includes('palette-library/')) pltPaths.push(path); });
+      for (const path of pltPaths) {
+        const text = await zip.file(path).async('text');
+        for (const line of text.split('\n')) {
+          const m = line.match(/^Solid\s+(\S+)\s+(0x\w+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
+          if (m) palettes.push({ r: +m[3], g: +m[4], b: +m[5], a: +m[6], id: m[2] });
+        }
+      }
+
+      // Find all TVG files
+      const tvgFiles = [];
+      zip.forEach((p) => { if (p.endsWith('.tvg')) tvgFiles.push(p); });
+
+      // Find ZIP prefix
+      const prefix = tvgFiles[0].substring(0, tvgFiles[0].indexOf('elements/'));
+
+      const output = document.getElementById('output');
+      const info = [];
+      output.innerHTML = '';
+
+      for (const d of DRAWINGS) {
+        const tvgPath = tvgFiles.find(p => p.includes(d.tvgName + '.tvg'));
+        if (!tvgPath) { info.push(d.tvgName + ': NOT FOUND'); continue; }
+
+        const tvgBuf = await zip.file(tvgPath).async('arraybuffer');
+        const drawing = parseTVG(tvgBuf);
+        if (palettes.length > 0) resolveExternalPalette(drawing, palettes);
+
+        // Render with field chart viewport
+        const canvas = renderTVGToCanvas(drawing, 320, 320, VIEWPORT_SIZE);
+        if (!canvas) { info.push(d.tvgName + ': render failed'); continue; }
+        if (canvas.__bitmapTiles) await loadBitmapTiles(canvas);
+
+        // Load embedded thumbnail
+        const thumbFile = zip.file(prefix + d.thumbPath);
+        let thumbUrl = '';
+        if (thumbFile) {
+          const blob = new Blob([await thumbFile.async('arraybuffer')], { type: 'image/png' });
+          thumbUrl = URL.createObjectURL(blob);
+        }
+
+        // Create comparison pair
+        const pair = document.createElement('div');
+        pair.className = 'pair';
+        pair.innerHTML = `<h3>${d.tvgName}</h3>`;
+
+        const row = document.createElement('div');
+        if (thumbUrl) {
+          const img = document.createElement('img');
+          img.src = thumbUrl;
+          row.appendChild(img);
+        }
+        // Override canvas CSS size to match reference
+        canvas.style.width = '320px';
+        canvas.style.height = '320px';
+        row.appendChild(canvas);
+        pair.appendChild(row);
+
+        const labels = document.createElement('div');
+        labels.className = 'labels';
+        labels.innerHTML = '<span>Toon Boom</span><span>Our Render</span>';
+        pair.appendChild(labels);
+
+        output.appendChild(pair);
+
+        // Compute bounds info
+        let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+        for (const l of drawing.layers) for (const s of l.shapes) for (const c of s.components) if (c.path)
+          for (const seg of c.path.segments) {
+            minX=Math.min(minX,seg.x); minY=Math.min(minY,seg.y);
+            maxX=Math.max(maxX,seg.x); maxY=Math.max(maxY,seg.y);
+          }
+        const w = maxX-minX, h = maxY-minY;
+        info.push(`${d.tvgName}: ${w.toFixed(0)}×${h.toFixed(0)} TVG units, viewport=${VIEWPORT_SIZE}`);
+      }
+
+      document.getElementById('info').textContent = info.join('\n');
+    }
+
+    main().catch(e => {
+      document.getElementById('info').textContent = 'Error: ' + e.message;
+      console.error(e);
+    });
+  </script>
+</body>
+</html>

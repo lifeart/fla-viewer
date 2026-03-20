@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html><head>
+<title>Compare: Reference vs Render</title>
+<style>
+  body { margin: 0; padding: 10px; background: #1a1a1a; color: #eee; font-family: monospace; }
+  #controls { margin-bottom: 10px; }
+  #controls select, #controls button { font-size: 14px; padding: 4px 8px; }
+  #grid { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pair { display: flex; flex-direction: column; align-items: center; border: 1px solid #333; padding: 4px; border-radius: 4px; }
+  .pair.bad { border-color: #f44; }
+  .pair.ok { border-color: #fa4; }
+  .pair.good { border-color: #4a4; }
+  .images { display: flex; gap: 2px; }
+  .images canvas { image-rendering: pixelated; width: 160px; height: 160px; background: #fff; }
+  .label { font-size: 11px; margin-top: 2px; }
+  .score { font-weight: bold; }
+  .bad .score { color: #f66; }
+  .ok .score { color: #fa6; }
+  .good .score { color: #6c6; }
+  #status { margin-bottom: 8px; font-size: 13px; color: #aaa; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <b>Sort:</b>
+  <select id="sortBy">
+    <option value="score-asc">Worst first</option>
+    <option value="score-desc">Best first</option>
+    <option value="name">By name</option>
+  </select>
+  <b style="margin-left:12px">Show:</b>
+  <select id="filterBy">
+    <option value="all">All</option>
+    <option value="bad">Below 95%</option>
+    <option value="ok">Below 98%</option>
+    <option value="vector">Vector only</option>
+  </select>
+</div>
+<div id="status">Loading...</div>
+<div id="grid"></div>
+
+<script type="module">
+import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
+import { parseTVG, resolveExternalPalette, renderTVGToCanvas, loadBitmapTiles } from './src/tvg-parser.ts';
+
+const SIZE = 160, TOL = 50;
+const ZIP = './sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
+
+const results = [];
+
+async function main() {
+  const zip = await JSZip.loadAsync(await (await fetch(ZIP)).arrayBuffer());
+  const thumbFiles = Object.keys(zip.files).filter(f => f.includes('.thumbnails/') && f.endsWith('.tvg.png'));
+  const palFiles = Object.keys(zip.files).filter(f => f.includes('palette-library/') && f.endsWith('.plt'));
+  const palCache = {};
+  const statusEl = document.getElementById('status');
+
+  for (let ti = 0; ti < thumbFiles.length; ti++) {
+    const tp = thumbFiles[ti];
+    const parts = tp.split('/');
+    const tn = parts.pop().replace(/^\./, '').replace('.tvg.png', '');
+    const ed = parts.slice(0, -1).join('/') + '/';
+    const tf = zip.file(ed + tn + '.tvg');
+    if (!tf) continue;
+
+    statusEl.textContent = `Loading ${ti + 1}/${thumbFiles.length}: ${tn}...`;
+
+    const pals = {};
+    for (const pf of palFiles.filter(f => f.startsWith(ed))) {
+      const n = pf.split('/').pop().replace('.plt', '');
+      if (!palCache[pf]) palCache[pf] = await zip.file(pf).async('text');
+      pals[n] = palCache[pf];
+    }
+
+    try {
+      const d = parseTVG(await tf.async('arraybuffer'));
+      for (const [n, x] of Object.entries(pals)) resolveExternalPalette(d, x, n);
+      const c = renderTVGToCanvas(d, SIZE, SIZE, 336, { supersample: 2 });
+      if (!c) continue;
+      await loadBitmapTiles(c);
+
+      const tb = await zip.file(tp).async('arraybuffer');
+      const img = await new Promise(r => {
+        const i = new Image();
+        i.onload = () => r(i); i.onerror = () => r(null);
+        i.src = URL.createObjectURL(new Blob([tb], { type: 'image/png' }));
+      });
+      if (!img) continue;
+
+      // Reference canvas
+      const refCanvas = document.createElement('canvas');
+      refCanvas.width = SIZE; refCanvas.height = SIZE;
+      const rc = refCanvas.getContext('2d');
+      rc.fillStyle = '#fff'; rc.fillRect(0, 0, SIZE, SIZE);
+      rc.drawImage(img, 0, 0, SIZE, SIZE);
+      const rd = rc.getImageData(0, 0, SIZE, SIZE);
+
+      // Our render canvas
+      const ourCanvas = document.createElement('canvas');
+      ourCanvas.width = SIZE; ourCanvas.height = SIZE;
+      const oc = ourCanvas.getContext('2d');
+      oc.fillStyle = '#fff'; oc.fillRect(0, 0, SIZE, SIZE);
+      oc.drawImage(c, 0, 0, SIZE, SIZE);
+      const od = oc.getImageData(0, 0, SIZE, SIZE);
+
+      // Diff canvas (highlight differences in red)
+      const diffCanvas = document.createElement('canvas');
+      diffCanvas.width = SIZE; diffCanvas.height = SIZE;
+      const dc = diffCanvas.getContext('2d');
+      const dd = dc.createImageData(SIZE, SIZE);
+      let match = 0;
+      for (let i = 0; i < SIZE * SIZE; i++) {
+        const x = i * 4;
+        const dr = Math.abs(rd.data[x] - od.data[x]);
+        const dg = Math.abs(rd.data[x+1] - od.data[x+1]);
+        const db = Math.abs(rd.data[x+2] - od.data[x+2]);
+        if (dr <= TOL && dg <= TOL && db <= TOL) {
+          match++;
+          // Show original with slight dimming
+          dd.data[x] = od.data[x] * 0.4; dd.data[x+1] = od.data[x+1] * 0.4; dd.data[x+2] = od.data[x+2] * 0.4; dd.data[x+3] = 255;
+        } else {
+          // Highlight diff in red
+          const intensity = Math.min(255, (dr + dg + db) * 2);
+          dd.data[x] = 255; dd.data[x+1] = 0; dd.data[x+2] = 0; dd.data[x+3] = Math.max(80, intensity);
+        }
+      }
+      dc.putImageData(dd, 0, 0);
+
+      const isBitmap = d.bitmapTiles.length > 0 && d.layers.every(l => l.shapes.length === 0);
+      const score = match / (SIZE * SIZE) * 100;
+
+      results.push({ name: tn, score, bitmap: isBitmap, refCanvas, ourCanvas, diffCanvas });
+    } catch (e) {}
+  }
+
+  const vecScores = results.filter(x => !x.bitmap);
+  const vecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.score, 0) / vecScores.length : 0;
+  const allAvg = results.reduce((s, x) => s + x.score, 0) / results.length;
+  statusEl.textContent = `Done: ${results.length} drawings | All avg: ${allAvg.toFixed(1)}% | Vector avg: ${vecAvg.toFixed(1)}% | >=98%: ${vecScores.filter(x => x.score >= 98).length}/${vecScores.length} | >=95%: ${vecScores.filter(x => x.score >= 95).length}/${vecScores.length}`;
+  document.title = `Compare: ${vecAvg.toFixed(1)}% vec avg`;
+  render();
+}
+
+function render() {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+  const sortBy = document.getElementById('sortBy').value;
+  const filterBy = document.getElementById('filterBy').value;
+
+  let items = [...results];
+  if (filterBy === 'bad') items = items.filter(x => x.score < 95);
+  else if (filterBy === 'ok') items = items.filter(x => x.score < 98);
+  else if (filterBy === 'vector') items = items.filter(x => !x.bitmap);
+
+  if (sortBy === 'score-asc') items.sort((a, b) => a.score - b.score);
+  else if (sortBy === 'score-desc') items.sort((a, b) => b.score - a.score);
+  else items.sort((a, b) => a.name.localeCompare(b.name));
+
+  for (const r of items) {
+    const cls = r.score < 95 ? 'bad' : r.score < 98 ? 'ok' : 'good';
+    const div = document.createElement('div');
+    div.className = `pair ${cls}`;
+    const imgs = document.createElement('div');
+    imgs.className = 'images';
+    imgs.appendChild(r.refCanvas);
+    imgs.appendChild(r.ourCanvas);
+    imgs.appendChild(r.diffCanvas);
+    div.appendChild(imgs);
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.innerHTML = `<span class="score">${r.score.toFixed(1)}%</span> ${r.name}${r.bitmap ? ' [bmp]' : ''}`;
+    div.appendChild(label);
+    grid.appendChild(div);
+  }
+}
+
+document.getElementById('sortBy').addEventListener('change', render);
+document.getElementById('filterBy').addEventListener('change', render);
+
+main().catch(e => { document.getElementById('status').textContent = 'ERROR: ' + e.message; });
+</script>
+</body></html>

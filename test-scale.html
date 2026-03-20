@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head><title>Scale Comparison</title>
+<style>
+  body { font-family: sans-serif; background: #eee; padding: 10px; }
+  .row { display: flex; gap: 5px; margin: 10px 0; align-items: start; }
+  .row canvas, .row img { width: 200px; height: 200px; border: 1px solid #ccc; background: white; }
+  .labels { display: flex; gap: 5px; font-size: 11px; text-align: center; }
+  .labels span { width: 200px; }
+  h3 { margin: 5px 0; font-size: 12px; }
+</style>
+</head>
+<body>
+<h2>Scale test: Reference vs viewport=336 vs auto-fit</h2>
+<div class="labels"><span>Reference</span><span>viewport=336</span><span>auto-fit</span></div>
+<div id="out"></div>
+<script type="module">
+import JSZip from 'jszip';
+import { parseTVG, renderTVGToCanvas, resolveExternalPalette } from './src/tvg-parser.ts';
+
+const ZIP_PATH = 'sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
+const DRAWINGS = [
+  { tvgName: 'F-Hand_OL_1_F-14', thumbPath: 'elements/F-Hand_OL_1_F/.thumbnails/.F-Hand_OL_1_F-14.tvg.png' },
+  { tvgName: 'F-Hand_OL_1_F-11', thumbPath: 'elements/F-Hand_OL_1_F/.thumbnails/.F-Hand_OL_1_F-11.tvg.png' },
+  { tvgName: 'F_3_symbol-1', thumbPath: 'elements/F_3_symbol/.thumbnails/.F_3_symbol-1.tvg.png' },
+  { tvgName: 'Number_Body-1', thumbPath: 'elements/Number_Body/.thumbnails/.Number_Body-1.tvg.png' },
+];
+
+async function main() {
+  const resp = await fetch(ZIP_PATH);
+  const zip = await JSZip.loadAsync(await resp.arrayBuffer());
+  const palettes = [];
+  const pltPaths = [];
+  zip.forEach(p => { if (p.endsWith('.plt') && p.includes('palette-library/')) pltPaths.push(p); });
+  for (const p of pltPaths) {
+    const text = await zip.file(p).async('text');
+    for (const line of text.split('\n')) {
+      const m = line.match(/^Solid\s+(\S+)\s+(0x\w+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
+      if (m) palettes.push({ r: +m[3], g: +m[4], b: +m[5], a: +m[6], id: m[2] });
+    }
+  }
+  const tvgFiles = [];
+  zip.forEach(p => { if (p.endsWith('.tvg')) tvgFiles.push(p); });
+  const prefix = tvgFiles[0].substring(0, tvgFiles[0].indexOf('elements/'));
+
+  for (const d of DRAWINGS) {
+    const tvgPath = tvgFiles.find(p => p.includes(d.tvgName + '.tvg'));
+    if (!tvgPath) continue;
+    const buf = await zip.file(tvgPath).async('arraybuffer');
+    const drawing = parseTVG(buf);
+    resolveExternalPalette(drawing, palettes);
+
+    const c1 = renderTVGToCanvas(drawing, 200, 200, 336);
+    const c2 = renderTVGToCanvas(drawing, 200, 200); // auto-fit
+
+    const thumbFile = zip.file(prefix + d.thumbPath);
+    let thumbUrl = '';
+    if (thumbFile) {
+      const blob = new Blob([await thumbFile.async('arraybuffer')], {type:'image/png'});
+      thumbUrl = URL.createObjectURL(blob);
+    }
+
+    const div = document.createElement('div');
+    div.innerHTML = `<h3>${d.tvgName}</h3>`;
+    const row = document.createElement('div');
+    row.className = 'row';
+    if (thumbUrl) {
+      const img = document.createElement('img');
+      img.src = thumbUrl;
+      row.appendChild(img);
+    }
+    if (c1) { c1.style.cssText = 'width:200px;height:200px;border:1px solid #ccc'; row.appendChild(c1); }
+    if (c2) { c2.style.cssText = 'width:200px;height:200px;border:1px solid #ccc'; row.appendChild(c2); }
+    div.appendChild(row);
+    document.getElementById('out').appendChild(div);
+  }
+}
+main().catch(e => document.getElementById('out').textContent = 'Error: ' + e.message);
+</script>
+</body>
+</html>
