@@ -204,7 +204,7 @@ export async function parseTPL(
         for (const palette of metadata.palettes) {
           for (const color of palette.colors) {
             if (color.type === 'solid') {
-              externalColors.push({ r: color.r, g: color.g, b: color.b, a: color.a, id: color.id });
+              externalColors.push({ r: color.r, g: color.g, b: color.b, a: color.a, id: color.id, name: color.name, paletteName: palette.name });
             }
           }
         }
@@ -571,7 +571,7 @@ async function renderTVGElements(
   for (const palette of metadata.palettes) {
     for (const color of palette.colors) {
       if (color.type === 'solid') {
-        externalColors.push({ r: color.r, g: color.g, b: color.b, a: color.a, id: color.id });
+        externalColors.push({ r: color.r, g: color.g, b: color.b, a: color.a, id: color.id, name: color.name, paletteName: palette.name });
       }
     }
   }
