@@ -1265,14 +1265,23 @@ function parseTGBP(reader: BinaryReader, len: number): TVGPath | null {
     }
   }
 
-  // Check if closed (first point ~= last point)
+  // Check for explicit closed flag byte after the point data.
+  // Expected consumed bytes: 4 (numPoints) + flagByteCount + numPoints*8 (points)
+  const consumedBytes = 4 + flagByteCount + numPoints * 8;
   let closed = false;
-  if (points.length >= 2) {
-    const first = points[0];
-    const last = points[points.length - 1];
-    const dx = Math.abs(first.x - last.x);
-    const dy = Math.abs(first.y - last.y);
-    closed = dx < 0.001 && dy < 0.001;
+  if (consumedBytes < len) {
+    // There are trailing bytes — the first one is likely the closed flag (0 or 1)
+    const closedByte = reader.readU8();
+    closed = closedByte !== 0;
+  } else {
+    // Fallback: infer closed from endpoint proximity
+    if (points.length >= 2) {
+      const first = points[0];
+      const last = points[points.length - 1];
+      const dx = Math.abs(first.x - last.x);
+      const dy = Math.abs(first.y - last.y);
+      closed = dx < 0.001 && dy < 0.001;
+    }
   }
 
   return { segments, closed };
@@ -2562,8 +2571,8 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
             const path = buildPath2D(comp.path);
             ctx.strokeStyle = fillStyle;
             ctx.lineWidth = uniformWidth;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
+            ctx.lineCap = comp.fromTipType;
+            ctx.lineJoin = comp.joinType;
             ctx.stroke(path);
           } else {
             renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, fillStyle);
@@ -2572,8 +2581,8 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
           const path = buildPath2D(comp.path!);
           ctx.strokeStyle = fillStyle;
           ctx.lineWidth = sw;
-          ctx.lineCap = 'round';
-          ctx.lineJoin = 'round';
+          ctx.lineCap = comp.fromTipType;
+          ctx.lineJoin = comp.joinType;
           ctx.stroke(path);
         }
       }
@@ -2619,8 +2628,8 @@ function renderStrokeMask(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, def
           const path = buildPath2D(comp.path);
           ctx.strokeStyle = 'rgba(255,255,255,1)';
           ctx.lineWidth = uniformWidth;
-          ctx.lineCap = 'round';
-          ctx.lineJoin = 'round';
+          ctx.lineCap = comp.fromTipType;
+          ctx.lineJoin = comp.joinType;
           ctx.stroke(path);
         } else {
           renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, 'rgba(255,255,255,1)');
@@ -2629,8 +2638,8 @@ function renderStrokeMask(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, def
         const path = buildPath2D(comp.path!);
         ctx.strokeStyle = 'rgba(255,255,255,1)';
         ctx.lineWidth = sw;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
+        ctx.lineCap = comp.fromTipType;
+        ctx.lineJoin = comp.joinType;
         ctx.stroke(path);
       }
     }
