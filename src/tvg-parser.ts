@@ -1492,82 +1492,161 @@ export function renderTVGToCanvas(
 
   if (hasStrokes) {
     // Pass 2: Dilated flood-fill to clip fills to stroke boundaries
-    const maskCanvas = document.createElement('canvas');
-    maskCanvas.width = width;
-    maskCanvas.height = height;
-    const maskCtx = maskCanvas.getContext('2d')!;
-    maskCtx.setTransform(ctx.getTransform());
-    for (const layerType of strokeOrder) {
-      for (const layer of drawing.layers) {
-        if (layer.type !== layerType) continue;
-        renderStrokeMask(maskCtx, layer, defaultStrokeWidth);
-      }
-    }
+    // Uses 2x resolution mask (Approach C) for better sub-pixel gap closure,
+    // with adaptive dilation radius (Approach A) based on stroke density.
 
-    // Build wall map from stroke mask
-    const maskData = maskCtx.getImageData(0, 0, width, height);
-    const isWall = new Uint8Array(width * height);
-    for (let i = 0; i < width * height; i++) {
-      if (maskData.data[i * 4 + 3] > 30) isWall[i] = 1;
-    }
-
-    // Dilate by 2px to close sub-pixel gaps between stroke segments
-    const dilated = new Uint8Array(width * height);
-    const DR = 2;
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        if (isWall[y * width + x]) { dilated[y * width + x] = 1; continue; }
-        let found = false;
-        for (let dy = -DR; dy <= DR && !found; dy++) {
-          for (let dx = -DR; dx <= DR && !found; dx++) {
-            if (dx * dx + dy * dy > DR * DR) continue;
-            const nx = x + dx, ny = y + dy;
-            if (nx >= 0 && nx < width && ny >= 0 && ny < height && isWall[ny * width + nx]) found = true;
+    // Compute stroke density for adaptive dilation (Approach A)
+    let totalStrokeLength = 0;
+    for (const layer of drawing.layers) {
+      for (const shape of layer.shapes) {
+        for (const comp of shape.components) {
+          if ((comp.componentType === 2 || comp.componentType === 4) && comp.path && comp.path.segments.length > 0) {
+            const segs = comp.path.segments;
+            for (let i = 1; i < segs.length; i++) {
+              const prev = segs[i - 1];
+              const seg = segs[i];
+              if (seg.type === 'L' || seg.type === 'M') {
+                const dx = seg.x - prev.x;
+                const dy = seg.y - prev.y;
+                totalStrokeLength += Math.sqrt(dx * dx + dy * dy);
+              } else if (seg.type === 'Q') {
+                // Approximate quadratic bezier length
+                const dx1 = seg.cx - prev.x, dy1 = seg.cy - prev.y;
+                const dx2 = seg.x - seg.cx, dy2 = seg.y - seg.cy;
+                totalStrokeLength += Math.sqrt(dx1 * dx1 + dy1 * dy1) + Math.sqrt(dx2 * dx2 + dy2 * dy2);
+              } else if (seg.type === 'C') {
+                const dx1 = seg.c1x - prev.x, dy1 = seg.c1y - prev.y;
+                const dx2 = seg.c2x - seg.c1x, dy2 = seg.c2y - seg.c1y;
+                const dx3 = seg.x - seg.c2x, dy3 = seg.y - seg.c2y;
+                totalStrokeLength += Math.sqrt(dx1 * dx1 + dy1 * dy1) + Math.sqrt(dx2 * dx2 + dy2 * dy2) + Math.sqrt(dx3 * dx3 + dy3 * dy3);
+              }
+            }
           }
         }
-        if (found) dilated[y * width + x] = 1;
       }
     }
 
-    // BFS flood-fill from edges to find "outside" region
-    const outside = new Uint8Array(width * height);
-    const queue: number[] = [];
-    for (let x = 0; x < width; x++) {
-      if (!dilated[x]) { outside[x] = 1; queue.push(x); }
-      const b = (height - 1) * width + x;
-      if (!dilated[b]) { outside[b] = 1; queue.push(b); }
-    }
-    for (let y = 1; y < height - 1; y++) {
-      if (!dilated[y * width]) { outside[y * width] = 1; queue.push(y * width); }
-      const r = y * width + width - 1;
-      if (!dilated[r]) { outside[r] = 1; queue.push(r); }
-    }
-    let head = 0;
-    while (head < queue.length) {
-      const idx = queue[head++];
-      const x = idx % width, y = (idx / width) | 0;
-      if (x > 0 && !outside[idx - 1] && !dilated[idx - 1]) { outside[idx - 1] = 1; queue.push(idx - 1); }
-      if (x < width - 1 && !outside[idx + 1] && !dilated[idx + 1]) { outside[idx + 1] = 1; queue.push(idx + 1); }
-      if (y > 0 && !outside[idx - width] && !dilated[idx - width]) { outside[idx - width] = 1; queue.push(idx - width); }
-      if (y < height - 1 && !outside[idx + width] && !dilated[idx + width]) { outside[idx + width] = 1; queue.push(idx + width); }
-    }
+    const canvasArea = width * height;
+    const strokeDensity = canvasArea > 0 ? totalStrokeLength / canvasArea : 0;
 
-    // Erase outside pixels from fill canvas, with leak detection fallback.
-    // If clipping removes >50% of fill pixels, the mask leaked — skip clipping.
-    const fillData = fillCtx.getImageData(0, 0, width, height);
-    let fillPixels = 0, erasedPixels = 0;
-    for (let i = 0; i < width * height; i++) {
-      if (fillData.data[i * 4 + 3] > 0) fillPixels++;
-      if (outside[i] && fillData.data[i * 4 + 3] > 0) erasedPixels++;
-    }
-    if (fillPixels > 0 && erasedPixels / fillPixels < 0.5) {
-      // Safe to clip - less than 50% of fill would be removed
+    // Very sparse strokes: skip clipping entirely (Approach A)
+    if (strokeDensity >= 0.01) {
+      // Adaptive dilation radius in 2x space (Approach A):
+      // Dense strokes (>0.1): radius 6 in 2x (= 3px in 1x)
+      // Normal strokes: radius 4 in 2x (= 2px in 1x)
+      const DR2x = strokeDensity > 0.1 ? 6 : 4;
+
+      // 2x resolution mask (Approach C): render stroke mask at double resolution
+      // Sub-pixel gaps at 1x become 1px gaps at 2x, which dilation can reliably close
+      const mw = width * 2;
+      const mh = height * 2;
+      const maskCanvas = document.createElement('canvas');
+      maskCanvas.width = mw;
+      maskCanvas.height = mh;
+      const maskCtx = maskCanvas.getContext('2d')!;
+
+      // Scale the transform by 2x for the hi-res mask
+      const baseTransform = ctx.getTransform();
+      maskCtx.setTransform(
+        baseTransform.a * 2, baseTransform.b * 2,
+        baseTransform.c * 2, baseTransform.d * 2,
+        baseTransform.e * 2, baseTransform.f * 2,
+      );
+
+      for (const layerType of strokeOrder) {
+        for (const layer of drawing.layers) {
+          if (layer.type !== layerType) continue;
+          renderStrokeMask(maskCtx, layer, defaultStrokeWidth);
+        }
+      }
+
+      // Build wall map from 2x stroke mask
+      const maskData = maskCtx.getImageData(0, 0, mw, mh);
+      const isWall = new Uint8Array(mw * mh);
+      for (let i = 0; i < mw * mh; i++) {
+        if (maskData.data[i * 4 + 3] > 30) isWall[i] = 1;
+      }
+
+      // Dilate by adaptive radius in 2x space to close sub-pixel gaps
+      const dilated = new Uint8Array(mw * mh);
+      const DR2xSq = DR2x * DR2x;
+      for (let y = 0; y < mh; y++) {
+        for (let x = 0; x < mw; x++) {
+          const idx = y * mw + x;
+          if (isWall[idx]) { dilated[idx] = 1; continue; }
+          let found = false;
+          for (let dy = -DR2x; dy <= DR2x && !found; dy++) {
+            const ny = y + dy;
+            if (ny < 0 || ny >= mh) continue;
+            for (let dx = -DR2x; dx <= DR2x && !found; dx++) {
+              if (dx * dx + dy * dy > DR2xSq) continue;
+              const nx = x + dx;
+              if (nx >= 0 && nx < mw && isWall[ny * mw + nx]) found = true;
+            }
+          }
+          if (found) dilated[idx] = 1;
+        }
+      }
+
+      // BFS flood-fill from edges of 2x mask to find "outside" region
+      const outside2x = new Uint8Array(mw * mh);
+      const queue: number[] = [];
+      for (let x = 0; x < mw; x++) {
+        if (!dilated[x]) { outside2x[x] = 1; queue.push(x); }
+        const b = (mh - 1) * mw + x;
+        if (!dilated[b]) { outside2x[b] = 1; queue.push(b); }
+      }
+      for (let y = 1; y < mh - 1; y++) {
+        if (!dilated[y * mw]) { outside2x[y * mw] = 1; queue.push(y * mw); }
+        const r = y * mw + mw - 1;
+        if (!dilated[r]) { outside2x[r] = 1; queue.push(r); }
+      }
+      let head = 0;
+      while (head < queue.length) {
+        const idx = queue[head++];
+        const x = idx % mw, y = (idx / mw) | 0;
+        if (x > 0 && !outside2x[idx - 1] && !dilated[idx - 1]) { outside2x[idx - 1] = 1; queue.push(idx - 1); }
+        if (x < mw - 1 && !outside2x[idx + 1] && !dilated[idx + 1]) { outside2x[idx + 1] = 1; queue.push(idx + 1); }
+        if (y > 0 && !outside2x[idx - mw] && !dilated[idx - mw]) { outside2x[idx - mw] = 1; queue.push(idx - mw); }
+        if (y < mh - 1 && !outside2x[idx + mw] && !dilated[idx + mw]) { outside2x[idx + mw] = 1; queue.push(idx + mw); }
+      }
+
+      // Downsample outside map from 2x to 1x:
+      // A 1x pixel is "outside" only if ALL 4 corresponding 2x pixels are outside.
+      // This conservative approach prevents erasing edge pixels that are partially inside.
+      const outside = new Uint8Array(width * height);
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const x2 = x * 2, y2 = y * 2;
+          if (
+            outside2x[y2 * mw + x2] &&
+            outside2x[y2 * mw + x2 + 1] &&
+            outside2x[(y2 + 1) * mw + x2] &&
+            outside2x[(y2 + 1) * mw + x2 + 1]
+          ) {
+            outside[y * width + x] = 1;
+          }
+        }
+      }
+
+      // Erase outside pixels from fill canvas, with leak detection fallback.
+      // If clipping removes >50% of fill pixels, the mask leaked — skip clipping.
+      const fillData = fillCtx.getImageData(0, 0, width, height);
+      let fillPixels = 0, erasedPixels = 0;
       for (let i = 0; i < width * height; i++) {
-        if (outside[i]) fillData.data[i * 4 + 3] = 0;
+        if (fillData.data[i * 4 + 3] > 0) fillPixels++;
+        if (outside[i] && fillData.data[i * 4 + 3] > 0) erasedPixels++;
       }
-      fillCtx.putImageData(fillData, 0, 0);
+      if (fillPixels > 0 && erasedPixels / fillPixels < 0.5) {
+        // Safe to clip - less than 50% of fill would be removed
+        for (let i = 0; i < width * height; i++) {
+          if (outside[i]) fillData.data[i * 4 + 3] = 0;
+        }
+        fillCtx.putImageData(fillData, 0, 0);
+      }
+      // else: mask leaked, keep fills unclipped
     }
-    // else: mask leaked, keep fills unclipped
+    // else: strokeDensity < 0.01, very sparse strokes — skip clipping entirely
   }
 
   // Composite clipped fills onto main canvas
