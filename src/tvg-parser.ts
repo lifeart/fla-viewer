@@ -14,6 +14,8 @@ export interface TVGDrawing {
   layers: TVGArtLayer[];
   palette: TVGPaletteEntry[];
   bitmapTiles: TVGBitmapTile[];
+  /** Coordinate quantization factor from TGRV tag (f64, typically ~0.576). */
+  pointQuantum: number | null;
 }
 
 export interface TVGArtLayer {
@@ -44,6 +46,13 @@ export interface TVGThicknessPoint {
 export interface TVGThicknessProfile {
   points: TVGThicknessPoint[];
   domain: [number, number]; // [start, end] - which portion of the thickness path applies
+  /** Tip tangent values from tGTB domain section (6 f32s total). */
+  tipTangentLeftFrom: number;
+  tipTangentRightFrom: number;
+  tipTangentLeftTo: number;
+  tipTangentRightTo: number;
+  /** Closed flag from tGTB 5-byte trailer (byte[3]). */
+  closed: boolean;
 }
 
 /**
@@ -61,6 +70,8 @@ export type TVGTipType = 'round' | 'butt' | 'square';
 export interface TVGComponent {
   componentType: number; // 0=fill, 1=unknown, 2=stroke, 4=pencil
   colorId: bigint | null;
+  /** Inside color ID from second TGCO entry (usually 0xFFFFFFFFFFFFFFFF = null). */
+  insideColorId: bigint | null;
   paletteIndex: number | null; // Palette position index for fills without TGCO
   color: { r: number; g: number; b: number; a: number } | null;
   transform: TVGTransform | null;
@@ -72,6 +83,16 @@ export interface TVGComponent {
   toTipType: TVGTipType; // End cap type (default: 'round')
   gradientType?: 'linear' | 'radial';
   gradientStops?: { pos: number; r: number; g: number; b: number; a: number }[];
+  /** tGTI full fields (76-byte structure) */
+  tgtiThickness: number | null;
+  tgtiTextureScaleX: number | null;
+  tgtiTextureScaleY: number | null;
+  tgtiTextureOffset: number | null;
+  tgtiOpacityThickness: number | null;
+  tgtiOpacityScaleX: number | null;
+  tgtiOpacityScaleY: number | null;
+  tgtiOpacityOffset: number | null;
+  tgtiHasTextureFlags: number | null;
 }
 
 export interface TVGTransform {
@@ -207,7 +228,7 @@ const TAG_TGVS = 'TGVS';
 const TAG_TGSD = 'TGSD';
 const TAG_TGBP = 'TGBP';
 const TAG_TGCO = 'TGCO';
-// const TAG_TGRV = 'TGRV';
+const TAG_TGRV = 'TGRV';
 const TAG_TCSC = 'TCSC';
 const TAG_TCID = 'TCID';
 const TAG_TGBG = 'TGBG';
@@ -233,6 +254,7 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
     layers: [],
     palette: [],
     bitmapTiles: [],
+    pointQuantum: null,
   };
 
   // Parse top-level chunks
@@ -667,6 +689,15 @@ function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
       } catch (_e) {
         // Skip unparseable TGBG
       }
+    } else if (tag === TAG_TGRV) {
+      // TGRV: coordinate quantization factor (pointQuantum), f64 value (~0.576)
+      const rvLen = reader.readU32LE();
+      if (rvLen >= 8 && rvLen <= reader.remaining) {
+        drawing.pointQuantum = reader.readF64LE();
+        if (rvLen > 8) reader.skip(rvLen - 8);
+      } else if (rvLen > 0 && rvLen <= reader.remaining) {
+        reader.skip(rvLen);
+      }
     } else if (tag === TAG_ENDT) {
       break;
     } else if (tag === TAG_TTOC) {
@@ -792,6 +823,7 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
   const comp: TVGComponent = {
     componentType: -1,
     colorId: null,
+    insideColorId: null,
     paletteIndex: null,
     color: null,
     transform: null,
@@ -801,6 +833,15 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
     joinType: 'round',
     fromTipType: 'round',
     toTipType: 'round',
+    tgtiThickness: null,
+    tgtiTextureScaleX: null,
+    tgtiTextureScaleY: null,
+    tgtiTextureOffset: null,
+    tgtiOpacityThickness: null,
+    tgtiOpacityScaleX: null,
+    tgtiOpacityScaleY: null,
+    tgtiOpacityOffset: null,
+    tgtiHasTextureFlags: null,
   };
 
   while (reader.pos < endPos - 4) {
@@ -844,26 +885,37 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
         reader.pos = tbEnd;
       }
     } else if (tag === 'tGTI') {
-      // Stroke properties: 8-byte sentinel + f64 width + optional join/tip bytes
+      // Full 76-byte tGTI structure (all f64 except last u32):
+      //   +0: sentinel u64 (0xFFFFFFFFFFFFFFFF)
+      //   +8: thickness f64
+      //   +16: textureScaleX f64
+      //   +24: textureScaleY f64
+      //   +32: textureOffset f64
+      //   +40: opacityThickness f64
+      //   +48: opacityScaleX f64
+      //   +56: opacityScaleY f64
+      //   +64: opacityOffset f64
+      //   +72: hasTextureFlags u32
       const len = reader.readU32LE();
       if (len >= 16 && reader.remaining >= len) {
         const tiEnd = reader.pos + len;
-        reader.skip(8); // sentinel
-        const width = reader.readF64LE();
+        reader.skip(8); // sentinel u64 (0xFFFFFFFFFFFFFFFF)
+        const thickness = reader.readF64LE(); // +8
         if (comp.strokeWidth === null) {
-          comp.strokeWidth = width;
+          comp.strokeWidth = thickness;
         }
-        // After the 8-byte sentinel + 8-byte width (16 bytes), remaining bytes
-        // may encode join type and tip types (from/to). Based on Harmony's
-        // GR_VectorStroke serialization: joinType(u8), fromTipType(u8), toTipType(u8).
-        const remaining = tiEnd - reader.pos;
-        if (remaining >= 3) {
-          const joinByte = reader.readU8();
-          const fromTipByte = reader.readU8();
-          const toTipByte = reader.readU8();
-          comp.joinType = decodeJoinType(joinByte);
-          comp.fromTipType = decodeTipType(fromTipByte);
-          comp.toTipType = decodeTipType(toTipByte);
+        comp.tgtiThickness = thickness;
+
+        if (len >= 76) {
+          // Full 76-byte structure
+          comp.tgtiTextureScaleX = reader.readF64LE();   // +16
+          comp.tgtiTextureScaleY = reader.readF64LE();   // +24
+          comp.tgtiTextureOffset = reader.readF64LE();   // +32
+          comp.tgtiOpacityThickness = reader.readF64LE(); // +40
+          comp.tgtiOpacityScaleX = reader.readF64LE();   // +48
+          comp.tgtiOpacityScaleY = reader.readF64LE();   // +56
+          comp.tgtiOpacityOffset = reader.readF64LE();   // +64
+          comp.tgtiHasTextureFlags = reader.readU32LE(); // +72
         }
         reader.pos = tiEnd;
       } else {
@@ -887,11 +939,17 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
     }
   }
 
+  // Finding 7: Combine TGBP endpoint-proximity heuristic with tGTB closed flag.
+  // If the thickness profile says the path is closed, mark the path as closed too.
+  if (comp.path && comp.thicknessProfile && comp.thicknessProfile.closed && !comp.path.closed) {
+    comp.path.closed = true;
+  }
+
   return comp;
 }
 
 function scanToNextKnownTag(reader: BinaryReader, endPos: number): boolean {
-  const knownTags = [TAG_TGSD, TAG_TGCO, TAG_TGBP, 'tGTB', 'tGTI'];
+  const knownTags = [TAG_TGSD, TAG_TGCO, TAG_TGBP, TAG_TGRV, 'tGTB', 'tGTI'];
   while (reader.pos < endPos - 4) {
     const peek = reader.peekTag4();
     if (knownTags.includes(peek)) return true;
@@ -948,10 +1006,19 @@ function parseTGSD(reader: BinaryReader, comp: TVGComponent, len: number): void 
     }
   } else if (comp.componentType === 4) {
     // Pencil component: has inline color ID
-    // Skip float32 value (brush size ~10.0)
+    // Full structure is 25 bytes when len=25:
+    //   byte[0]: componentType (already read)
+    //   bytes[1-4]: f32 brush size (~10.0)
+    //   bytes[5-12]: colorId (u64)
+    //   bytes[13-24]: 12 zero bytes (reserved/padding)
     if (reader.remaining >= 12) {
-      reader.skip(4); // f32
+      reader.skip(4); // f32 brush size
       comp.colorId = reader.readU64LE();
+      // Read remaining bytes (12 zero bytes for len=25) — currently unused but consumed
+      const extraBytes = sdEnd - reader.pos;
+      if (extraBytes > 0) {
+        reader.skip(extraBytes);
+      }
     }
   } else if (comp.componentType === 2) {
     // Brush stroke: similar structure to fill — check for embedded color
@@ -994,6 +1061,7 @@ function scanAndParseTGCO(reader: BinaryReader, comp: TVGComponent, endPos: numb
 function parseTGCO(reader: BinaryReader, comp: TVGComponent, len: number): void {
   if (len < 57) return;
 
+  // Entry 1 (bytes 0-56): outside color (colorType + transform + colorId)
   const colorType = reader.readU8(); // 1 = solid fill
   void colorType;
 
@@ -1011,6 +1079,20 @@ function parseTGCO(reader: BinaryReader, comp: TVGComponent, len: number): void 
   // This is the authoritative source for both fills and strokes when TGCO is present.
   if (len >= 57 && comp.colorId === null) {
     comp.colorId = reader.readU64LE();
+  }
+
+  // Entry 2 (bytes 57-113): inside color (same structure: colorType + transform + colorId)
+  // When TGCO length >= 114, there are TWO 57-byte color entries.
+  // The inside colorId is usually 0xFFFFFFFFFFFFFFFF (null/unused).
+  if (len >= 114) {
+    const insideColorType = reader.readU8();
+    void insideColorType;
+    // Skip inside transform (6 x f64 = 48 bytes)
+    reader.skip(48);
+    const insideColorId = reader.readU64LE();
+    // Store insideColorId; 0xFFFFFFFFFFFFFFFF means "no inside color"
+    const NULL_COLOR_ID = 0xFFFFFFFFFFFFFFFFn;
+    comp.insideColorId = (insideColorId === NULL_COLOR_ID) ? null : insideColorId;
   }
 }
 
@@ -1059,12 +1141,17 @@ function parseTGTB(
     if (type === 0x00) {
       // Reference to previous thickness profile — reuse definition, read new domain
       reader.readU32LE(); // id
-      const domain = readTGTBDomain(reader, endPos);
-      if (prevProfile && domain) {
+      const domainResult = readTGTBDomain(reader, endPos);
+      if (prevProfile && domainResult) {
         // Reuse previous profile's points with new domain
         const profile: TVGThicknessProfile = {
           points: prevProfile.points,
-          domain,
+          domain: domainResult.domain,
+          tipTangentLeftFrom: domainResult.tipTangentLeftFrom,
+          tipTangentRightFrom: domainResult.tipTangentRightFrom,
+          tipTangentLeftTo: domainResult.tipTangentLeftTo,
+          tipTangentRightTo: domainResult.tipTangentRightTo,
+          closed: prevProfile.closed,
         };
         let maxWidth = 0;
         for (const pt of profile.points) {
@@ -1117,44 +1204,87 @@ function parseTGTB(
       if (width > maxWidth) maxWidth = width;
     }
 
-    // Read 5-byte trailer: may contain tip/join type info.
-    // Format hypothesis: fromTipType(u8), toTipType(u8), joinType(u8), 2 bytes padding/flags
+    // Read 5-byte trailer: tip/join/closed flags
+    // byte[0]: tipType_from (0=FLAT, 1=ROUND, 2=BEVEL)
+    // byte[1]: tipType_to
+    // byte[2]: joinType (0=ROUND, 1=MITER, 2=BEVEL)
+    // byte[3]: closed flag (0 or 1)
+    // byte[4]: reserved
     let fromTip: TVGTipType = 'round';
     let toTip: TVGTipType = 'round';
     let join: TVGJoinType = 'round';
+    let tgtbClosed = false;
     if (reader.pos + 5 <= endPos) {
-      const b0 = reader.readU8();
-      const b1 = reader.readU8();
-      const b2 = reader.readU8();
-      reader.skip(2); // remaining trailer bytes
+      const tipFromByte = reader.readU8();
+      const tipToByte = reader.readU8();
+      const joinByte = reader.readU8();
+      const closedByte = reader.readU8();
+      reader.skip(1); // reserved byte
       // Only apply if the values look like valid enum values (0-2)
-      if (b0 <= 2 && b1 <= 2 && b2 <= 2) {
-        fromTip = decodeTipType(b0);
-        toTip = decodeTipType(b1);
-        join = decodeJoinType(b2);
+      if (tipFromByte <= 2 && tipToByte <= 2 && joinByte <= 2) {
+        fromTip = decodeTipType(tipFromByte);
+        toTip = decodeTipType(tipToByte);
+        join = decodeJoinType(joinByte);
       }
+      tgtbClosed = closedByte !== 0;
     }
 
-    // Read domain
-    const domain = readTGTBDomain(reader, endPos);
+    // Read domain (6 x f32 = 24 bytes)
+    const domainResult = readTGTBDomain(reader, endPos);
 
     if (maxWidth <= 0) return null;
-    return { maxWidth, profile: { points, domain: domain || [0, 1] }, fromTip, toTip, join };
+    return {
+      maxWidth,
+      profile: {
+        points,
+        domain: domainResult ? domainResult.domain : [0, 1],
+        tipTangentLeftFrom: domainResult ? domainResult.tipTangentLeftFrom : 0,
+        tipTangentRightFrom: domainResult ? domainResult.tipTangentRightFrom : 0,
+        tipTangentLeftTo: domainResult ? domainResult.tipTangentLeftTo : 0,
+        tipTangentRightTo: domainResult ? domainResult.tipTangentRightTo : 0,
+        closed: tgtbClosed,
+      },
+      fromTip, toTip, join,
+    };
   } catch (_e) {
     reader.pos = startPos;
     return null;
   }
 }
 
-/** Read the tGTB domain: f32(start) + u64(unknown) + f32(end) + u64(unknown) = 24 bytes */
-function readTGTBDomain(reader: BinaryReader, endPos: number): [number, number] | null {
+/**
+ * Read the tGTB domain section: 6 x f32 = 24 bytes.
+ *   f32: domainStart
+ *   f32: tipTangent(left, from)
+ *   f32: tipTangent(right, from)
+ *   f32: domainEnd
+ *   f32: tipTangent(left, to)
+ *   f32: tipTangent(right, to)
+ */
+interface TGTBDomainResult {
+  domain: [number, number];
+  tipTangentLeftFrom: number;
+  tipTangentRightFrom: number;
+  tipTangentLeftTo: number;
+  tipTangentRightTo: number;
+}
+
+function readTGTBDomain(reader: BinaryReader, endPos: number): TGTBDomainResult | null {
   if (reader.pos + 24 > endPos) return null;
   try {
     const domainStart = reader.readF32LE();
-    reader.skip(8); // unknown u64
+    const tipTangentLeftFrom = reader.readF32LE();
+    const tipTangentRightFrom = reader.readF32LE();
     const domainEnd = reader.readF32LE();
-    reader.skip(8); // unknown u64
-    return [domainStart, domainEnd];
+    const tipTangentLeftTo = reader.readF32LE();
+    const tipTangentRightTo = reader.readF32LE();
+    return {
+      domain: [domainStart, domainEnd],
+      tipTangentLeftFrom,
+      tipTangentRightFrom,
+      tipTangentLeftTo,
+      tipTangentRightTo,
+    };
   } catch (_e) {
     return null;
   }
@@ -2879,49 +3009,57 @@ function renderVariableWidthStroke(
 
   if (leftPoints.length < 2) return;
 
-  // Build filled outline: left forward, end cap, right reversed, start cap
+  // Build filled outline: left forward, end cap/join, right reversed, start cap/join
+  const isClosed = profile.closed;
   const outlinePath = new Path2D();
   outlinePath.moveTo(leftPoints[0].x, leftPoints[0].y);
   for (let i = 1; i < leftPoints.length; i++) {
     outlinePath.lineTo(leftPoints[i].x, leftPoints[i].y);
   }
 
-  // End cap: cubic bezier round cap (matching Toon Boom's 1.33x cap offset)
-  if (lastPt && profile.points.length > 0) {
-    const lastTP = profile.points[profile.points.length - 1];
-    const capScale = 1.33;
-    const lastLeft = leftPoints[leftPoints.length - 1];
-    const lastRight = rightPoints[rightPoints.length - 1];
-    // Tangent direction at end
-    const tdx = -lastPt.ny;
-    const tdy = lastPt.nx;
-    const cp1x = lastLeft.x + tdx * capScale * lastTP.leftOffset;
-    const cp1y = lastLeft.y + tdy * capScale * lastTP.leftOffset;
-    const cp2x = lastRight.x + tdx * capScale * lastTP.rightOffset;
-    const cp2y = lastRight.y + tdy * capScale * lastTP.rightOffset;
-    outlinePath.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, lastRight.x, lastRight.y);
-  } else {
+  if (isClosed) {
+    // Closed stroke: connect end directly to right side (no end cap)
     outlinePath.lineTo(rightPoints[rightPoints.length - 1].x, rightPoints[rightPoints.length - 1].y);
+  } else {
+    // End cap: cubic bezier round cap (matching Toon Boom's 1.33x cap offset)
+    if (lastPt && profile.points.length > 0) {
+      const lastTP = profile.points[profile.points.length - 1];
+      const capScale = 1.33;
+      const lastLeft = leftPoints[leftPoints.length - 1];
+      const lastRight = rightPoints[rightPoints.length - 1];
+      // Tangent direction at end
+      const tdx = -lastPt.ny;
+      const tdy = lastPt.nx;
+      const cp1x = lastLeft.x + tdx * capScale * lastTP.leftOffset;
+      const cp1y = lastLeft.y + tdy * capScale * lastTP.leftOffset;
+      const cp2x = lastRight.x + tdx * capScale * lastTP.rightOffset;
+      const cp2y = lastRight.y + tdy * capScale * lastTP.rightOffset;
+      outlinePath.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, lastRight.x, lastRight.y);
+    } else {
+      outlinePath.lineTo(rightPoints[rightPoints.length - 1].x, rightPoints[rightPoints.length - 1].y);
+    }
   }
 
   for (let i = rightPoints.length - 2; i >= 0; i--) {
     outlinePath.lineTo(rightPoints[i].x, rightPoints[i].y);
   }
 
-  // Start cap: cubic bezier round cap
-  if (firstPt && profile.points.length > 0) {
-    const firstTP = profile.points[0];
-    const capScale = 1.33;
-    const firstRight = rightPoints[0];
-    const firstLeft = leftPoints[0];
-    // Tangent direction at start (backward = negative tangent)
-    const tdx = firstPt.ny;
-    const tdy = -firstPt.nx;
-    const cp1x = firstRight.x + tdx * capScale * firstTP.rightOffset;
-    const cp1y = firstRight.y + tdy * capScale * firstTP.rightOffset;
-    const cp2x = firstLeft.x + tdx * capScale * firstTP.leftOffset;
-    const cp2y = firstLeft.y + tdy * capScale * firstTP.leftOffset;
-    outlinePath.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, firstLeft.x, firstLeft.y);
+  if (!isClosed) {
+    // Start cap: cubic bezier round cap
+    if (firstPt && profile.points.length > 0) {
+      const firstTP = profile.points[0];
+      const capScale = 1.33;
+      const firstRight = rightPoints[0];
+      const firstLeft = leftPoints[0];
+      // Tangent direction at start (backward = negative tangent)
+      const tdx = firstPt.ny;
+      const tdy = -firstPt.nx;
+      const cp1x = firstRight.x + tdx * capScale * firstTP.rightOffset;
+      const cp1y = firstRight.y + tdy * capScale * firstTP.rightOffset;
+      const cp2x = firstLeft.x + tdx * capScale * firstTP.leftOffset;
+      const cp2y = firstLeft.y + tdy * capScale * firstTP.leftOffset;
+      outlinePath.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, firstLeft.x, firstLeft.y);
+    }
   }
 
   outlinePath.closePath();
