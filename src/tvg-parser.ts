@@ -2309,7 +2309,7 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement): Promise<boolea
 }
 
 
-function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defaultStrokeWidth: number, pass: 'fill' | 'stroke', drawingHasFills = false, defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null = null): void {
+function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defaultStrokeWidth: number, pass: 'fill' | 'stroke', _drawingHasFills = false, defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null = null): void {
   for (const shape of layer.shapes) {
     // Separate fill components from stroke/pencil components
     const fillComps = shape.components.filter(c => c.componentType === 0 && c.path && c.path.segments.length > 1 && !isDegenerate(c.path)
@@ -2364,8 +2364,10 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
 
     // Pencil-fill: shapes with shapeType 1 or 5, no fill components, and only
     // pencil strokes should render as filled regions. ShapeType 1/5 are fill-associated
-    // types, while 4/6 are outline types. Also requires the drawing to have no other fills.
-    if (pass === 'fill' && fillComps.length === 0 && !drawingHasFills
+    // types, while 4/6 are outline types.
+    // The per-shape fillComps check is sufficient — other shapes having fills
+    // (e.g., underlay mask fills) should not prevent pencil-fill in this shape.
+    if (pass === 'fill' && fillComps.length === 0
         && (shape.shapeType === 1 || shape.shapeType === 5)) {
       const pencilComps = strokeComps.filter(c => c.componentType === 4 && c.path && c.path.segments.length > 1 && c.color);
       if (pencilComps.length > 0) {
@@ -2395,7 +2397,8 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
     // Boundary-stroke fill: shapes with ONLY ct=2 boundary strokes (no fills, no pencils)
     // that chain into a closed region should render as filled shapes.
     // Example: Number_Body-2 has 9 boundary strokes forming the digit "2".
-    if (pass === 'fill' && fillComps.length === 0 && !drawingHasFills) {
+    // Per-shape check: no fills in this shape (other shapes' fills are irrelevant).
+    if (pass === 'fill' && fillComps.length === 0) {
       const boundaryOnly = strokeComps.filter(c => c.componentType === 2 && c.path && c.path.segments.length > 1);
       const pencilsInShape = strokeComps.filter(c => c.componentType === 4);
       if (boundaryOnly.length >= 2 && pencilsInShape.length === 0) {
