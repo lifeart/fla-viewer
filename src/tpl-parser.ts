@@ -612,9 +612,16 @@ async function renderTVGElements(
 
   if (renderedCanvases.length === 0) return null;
 
-  // Compose into a grid
-  const canvasWidth = metadata.width;
-  const canvasHeight = metadata.height;
+  // Compose into a grid at a reasonable resolution.
+  // Cap at 1280px max dimension to avoid huge canvas/toDataURL issues.
+  const maxGridDim = 1280;
+  let canvasWidth = metadata.width;
+  let canvasHeight = metadata.height;
+  if (canvasWidth > maxGridDim || canvasHeight > maxGridDim) {
+    const scale = maxGridDim / Math.max(canvasWidth, canvasHeight);
+    canvasWidth = Math.round(canvasWidth * scale);
+    canvasHeight = Math.round(canvasHeight * scale);
+  }
   const canvas = document.createElement('canvas');
   canvas.width = canvasWidth;
   canvas.height = canvasHeight;
@@ -649,7 +656,8 @@ async function renderTVGElements(
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => resolve(img);
-    img.src = canvas.toDataURL('image/png');
+    img.onerror = () => { console.warn('[TPL] Grid image creation failed'); resolve(img); };
+    img.src = canvas.toDataURL('image/jpeg', 0.92);
   });
 }
 
