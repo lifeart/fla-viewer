@@ -300,9 +300,11 @@ function evaluateColumn(graph: SceneGraph, colName: string | undefined, frame: n
   if (!before && after) return after.value;
   if (before && after) {
     if (before.constSeg) return before.value; // Step/hold
-    // Linear interpolation (simplified - full impl would use bezier)
+    // Cubic ease interpolation (smooth bezier with control points at 1/3 and 2/3)
+    // Uses Hermite-style cubic: 3t^2 - 2t^3 for smooth ease-in/ease-out
     const t = (frame - before.frame) / (after.frame - before.frame);
-    return before.value + (after.value - before.value) * t;
+    const smoothT = 3 * t * t - 2 * t * t * t;
+    return before.value + (after.value - before.value) * smoothT;
   }
   return defaultValue;
 }
