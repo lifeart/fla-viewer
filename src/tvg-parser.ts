@@ -26,8 +26,24 @@ export interface TVGShape {
   components: TVGComponent[];
 }
 
+export interface TVGThicknessControlPoint {
+  x: number; // 0..1 relative to interval between this point and the next (fwd) or previous (back)
+  y: number; // offset distance from center line
+}
+
+export interface TVGThicknessPoint {
+  loc: number;
+  leftOffset: number;
+  leftCtrlBack: TVGThicknessControlPoint;
+  leftCtrlFwd: TVGThicknessControlPoint;
+  rightOffset: number;
+  rightCtrlBack: TVGThicknessControlPoint;
+  rightCtrlFwd: TVGThicknessControlPoint;
+}
+
 export interface TVGThicknessProfile {
-  points: { loc: number; leftOffset: number; rightOffset: number }[];
+  points: TVGThicknessPoint[];
+  domain: [number, number]; // [start, end] - which portion of the thickness path applies
 }
 
 export interface TVGComponent {
@@ -678,6 +694,7 @@ function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type']): TVGArtL
     const shape: TVGShape = { shapeType, components: [] };
 
     let lastTGTBWidth: number | null = null;
+    let lastTGTBProfile: TVGThicknessProfile | null = null;
     for (let c = 0; c < componentCount && reader.pos < shapeEnd; c++) {
       // Find next TGVS
       if (!scanToTag(reader, TAG_TGVS)) break;
@@ -686,12 +703,15 @@ function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type']): TVGArtL
       if (vsLen > reader.remaining) break;
 
       const vsEnd = reader.pos + vsLen;
-      const comp = parseComponent(reader, vsEnd, lastTGTBWidth);
+      const comp = parseComponent(reader, vsEnd, lastTGTBWidth, lastTGTBProfile);
       if (comp) {
         shape.components.push(comp);
-        // Track last tGTB width for "reference to previous" inheritance
+        // Track last tGTB width and profile for "reference to previous" inheritance
         if (comp.strokeWidth !== null && comp.strokeWidth > 0.1) {
           lastTGTBWidth = comp.strokeWidth;
+        }
+        if (comp.thicknessProfile) {
+          lastTGTBProfile = comp.thicknessProfile;
         }
       }
 
@@ -742,7 +762,7 @@ function scanToTag(reader: BinaryReader, tag: string): boolean {
 
 // ── Component Parsing ──
 
-function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: number | null): TVGComponent | null {
+function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: number | null, prevTGTBProfile?: TVGThicknessProfile | null): TVGComponent | null {
   const comp: TVGComponent = {
     componentType: -1,
     colorId: null,
@@ -780,12 +800,12 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
       const len = reader.readU32LE();
       if (len > reader.remaining) { reader.skip(Math.min(len, reader.remaining)); } else {
         const tbEnd = reader.pos + len;
-        const result = parseTGTB(reader, len);
+        const result = parseTGTB(reader, len, prevTGTBProfile || null);
         if (result) {
           comp.strokeWidth = result.maxWidth;
           comp.thicknessProfile = result.profile;
         }
-        // tGTB type=0x00 means "reference to previous" — inherit width from previous component
+        // Fallback: inherit width from previous component if type=0x00 returned null
         if (comp.strokeWidth === null && prevTGTBWidth != null) {
           comp.strokeWidth = prevTGTBWidth;
         }
@@ -941,27 +961,48 @@ function parseTGCO(reader: BinaryReader, comp: TVGComponent, len: number): void 
 
 /**
  * Parse tGTB pencil thickness data, returning the full profile and max width.
- * tGTB format: type(u8) + id(u32) + 0xCF marker + mystery(u8) + pointCount(u32) + points...
- * Each point: location(f32) + left_offset(f32) + left_cp1(2xf32) + left_cp2(2xf32)
- *             + right_offset(f32) + right_cp1(2xf32) + right_cp2(2xf32) = 11 floats
+ * tGTB format:
+ *   type(u8) + id(u32) + marker(u16 LE, must be 0x00CF) + pointCount(u32) + points...
+ *   Each point: loc(f32) + left_offset(f32) + left_ctrl_back(2xf32) + left_ctrl_fwd(2xf32)
+ *               + right_offset(f32) + right_ctrl_back(2xf32) + right_ctrl_fwd(2xf32) = 11 f32s
+ *   After points: 5-byte trailer + domain(f32 + u64 + f32 + u64)
+ *
+ * For type=0x00 (reference to previous): type(u8) + id(u32) + domain(f32+u64+f32+u64)
  */
-function parseTGTB(reader: BinaryReader, len: number): { maxWidth: number; profile: TVGThicknessProfile } | null {
+function parseTGTB(
+  reader: BinaryReader, len: number, prevProfile: TVGThicknessProfile | null,
+): { maxWidth: number; profile: TVGThicknessProfile } | null {
   if (len < 10) return null;
   const startPos = reader.pos;
+  const endPos = startPos + len;
 
   try {
     const type = reader.readU8();
+
     if (type === 0x00) {
-      // Reference to previous thickness profile — no data here
+      // Reference to previous thickness profile — reuse definition, read new domain
+      reader.readU32LE(); // id
+      const domain = readTGTBDomain(reader, endPos);
+      if (prevProfile && domain) {
+        // Reuse previous profile's points with new domain
+        const profile: TVGThicknessProfile = {
+          points: prevProfile.points,
+          domain,
+        };
+        let maxWidth = 0;
+        for (const pt of profile.points) {
+          const w = pt.leftOffset + pt.rightOffset;
+          if (w > maxWidth) maxWidth = w;
+        }
+        return { maxWidth, profile };
+      }
       return null;
     }
     if (type !== 0x01) return null;
 
     reader.readU32LE(); // color/id reference (often 0xFFFFFFFF)
-    const marker = reader.readU8();
+    const marker = reader.readU16LE(); // 0x00CF
     if (marker !== 0xCF) return null;
-
-    reader.readU8(); // mystery byte
 
     const pointCount = reader.readU32LE();
     if (pointCount === 0 || pointCount > 1000) return null;
@@ -970,23 +1011,61 @@ function parseTGTB(reader: BinaryReader, len: number): { maxWidth: number; profi
     if (reader.remaining < needed) return null;
 
     let maxWidth = 0;
-    const points: { loc: number; leftOffset: number; rightOffset: number }[] = [];
+    const points: TVGThicknessPoint[] = [];
 
     for (let i = 0; i < pointCount; i++) {
-      const loc = reader.readF32LE();         // location (0..1)
-      const leftOffset = reader.readF32LE();  // left side offset from center
-      reader.skip(16); // left bezier control points (4 f32)
-      const rightOffset = reader.readF32LE(); // right side offset from center
-      reader.skip(16); // right bezier control points (4 f32)
-      points.push({ loc, leftOffset, rightOffset });
+      const loc = reader.readF32LE();
+      const leftOffset = reader.readF32LE();
+      const lbX = reader.readF32LE();
+      const lbY = reader.readF32LE();
+      const lfX = reader.readF32LE();
+      const lfY = reader.readF32LE();
+      const rightOffset = reader.readF32LE();
+      const rbX = reader.readF32LE();
+      const rbY = reader.readF32LE();
+      const rfX = reader.readF32LE();
+      const rfY = reader.readF32LE();
+
+      points.push({
+        loc,
+        leftOffset,
+        leftCtrlBack: { x: lbX, y: lbY },
+        leftCtrlFwd: { x: lfX, y: lfY },
+        rightOffset,
+        rightCtrlBack: { x: rbX, y: rbY },
+        rightCtrlFwd: { x: rfX, y: rfY },
+      });
+
       const width = leftOffset + rightOffset;
       if (width > maxWidth) maxWidth = width;
     }
 
+    // Read 5-byte trailer (expected to be zeros)
+    if (reader.pos + 5 <= endPos) {
+      reader.skip(5);
+    }
+
+    // Read domain
+    const domain = readTGTBDomain(reader, endPos);
+
     if (maxWidth <= 0) return null;
-    return { maxWidth, profile: { points } };
+    return { maxWidth, profile: { points, domain: domain || [0, 1] } };
   } catch (_e) {
     reader.pos = startPos;
+    return null;
+  }
+}
+
+/** Read the tGTB domain: f32(start) + u64(unknown) + f32(end) + u64(unknown) = 24 bytes */
+function readTGTBDomain(reader: BinaryReader, endPos: number): [number, number] | null {
+  if (reader.pos + 24 > endPos) return null;
+  try {
+    const domainStart = reader.readF32LE();
+    reader.skip(8); // unknown u64
+    const domainEnd = reader.readF32LE();
+    reader.skip(8); // unknown u64
+    return [domainStart, domainEnd];
+  } catch (_e) {
     return null;
   }
 }
@@ -1365,24 +1444,18 @@ export function renderTVGToCanvas(
   const fillOrder: TVGArtLayer['type'][] = ['underlay', 'color', 'line', 'overlay'];
   const strokeOrder: TVGArtLayer['type'][] = ['underlay', 'color', 'line', 'overlay'];
 
-  // Three-pass rendering: fills clipped to stroke boundaries, then strokes on top.
-  //
-  // In Toon Boom, strokes define the visible boundaries of fill regions. Fills can
-  // extend slightly beyond stroke outlines. To fix this, we:
-  //   1. Render fills to a temporary offscreen canvas
-  //   2. Erase fill pixels under all stroke outlines (including invisible boundaries)
-  //      using globalCompositeOperation 'destination-out'
-  //   3. Composite the clipped fills onto the main canvas
-  //   4. Render visible strokes on top (covering the erased boundary gap)
-  //
+  // Three-pass rendering with dilated flood-fill clipping:
+  //   1. Render fills to offscreen canvas
+  //   2. Build stroke mask → dilate 2px → flood-fill from edges → erase outside
+  //   3. Composite clipped fills, then visible strokes on top
+
   const fillCanvas = document.createElement('canvas');
   fillCanvas.width = width;
   fillCanvas.height = height;
   const fillCtx = fillCanvas.getContext('2d')!;
-  // Copy the same transform so fills render at the same position
   fillCtx.setTransform(ctx.getTransform());
 
-  // Pass 1: Render all fills to the offscreen canvas
+  // Pass 1: Render all fills to offscreen canvas
   for (const layerType of fillOrder) {
     for (const layer of drawing.layers) {
       if (layer.type !== layerType) continue;
@@ -1390,25 +1463,104 @@ export function renderTVGToCanvas(
     }
   }
 
-  // Pass 2: Erase fill pixels that fall under stroke outlines (including invisible boundaries).
-  // This clips fills to the interior regions defined by strokes.
-  fillCtx.save();
-  fillCtx.globalCompositeOperation = 'destination-out';
-  for (const layerType of strokeOrder) {
-    for (const layer of drawing.layers) {
-      if (layer.type !== layerType) continue;
-      renderStrokeMask(fillCtx, layer, defaultStrokeWidth);
+  // Check if drawing has stroke components for clipping
+  let hasStrokes = false;
+  for (const layer of drawing.layers) {
+    for (const shape of layer.shapes) {
+      if (shape.components.some(c => (c.componentType === 2 || c.componentType === 4) && c.path && c.path.segments.length > 0)) {
+        hasStrokes = true; break;
+      }
     }
+    if (hasStrokes) break;
   }
-  fillCtx.restore();
+
+  if (hasStrokes) {
+    // Pass 2: Dilated flood-fill to clip fills to stroke boundaries
+    const maskCanvas = document.createElement('canvas');
+    maskCanvas.width = width;
+    maskCanvas.height = height;
+    const maskCtx = maskCanvas.getContext('2d')!;
+    maskCtx.setTransform(ctx.getTransform());
+    for (const layerType of strokeOrder) {
+      for (const layer of drawing.layers) {
+        if (layer.type !== layerType) continue;
+        renderStrokeMask(maskCtx, layer, defaultStrokeWidth);
+      }
+    }
+
+    // Build wall map from stroke mask
+    const maskData = maskCtx.getImageData(0, 0, width, height);
+    const isWall = new Uint8Array(width * height);
+    for (let i = 0; i < width * height; i++) {
+      if (maskData.data[i * 4 + 3] > 30) isWall[i] = 1;
+    }
+
+    // Dilate by 2px to close sub-pixel gaps between stroke segments
+    const dilated = new Uint8Array(width * height);
+    const DR = 2;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (isWall[y * width + x]) { dilated[y * width + x] = 1; continue; }
+        let found = false;
+        for (let dy = -DR; dy <= DR && !found; dy++) {
+          for (let dx = -DR; dx <= DR && !found; dx++) {
+            if (dx * dx + dy * dy > DR * DR) continue;
+            const nx = x + dx, ny = y + dy;
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height && isWall[ny * width + nx]) found = true;
+          }
+        }
+        if (found) dilated[y * width + x] = 1;
+      }
+    }
+
+    // BFS flood-fill from edges to find "outside" region
+    const outside = new Uint8Array(width * height);
+    const queue: number[] = [];
+    for (let x = 0; x < width; x++) {
+      if (!dilated[x]) { outside[x] = 1; queue.push(x); }
+      const b = (height - 1) * width + x;
+      if (!dilated[b]) { outside[b] = 1; queue.push(b); }
+    }
+    for (let y = 1; y < height - 1; y++) {
+      if (!dilated[y * width]) { outside[y * width] = 1; queue.push(y * width); }
+      const r = y * width + width - 1;
+      if (!dilated[r]) { outside[r] = 1; queue.push(r); }
+    }
+    let head = 0;
+    while (head < queue.length) {
+      const idx = queue[head++];
+      const x = idx % width, y = (idx / width) | 0;
+      if (x > 0 && !outside[idx - 1] && !dilated[idx - 1]) { outside[idx - 1] = 1; queue.push(idx - 1); }
+      if (x < width - 1 && !outside[idx + 1] && !dilated[idx + 1]) { outside[idx + 1] = 1; queue.push(idx + 1); }
+      if (y > 0 && !outside[idx - width] && !dilated[idx - width]) { outside[idx - width] = 1; queue.push(idx - width); }
+      if (y < height - 1 && !outside[idx + width] && !dilated[idx + width]) { outside[idx + width] = 1; queue.push(idx + width); }
+    }
+
+    // Erase outside pixels from fill canvas, with leak detection fallback.
+    // If clipping removes >50% of fill pixels, the mask leaked — skip clipping.
+    const fillData = fillCtx.getImageData(0, 0, width, height);
+    let fillPixels = 0, erasedPixels = 0;
+    for (let i = 0; i < width * height; i++) {
+      if (fillData.data[i * 4 + 3] > 0) fillPixels++;
+      if (outside[i] && fillData.data[i * 4 + 3] > 0) erasedPixels++;
+    }
+    if (fillPixels > 0 && erasedPixels / fillPixels < 0.5) {
+      // Safe to clip - less than 50% of fill would be removed
+      for (let i = 0; i < width * height; i++) {
+        if (outside[i]) fillData.data[i * 4 + 3] = 0;
+      }
+      fillCtx.putImageData(fillData, 0, 0);
+    }
+    // else: mask leaked, keep fills unclipped
+  }
 
   // Composite clipped fills onto main canvas
   ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0); // identity — fillCanvas is already in pixel space
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.drawImage(fillCanvas, 0, 0);
   ctx.restore();
 
-  // Pass 3: Render visible strokes on top
+  // Pass 3: Render visible strokes on top (covers boundary imprecision from dilation)
   for (const layerType of strokeOrder) {
     for (const layer of drawing.layers) {
       if (layer.type !== layerType) continue;
@@ -1525,18 +1677,28 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
     const strokeComps = shape.components.filter(c => (c.componentType === 4 || c.componentType === 2) && c.path && c.path.segments.length > 0);
 
     // Fill rendering: group fill components by color, then chain each group
-    // into closed regions. Colorless boundary components are shared across groups.
+    // into closed regions. Colorless fills AND invisible stroke boundaries
+    // (ct=2 without strokeWidth) are shared across groups as boundary segments.
     if (pass === 'fill' && fillComps.length > 0) {
-      const TOL = 0.5;
+      const TOL = 2.0;
+
+      // Include invisible stroke boundaries as additional fill boundary components.
+      // In Toon Boom, invisible strokes (ct=2, no width) define fill region edges.
+      // Adding them to the fill chain helps close open regions.
+      const boundaryStrokes = strokeComps.filter(c =>
+        c.componentType === 2 && c.strokeWidth === null && c.path && c.path.segments.length > 1
+      );
+      // Create a combined component array: fills + boundary strokes
+      const allChainComps = [...fillComps, ...boundaryStrokes];
 
       // Separate colored fills from colorless boundary fills
       const colorKey = (c: { r: number; g: number; b: number; a: number }) => `${c.r},${c.g},${c.b},${c.a}`;
-      const colorGroups = new Map<string, number[]>(); // colorKey -> fill indices
-      const boundaryIndices: number[] = []; // colorless fills
+      const colorGroups = new Map<string, number[]>(); // colorKey -> fill indices in allChainComps
+      const boundaryIndices: number[] = []; // colorless fills + boundary strokes
 
-      for (let i = 0; i < fillComps.length; i++) {
-        const comp = fillComps[i];
-        if (comp.color) {
+      for (let i = 0; i < allChainComps.length; i++) {
+        const comp = allChainComps[i];
+        if (comp.color && comp.componentType === 0) {
           const key = colorKey(comp.color);
           if (!colorGroups.has(key)) colorGroups.set(key, []);
           colorGroups.get(key)!.push(i);
@@ -1549,13 +1711,13 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
       // For multi-color shapes, chain each color group + shared boundaries
       const colorKeys = Array.from(colorGroups.keys());
       if (colorKeys.length <= 1) {
-        // Single color: chain all fills together (original behavior)
-        chainAndFillComponents(ctx, fillComps, fillComps.map((_, i) => i), TOL);
+        // Single color: chain all components (fills + boundary strokes)
+        chainAndFillComponents(ctx, allChainComps, allChainComps.map((_, i) => i), TOL);
       } else {
         // Multi-color: chain each color group separately, including shared boundaries
         for (const key of colorKeys) {
           const groupIndices = [...colorGroups.get(key)!, ...boundaryIndices];
-          chainAndFillComponents(ctx, fillComps, groupIndices, TOL);
+          chainAndFillComponents(ctx, allChainComps, groupIndices, TOL);
         }
       }
     }
@@ -1621,10 +1783,9 @@ function renderStrokeMask(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, def
       } else if (comp.componentType === 4) {
         sw = defaultStrokeWidth;
       } else {
-        // Invisible boundary strokes: use a thin width to mask fill overflow.
-        // This should be thin enough to be covered by the visible strokes drawn on top,
-        // but wide enough to erase the fill overflow at the boundary.
-        sw = 0.5;
+        // Invisible boundary strokes: use width 1.0 for the mask to ensure
+        // continuous lines. Visible strokes drawn on top cover this imprecision.
+        sw = 1.0;
       }
       if (sw < 0.05) continue;
 
@@ -1643,6 +1804,162 @@ function renderStrokeMask(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, def
   }
 }
 
+/**
+ * Evaluate a cubic bezier at parameter t.
+ */
+function cubicBezier(t: number, p0: number, p1: number, p2: number, p3: number): number {
+  const mt = 1 - t;
+  return mt * mt * mt * p0 + 3 * mt * mt * t * p1 + 3 * mt * t * t * p2 + t * t * t * p3;
+}
+
+/**
+ * Evaluate a cubic bezier derivative at parameter t (for tangent).
+ */
+function cubicBezierDeriv(t: number, p0: number, p1: number, p2: number, p3: number): number {
+  const mt = 1 - t;
+  return 3 * mt * mt * (p1 - p0) + 6 * mt * t * (p2 - p1) + 3 * t * t * (p3 - p2);
+}
+
+/**
+ * Sample a point and tangent on the centerline path at a given arc-length fraction.
+ * Handles M, L, Q, C segments by evaluating the actual curve equations.
+ */
+function sampleCenterline(
+  segs: TVGSegment[],
+  segArcStarts: number[],
+  totalArcLen: number,
+  targetFraction: number,
+): { x: number; y: number; nx: number; ny: number } | null {
+  const targetLen = targetFraction * totalArcLen;
+  if (segs.length < 2) return null;
+
+  // Find which segment contains targetLen
+  let segIdx = 1;
+  while (segIdx < segs.length - 1 && segArcStarts[segIdx + 1] < targetLen) segIdx++;
+
+  const segStart = segArcStarts[segIdx];
+  const segEnd = (segIdx + 1 < segArcStarts.length) ? segArcStarts[segIdx + 1] : segArcStarts[segIdx];
+  const segLen = segEnd - segStart;
+  const segT = segLen > 0.001 ? Math.max(0, Math.min(1, (targetLen - segStart) / segLen)) : 0;
+
+  const seg = segs[segIdx];
+  const prev = segs[segIdx - 1] || segs[0];
+
+  let x: number, y: number, tx: number, ty: number;
+
+  if (seg.type === 'L' || seg.type === 'M') {
+    x = prev.x + (seg.x - prev.x) * segT;
+    y = prev.y + (seg.y - prev.y) * segT;
+    tx = seg.x - prev.x;
+    ty = seg.y - prev.y;
+  } else if (seg.type === 'Q') {
+    const mt = 1 - segT;
+    x = mt * mt * prev.x + 2 * mt * segT * seg.cx + segT * segT * seg.x;
+    y = mt * mt * prev.y + 2 * mt * segT * seg.cy + segT * segT * seg.y;
+    tx = 2 * mt * (seg.cx - prev.x) + 2 * segT * (seg.x - seg.cx);
+    ty = 2 * mt * (seg.cy - prev.y) + 2 * segT * (seg.y - seg.cy);
+  } else if (seg.type === 'C') {
+    x = cubicBezier(segT, prev.x, seg.c1x, seg.c2x, seg.x);
+    y = cubicBezier(segT, prev.y, seg.c1y, seg.c2y, seg.y);
+    tx = cubicBezierDeriv(segT, prev.x, seg.c1x, seg.c2x, seg.x);
+    ty = cubicBezierDeriv(segT, prev.y, seg.c1y, seg.c2y, seg.y);
+  } else {
+    return null;
+  }
+
+  const tLen = Math.sqrt(tx * tx + ty * ty) || 1;
+  // Normal perpendicular to tangent (left-pointing)
+  return { x, y, nx: -ty / tLen, ny: tx / tLen };
+}
+
+/**
+ * Compute approximate arc lengths for each path segment using subdivision.
+ * Returns array where index i is the cumulative arc length at the START of segment i.
+ */
+function computeSegmentArcLengths(segs: TVGSegment[]): number[] {
+  const arcStarts: number[] = [0]; // segment 0 (M) starts at 0
+  let cumLen = 0;
+
+  for (let i = 1; i < segs.length; i++) {
+    const prev = segs[i - 1];
+    const seg = segs[i];
+    let segLen = 0;
+
+    if (seg.type === 'L' || seg.type === 'M') {
+      const dx = seg.x - prev.x;
+      const dy = seg.y - prev.y;
+      segLen = Math.sqrt(dx * dx + dy * dy);
+    } else if (seg.type === 'Q') {
+      const steps = 8;
+      let lx = prev.x, ly = prev.y;
+      for (let s = 1; s <= steps; s++) {
+        const t = s / steps;
+        const mt = 1 - t;
+        const nx = mt * mt * prev.x + 2 * mt * t * seg.cx + t * t * seg.x;
+        const ny = mt * mt * prev.y + 2 * mt * t * seg.cy + t * t * seg.y;
+        segLen += Math.sqrt((nx - lx) ** 2 + (ny - ly) ** 2);
+        lx = nx; ly = ny;
+      }
+    } else if (seg.type === 'C') {
+      const steps = 12;
+      let lx = prev.x, ly = prev.y;
+      for (let s = 1; s <= steps; s++) {
+        const t = s / steps;
+        const nx = cubicBezier(t, prev.x, seg.c1x, seg.c2x, seg.x);
+        const ny = cubicBezier(t, prev.y, seg.c1y, seg.c2y, seg.y);
+        segLen += Math.sqrt((nx - lx) ** 2 + (ny - ly) ** 2);
+        lx = nx; ly = ny;
+      }
+    }
+
+    cumLen += segLen;
+    arcStarts.push(cumLen);
+  }
+
+  return arcStarts;
+}
+
+/**
+ * Interpolate thickness using cubic bezier control points from the thickness profile.
+ *
+ * The control points define a smooth cubic bezier curve between adjacent thickness points:
+ *   ctrl_fwd of point_i: forward CP (x is 0..1 relative to interval, y is offset distance)
+ *   ctrl_back of point_i+1: backward CP (x is 0..1 relative from next point, y is offset distance)
+ */
+function interpolateThickness(
+  profile: TVGThicknessProfile,
+  t: number,
+): { leftW: number; rightW: number } {
+  const pts = profile.points;
+  if (pts.length === 0) return { leftW: 0, rightW: 0 };
+  if (pts.length === 1) return { leftW: pts[0].leftOffset, rightW: pts[0].rightOffset };
+
+  // Clamp t to profile range
+  if (t <= pts[0].loc) return { leftW: pts[0].leftOffset, rightW: pts[0].rightOffset };
+  if (t >= pts[pts.length - 1].loc) {
+    const last = pts[pts.length - 1];
+    return { leftW: last.leftOffset, rightW: last.rightOffset };
+  }
+
+  // Find the interval
+  let j = 1;
+  while (j < pts.length && pts[j].loc < t) j++;
+
+  const prev = pts[j - 1];
+  const next = pts[j];
+  const intervalLen = next.loc - prev.loc;
+  if (intervalLen <= 0) return { leftW: prev.leftOffset, rightW: prev.rightOffset };
+
+  const localT = (t - prev.loc) / intervalLen;
+
+  // Cubic bezier interpolation for left side:
+  // P0 = prev.leftOffset, P1 = prev.leftCtrlFwd.y, P2 = next.leftCtrlBack.y, P3 = next.leftOffset
+  const leftW = cubicBezier(localT, prev.leftOffset, prev.leftCtrlFwd.y, next.leftCtrlBack.y, next.leftOffset);
+  const rightW = cubicBezier(localT, prev.rightOffset, prev.rightCtrlFwd.y, next.rightCtrlBack.y, next.rightOffset);
+
+  return { leftW: Math.max(0, leftW), rightW: Math.max(0, rightW) };
+}
+
 /** Render a variable-width stroke as a filled outline using the thickness profile. */
 function renderVariableWidthStroke(
   ctx: CanvasRenderingContext2D,
@@ -1653,87 +1970,89 @@ function renderVariableWidthStroke(
   const segs = path.segments;
   if (segs.length < 2) return;
 
-  // Sample points along the path with tangent normals
-  const samplePoints: { x: number; y: number; nx: number; ny: number }[] = [];
-
-  // Collect all endpoints (simplified: linear interpolation between segment endpoints)
-  const pts: { x: number; y: number }[] = [];
-  for (const seg of segs) {
-    pts.push({ x: seg.x, y: seg.y });
-  }
-
-  // Compute cumulative arc lengths
-  const arcLens: number[] = [0];
-  for (let i = 1; i < pts.length; i++) {
-    const dx = pts[i].x - pts[i - 1].x;
-    const dy = pts[i].y - pts[i - 1].y;
-    arcLens.push(arcLens[i - 1] + Math.sqrt(dx * dx + dy * dy));
-  }
-  const totalLen = arcLens[arcLens.length - 1];
+  // Compute proper arc lengths along the actual bezier curves
+  const segArcStarts = computeSegmentArcLengths(segs);
+  const totalLen = segArcStarts[segArcStarts.length - 1];
   if (totalLen < 0.01) return;
 
-  // Sample at regular intervals
-  const numSamples = Math.max(20, Math.min(80, Math.ceil(totalLen / 2)));
-  for (let i = 0; i <= numSamples; i++) {
-    const t = i / numSamples;
-    const targetLen = t * totalLen;
+  // Higher sample density for better quality (was: max 80, 2px spacing)
+  const numSamples = Math.max(30, Math.min(200, Math.ceil(totalLen)));
 
-    // Find segment containing this arc length
-    let segIdx = 1;
-    while (segIdx < arcLens.length - 1 && arcLens[segIdx] < targetLen) segIdx++;
+  // Map from thickness domain to centerline parameter
+  const [domainStart, domainEnd] = profile.domain;
+  const domainLen = domainEnd - domainStart;
 
-    const segStart = arcLens[segIdx - 1];
-    const segEnd = arcLens[segIdx];
-    const segT = segEnd > segStart ? (targetLen - segStart) / (segEnd - segStart) : 0;
-
-    const x = pts[segIdx - 1].x + (pts[segIdx].x - pts[segIdx - 1].x) * segT;
-    const y = pts[segIdx - 1].y + (pts[segIdx].y - pts[segIdx - 1].y) * segT;
-
-    // Tangent and normal
-    const dx = pts[segIdx].x - pts[segIdx - 1].x;
-    const dy = pts[segIdx].y - pts[segIdx - 1].y;
-    const len = Math.sqrt(dx * dx + dy * dy) || 1;
-    // Normal perpendicular to tangent
-    samplePoints.push({ x, y, nx: -dy / len, ny: dx / len });
-  }
-
-  // Interpolate thickness at each sample point
   const leftPoints: { x: number; y: number }[] = [];
   const rightPoints: { x: number; y: number }[] = [];
 
-  for (let i = 0; i <= numSamples; i++) {
-    const t = i / numSamples;
-    const pt = samplePoints[i];
+  let firstPt: { x: number; y: number; nx: number; ny: number } | null = null;
+  let lastPt: { x: number; y: number; nx: number; ny: number } | null = null;
 
-    // Interpolate thickness from profile
-    let leftW = profile.points[0].leftOffset;
-    let rightW = profile.points[0].rightOffset;
-    for (let j = 1; j < profile.points.length; j++) {
-      if (profile.points[j].loc >= t) {
-        const prev = profile.points[j - 1];
-        const next = profile.points[j];
-        const lt = next.loc > prev.loc ? (t - prev.loc) / (next.loc - prev.loc) : 0;
-        leftW = prev.leftOffset + (next.leftOffset - prev.leftOffset) * lt;
-        rightW = prev.rightOffset + (next.rightOffset - prev.rightOffset) * lt;
-        break;
-      }
-      leftW = profile.points[j].leftOffset;
-      rightW = profile.points[j].rightOffset;
-    }
+  for (let i = 0; i <= numSamples; i++) {
+    const frac = i / numSamples;
+
+    const pt = sampleCenterline(segs, segArcStarts, totalLen, frac);
+    if (!pt) continue;
+
+    // Map centerline fraction to thickness parameter via domain
+    const thicknessT = domainLen > 0 ? domainStart + frac * domainLen : frac;
+
+    const { leftW, rightW } = interpolateThickness(profile, thicknessT);
 
     leftPoints.push({ x: pt.x + pt.nx * leftW, y: pt.y + pt.ny * leftW });
     rightPoints.push({ x: pt.x - pt.nx * rightW, y: pt.y - pt.ny * rightW });
+
+    if (!firstPt) firstPt = pt;
+    lastPt = pt;
   }
 
-  // Build filled outline: left side forward, then right side reversed
+  if (leftPoints.length < 2) return;
+
+  // Build filled outline: left forward, end cap, right reversed, start cap
   const outlinePath = new Path2D();
   outlinePath.moveTo(leftPoints[0].x, leftPoints[0].y);
   for (let i = 1; i < leftPoints.length; i++) {
     outlinePath.lineTo(leftPoints[i].x, leftPoints[i].y);
   }
-  for (let i = rightPoints.length - 1; i >= 0; i--) {
+
+  // End cap: cubic bezier round cap (matching Toon Boom's 1.33x cap offset)
+  if (lastPt && profile.points.length > 0) {
+    const lastTP = profile.points[profile.points.length - 1];
+    const capScale = 1.33;
+    const lastLeft = leftPoints[leftPoints.length - 1];
+    const lastRight = rightPoints[rightPoints.length - 1];
+    // Tangent direction at end
+    const tdx = -lastPt.ny;
+    const tdy = lastPt.nx;
+    const cp1x = lastLeft.x + tdx * capScale * lastTP.leftOffset;
+    const cp1y = lastLeft.y + tdy * capScale * lastTP.leftOffset;
+    const cp2x = lastRight.x + tdx * capScale * lastTP.rightOffset;
+    const cp2y = lastRight.y + tdy * capScale * lastTP.rightOffset;
+    outlinePath.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, lastRight.x, lastRight.y);
+  } else {
+    outlinePath.lineTo(rightPoints[rightPoints.length - 1].x, rightPoints[rightPoints.length - 1].y);
+  }
+
+  for (let i = rightPoints.length - 2; i >= 0; i--) {
     outlinePath.lineTo(rightPoints[i].x, rightPoints[i].y);
   }
+
+  // Start cap: cubic bezier round cap
+  if (firstPt && profile.points.length > 0) {
+    const firstTP = profile.points[0];
+    const capScale = 1.33;
+    const firstRight = rightPoints[0];
+    const firstLeft = leftPoints[0];
+    // Tangent direction at start (backward = negative tangent)
+    const tdx = firstPt.ny;
+    const tdy = -firstPt.nx;
+    const cp1x = firstRight.x + tdx * capScale * firstTP.rightOffset;
+    const cp1y = firstRight.y + tdy * capScale * firstTP.rightOffset;
+    const cp2x = firstLeft.x + tdx * capScale * firstTP.leftOffset;
+    const cp2y = firstLeft.y + tdy * capScale * firstTP.leftOffset;
+    outlinePath.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, firstLeft.x, firstLeft.y);
+  }
+
   outlinePath.closePath();
 
   ctx.fillStyle = fillStyle;
