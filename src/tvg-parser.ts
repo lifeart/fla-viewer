@@ -2369,10 +2369,17 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
         && (shape.shapeType === 1 || shape.shapeType === 5)) {
       const pencilComps = strokeComps.filter(c => c.componentType === 4 && c.path && c.path.segments.length > 1 && c.color);
       if (pencilComps.length > 0) {
+        // Chain pencil paths into one connected path using lineTo for
+        // subsequent components (not moveTo which creates separate sub-paths)
         const path = new Path2D();
+        let isFirst = true;
         for (const comp of pencilComps) {
-          for (const seg of comp.path!.segments) {
-            if (seg.type === 'M') path.moveTo(seg.x, seg.y);
+          for (let si = 0; si < comp.path!.segments.length; si++) {
+            const seg = comp.path!.segments[si];
+            if (si === 0) {
+              if (isFirst) { path.moveTo(seg.x, seg.y); isFirst = false; }
+              else path.lineTo(seg.x, seg.y); // connect to previous
+            }
             else if (seg.type === 'L') path.lineTo(seg.x, seg.y);
             else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y);
             else if (seg.type === 'C') path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
@@ -2398,9 +2405,14 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
         const boundaryColor = defaultBoundaryFillColor;
         if (boundaryColor) {
           const path = new Path2D();
+          let isFirstB = true;
           for (const comp of boundaryOnly) {
-            for (const seg of comp.path!.segments) {
-              if (seg.type === 'M') path.moveTo(seg.x, seg.y);
+            for (let si = 0; si < comp.path!.segments.length; si++) {
+              const seg = comp.path!.segments[si];
+              if (si === 0) {
+                if (isFirstB) { path.moveTo(seg.x, seg.y); isFirstB = false; }
+                else path.lineTo(seg.x, seg.y);
+              } else if (seg.type === 'M') path.moveTo(seg.x, seg.y);
               else if (seg.type === 'L') path.lineTo(seg.x, seg.y);
               else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y);
               else if (seg.type === 'C') path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
