@@ -1914,7 +1914,10 @@ export function renderTVGToCanvas(
     }
   }
 
-  // Pass 1: Render all fills to offscreen canvas
+  // Pass 1: Render all fills to offscreen canvas (all layers in order).
+  // Per Harmony's contour topology (HARMONY_RENDERING_INTERNALS.md), overlay fills
+  // are children of the main outline. Flood-fill clipping in Pass 2 clips all fills
+  // (including overlay) to the stroke boundaries.
   for (const layerType of fillOrder) {
     for (const layer of drawing.layers) {
       if (layer.type !== layerType) continue;
@@ -1926,13 +1929,13 @@ export function renderTVGToCanvas(
   const skipClipping = options?.skipClipping ?? false;
 
   // Check if drawing has stroke components for clipping.
-  // Flood-fill clipping requires boundary strokes (ct=2 without explicit strokeWidth)
-  // which Toon Boom uses to define sealed fill regions. Drawings with only pencil
-  // strokes (ct=4) — like hand-drawn elements — lack these boundaries, so their
-  // pencil strokes don't form sealed walls. Flood-fill leaks through tiny gaps
-  // and incorrectly erases fill pixels, reducing accuracy.
+  // Flood-fill clipping uses stroke boundaries to clip fills.
+  // Traditional boundary strokes (ct=2 without explicit strokeWidth) form sealed regions.
+  // Uniform-width pencil strokes (ct=4) also form reliable boundaries when they have
+  // consistent width, allowing flood-fill clipping for pencil-only drawings.
   let hasStrokes = false;
   let hasBoundaryStrokes = false;
+  let hasUniformPencilStrokes = false;
   for (const layer of drawing.layers) {
     for (const shape of layer.shapes) {
       for (const comp of shape.components) {
@@ -1942,11 +1945,17 @@ export function renderTVGToCanvas(
         if (comp.componentType === 2 && comp.strokeWidth === null && comp.path && comp.path.segments.length > 0) {
           hasBoundaryStrokes = true;
         }
+        // Uniform-width pencil strokes form sealed walls suitable for flood-fill
+        if (comp.componentType === 4 && comp.thicknessProfile && comp.path && comp.path.segments.length > 0) {
+          const uw = getUniformProfileWidth(comp.thicknessProfile);
+          if (uw !== null && uw >= 1.0) hasUniformPencilStrokes = true;
+        }
       }
     }
   }
+  const canClip = hasBoundaryStrokes || hasUniformPencilStrokes;
 
-  if (hasStrokes && hasBoundaryStrokes && !skipClipping) {
+  if (hasStrokes && canClip && !skipClipping) {
     // Pass 2: Dilated flood-fill to clip fills to stroke boundaries
     // Uses 2x resolution mask (Approach C) for better sub-pixel gap closure,
     // with adaptive dilation radius (Approach A) based on stroke density.
@@ -2100,8 +2109,11 @@ export function renderTVGToCanvas(
         if (fillData.data[i * 4 + 3] > 0) fillPixels++;
         if (outside[i] && fillData.data[i * 4 + 3] > 0) erasedPixels++;
       }
-      if (fillPixels > 0 && erasedPixels / fillPixels < 0.5) {
-        // Safe to clip - less than 50% of fill would be removed
+      // For pencil-only drawings (no boundary strokes), overlay fills often extend
+      // beyond the main outline — allow more aggressive clipping (60% vs 50%).
+      const leakThreshold = hasBoundaryStrokes ? 0.5 : 0.6;
+      if (fillPixels > 0 && erasedPixels / fillPixels < leakThreshold) {
+        // Safe to clip - less than threshold of fill would be removed
         for (let i = 0; i < ssWidth * ssHeight; i++) {
           if (outside[i]) fillData.data[i * 4 + 3] = 0;
         }
@@ -2138,7 +2150,10 @@ export function renderTVGToCanvas(
   ctx.drawImage(fillCanvas, 0, 0);
   ctx.restore();
 
-  // Pass 3: Render visible strokes on top (covers boundary imprecision from dilation)
+  // Pass 3: Render visible strokes on top (covers boundary imprecision from dilation).
+  // All layers render strokes in order (painter's algorithm).
+  // Overlay strokes render on top — in Harmony thumbnails, all art layers are
+  // rendered without inter-layer clipping.
   for (const layerType of strokeOrder) {
     for (const layer of drawing.layers) {
       if (layer.type !== layerType) continue;
@@ -2586,10 +2601,19 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
     // types, while 4/6 are outline types.
     // The per-shape fillComps check is sufficient — other shapes having fills
     // (e.g., underlay mask fills) should not prevent pencil-fill in this shape.
+    // However, pencil strokes with "Line" color (typically black/dark) are outlines,
+    // not fill boundaries — skip pencil-fill for those to avoid covering up real fills
+    // from the color layer.
     if (pass === 'fill' && fillComps.length === 0
         && (shape.shapeType === 1 || shape.shapeType === 5)) {
       const pencilComps = strokeComps.filter(c => c.componentType === 4 && c.path && c.path.segments.length > 1 && c.color);
-      if (pencilComps.length > 0) {
+      // Skip pencil-fill when all pencil components have a dark/line color (r,g,b all < 30).
+      // Dark-colored pencils are outline strokes, not fill-defining boundaries.
+      const allDark = pencilComps.length > 0 && pencilComps.every(c => {
+        const col = c.color!;
+        return col.r < 30 && col.g < 30 && col.b < 30;
+      });
+      if (pencilComps.length > 0 && !allDark) {
         // Chain pencil paths into one connected path using lineTo for
         // subsequent components (not moveTo which creates separate sub-paths)
         const path = new Path2D();
@@ -3189,21 +3213,95 @@ function chainAndFillComponents(
     if (isClosed) path.closePath();
   };
 
-  // Build a single compound path from all chains and fill with evenodd.
-  // This is the simplest correct approach: evenodd handles both overlapping
-  // fills (they add up) and nested holes (they cancel out).
-  {
+  // Contour-based fill (matching Harmony's GR_Contour system):
+  // Each chain = one contour = one independent filled region.
+  // Per binary findings: Harmony does NOT use evenodd/nonzero winding rules.
+  // Instead each contour fills independently, and parent-child nesting
+  // (TopologicalComparison) determines holes.
+  //
+  // For chains that are nested (bbox containment), combine into one path
+  // with evenodd to create holes. Non-nested chains fill independently.
+  if (chains.length === 1) {
+    // Single contour: just fill it
     const path = new Path2D();
-    for (let ci = 0; ci < chains.length; ci++) {
-      addChainToPath(path, chains[ci], ci === 0);
-    }
-    ctx.fill(path, 'evenodd');
-  }
+    addChainToPath(path, chains[0], true);
+    ctx.fill(path);
+  } else {
+    // Multiple chains: detect nesting for hole handling.
+    // Compute bounding boxes.
+    const bboxes = chains.map(chain => {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const info of chain) {
+        const comp = allFillComps[info.ci];
+        for (const seg of comp.path!.segments) {
+          if (seg.x < minX) minX = seg.x;
+          if (seg.y < minY) minY = seg.y;
+          if (seg.x > maxX) maxX = seg.x;
+          if (seg.y > maxY) maxY = seg.y;
+        }
+      }
+      return { minX, minY, maxX, maxY, area: (maxX - minX) * (maxY - minY) };
+    });
 
-  // NOTE: Previous "contour-based nesting detection" approach was removed
-  // because it caused regressions. The simple compound-path + evenodd handles
-  // both overlapping fills and nested holes correctly for all test cases.
-  // See commit 3e1d67b for the removed logic if needed in the future.
+    // Find parent for each chain (smallest containing chain by bbox).
+    const parent = new Array<number>(chains.length).fill(-1);
+    for (let i = 0; i < chains.length; i++) {
+      let bestParent = -1;
+      let bestArea = Infinity;
+      for (let j = 0; j < chains.length; j++) {
+        if (i === j) continue;
+        const outer = bboxes[j];
+        const inner = bboxes[i];
+        if (inner.minX >= outer.minX && inner.maxX <= outer.maxX &&
+            inner.minY >= outer.minY && inner.maxY <= outer.maxY &&
+            inner.area < outer.area * 0.95 &&
+            outer.area < bestArea) {
+          bestParent = j;
+          bestArea = outer.area;
+        }
+      }
+      parent[i] = bestParent;
+    }
+
+    // Group: root contours and their direct children (holes).
+    const processed = new Set<number>();
+    for (let i = 0; i < chains.length; i++) {
+      if (processed.has(i)) continue;
+      if (parent[i] !== -1) continue; // not a root
+
+      // Collect this root's children (holes)
+      const children: number[] = [];
+      for (let j = 0; j < chains.length; j++) {
+        if (parent[j] === i) children.push(j);
+      }
+
+      if (children.length > 0) {
+        // Root with holes: compound path + evenodd
+        const path = new Path2D();
+        addChainToPath(path, chains[i], true);
+        processed.add(i);
+        for (const childIdx of children) {
+          addChainToPath(path, chains[childIdx], false);
+          processed.add(childIdx);
+        }
+        ctx.fill(path, 'evenodd');
+      } else {
+        // Standalone root: fill independently (no winding rule needed)
+        const path = new Path2D();
+        addChainToPath(path, chains[i], true);
+        processed.add(i);
+        ctx.fill(path);
+      }
+    }
+
+    // Fill any remaining chains (nested children without a processed root)
+    for (let i = 0; i < chains.length; i++) {
+      if (processed.has(i)) continue;
+      const path = new Path2D();
+      addChainToPath(path, chains[i], true);
+      ctx.fill(path);
+    }
+  }
 }
 
 /** Check if a path is degenerate (all points collinear — forms a line, not a shape). */
