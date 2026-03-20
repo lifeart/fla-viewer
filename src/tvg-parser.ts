@@ -1424,11 +1424,11 @@ export function renderTVGToCanvas(
         }
       }
     }
-    // Auto-expand viewport if content exceeds field chart area.
-    // Factor 1.25 provides padding to prevent clipping. This matches the best
-    // balance between large drawings (need expansion) and small ones (need exact VP).
+    // Toon Boom thumbnail viewport formula (from empirical measurement):
+    // viewport = max(fieldChart * 28, contentExtent + 227)
+    // The +227 TVG units (~8.1 fields) provides margin around the content.
     const contentExtent = Math.max(maxX - minX, maxY - minY);
-    viewportSize = Math.max(viewport, contentExtent * 1.25);
+    viewportSize = Math.max(viewport, contentExtent + 227);
 
     // When centerOnOrigin is set (compositor mode), center on (0,0) so all elements
     // share the same coordinate space. Otherwise center on content centroid.
@@ -1480,14 +1480,14 @@ export function renderTVGToCanvas(
   // Default stroke width: 1 TVG unit ≈ 1 pixel at standard viewport/canvas ratio
   const defaultStrokeWidth = 1.0;
 
-  // Art layer order. Skip underlay by default: it contains Mask-colored fills
-  // used for CUTTER clip regions, not visible content. In debug mode (includeUnderlay),
-  // render all layers including underlay to show the raw drawing structure.
-  const includeUnderlay = options?.includeUnderlay ?? false;
+  // Art layer order. Research confirmed Toon Boom thumbnails render ALL layers
+  // including underlay (which contains Mask-colored fills visible in thumbnails).
+  // The includeUnderlay option defaults to true for thumbnail matching.
+  // Set to false for compositor mode where underlay is used as CUTTER clip mask.
+  const includeUnderlay = options?.includeUnderlay ?? true;
   const artLayerFilter = options?.artLayerFilter;
   let layerTypes: TVGArtLayer['type'][];
   if (artLayerFilter && artLayerFilter !== 'all') {
-    // Render only the specific art layer requested
     layerTypes = [artLayerFilter];
   } else {
     layerTypes = includeUnderlay

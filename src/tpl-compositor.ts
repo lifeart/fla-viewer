@@ -457,8 +457,9 @@ export async function renderCompositeFrame(
       // coordinate space. This ensures body parts at different TVG positions appear at
       // the correct locations on the output canvas, even without PEG transforms.
       const viewportSize = graph.fieldY * TVG_UNITS_PER_FIELD;
-      const renderOpts: { artLayerFilter?: 'all' | 'color' | 'line' | 'overlay'; centerOnOrigin: boolean } = {
+      const renderOpts: { artLayerFilter?: 'all' | 'color' | 'line' | 'overlay'; centerOnOrigin: boolean; includeUnderlay: boolean } = {
         centerOnOrigin: true,
+        includeUnderlay: false, // Compositor uses underlay as CUTTER clip mask, not visible content
       };
       if (artLayerFilter) renderOpts.artLayerFilter = artLayerFilter;
       const canvas = renderTVGToCanvas(drawing, canvasWidth, canvasHeight, viewportSize, renderOpts);
