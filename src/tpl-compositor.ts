@@ -221,19 +221,37 @@ function parseModule(moduleEl: Element, groupPath: string, graph: SceneGraph): v
     }
   }
 
-  // Extract attributes with column references
-  const attrEls = moduleEl.querySelectorAll(':scope > attrs > *');
-  attrEls.forEach(attr => {
-    const attrName = attr.tagName;
-    const val = parseFloat(attr.getAttribute('val') || '0');
-    const col = attr.getAttribute('col') || undefined;
-    node.attrs.set(attrName, { value: isNaN(val) ? 0 : val, col });
-  });
+  // Extract transform attributes from nested XML structure
+  const attrsEl = moduleEl.querySelector(':scope > attrs');
+  if (attrsEl) {
+    // Parse nested transform groups: offset/position, scale, rotation, pivot
+    for (const groupName of ['offset', 'position', 'scale', 'rotation', 'pivot', 'splineOffset']) {
+      const groupEl = attrsEl.querySelector(`:scope > ${groupName}`);
+      if (groupEl) {
+        for (const child of Array.from(groupEl.children)) {
+          const childName = child.tagName;
+          if (childName === 'separate' || childName === 'inFields') continue;
+          const val = parseFloat(child.getAttribute('val') || '0');
+          const col = child.getAttribute('col') || undefined;
+          node.attrs.set(`${groupName}.${childName}`, { value: isNaN(val) ? 0 : val, col });
+        }
+      }
+    }
+    // Parse flat attributes: angle, skew, depth, transparency, etc.
+    for (const flatName of ['angle', 'skew', 'depth', 'transparency', 'softrender', 'inverted']) {
+      const el = attrsEl.querySelector(`:scope > ${flatName}`);
+      if (el) {
+        const val = parseFloat(el.getAttribute('val') || '0');
+        const col = el.getAttribute('col') || undefined;
+        node.attrs.set(flatName, { value: isNaN(val) ? 0 : val, col });
+      }
+    }
+  }
 
   // CUTTER inverted
   if (moduleType === 'CUTTER') {
-    const invEl = moduleEl.querySelector('attrs > inverted');
-    node.inverted = invEl?.getAttribute('val') === 'true';
+    const invAttr = node.attrs.get('inverted');
+    node.inverted = invAttr ? invAttr.value !== 0 : false;
   }
 
   graph.nodes.set(nodeId, node);
@@ -300,18 +318,23 @@ function buildTransformMatrix(node: SceneNode, graph: SceneGraph, frame: number)
     return evaluateColumn(graph, attr.col, frame, attr.value);
   };
 
-  const px = getAttr('offset.x', 0) || getAttr('position.x', 0);
-  const py = getAttr('offset.y', 0) || getAttr('position.y', 0);
+  // Position: try "position" first (PEG), then "offset" (READ)
+  const px = getAttr('position.x', 0) || getAttr('offset.x', 0);
+  const py = getAttr('position.y', 0) || getAttr('offset.y', 0);
   const sx = getAttr('scale.x', 1);
   const sy = getAttr('scale.y', 1);
+  // Rotation: try "rotation.anglez" first (PEG/READ), then "angle" (legacy)
   const rot = getAttr('rotation.anglez', 0) || getAttr('angle', 0);
+  const skew = getAttr('skew', 0);
   const pivotX = getAttr('pivot.x', 0);
   const pivotY = getAttr('pivot.y', 0);
 
+  // Build transform: translate to pivot → scale → rotate → skew → translate by pos → translate back from pivot
   const m = new DOMMatrix();
   m.translateSelf(pivotX, pivotY);
-  m.scaleSelf(sx, sy);
-  m.rotateSelf(rot);
+  if (sx !== 1 || sy !== 1) m.scaleSelf(sx, sy);
+  if (rot !== 0) m.rotateSelf(rot);
+  if (skew !== 0) m.skewXSelf(skew);
   m.translateSelf(px, py);
   m.translateSelf(-pivotX, -pivotY);
 
