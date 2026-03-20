@@ -1861,8 +1861,28 @@ export function renderTVGToCanvas(
           if (outside[i]) fillData.data[i * 4 + 3] = 0;
         }
         fillCtx.putImageData(fillData, 0, 0);
+      } else if (fillPixels > 0) {
+        // Global flood-fill leaked. For high-shape-count drawings (complex character faces),
+        // try per-shape flood-fill: each fill shape is clipped individually within its
+        // bounding box region, where nearby strokes are more likely to form sealed boundaries.
+        let totalFillShapes = 0;
+        for (const layer of drawing.layers) {
+          for (const shape of layer.shapes) {
+            if (shape.components.some(c => c.componentType === 0 && c.path && c.path.segments.length > 1)) {
+              totalFillShapes++;
+            }
+          }
+        }
+
+        if (totalFillShapes > 5) {
+          perShapeFloodFillClip(
+            fillCtx, drawing, fillOrder, strokeOrder,
+            defaultStrokeWidth, drawingHasFills, defaultBoundaryFillColor,
+            ssWidth, ssHeight, ctx.getTransform(), maskScale, DR2x,
+          );
+        }
+        // else: too few shapes for per-shape approach, keep fills unclipped
       }
-      // else: mask leaked, keep fills unclipped
     }
     // else: strokeDensity < 0.01, very sparse strokes — skip clipping entirely
   }
@@ -1902,6 +1922,266 @@ export function renderTVGToCanvas(
   }
 
   return canvas;
+}
+
+/**
+ * Per-shape flood-fill clipping strategy for high-shape-count drawings.
+ *
+ * When the global flood-fill leaks (>50% of fill erased), this function
+ * clips each fill shape individually within its bounding box. In a bounded
+ * sub-region, nearby strokes are much more likely to form sealed boundaries
+ * around the fills they enclose.
+ *
+ * Algorithm:
+ * 1. Clear the fill canvas (global fills leaked, start fresh)
+ * 2. For each shape with fill components, compute its pixel-space bounding box
+ * 3. Create a small canvas for that bbox region
+ * 4. Render the shape's fills + ALL strokes (from all layers) into that canvas
+ * 5. Run dilated flood-fill clipping within that small canvas
+ * 6. Composite the clipped result back to the main fill canvas
+ */
+function perShapeFloodFillClip(
+  fillCtx: CanvasRenderingContext2D,
+  drawing: TVGDrawing,
+  fillOrder: TVGArtLayer['type'][],
+  strokeOrder: TVGArtLayer['type'][],
+  defaultStrokeWidth: number,
+  drawingHasFills: boolean,
+  defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null,
+  ssWidth: number,
+  ssHeight: number,
+  baseTransform: DOMMatrix,
+  maskScale: number,
+  DR2x: number,
+): void {
+  // Clear the fill canvas — we'll re-render fills per-shape with clipping
+  fillCtx.save();
+  fillCtx.setTransform(1, 0, 0, 1, 0, 0);
+  fillCtx.clearRect(0, 0, ssWidth, ssHeight);
+  fillCtx.restore();
+
+  // Collect all stroke components from all visible layers for the stroke mask
+  const allStrokeComps: TVGComponent[] = [];
+  for (const layerType of strokeOrder) {
+    for (const layer of drawing.layers) {
+      if (layer.type !== layerType) continue;
+      for (const shape of layer.shapes) {
+        for (const comp of shape.components) {
+          if ((comp.componentType === 2 || comp.componentType === 4) && comp.path && comp.path.segments.length > 0) {
+            allStrokeComps.push(comp);
+          }
+        }
+      }
+    }
+  }
+
+  // Compute pixel-space bounding box for a set of path segments
+  const computePixelBBox = (comps: TVGComponent[]): { x1: number; y1: number; x2: number; y2: number } | null => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const comp of comps) {
+      if (!comp.path) continue;
+      for (const seg of comp.path.segments) {
+        // Transform TVG coords to pixel coords using the base transform
+        // baseTransform maps (tvgX, tvgY) -> (pixX, pixY) with Y-flip
+        const px = baseTransform.a * seg.x + baseTransform.c * seg.y + baseTransform.e;
+        const py = baseTransform.b * seg.x + baseTransform.d * seg.y + baseTransform.f;
+        if (px < minX) minX = px;
+        if (py < minY) minY = py;
+        if (px > maxX) maxX = px;
+        if (py > maxY) maxY = py;
+        // Also check control points for curves
+        if (seg.type === 'Q') {
+          const cx = baseTransform.a * seg.cx + baseTransform.c * seg.cy + baseTransform.e;
+          const cy = baseTransform.b * seg.cx + baseTransform.d * seg.cy + baseTransform.f;
+          if (cx < minX) minX = cx; if (cy < minY) minY = cy;
+          if (cx > maxX) maxX = cx; if (cy > maxY) maxY = cy;
+        } else if (seg.type === 'C') {
+          for (const [cpx, cpy] of [[seg.c1x, seg.c1y], [seg.c2x, seg.c2y]]) {
+            const cx = baseTransform.a * cpx + baseTransform.c * cpy + baseTransform.e;
+            const cy = baseTransform.b * cpx + baseTransform.d * cpy + baseTransform.f;
+            if (cx < minX) minX = cx; if (cy < minY) minY = cy;
+            if (cx > maxX) maxX = cx; if (cy > maxY) maxY = cy;
+          }
+        }
+      }
+    }
+    if (!isFinite(minX)) return null;
+    return { x1: minX, y1: minY, x2: maxX, y2: maxY };
+  };
+
+  // Process each fill shape individually
+  for (const layerType of fillOrder) {
+    for (const layer of drawing.layers) {
+      if (layer.type !== layerType) continue;
+
+      for (const shape of layer.shapes) {
+        const fillComps = shape.components.filter(c =>
+          c.componentType === 0 && c.path && c.path.segments.length > 1 && !isDegenerate(c.path)
+          && (!c.color || c.color.a > 128)
+        );
+        if (fillComps.length === 0) continue;
+
+        // Compute bounding box for this shape's fill components
+        const bbox = computePixelBBox(fillComps);
+        if (!bbox) continue;
+
+        // Add margin (in pixel space) for strokes and dilation
+        const margin = Math.max(20, DR2x * 2);
+        const bx1 = Math.max(0, Math.floor(bbox.x1 - margin));
+        const by1 = Math.max(0, Math.floor(bbox.y1 - margin));
+        const bx2 = Math.min(ssWidth, Math.ceil(bbox.x2 + margin));
+        const by2 = Math.min(ssHeight, Math.ceil(bbox.y2 + margin));
+        const bw = bx2 - bx1;
+        const bh = by2 - by1;
+        if (bw < 2 || bh < 2) continue;
+
+        // Create a small fill canvas for this shape's region
+        const shapeFillCanvas = document.createElement('canvas');
+        shapeFillCanvas.width = bw;
+        shapeFillCanvas.height = bh;
+        const shapeFillCtx = shapeFillCanvas.getContext('2d')!;
+        // Offset the transform so that pixel (bx1, by1) maps to (0, 0)
+        shapeFillCtx.setTransform(
+          baseTransform.a, baseTransform.b,
+          baseTransform.c, baseTransform.d,
+          baseTransform.e - bx1, baseTransform.f - by1,
+        );
+
+        // Render this shape's fills
+        const singleShapeLayer: TVGArtLayer = { type: layer.type, shapes: [shape] };
+        renderLayerPass(shapeFillCtx, singleShapeLayer, defaultStrokeWidth, 'fill', drawingHasFills, defaultBoundaryFillColor);
+
+        // Check if there are any fill pixels to clip
+        const shapeFillData = shapeFillCtx.getImageData(0, 0, bw, bh);
+        let shapeFillPixels = 0;
+        for (let i = 0; i < bw * bh; i++) {
+          if (shapeFillData.data[i * 4 + 3] > 0) shapeFillPixels++;
+        }
+        if (shapeFillPixels === 0) continue;
+
+        // Create stroke mask at mask resolution for this bbox region
+        const mw = bw * maskScale;
+        const mh = bh * maskScale;
+        // Cap mask size to avoid excessive memory for very large shapes
+        if (mw * mh > 4_000_000) {
+          // Too large for per-shape mask — just composite unclipped fills
+          fillCtx.save();
+          fillCtx.setTransform(1, 0, 0, 1, 0, 0);
+          fillCtx.drawImage(shapeFillCanvas, bx1, by1);
+          fillCtx.restore();
+          continue;
+        }
+
+        const shapeMaskCanvas = document.createElement('canvas');
+        shapeMaskCanvas.width = mw;
+        shapeMaskCanvas.height = mh;
+        const shapeMaskCtx = shapeMaskCanvas.getContext('2d')!;
+        shapeMaskCtx.setTransform(
+          baseTransform.a * maskScale, baseTransform.b * maskScale,
+          baseTransform.c * maskScale, baseTransform.d * maskScale,
+          (baseTransform.e - bx1) * maskScale, (baseTransform.f - by1) * maskScale,
+        );
+
+        // Render ALL strokes (from all layers) into the mask
+        for (const sLayerType of strokeOrder) {
+          for (const sLayer of drawing.layers) {
+            if (sLayer.type !== sLayerType) continue;
+            renderStrokeMask(shapeMaskCtx, sLayer, defaultStrokeWidth);
+          }
+        }
+
+        // Build wall map and dilate
+        const maskData = shapeMaskCtx.getImageData(0, 0, mw, mh);
+        const isWall = new Uint8Array(mw * mh);
+        for (let i = 0; i < mw * mh; i++) {
+          if (maskData.data[i * 4 + 3] > 30) isWall[i] = 1;
+        }
+
+        const dilated = new Uint8Array(mw * mh);
+        const DR2xSq = DR2x * DR2x;
+        for (let y = 0; y < mh; y++) {
+          for (let x = 0; x < mw; x++) {
+            const idx = y * mw + x;
+            if (isWall[idx]) { dilated[idx] = 1; continue; }
+            let found = false;
+            for (let dy = -DR2x; dy <= DR2x && !found; dy++) {
+              const ny = y + dy;
+              if (ny < 0 || ny >= mh) continue;
+              for (let dx = -DR2x; dx <= DR2x && !found; dx++) {
+                if (dx * dx + dy * dy > DR2xSq) continue;
+                const nx = x + dx;
+                if (nx >= 0 && nx < mw && isWall[ny * mw + nx]) found = true;
+              }
+            }
+            if (found) dilated[idx] = 1;
+          }
+        }
+
+        // BFS flood-fill from edges to find outside region
+        const outside2x = new Uint8Array(mw * mh);
+        const queue: number[] = [];
+        for (let x = 0; x < mw; x++) {
+          if (!dilated[x]) { outside2x[x] = 1; queue.push(x); }
+          const b = (mh - 1) * mw + x;
+          if (!dilated[b]) { outside2x[b] = 1; queue.push(b); }
+        }
+        for (let y = 1; y < mh - 1; y++) {
+          if (!dilated[y * mw]) { outside2x[y * mw] = 1; queue.push(y * mw); }
+          const r = y * mw + mw - 1;
+          if (!dilated[r]) { outside2x[r] = 1; queue.push(r); }
+        }
+        let head = 0;
+        while (head < queue.length) {
+          const idx = queue[head++];
+          const x = idx % mw, y = (idx / mw) | 0;
+          if (x > 0 && !outside2x[idx - 1] && !dilated[idx - 1]) { outside2x[idx - 1] = 1; queue.push(idx - 1); }
+          if (x < mw - 1 && !outside2x[idx + 1] && !dilated[idx + 1]) { outside2x[idx + 1] = 1; queue.push(idx + 1); }
+          if (y > 0 && !outside2x[idx - mw] && !dilated[idx - mw]) { outside2x[idx - mw] = 1; queue.push(idx - mw); }
+          if (y < mh - 1 && !outside2x[idx + mw] && !dilated[idx + mw]) { outside2x[idx + mw] = 1; queue.push(idx + mw); }
+        }
+
+        // Downsample outside map to shape-fill resolution
+        const outsideShape = new Uint8Array(bw * bh);
+        if (maskScale === 1) {
+          outsideShape.set(outside2x);
+        } else {
+          for (let y = 0; y < bh; y++) {
+            for (let x = 0; x < bw; x++) {
+              const x2 = x * maskScale, y2 = y * maskScale;
+              let allOutside = true;
+              for (let dy = 0; dy < maskScale && allOutside; dy++) {
+                for (let dx = 0; dx < maskScale && allOutside; dx++) {
+                  if (!outside2x[(y2 + dy) * mw + (x2 + dx)]) allOutside = false;
+                }
+              }
+              if (allOutside) outsideShape[y * bw + x] = 1;
+            }
+          }
+        }
+
+        // Clip: erase outside pixels, with per-shape leak detection
+        let shapeErased = 0;
+        for (let i = 0; i < bw * bh; i++) {
+          if (outsideShape[i] && shapeFillData.data[i * 4 + 3] > 0) shapeErased++;
+        }
+
+        if (shapeFillPixels > 0 && shapeErased / shapeFillPixels < 0.7) {
+          // Per-shape clipping succeeded — apply it
+          for (let i = 0; i < bw * bh; i++) {
+            if (outsideShape[i]) shapeFillData.data[i * 4 + 3] = 0;
+          }
+          shapeFillCtx.putImageData(shapeFillData, 0, 0);
+        }
+        // else: even per-shape leaked, keep this shape's fills unclipped
+
+        // Composite clipped shape fills back to main fill canvas
+        fillCtx.save();
+        fillCtx.setTransform(1, 0, 0, 1, 0, 0);
+        fillCtx.drawImage(shapeFillCanvas, bx1, by1);
+        fillCtx.restore();
+      }
+    }
+  }
 }
 
 function renderBitmapTVGToCanvas(
