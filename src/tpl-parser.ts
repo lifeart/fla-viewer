@@ -612,7 +612,7 @@ async function renderTVGElements(
           viewportSize = elem.fieldChart * TVG_UNITS_PER_FIELD;
         }
       }
-      const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize, viewportSize);
+      const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize, viewportSize, { supersample: 2 });
       if (canvas) {
         // Load bitmap tiles asynchronously if present
         if ((canvas as any).__bitmapTiles) {
