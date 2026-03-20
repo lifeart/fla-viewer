@@ -1345,6 +1345,9 @@ export interface TVGRenderOptions {
    *  'line' → only tLAA (line art layer).
    *  'overlay' → only tOAA (overlay art layer). */
   artLayerFilter?: 'all' | 'color' | 'line' | 'overlay';
+  /** Center the viewport on the origin (0,0) instead of the content centroid.
+   *  Used by the compositor so all elements share the same coordinate space. */
+  centerOnOrigin?: boolean;
 }
 
 export function renderTVGToCanvas(
@@ -1406,11 +1409,17 @@ export function renderTVGToCanvas(
         }
       }
     }
+    // Auto-expand viewport if content exceeds field chart area.
+    // Factor 1.25 provides padding to prevent clipping. This matches the best
+    // balance between large drawings (need expansion) and small ones (need exact VP).
     const contentExtent = Math.max(maxX - minX, maxY - minY);
     viewportSize = Math.max(viewport, contentExtent * 1.25);
 
-    const centerX = (minX + maxX) / 2;
-    const centerY = (minY + maxY) / 2;
+    // When centerOnOrigin is set (compositor mode), center on (0,0) so all elements
+    // share the same coordinate space. Otherwise center on content centroid.
+    const centerOnOrigin = options?.centerOnOrigin ?? false;
+    const centerX = centerOnOrigin ? 0 : (minX + maxX) / 2;
+    const centerY = centerOnOrigin ? 0 : (minY + maxY) / 2;
 
     scale = Math.min(width, height) / viewportSize;
     offsetX = width / 2 - centerX * scale;
