@@ -2394,6 +2394,29 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
       }
     }
 
+    // Thin pencil strokes as fill boundaries: In Harmony, pencil strokes with
+    // very thin width (sw < 0.1) serve as fill boundaries. When they form closed
+    // shapes, render them as filled regions regardless of shapeType or drawingHasFills.
+    if (pass === 'fill') {
+      const thinPencilComps = strokeComps.filter(c => {
+        if (c.componentType !== 4 || !c.path || c.path.segments.length <= 2 || !c.color) return false;
+        const sw = c.strokeWidth !== null ? c.strokeWidth : defaultStrokeWidth;
+        if (sw >= 0.1) return false;
+        const segs = c.path.segments;
+        const first = segs[0];
+        const last = segs[segs.length - 1];
+        const closeTol = 2.0;
+        return c.path.closed || (Math.abs(first.x - last.x) < closeTol && Math.abs(first.y - last.y) < closeTol);
+      });
+      for (const comp of thinPencilComps) {
+        const path = buildPath2D(comp.path!);
+        path.closePath();
+        const color = comp.color!;
+        ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${color.a / 255})`;
+        ctx.fill(path);
+      }
+    }
+
     // Boundary-stroke fill: shapes with ONLY ct=2 boundary strokes (no fills, no pencils)
     // that chain into a closed region should render as filled shapes.
     // Example: Number_Body-2 has 9 boundary strokes forming the digit "2".
@@ -2447,6 +2470,8 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
         } else {
           continue; // ct=2 brush strokes without explicit width are invisible boundaries
         }
+        // Thin pencil strokes (sw < 0.1) are rendered as fill boundaries in the
+        // fill pass. Skip them here in the stroke pass to avoid double-rendering.
         if (sw < 0.1) continue;
 
         // Variable-width stroke: render as filled outline using thickness profile
@@ -2872,8 +2897,12 @@ function chainAndFillComponents(
     chains.push(chain);
   }
 
-  // Build a single compound path from all chains for evenodd fill.
-  // Chained components are connected via lineTo, unchained ones start new sub-paths.
+  // Contour-based fill with nesting detection.
+  // Harmony fills each contour independently. However, nested contours of the same
+  // color represent holes (like the inside of letter "O"). We detect nesting by
+  // checking bounding box containment, then:
+  // - Nested chain groups: combine into one compound path with evenodd (preserves holes)
+  // - Non-nested chains: fill independently with nonzero winding (avoids false holes)
   let fillColor: { r: number; g: number; b: number; a: number } | null = null;
   for (const chain of chains) {
     for (const info of chain) {
@@ -2884,12 +2913,14 @@ function chainAndFillComponents(
   }
   if (!fillColor) return;
 
-  const path = new Path2D();
-  for (const chain of chains) {
-    let isFirst = true;
+  const fillStyle = `rgba(${fillColor.r},${fillColor.g},${fillColor.b},${fillColor.a / 255})`;
+  ctx.fillStyle = fillStyle;
+
+  // Helper: add a chain to a Path2D
+  const addChainToPath = (path: Path2D, chain: typeof chains[0], isFirstChain: boolean) => {
+    let isFirst = isFirstChain;
     const head = chain[0], tail = chain[chain.length - 1];
     const isClosed = Math.abs(head.startX - tail.endX) + Math.abs(head.startY - tail.endY) < TOL * 2;
-
     for (const info of chain) {
       const comp = allFillComps[info.ci];
       const segs = comp.path!.segments;
@@ -2917,11 +2948,85 @@ function chainAndFillComponents(
       }
     }
     if (isClosed) path.closePath();
-  }
+  };
 
-  const fillStyle = `rgba(${fillColor.r},${fillColor.g},${fillColor.b},${fillColor.a / 255})`;
-  ctx.fillStyle = fillStyle;
-  ctx.fill(path, 'evenodd');
+  if (chains.length === 1) {
+    // Single chain: just fill it
+    const path = new Path2D();
+    addChainToPath(path, chains[0], true);
+    ctx.fill(path);
+  } else {
+    // Multiple chains: detect nesting to determine fill strategy.
+    // Compute bounding boxes for each chain.
+    const bboxes = chains.map(chain => {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const info of chain) {
+        const comp = allFillComps[info.ci];
+        const segs = comp.path!.segments;
+        for (const seg of segs) {
+          if (seg.x < minX) minX = seg.x;
+          if (seg.y < minY) minY = seg.y;
+          if (seg.x > maxX) maxX = seg.x;
+          if (seg.y > maxY) maxY = seg.y;
+        }
+      }
+      return { minX, minY, maxX, maxY, area: (maxX - minX) * (maxY - minY) };
+    });
+
+    // Find chains that are nested inside another chain (bbox containment + significant area).
+    // These pairs need evenodd to preserve holes.
+    const nestedIn = new Array<number>(chains.length).fill(-1); // nestedIn[i] = index of containing chain, or -1
+    for (let i = 0; i < chains.length; i++) {
+      for (let j = 0; j < chains.length; j++) {
+        if (i === j) continue;
+        const outer = bboxes[j];
+        const inner = bboxes[i];
+        if (inner.minX >= outer.minX && inner.maxX <= outer.maxX &&
+            inner.minY >= outer.minY && inner.maxY <= outer.maxY &&
+            inner.area < outer.area * 0.8 && inner.area > outer.area * 0.02) {
+          // inner chain i is nested inside outer chain j with significant area -> hole
+          if (nestedIn[i] === -1 || bboxes[nestedIn[i]].area > outer.area) {
+            nestedIn[i] = j; // assign to smallest containing chain
+          }
+        }
+      }
+    }
+
+    // Group chains: chains that contain holes + their holes go into one evenodd group.
+    // Standalone chains get filled independently.
+    const processed = new Set<number>();
+
+    for (let i = 0; i < chains.length; i++) {
+      if (processed.has(i)) continue;
+
+      // Collect this chain and any chains nested inside it
+      const children = [];
+      for (let j = 0; j < chains.length; j++) {
+        if (nestedIn[j] === i) children.push(j);
+      }
+
+      if (children.length > 0) {
+        // This chain has holes: build compound path and use evenodd
+        const path = new Path2D();
+        addChainToPath(path, chains[i], true);
+        processed.add(i);
+        for (const childIdx of children) {
+          addChainToPath(path, chains[childIdx], false);
+          processed.add(childIdx);
+        }
+        ctx.fill(path, 'evenodd');
+      } else if (nestedIn[i] !== -1) {
+        // Already handled as part of a parent group
+        continue;
+      } else {
+        // Standalone chain: fill independently with nonzero winding
+        const path = new Path2D();
+        addChainToPath(path, chains[i], true);
+        processed.add(i);
+        ctx.fill(path);
+      }
+    }
+  }
 }
 
 /** Check if a path is degenerate (all points collinear — forms a line, not a shape). */
