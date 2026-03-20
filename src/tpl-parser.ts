@@ -255,8 +255,10 @@ export async function parseTPL(
 
     // Fallback: render TVG drawings as a grid
     if (thumbnails.size === 0) {
-      progress('Parsing TVG drawings...');
+      progress('Rendering TVG elements...');
+      console.log('[TPL] Compositor produced no content, falling back to TVG grid');
       const tvgRendered = await renderTVGElements(zip, metadata, progress);
+      console.log('[TPL] TVG grid result:', tvgRendered ? 'success' : 'null');
       if (tvgRendered) {
         thumbnails.set(0, tvgRendered);
         metadata.totalFrames = 1;
@@ -631,7 +633,7 @@ async function renderTVGElements(
           viewportSize = elem.fieldChart * TVG_UNITS_PER_FIELD;
         }
       }
-      const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize, viewportSize, { supersample: 2 });
+      const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize, viewportSize);
       if (canvas) {
         // Load bitmap tiles asynchronously if present
         if ((canvas as any).__bitmapTiles) {
@@ -639,8 +641,8 @@ async function renderTVGElements(
         }
         renderedCanvases.push(canvas);
       }
-    } catch (_e) {
-      // Skip unparseable TVG files
+    } catch (e) {
+      console.warn('[TPL] TVG render failed:', tvgFiles[i].split('/').pop(), e);
     }
 
     parsed++;
