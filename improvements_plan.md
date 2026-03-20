@@ -4,14 +4,14 @@
 
 | Metric | Value |
 |--------|-------|
-| **Average similarity** | 94.4% across 150 element thumbnails |
-| **100% pixel-perfect** | 6 drawings |
-| **≥98%** | 52 drawings (35%) |
-| **≥95%** | 90 drawings (60%) |
-| **≥90%** | 126 drawings (84%) |
-| **<80%** | 5 drawings (3%) — all compositing-dependent |
-| **Compositor** | 123 drawings loaded, recognizable character output at 1920×1459 |
-| **Code** | tvg-parser.ts (~2300 lines), tpl-parser.ts (~940), tpl-compositor.ts (~750) |
+| **Average similarity** | **97.5%** across 150 element thumbnails |
+| **100% pixel-perfect** | **11** drawings |
+| **≥98%** | **84** drawings (56%) |
+| **≥95%** | **129** drawings (86%) |
+| **≥90%** | **144** drawings (96%) |
+| **<80%** | **1** drawing — deleted palette reference |
+| **Compositor** | 126 drawings loaded, character positioned correctly at 1920×1459 |
+| **Code** | tvg-parser.ts (~2400 lines), tpl-parser.ts (~960), tpl-compositor.ts (~820) |
 
 ### What's implemented
 - TVG binary parser: all chunk types, TGLY/TGVS/TGSD/TGBP/TGCO/tGTB geometry
