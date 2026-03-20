@@ -1855,6 +1855,27 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
       }
     }
 
+    // Pencil-fill: shapes with ONLY pencil strokes (no fills) should be rendered
+    // as filled regions. The pencil tool creates strokes that together define a
+    // closed filled shape (e.g., eyebrows, collar, shadow shapes).
+    if (pass === 'fill' && fillComps.length === 0) {
+      const pencilComps = strokeComps.filter(c => c.componentType === 4 && c.path && c.path.segments.length > 1 && c.color);
+      if (pencilComps.length > 0) {
+        const path = new Path2D();
+        for (const comp of pencilComps) {
+          for (const seg of comp.path!.segments) {
+            if (seg.type === 'M') path.moveTo(seg.x, seg.y);
+            else if (seg.type === 'L') path.lineTo(seg.x, seg.y);
+            else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y);
+            else if (seg.type === 'C') path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
+          }
+        }
+        const color = pencilComps[0].color!;
+        ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${color.a / 255})`;
+        ctx.fill(path, 'evenodd');
+      }
+    }
+
     // Render stroke/pencil components individually
     if (pass === 'stroke') {
       for (const comp of strokeComps) {
