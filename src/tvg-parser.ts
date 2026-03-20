@@ -424,31 +424,6 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
     }
   }
 
-  // Apply pointQuantum coordinate snapping: Harmony quantizes coordinates to a grid.
-  // Snapping aligns our coordinates to that grid, improving fill chain matching.
-  const q = drawing.pointQuantum;
-  if (q !== null && q > 0) {
-    for (const layer of drawing.layers) {
-      for (const shape of layer.shapes) {
-        for (const comp of shape.components) {
-          if (!comp.path) continue;
-          for (const seg of comp.path.segments) {
-            seg.x = Math.round(seg.x / q) * q;
-            seg.y = Math.round(seg.y / q) * q;
-            if (seg.type === 'Q') {
-              seg.cx = Math.round(seg.cx / q) * q;
-              seg.cy = Math.round(seg.cy / q) * q;
-            } else if (seg.type === 'C') {
-              seg.c1x = Math.round(seg.c1x / q) * q;
-              seg.c1y = Math.round(seg.c1y / q) * q;
-              seg.c2x = Math.round(seg.c2x / q) * q;
-              seg.c2y = Math.round(seg.c2y / q) * q;
-            }
-          }
-        }
-      }
-    }
-  }
 
   return drawing;
 }
@@ -1799,7 +1774,7 @@ export function renderTVGToCanvas(
   if (!hasVectors) {
     // No vector data — try bitmap tiles
     if (drawing.bitmapTiles.length > 0) {
-      return renderBitmapTVGToCanvas(drawing.bitmapTiles, width, height);
+      return renderBitmapTVGToCanvas(drawing.bitmapTiles, width, height, viewport);
     }
     return null;
   }
@@ -2589,6 +2564,7 @@ function renderBitmapTVGToCanvas(
   tiles: TVGBitmapTile[],
   width: number,
   height: number,
+  _viewport?: number,
 ): HTMLCanvasElement | null {
   if (tiles.length === 0) return null;
 
@@ -2606,6 +2582,7 @@ function renderBitmapTVGToCanvas(
       maxY = Math.max(maxY, tile.clipY + tile.clipH);
     }
   }
+
 
   // Return canvas — actual bitmap rendering happens asynchronously
   // Mark the canvas with bitmap data for async loading
@@ -2887,20 +2864,6 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
       }
     }
 
-    // Inside-color fill: strokes with insideColor contribute fill on their inner side.
-    // In Harmony, two-sided strokes have an "inside color" that fills the region
-    // on one side of the stroke path.
-    if (pass === 'fill') {
-      for (const comp of strokeComps) {
-        if (!comp.insideColor || !comp.path || comp.path.segments.length < 3) continue;
-        const ic = comp.insideColor;
-        if (ic.a < 1) continue;
-        const path = buildPath2D(comp.path);
-        path.closePath();
-        ctx.fillStyle = `rgba(${ic.r},${ic.g},${ic.b},${ic.a / 255})`;
-        ctx.fill(path);
-      }
-    }
 
     // Render stroke/pencil components individually
     if (pass === 'stroke') {
