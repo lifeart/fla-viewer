@@ -194,9 +194,16 @@ export async function parseTPL(
 
   // Step 1: Render TVG vector art as the primary display (frame 0)
   progress('Rendering TVG vector art...');
-  const tvgRendered = await renderTVGElements(zip, metadata, progress);
-  if (tvgRendered) {
-    thumbnails.set(0, tvgRendered);
+  try {
+    const tvgRendered = await renderTVGElements(zip, metadata, progress);
+    if (tvgRendered) {
+      console.log(`[TPL] TVG grid: ${tvgRendered.naturalWidth}x${tvgRendered.naturalHeight}`);
+      thumbnails.set(0, tvgRendered);
+    } else {
+      console.warn('[TPL] TVG grid returned null');
+    }
+  } catch (e) {
+    console.error('[TPL] TVG grid failed:', e);
   }
 
   // Step 2: Load pre-rendered frame thumbnails for animation playback (frames 1+)
