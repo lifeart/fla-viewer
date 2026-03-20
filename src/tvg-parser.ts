@@ -2041,7 +2041,18 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
 
         // Variable-width stroke: render as filled outline using thickness profile
         if (comp.thicknessProfile && comp.thicknessProfile.points.length >= 2 && comp.path) {
-          renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, fillStyle);
+          // Optimization: uniform thickness profiles can use native ctx.stroke()
+          const uniformWidth = getUniformProfileWidth(comp.thicknessProfile);
+          if (uniformWidth !== null && uniformWidth >= 0.1) {
+            const path = buildPath2D(comp.path);
+            ctx.strokeStyle = fillStyle;
+            ctx.lineWidth = uniformWidth;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.stroke(path);
+          } else {
+            renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, fillStyle);
+          }
         } else {
           const path = buildPath2D(comp.path!);
           ctx.strokeStyle = fillStyle;
@@ -2087,7 +2098,18 @@ function renderStrokeMask(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, def
 
       // Variable-width stroke: render as filled outline
       if (comp.thicknessProfile && comp.thicknessProfile.points.length >= 2 && comp.path) {
-        renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, 'rgba(255,255,255,1)');
+        // Optimization: uniform thickness profiles can use native ctx.stroke()
+        const uniformWidth = getUniformProfileWidth(comp.thicknessProfile);
+        if (uniformWidth !== null && uniformWidth >= 0.1) {
+          const path = buildPath2D(comp.path);
+          ctx.strokeStyle = 'rgba(255,255,255,1)';
+          ctx.lineWidth = uniformWidth;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.stroke(path);
+        } else {
+          renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, 'rgba(255,255,255,1)');
+        }
       } else {
         const path = buildPath2D(comp.path!);
         ctx.strokeStyle = 'rgba(255,255,255,1)';
@@ -2254,6 +2276,35 @@ function interpolateThickness(
   const rightW = cubicBezier(localT, prev.rightOffset, prev.rightCtrlFwd.y, next.rightCtrlBack.y, next.rightOffset);
 
   return { leftW: Math.max(0, leftW), rightW: Math.max(0, rightW) };
+}
+
+/**
+ * Check if a thickness profile is uniform (constant width).
+ * Returns the constant lineWidth (left + right) if uniform, or null if variable.
+ * A profile is "uniform" if the range of leftOffset and rightOffset values
+ * (including control points) is less than 0.1.
+ */
+function getUniformProfileWidth(profile: TVGThicknessProfile): number | null {
+  const pts = profile.points;
+  if (pts.length === 0) return null;
+
+  let minLeft = Infinity, maxLeft = -Infinity;
+  let minRight = Infinity, maxRight = -Infinity;
+
+  for (const pt of pts) {
+    minLeft = Math.min(minLeft, pt.leftOffset, pt.leftCtrlFwd.y, pt.leftCtrlBack.y);
+    maxLeft = Math.max(maxLeft, pt.leftOffset, pt.leftCtrlFwd.y, pt.leftCtrlBack.y);
+    minRight = Math.min(minRight, pt.rightOffset, pt.rightCtrlFwd.y, pt.rightCtrlBack.y);
+    maxRight = Math.max(maxRight, pt.rightOffset, pt.rightCtrlFwd.y, pt.rightCtrlBack.y);
+  }
+
+  if (maxLeft - minLeft < 0.1 && maxRight - minRight < 0.1) {
+    // Uniform: total width = average left + average right
+    const avgLeft = (minLeft + maxLeft) / 2;
+    const avgRight = (minRight + maxRight) / 2;
+    return avgLeft + avgRight;
+  }
+  return null;
 }
 
 /** Render a variable-width stroke as a filled outline using the thickness profile. */
