@@ -1689,7 +1689,8 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement): Promise<boolea
 function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defaultStrokeWidth: number, pass: 'fill' | 'stroke'): void {
   for (const shape of layer.shapes) {
     // Separate fill components from stroke/pencil components
-    const fillComps = shape.components.filter(c => c.componentType === 0 && c.path && c.path.segments.length > 1 && !isDegenerate(c.path));
+    const fillComps = shape.components.filter(c => c.componentType === 0 && c.path && c.path.segments.length > 1 && !isDegenerate(c.path)
+      && (!c.color || c.color.a > 128)); // Skip low-alpha fills (controller/handle colors)
     const strokeComps = shape.components.filter(c => (c.componentType === 4 || c.componentType === 2) && c.path && c.path.segments.length > 0);
 
     // Fill rendering: group fill components by color, then chain each group
