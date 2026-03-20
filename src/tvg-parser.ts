@@ -1350,12 +1350,94 @@ export function resolveExternalPalette(
     }
   }
 
+  // Build a global colorName -> ExternalPaletteColor map (first occurrence wins).
+  // Used as last-resort fallback when no palette name matches at all.
+  const globalNameMap = new Map<string, ExternalPaletteColor>();
+  for (const color of externalColors) {
+    if (color.name && !globalNameMap.has(color.name)) {
+      globalNameMap.set(color.name, color);
+    }
+  }
+
   // Build TPAL id -> entry map for fallback lookup
   const tpalById = new Map<bigint, TVGPaletteEntry>();
   for (const entry of drawing.palette) {
     if (entry.id !== 0n) {
       tpalById.set(entry.id, entry);
     }
+  }
+
+  // Fuzzy palette name matcher: given a TPAL palette name, find the best matching
+  // external palette. Tries: (1) exact, (2) case-insensitive, (3) word-overlap scoring.
+  const fuzzyPaletteCache = new Map<string, Map<string, ExternalPaletteColor> | null>();
+  const extPaletteNames = Array.from(nameMap.keys());
+
+  function fuzzyFindPalette(tpalPalName: string): Map<string, ExternalPaletteColor> | null {
+    if (fuzzyPaletteCache.has(tpalPalName)) return fuzzyPaletteCache.get(tpalPalName)!;
+
+    // 1. Exact match
+    let result = nameMap.get(tpalPalName) ?? null;
+    if (result) { fuzzyPaletteCache.set(tpalPalName, result); return result; }
+
+    const tpalLower = tpalPalName.toLowerCase();
+
+    // 2. Case-insensitive exact match
+    for (const extName of extPaletteNames) {
+      if (extName.toLowerCase() === tpalLower) {
+        result = nameMap.get(extName)!;
+        fuzzyPaletteCache.set(tpalPalName, result);
+        return result;
+      }
+    }
+
+    // 3. Split both names into word tokens and score by overlap.
+    // Tokenize on underscores, spaces, camelCase boundaries, and dots.
+    const tokenize = (s: string): string[] =>
+      s.toLowerCase()
+        .replace(/([a-z])([A-Z])/g, '$1_$2')
+        .split(/[_\s.]+/)
+        .filter(t => t.length > 0);
+
+    const tpalTokens = tokenize(tpalPalName);
+    if (tpalTokens.length === 0) {
+      fuzzyPaletteCache.set(tpalPalName, null);
+      return null;
+    }
+
+    let bestMatch: string | null = null;
+    let bestScore = 0;
+
+    for (const extName of extPaletteNames) {
+      const extTokens = tokenize(extName);
+      if (extTokens.length === 0) continue;
+
+      // Count shared tokens (case-insensitive)
+      let shared = 0;
+      for (const tt of tpalTokens) {
+        if (extTokens.includes(tt)) shared++;
+      }
+      if (shared === 0) {
+        // Try prefix/substring matching on individual tokens
+        for (const tt of tpalTokens) {
+          for (const et of extTokens) {
+            if (et.startsWith(tt) || tt.startsWith(et)) {
+              shared = 0.5; // partial credit
+              break;
+            }
+          }
+          if (shared > 0) break;
+        }
+      }
+
+      if (shared > bestScore) {
+        bestScore = shared;
+        bestMatch = extName;
+      }
+    }
+
+    result = bestMatch ? nameMap.get(bestMatch)! : null;
+    fuzzyPaletteCache.set(tpalPalName, result);
+    return result;
   }
 
   for (const layer of drawing.layers) {
@@ -1370,11 +1452,18 @@ export function resolveExternalPalette(
             // Fallback: match by palette name + color entry name
             const tpalEntry = tpalById.get(comp.colorId);
             if (tpalEntry && tpalEntry.paletteName && tpalEntry.name) {
-              const byName = nameMap.get(tpalEntry.paletteName);
+              // Try fuzzy palette name matching (exact -> case-insensitive -> word overlap)
+              const byName = fuzzyFindPalette(tpalEntry.paletteName);
               if (byName) {
                 const named = byName.get(tpalEntry.name);
                 if (named) {
                   comp.color = { r: named.r, g: named.g, b: named.b, a: named.a };
+                }
+              } else {
+                // Last resort: match color name across ALL palettes
+                const globalMatch = globalNameMap.get(tpalEntry.name);
+                if (globalMatch) {
+                  comp.color = { r: globalMatch.r, g: globalMatch.g, b: globalMatch.b, a: globalMatch.a };
                 }
               }
             }
