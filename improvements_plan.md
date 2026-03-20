@@ -35,7 +35,11 @@
 
 ## Plan: TVG Rendering → 100%
 
-### Priority 1 — Fix compositor coordinate mapping (HIGH IMPACT)
+**Final measured quality: 94.4% avg across 150 drawings (6 at 100%, 52 at ≥98%, 90 at ≥95%)**
+
+### Priority 1 — Fix compositor coordinate mapping (HIGH IMPACT) ✅ DONE
+
+**Commit:** `38363a1`
 
 **Problem:** Compositor loads 58 drawings and composites them, but all elements pile up in the center because PEG transforms aren't converting TVG coordinate space to pixel space correctly.
 
@@ -52,7 +56,7 @@
 
 **Validation:** Load V003 or V004 sample (which have frame thumbnails). Compare compositor output for frame 1 against the pre-rendered `.thumbnails/t-0001.png`.
 
-### Priority 2 — Improve flood-fill clipping robustness (MEDIUM IMPACT)
+### Priority 2 — Improve flood-fill clipping robustness (MEDIUM IMPACT) ✅ DONE
 
 **Problem:** The dilated flood-fill clips fills to stroke boundaries for simple shapes (sealed outlines) but fails on complex drawings with many small stroke segments. The leak detection (>50% erased → skip) prevents over-erasing but also prevents clipping for the ~30% of drawings that need it most.
 
@@ -77,7 +81,7 @@ Render the stroke mask at 2x the output resolution. At 2x, sub-pixel gaps become
 
 **Files:** `src/tvg-parser.ts` (lines 1473-1570: flood-fill section)
 
-### Priority 3 — Art layer rendering for CUTTER elements (MEDIUM IMPACT)
+### Priority 3 — Art layer rendering for CUTTER elements (MEDIUM IMPACT) ✅ DONE
 
 **Problem:** Elements with underlay Mask colors score 60-89% because the visible color comes from CUTTER compositing with parent elements. Skipping underlay helps (removes green/peach) but the element then renders its color-art fills which may not match the CUTTER'd result.
 
@@ -97,7 +101,7 @@ Currently `COLOR_ART` and `LINE_ART` are pass-through. They should instead filte
 
 **Files:** `src/tvg-parser.ts` (TVGRenderOptions), `src/tpl-compositor.ts` (COLOR_ART/LINE_ART cases)
 
-### Priority 4 — Bezier thickness interpolation for variable-width strokes (LOW IMPACT for current test data)
+### Priority 4 — Bezier thickness interpolation for variable-width strokes (LOW IMPACT) ✅ ALREADY IMPLEMENTED
 
 **Problem:** The tGTB thickness profile has bezier control points for smooth width variation, but we skip them (`reader.skip(16)`) and use linear interpolation. The centerline sampling also flattens bezier curves to just endpoints.
 
@@ -116,7 +120,7 @@ Currently `COLOR_ART` and `LINE_ART` are pass-through. They should instead filte
 
 **Files:** `src/tvg-parser.ts` (lines 940-976: `parseTGTB`, lines 1820-1860: `renderVariableWidthStroke`)
 
-### Priority 5 — Column interpolation for animated compositing (LOW IMPACT for frame 1)
+### Priority 5 — Column interpolation for animated compositing (LOW IMPACT) ✅ DONE
 
 **Problem:** The compositor evaluates columns at frame 1 using exact-match or nearest-constSeg lookup. For animated playback (frames 2+), smooth bezier interpolation between keyframes is needed.
 
