@@ -403,14 +403,12 @@ export async function renderCompositeFrame(
 
   const progress = onProgress || (() => {});
   progress('Evaluating scene graph...');
-  console.log(`[Compositor] Root: ${graph.rootOutputId}, Nodes: ${graph.nodes.size}, Drawing cols: ${graph.drawingColumns.size}`);
+  console.log(`[Compositor] Root: ${graph.rootOutputId}, Nodes: ${graph.nodes.size}, Drawing cols: ${graph.drawingColumns.size}, Field: ${graph.fieldX}x${graph.fieldY}, Canvas: ${canvasWidth}x${canvasHeight}`);
 
-  // Element render size: proportional to output canvas.
-  // Each element has a fieldChart (typically 12) which defines its viewport in TVG units.
-  // We render elements at a size that maps the field chart viewport to a portion of the output.
-  // The output canvas represents the full project resolution.
-  // For a 12-field element on a 1920-wide canvas: element renders at ~canvasWidth pixels.
-  const elemRenderSize = Math.min(canvasWidth, canvasHeight);
+  // Element render size: proportional to output canvas based on the element's field chart
+  // relative to the project's field chart. A 12-field element on a 24-field project should
+  // occupy roughly half the canvas width, not the entire canvas.
+  // We compute the render size per-element inside loadTVG.
 
   // Cache for loaded TVG drawings
   const tvgCache = new Map<string, HTMLCanvasElement | null>();
@@ -447,7 +445,12 @@ export async function renderCompositeFrame(
       }
 
       const viewportSize = element.fieldChart * TVG_UNITS_PER_FIELD;
-      const canvas = renderTVGToCanvas(drawing, elemRenderSize, elemRenderSize, viewportSize,
+      // Scale element render size: element's field chart relative to the project's field chart.
+      // An element with fieldChart=12 on a project with fieldX=24 should render at half canvas width.
+      const fieldRatio = element.fieldChart / graph.fieldX;
+      const elemW = Math.round(canvasWidth * fieldRatio);
+      const elemH = Math.round(canvasHeight * fieldRatio);
+      const canvas = renderTVGToCanvas(drawing, elemW, elemH, viewportSize,
         artLayerFilter ? { artLayerFilter } : undefined);
 
       if (canvas && (canvas as any).__bitmapTiles) {
@@ -754,7 +757,33 @@ export async function renderCompositeFrame(
     return null;
   }
 
-  console.log(`[Compositor] Success: loaded ${loadCount} drawings, output ${finalResult.canvas.width}x${finalResult.canvas.height}`);
+  // If the final result still has a pending transform (e.g., root node was a single-layer
+  // pass-through), apply it now onto the output canvas.
+  let outputCanvas = finalResult.canvas;
+  if (finalResult.transform || outputCanvas.width !== canvasWidth || outputCanvas.height !== canvasHeight) {
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = canvasWidth;
+    outCanvas.height = canvasHeight;
+    const outCtx = outCanvas.getContext('2d')!;
+
+    outCtx.save();
+    outCtx.globalAlpha = finalResult.opacity;
+
+    const dx = (canvasWidth - outputCanvas.width) / 2;
+    const dy = (canvasHeight - outputCanvas.height) / 2;
+
+    if (finalResult.transform) {
+      outCtx.translate(canvasWidth / 2, canvasHeight / 2);
+      const t = finalResult.transform;
+      outCtx.transform(t.a, t.b, t.c, t.d, t.e, t.f);
+      outCtx.translate(-canvasWidth / 2, -canvasHeight / 2);
+    }
+    outCtx.drawImage(outputCanvas, dx, dy);
+    outCtx.restore();
+    outputCanvas = outCanvas;
+  }
+
+  console.log(`[Compositor] Success: loaded ${loadCount} drawings, output ${outputCanvas.width}x${outputCanvas.height}`);
   progress(`Composited ${loadCount} drawings`);
-  return finalResult.canvas;
+  return outputCanvas;
 }

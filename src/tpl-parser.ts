@@ -209,9 +209,20 @@ export async function parseTPL(
           }
         }
 
+        // Cap compositor resolution to avoid excessive memory/CPU usage
+        // while preserving the aspect ratio
+        const maxDim = 1920;
+        let compW = metadata.width;
+        let compH = metadata.height;
+        if (compW > maxDim || compH > maxDim) {
+          const scale = maxDim / Math.max(compW, compH);
+          compW = Math.round(compW * scale);
+          compH = Math.round(compH * scale);
+        }
+
         const composited = await renderCompositeFrame(
           sceneGraph, 1, zip, externalColors,
-          metadata.width, metadata.height, progress,
+          compW, compH, progress,
         );
         if (composited) {
           const img = await canvasToImage(composited);
@@ -282,6 +293,20 @@ function parseXStageMetadata(xmlDoc: Document): TPLMetadata {
     if (resX && resY) {
       width = parseInt(resX, 10) || width;
       height = parseInt(resY, 10) || height;
+    } else {
+      // Handle size="W,H" format (e.g., size="4096,3112")
+      const sizeStr = resolution.getAttribute('size');
+      if (sizeStr) {
+        const parts = sizeStr.split(',');
+        if (parts.length === 2) {
+          const w = parseInt(parts[0], 10);
+          const h = parseInt(parts[1], 10);
+          if (w > 0 && h > 0) {
+            width = w;
+            height = h;
+          }
+        }
+      }
     }
   }
 
