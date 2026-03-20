@@ -1779,8 +1779,10 @@ export function renderTVGToCanvas(
     return null;
   }
 
-  // Supersampling: render at SS× resolution then downsample for antialiasing
-  const SS = options?.supersample && options.supersample > 1 ? options.supersample : 1;
+  // Supersampling: render at SS× resolution then downsample for antialiasing.
+  // Default 2× for quality unless explicitly set to 1 or skipClipping (fast mode).
+  const defaultSS = options?.skipClipping ? 1 : 2;
+  const SS = options?.supersample !== undefined ? (options.supersample > 1 ? options.supersample : 1) : defaultSS;
   const ssWidth = width * SS;
   const ssHeight = height * SS;
 
