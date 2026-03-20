@@ -1701,18 +1701,28 @@ export function renderTVGToCanvas(
     }
   }
 
-  // Check if drawing has stroke components for clipping
+  // Check if drawing has stroke components for clipping.
+  // Flood-fill clipping requires boundary strokes (ct=2 without explicit strokeWidth)
+  // which Toon Boom uses to define sealed fill regions. Drawings with only pencil
+  // strokes (ct=4) — like hand-drawn elements — lack these boundaries, so their
+  // pencil strokes don't form sealed walls. Flood-fill leaks through tiny gaps
+  // and incorrectly erases fill pixels, reducing accuracy.
   let hasStrokes = false;
+  let hasBoundaryStrokes = false;
   for (const layer of drawing.layers) {
     for (const shape of layer.shapes) {
-      if (shape.components.some(c => (c.componentType === 2 || c.componentType === 4) && c.path && c.path.segments.length > 0)) {
-        hasStrokes = true; break;
+      for (const comp of shape.components) {
+        if ((comp.componentType === 2 || comp.componentType === 4) && comp.path && comp.path.segments.length > 0) {
+          hasStrokes = true;
+        }
+        if (comp.componentType === 2 && comp.strokeWidth === null && comp.path && comp.path.segments.length > 0) {
+          hasBoundaryStrokes = true;
+        }
       }
     }
-    if (hasStrokes) break;
   }
 
-  if (hasStrokes) {
+  if (hasStrokes && hasBoundaryStrokes) {
     // Pass 2: Dilated flood-fill to clip fills to stroke boundaries
     // Uses 2x resolution mask (Approach C) for better sub-pixel gap closure,
     // with adaptive dilation radius (Approach A) based on stroke density.
