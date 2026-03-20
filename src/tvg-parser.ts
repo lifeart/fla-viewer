@@ -2215,15 +2215,20 @@ export function renderTVGToCanvas(
       // beyond the main outline — allow more aggressive clipping (60% vs 50%).
       const leakThreshold = hasBoundaryStrokes ? 0.5 : 0.6;
       if (fillPixels > 0 && erasedPixels / fillPixels < leakThreshold) {
-        // Safe to clip — apply coverage-based alpha for smooth edges
+        // Safe to clip — apply coverage-based alpha for smooth edges.
+        // Only apply partial alpha when outside coverage is substantial (>30%),
+        // to avoid darkening interior pixels near stroke boundaries where
+        // only 1-2 sub-pixels overlap the stroke wall.
+        const partialThreshold = Math.floor(255 * 0.3);
         for (let i = 0; i < ssWidth * ssHeight; i++) {
           if (outsideCoverage[i] >= 255) {
             fillData.data[i * 4 + 3] = 0;
-          } else if (outsideCoverage[i] > 0) {
-            // Partial coverage: blend alpha for anti-aliased edges
+          } else if (outsideCoverage[i] > partialThreshold) {
+            // Substantial outside coverage: apply anti-aliased edge
             const insideFraction = (255 - outsideCoverage[i]) / 255;
             fillData.data[i * 4 + 3] = (fillData.data[i * 4 + 3] * insideFraction) | 0;
           }
+          // else: low outside coverage (<30%) — keep pixel fully opaque
         }
         fillCtx.putImageData(fillData, 0, 0);
       } else if (fillPixels > 0) {
@@ -2648,6 +2653,59 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement): Promise<boolea
   // Compute bounds from actual image sizes if clip rects are all zero
   let useClipRects = isFinite(bounds.minX) && (bounds.maxX - bounds.minX) > 0;
 
+  // Detect if tiles need channel swap. Harmony bitmap TVGs sometimes store
+  // pixels as GRBA (byte-swapped 16-bit pairs) instead of standard RGBA.
+  // Detection: decode all tiles, count fully-opaque pixels (a=255) in both
+  // normal and swapped interpretations. Real art should have many a=255 pixels.
+  let needsChannelSwap = false;
+  {
+    let opaqueNormal = 0, opaqueSwapped = 0, totalSampled = 0;
+    for (const { img } of loaded) {
+      const tc = document.createElement('canvas');
+      tc.width = img.width; tc.height = img.height;
+      const tctx = tc.getContext('2d')!;
+      tctx.drawImage(img, 0, 0);
+      const d = tctx.getImageData(0, 0, img.width, img.height).data;
+      // Sample every 4th pixel for speed
+      for (let i = 0; i < d.length; i += 16) {
+        const r = d[i], g = d[i+1], b = d[i+2], a = d[i+3];
+        if (r === 0 && g === 0 && b === 0 && a === 0) continue; // skip empty
+        totalSampled++;
+        if (a === 255) opaqueNormal++;
+        // In swapped [G,R,A,B]: real alpha = b (byte 2)
+        if (b === 255) opaqueSwapped++;
+      }
+      if (totalSampled > 500) break; // enough samples
+    }
+    // If swapped interpretation yields significantly more opaque pixels, channels are swapped
+    if (totalSampled > 20 && opaqueSwapped > opaqueNormal * 1.5) {
+      needsChannelSwap = true;
+    }
+  }
+
+  // Helper: draw a tile image, optionally fixing channel order
+  const drawTile = (tileImg: HTMLImageElement, dx: number, dy: number, dw: number, dh: number) => {
+    if (!needsChannelSwap) {
+      ctx.drawImage(tileImg, dx, dy, dw, dh);
+      return;
+    }
+    // Fix GRBA → RGBA: decode at native resolution, swap channels, then draw scaled
+    const tc = document.createElement('canvas');
+    tc.width = tileImg.width;
+    tc.height = tileImg.height;
+    const tctx = tc.getContext('2d')!;
+    tctx.drawImage(tileImg, 0, 0);
+    const imgData = tctx.getImageData(0, 0, tc.width, tc.height);
+    const d = imgData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      // Stored as [G, R, A, B] in RGBA positions → swap to [R, G, B, A]
+      const g = d[i], r = d[i+1], a = d[i+2], b = d[i+3];
+      d[i] = r; d[i+1] = g; d[i+2] = b; d[i+3] = a;
+    }
+    tctx.putImageData(imgData, 0, 0);
+    ctx.drawImage(tc, 0, 0, tc.width, tc.height, dx, dy, dw, dh);
+  };
+
   if (useClipRects) {
     const totalW = bounds.maxX - bounds.minX;
     const totalH = bounds.maxY - bounds.minY;
@@ -2660,16 +2718,15 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement): Promise<boolea
       const dy = offsetY + (tile.clipY - bounds.minY) * scale;
       const dw = tile.clipW * scale;
       const dh = tile.clipH * scale;
-      ctx.drawImage(img, dx, dy, dw, dh);
+      drawTile(img, dx, dy, dw, dh);
     }
   } else {
     // No clip rect info — composite tiles by stacking largest first
-    // Just draw the largest tile centered
     const largest = loaded.reduce((a, b) => a.img.width * a.img.height > b.img.width * b.img.height ? a : b);
     const scale = Math.min(width / largest.img.width, height / largest.img.height);
     const dw = largest.img.width * scale;
     const dh = largest.img.height * scale;
-    ctx.drawImage(largest.img, (width - dw) / 2, (height - dh) / 2, dw, dh);
+    drawTile(largest.img, (width - dw) / 2, (height - dh) / 2, dw, dh);
   }
 
   // Clean up
