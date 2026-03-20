@@ -225,9 +225,28 @@ export async function parseTPL(
           compW, compH, progress,
         );
         if (composited) {
-          const img = await canvasToImage(composited);
-          thumbnails.set(0, img);
-          metadata.totalFrames = 1;
+          // Verify compositor canvas has actual visible content before using it.
+          // If empty, fall through to TVG grid rendering which always works.
+          const compCtx = composited.getContext('2d');
+          let hasContent = false;
+          if (compCtx) {
+            // Sample across the canvas (not just top-left corner)
+            for (const [sx, sy] of [[0, 0], [composited.width / 2, composited.height / 2], [composited.width / 4, composited.height * 3 / 4]]) {
+              const checkData = compCtx.getImageData(Math.floor(sx), Math.floor(sy), Math.min(100, composited.width - Math.floor(sx)), Math.min(100, composited.height - Math.floor(sy)));
+              for (let i = 0; i < checkData.data.length; i += 4) {
+                if (checkData.data[i + 3] > 0 && (checkData.data[i] < 250 || checkData.data[i + 1] < 250 || checkData.data[i + 2] < 250)) {
+                  hasContent = true; break;
+                }
+              }
+              if (hasContent) break;
+            }
+          }
+          if (hasContent) {
+            const img = await canvasToImage(composited);
+            thumbnails.set(0, img);
+            metadata.totalFrames = 1;
+          }
+          // If no content, fall through to TVG grid
         }
       }
     } catch (_e) {

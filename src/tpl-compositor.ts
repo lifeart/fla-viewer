@@ -453,10 +453,11 @@ export async function renderCompositeFrame(
         resolveExternalPalette(drawing, externalColors);
       }
 
-      // Use the PROJECT's field chart as the viewport so all elements share the same
-      // coordinate space. This ensures body parts at different TVG positions appear at
-      // the correct locations on the output canvas, even without PEG transforms.
-      const viewportSize = graph.fieldY * TVG_UNITS_PER_FIELD;
+      // Use a large viewport to contain all character content.
+      // Elements can be far from origin (e.g., Y=-1600 for feet), so the viewport
+      // must cover the full character extent, not just the field chart.
+      // Use 4x the field chart to ensure all body parts are visible.
+      const viewportSize = graph.fieldY * TVG_UNITS_PER_FIELD * 4;
       const renderOpts: { artLayerFilter?: 'all' | 'color' | 'line' | 'overlay'; centerOnOrigin: boolean; includeUnderlay: boolean } = {
         centerOnOrigin: true,
         includeUnderlay: false, // Compositor uses underlay as CUTTER clip mask, not visible content
