@@ -1339,6 +1339,12 @@ export function resolveExternalPalette(
 export interface TVGRenderOptions {
   /** Include underlay art layer (Mask colors). Default: false (skip for clean render). */
   includeUnderlay?: boolean;
+  /** Filter to render only a specific art layer type.
+   *  'all' or undefined → current behavior (all visible layers).
+   *  'color' → only tCAA (color art layer).
+   *  'line' → only tLAA (line art layer).
+   *  'overlay' → only tOAA (overlay art layer). */
+  artLayerFilter?: 'all' | 'color' | 'line' | 'overlay';
 }
 
 export function renderTVGToCanvas(
@@ -1454,9 +1460,16 @@ export function renderTVGToCanvas(
   // used for CUTTER clip regions, not visible content. In debug mode (includeUnderlay),
   // render all layers including underlay to show the raw drawing structure.
   const includeUnderlay = options?.includeUnderlay ?? false;
-  const layerTypes: TVGArtLayer['type'][] = includeUnderlay
-    ? ['underlay', 'color', 'line', 'overlay']
-    : ['color', 'line', 'overlay'];
+  const artLayerFilter = options?.artLayerFilter;
+  let layerTypes: TVGArtLayer['type'][];
+  if (artLayerFilter && artLayerFilter !== 'all') {
+    // Render only the specific art layer requested
+    layerTypes = [artLayerFilter];
+  } else {
+    layerTypes = includeUnderlay
+      ? ['underlay', 'color', 'line', 'overlay']
+      : ['color', 'line', 'overlay'];
+  }
   const fillOrder = layerTypes;
   const strokeOrder = layerTypes;
 

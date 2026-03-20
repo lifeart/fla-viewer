@@ -23,6 +23,9 @@ export interface SceneGraph {
   elements: Map<number, TPLElement>;
   /** Root output node path */
   rootOutputId: string | null;
+  /** Field chart dimensions from <metrics> element */
+  fieldX: number;
+  fieldY: number;
 }
 
 export interface SceneNode {
@@ -66,6 +69,11 @@ export interface FunctionKeyframe {
  * Parse the scene graph from scene.xstage XML.
  */
 export function parseSceneGraph(xmlDoc: Document, elements: TPLElement[]): SceneGraph {
+  // Parse <metrics> for field chart dimensions
+  const metricsEl = xmlDoc.querySelector('metrics');
+  const fieldX = parseFloat(metricsEl?.getAttribute('numberOfUnitsX') || '24') || 24;
+  const fieldY = parseFloat(metricsEl?.getAttribute('numberOfUnitsY') || '24') || 24;
+
   const graph: SceneGraph = {
     nodes: new Map(),
     inEdges: new Map(),
@@ -73,6 +81,8 @@ export function parseSceneGraph(xmlDoc: Document, elements: TPLElement[]): Scene
     functionColumns: new Map(),
     elements: new Map(elements.map(e => [e.id, e])),
     rootOutputId: null,
+    fieldX,
+    fieldY,
   };
 
   // Parse columns
@@ -311,7 +321,17 @@ function resolveDrawing(graph: SceneGraph, colName: string, frame: number): { el
 
 // ── Transform Builder ──
 
-function buildTransformMatrix(node: SceneNode, graph: SceneGraph, frame: number): DOMMatrix {
+/**
+ * Build a transform matrix from a PEG/READ node's attributes.
+ * Position values are in FIELD UNITS and are converted to pixel space using
+ * the project's field chart dimensions and canvas size.
+ * Y is flipped (TVG Y-up → Canvas Y-down).
+ */
+function buildTransformMatrix(
+  node: SceneNode, graph: SceneGraph, frame: number,
+  canvasWidth: number, canvasHeight: number,
+  fieldX: number, fieldY: number,
+): DOMMatrix {
   const getAttr = (name: string, def: number) => {
     const attr = node.attrs.get(name);
     if (!attr) return def;
@@ -329,14 +349,22 @@ function buildTransformMatrix(node: SceneNode, graph: SceneGraph, frame: number)
   const pivotX = getAttr('pivot.x', 0);
   const pivotY = getAttr('pivot.y', 0);
 
+  // Convert field units to pixels
+  const pixelsPerFieldX = canvasWidth / fieldX;
+  const pixelsPerFieldY = canvasHeight / fieldY;
+  const pixelX = px * pixelsPerFieldX;
+  const pixelY = -py * pixelsPerFieldY; // Y-flip: TVG Y-up → Canvas Y-down
+  const pivotPxX = pivotX * pixelsPerFieldX;
+  const pivotPxY = -pivotY * pixelsPerFieldY;
+
   // Build transform: translate to pivot → scale → rotate → skew → translate by pos → translate back from pivot
   const m = new DOMMatrix();
-  m.translateSelf(pivotX, pivotY);
+  m.translateSelf(pivotPxX, pivotPxY);
   if (sx !== 1 || sy !== 1) m.scaleSelf(sx, sy);
-  if (rot !== 0) m.rotateSelf(rot);
+  if (rot !== 0) m.rotateSelf(-rot); // negate rotation for Y-flip
   if (skew !== 0) m.skewXSelf(skew);
-  m.translateSelf(px, py);
-  m.translateSelf(-pivotX, -pivotY);
+  m.translateSelf(pixelX, pixelY);
+  m.translateSelf(-pivotPxX, -pivotPxY);
 
   return m;
 }
@@ -346,6 +374,12 @@ function buildTransformMatrix(node: SceneNode, graph: SceneGraph, frame: number)
 interface CompositeResult {
   canvas: HTMLCanvasElement;
   opacity: number;
+  /** Accumulated transform from PEG chain (field units, not yet converted to pixels) */
+  transform?: DOMMatrix;
+  /** Art layer filter for selective rendering (used by COLOR_ART / LINE_ART) */
+  artLayerFilter?: 'all' | 'color' | 'line' | 'overlay';
+  /** Source READ node ID, for re-rendering with a different art layer filter */
+  sourceReadNodeId?: string;
 }
 
 /**
@@ -383,11 +417,15 @@ export async function renderCompositeFrame(
 
   let loadCount = 0;
 
-  async function loadTVG(elementId: number, drawingName: string): Promise<HTMLCanvasElement | null> {
+  async function loadTVG(
+    elementId: number, drawingName: string,
+    artLayerFilter?: 'all' | 'color' | 'line' | 'overlay',
+  ): Promise<HTMLCanvasElement | null> {
     const element = graph.elements.get(elementId);
     if (!element) return null;
 
-    const cacheKey = `${element.folder}/${drawingName}`;
+    const filterSuffix = artLayerFilter && artLayerFilter !== 'all' ? `:${artLayerFilter}` : '';
+    const cacheKey = `${element.folder}/${drawingName}${filterSuffix}`;
     if (tvgCache.has(cacheKey)) return tvgCache.get(cacheKey)!;
 
     // Find TVG file
@@ -407,7 +445,8 @@ export async function renderCompositeFrame(
       }
 
       const viewportSize = element.fieldChart * TVG_UNITS_PER_FIELD;
-      const canvas = renderTVGToCanvas(drawing, elemRenderSize, elemRenderSize, viewportSize);
+      const canvas = renderTVGToCanvas(drawing, elemRenderSize, elemRenderSize, viewportSize,
+        artLayerFilter ? { artLayerFilter } : undefined);
 
       if (canvas && (canvas as any).__bitmapTiles) {
         await loadBitmapTiles(canvas);
@@ -451,59 +490,30 @@ export async function renderCompositeFrame(
         if (!drawing) { if (depth < 5) console.warn(`[Compositor] READ ${node.name}: no exposure for frame ${frame}`); break; }
         const canvas = await loadTVG(drawing.elementId, drawing.drawingName);
         if (!canvas) { if (depth < 5) console.warn(`[Compositor] READ ${node.name}: TVG load failed for ${drawing.drawingName}`); break; }
-        result = { canvas, opacity: 1 };
+        result = { canvas, opacity: 1, sourceReadNodeId: nodeId };
         break;
       }
 
       case 'PEG': {
-        // PEG applies a transform to its input and passes through
+        // PEG accumulates a transform on the CompositeResult.
+        // The actual pixel-space rendering happens in COMPOSITE nodes.
         const inputs = graph.inEdges.get(nodeId) || [];
         if (inputs.length === 0) break;
         const child = await evaluateNode(inputs[0].sourceId, depth + 1);
         if (!child) break;
 
-        // Build transform from PEG attributes
-        const transform = buildTransformMatrix(node, graph, frame);
+        // Build this PEG's transform (already in pixel space)
+        const pegTransform = buildTransformMatrix(node, graph, frame,
+          canvasWidth, canvasHeight, graph.fieldX, graph.fieldY);
 
-        // Check if transform is non-identity
-        const isIdentity = transform.a === 1 && transform.b === 0 && transform.c === 0 &&
-                          transform.d === 1 && transform.e === 0 && transform.f === 0;
+        // Accumulate with child's existing transform
+        const childTransform = child.transform || new DOMMatrix();
+        const accumulated = pegTransform.multiply(childTransform);
 
-        if (isIdentity) {
-          result = child;
-        } else {
-          // Apply transform by rendering child onto a new canvas
-          const outCanvas = document.createElement('canvas');
-          outCanvas.width = canvasWidth;
-          outCanvas.height = canvasHeight;
-          const outCtx = outCanvas.getContext('2d')!;
-
-          // Convert TVG-space transform to pixel-space:
-          // TVG coordinates → pixel coordinates
-          // The element is rendered centered on its canvas. The PEG transform
-          // offsets it in TVG field units. We need to convert to pixels.
-          const pixelsPerField = Math.min(canvasWidth, canvasHeight) / 12; // approximate
-
-          outCtx.save();
-          // Move to center of output canvas
-          outCtx.translate(canvasWidth / 2, canvasHeight / 2);
-          // Apply TVG-space transform scaled to pixels
-          // Note: TVG Y is up, canvas Y is down - flip Y for position
-          outCtx.translate(
-            transform.e * pixelsPerField / TVG_UNITS_PER_FIELD,
-            -transform.f * pixelsPerField / TVG_UNITS_PER_FIELD,
-          );
-          if (transform.a !== 1 || transform.d !== 1) {
-            outCtx.scale(transform.a, transform.d);
-          }
-          // Draw child centered
-          outCtx.translate(-canvasWidth / 2, -canvasHeight / 2);
-          outCtx.globalAlpha = child.opacity;
-          outCtx.drawImage(child.canvas, 0, 0);
-          outCtx.restore();
-
-          result = { canvas: outCanvas, opacity: 1 };
-        }
+        result = {
+          ...child,
+          transform: accumulated,
+        };
         break;
       }
 
@@ -522,18 +532,31 @@ export async function renderCompositeFrame(
         if (layers.length === 0) break;
         if (layers.length === 1) { result = layers[0]; break; }
 
-        // Composite all layers
+        // Composite all layers, applying accumulated transforms
         const outCanvas = document.createElement('canvas');
         outCanvas.width = canvasWidth;
         outCanvas.height = canvasHeight;
         const outCtx = outCanvas.getContext('2d')!;
 
         for (const layer of layers) {
+          outCtx.save();
           outCtx.globalAlpha = layer.opacity;
+
           // Center the element canvas on the output canvas
           const dx = (canvasWidth - layer.canvas.width) / 2;
           const dy = (canvasHeight - layer.canvas.height) / 2;
-          outCtx.drawImage(layer.canvas, dx, dy);
+
+          if (layer.transform) {
+            // Apply accumulated PEG transform around the canvas center
+            outCtx.translate(canvasWidth / 2, canvasHeight / 2);
+            const t = layer.transform;
+            outCtx.transform(t.a, t.b, t.c, t.d, t.e, t.f);
+            outCtx.translate(-canvasWidth / 2, -canvasHeight / 2);
+            outCtx.drawImage(layer.canvas, dx, dy);
+          } else {
+            outCtx.drawImage(layer.canvas, dx, dy);
+          }
+          outCtx.restore();
         }
         outCtx.globalAlpha = 1;
         result = { canvas: outCanvas, opacity: 1 };
@@ -631,10 +654,20 @@ export async function renderCompositeFrame(
               outCanvas.height = canvasHeight;
               const outCtx = outCanvas.getContext('2d')!;
               for (const layer of layers) {
+                outCtx.save();
                 outCtx.globalAlpha = layer.opacity;
                 const dx = (canvasWidth - layer.canvas.width) / 2;
                 const dy = (canvasHeight - layer.canvas.height) / 2;
-                outCtx.drawImage(layer.canvas, dx, dy);
+                if (layer.transform) {
+                  outCtx.translate(canvasWidth / 2, canvasHeight / 2);
+                  const t = layer.transform;
+                  outCtx.transform(t.a, t.b, t.c, t.d, t.e, t.f);
+                  outCtx.translate(-canvasWidth / 2, -canvasHeight / 2);
+                  outCtx.drawImage(layer.canvas, dx, dy);
+                } else {
+                  outCtx.drawImage(layer.canvas, dx, dy);
+                }
+                outCtx.restore();
               }
               outCtx.globalAlpha = 1;
               result = { canvas: outCanvas, opacity: 1 };
@@ -644,8 +677,62 @@ export async function renderCompositeFrame(
         break;
       }
 
+      case 'COLOR_ART': {
+        // COLOR_ART filters the input READ to only color art (tCAA).
+        // Trace back to the source READ node and re-render with artLayerFilter='color'.
+        const inputs = graph.inEdges.get(nodeId) || [];
+        if (inputs.length === 0) break;
+        const child = await evaluateNode(inputs[0].sourceId, depth + 1);
+        if (!child) break;
+
+        if (child.sourceReadNodeId) {
+          // Re-render the source READ node's TVG with color-art-only filter
+          const readNode = graph.nodes.get(child.sourceReadNodeId);
+          if (readNode?.drawingCol) {
+            const drawing = resolveDrawing(graph, readNode.drawingCol, frame);
+            if (drawing) {
+              const colorCanvas = await loadTVG(drawing.elementId, drawing.drawingName, 'color');
+              if (colorCanvas) {
+                result = { canvas: colorCanvas, opacity: child.opacity, artLayerFilter: 'color',
+                  sourceReadNodeId: child.sourceReadNodeId, transform: child.transform };
+                break;
+              }
+            }
+          }
+        }
+        // Fallback: pass through
+        result = child;
+        break;
+      }
+
+      case 'LINE_ART': {
+        // LINE_ART filters the input READ to only line art (tLAA).
+        const inputs = graph.inEdges.get(nodeId) || [];
+        if (inputs.length === 0) break;
+        const child = await evaluateNode(inputs[0].sourceId, depth + 1);
+        if (!child) break;
+
+        if (child.sourceReadNodeId) {
+          const readNode = graph.nodes.get(child.sourceReadNodeId);
+          if (readNode?.drawingCol) {
+            const drawing = resolveDrawing(graph, readNode.drawingCol, frame);
+            if (drawing) {
+              const lineCanvas = await loadTVG(drawing.elementId, drawing.drawingName, 'line');
+              if (lineCanvas) {
+                result = { canvas: lineCanvas, opacity: child.opacity, artLayerFilter: 'line',
+                  sourceReadNodeId: child.sourceReadNodeId, transform: child.transform };
+                break;
+              }
+            }
+          }
+        }
+        // Fallback: pass through
+        result = child;
+        break;
+      }
+
       default: {
-        // Pass-through for unknown types (COLOR_ART, LINE_ART, etc.)
+        // Pass-through for unknown types (AUTO_PATCH, OVERLAY_ART, etc.)
         const inputs = graph.inEdges.get(nodeId) || [];
         if (inputs.length > 0) {
           result = await evaluateNode(inputs[0].sourceId, depth + 1);
