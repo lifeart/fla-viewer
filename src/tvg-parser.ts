@@ -880,18 +880,31 @@ function parseTGSD(reader: BinaryReader, comp: TVGComponent, len: number): void 
     if (len >= 2) {
       const hasColor = reader.readU8();
       if (hasColor === 0x01) {
-        // Scan for embedded TGCO tag to extract transform data
+        // Scan for embedded TGCO tag to extract transform data and colorId
         scanAndParseTGCO(reader, comp, sdEnd);
-        // Color ID is always 24 bytes from end of TGSD (per Rust reference)
-        // This is correct for ALL TGSD sizes (85, 133, etc.)
-        if (len >= 26) {
+        // Fallback: read color ID 24 bytes from end of TGSD.
+        // Only use this if TGCO didn't already provide a valid colorId.
+        // The 24-from-end heuristic works for TGSD len=85 but reads zeros
+        // for len=133 where there are extra bytes after the TGCO block.
+        if (len >= 26 && comp.colorId === null) {
           reader.pos = sdStart + len - 24;
           comp.colorId = reader.readU64LE();
         }
       } else if (hasColor === 0x00) {
-        // No embedded color - needs palette resolution or inheritance
-        // Read palette index from offset 2 (u32) for potential palette lookup
-        if (len >= 6) {
+        // hasColor=0x00 can mean two things:
+        // 1. Short fills (len=13): no color, inherit from preceding fill
+        // 2. Long fills (len>=85): ALSO has an embedded TGCO at offset 9 (shifted by 5 extra bytes)
+        //    The structure is: 4 zero bytes + 0x01 flag + 2 unknown bytes + TGCO tag
+        if (len >= 85) {
+          // Scan for embedded TGCO in the hasColor=0 variant
+          scanAndParseTGCO(reader, comp, sdEnd);
+          // If TGCO didn't set colorId, try the 24-from-end heuristic
+          if (comp.colorId === null && len >= 26) {
+            reader.pos = sdStart + len - 24;
+            comp.colorId = reader.readU64LE();
+          }
+        } else if (len >= 6) {
+          // Short fill: read palette index for potential lookup
           comp.paletteIndex = reader.readU32LE();
         }
       }
@@ -909,7 +922,7 @@ function parseTGSD(reader: BinaryReader, comp: TVGComponent, len: number): void 
       const hasColor = reader.readU8();
       if (hasColor === 0x01) {
         scanAndParseTGCO(reader, comp, sdEnd);
-        if (len >= 26) {
+        if (len >= 26 && comp.colorId === null) {
           reader.pos = sdStart + len - 24;
           comp.colorId = reader.readU64LE();
         }
@@ -958,8 +971,7 @@ function parseTGCO(reader: BinaryReader, comp: TVGComponent, len: number): void 
   comp.transform = { a, b, c, d, tx, ty };
 
   // Read colorId from remaining bytes (8-byte UID after the 49-byte header+transform).
-  // For componentType 0 fills, this gets overwritten by parseTGSD (TGSD offset len-24).
-  // For componentType 2 strokes, this standalone TGCO is the only source of colorId.
+  // This is the authoritative source for both fills and strokes when TGCO is present.
   if (len >= 57 && comp.colorId === null) {
     comp.colorId = reader.readU64LE();
   }
