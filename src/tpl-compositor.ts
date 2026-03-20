@@ -429,12 +429,14 @@ export async function renderCompositeFrame(
   async function loadTVG(
     elementId: number, drawingName: string,
     artLayerFilter?: 'all' | 'color' | 'line' | 'overlay',
+    includeUnderlay?: boolean,
   ): Promise<HTMLCanvasElement | null> {
     const element = graph.elements.get(elementId);
     if (!element) return null;
 
     const filterSuffix = artLayerFilter && artLayerFilter !== 'all' ? `:${artLayerFilter}` : '';
-    const cacheKey = `${element.folder}/${drawingName}${filterSuffix}`;
+    const underlaySuffix = includeUnderlay ? ':underlay' : '';
+    const cacheKey = `${element.folder}/${drawingName}${filterSuffix}${underlaySuffix}`;
     if (tvgCache.has(cacheKey)) return tvgCache.get(cacheKey)!;
 
     // Find TVG file
@@ -458,9 +460,10 @@ export async function renderCompositeFrame(
       // must cover the full character extent, not just the field chart.
       // Use 4x the field chart to ensure all body parts are visible.
       const viewportSize = graph.fieldY * TVG_UNITS_PER_FIELD * 4;
-      const renderOpts: { artLayerFilter?: 'all' | 'color' | 'line' | 'overlay'; centerOnOrigin: boolean; includeUnderlay: boolean } = {
+      const renderOpts: { artLayerFilter?: 'all' | 'color' | 'line' | 'overlay'; centerOnOrigin: boolean; includeUnderlay: boolean; skipBackgroundComposite: boolean } = {
         centerOnOrigin: true,
-        includeUnderlay: false, // Compositor uses underlay as CUTTER clip mask, not visible content
+        includeUnderlay: includeUnderlay ?? false, // Compositor uses underlay as CUTTER clip mask, not visible content
+        skipBackgroundComposite: true, // Compositor composites layers itself; no per-element white bg
       };
       if (artLayerFilter) renderOpts.artLayerFilter = artLayerFilter;
       const canvas = renderTVGToCanvas(drawing, canvasWidth, canvasHeight, viewportSize, renderOpts);
@@ -594,6 +597,26 @@ export async function renderCompositeFrame(
         const matte = await evaluateNode(matteEdge.sourceId, depth + 1);
         if (!matte) { result = subject; break; }
 
+        // If the matte traces back to a READ node, re-render with includeUnderlay
+        // so the underlay art layer is used as the matte shape.
+        let matteCanvas = matte.canvas;
+        if (matte.sourceReadNodeId) {
+          const readNode = graph.nodes.get(matte.sourceReadNodeId);
+          if (readNode?.drawingCol) {
+            const drawing = resolveDrawing(graph, readNode.drawingCol, frame);
+            if (drawing) {
+              const underlayCanvas = await loadTVG(
+                drawing.elementId, drawing.drawingName,
+                matte.artLayerFilter, // preserve any art layer filter from upstream
+                true, // includeUnderlay
+              );
+              if (underlayCanvas) {
+                matteCanvas = underlayCanvas;
+              }
+            }
+          }
+        }
+
         // Apply matte as clip
         const outCanvas = document.createElement('canvas');
         outCanvas.width = subject.canvas.width;
@@ -604,9 +627,9 @@ export async function renderCompositeFrame(
         outCtx.drawImage(subject.canvas, 0, 0);
         // Apply matte
         outCtx.globalCompositeOperation = node.inverted ? 'destination-out' : 'destination-in';
-        const dx = (outCanvas.width - matte.canvas.width) / 2;
-        const dy = (outCanvas.height - matte.canvas.height) / 2;
-        outCtx.drawImage(matte.canvas, dx, dy);
+        const dx = (outCanvas.width - matteCanvas.width) / 2;
+        const dy = (outCanvas.height - matteCanvas.height) / 2;
+        outCtx.drawImage(matteCanvas, dx, dy);
         outCtx.globalCompositeOperation = 'source-over';
 
         result = { canvas: outCanvas, opacity: subject.opacity };

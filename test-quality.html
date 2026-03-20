@@ -1,345 +1,89 @@
 <!DOCTYPE html>
-<html>
-<head>
-  <title>TVG Quality Test</title>
-  <style>
-    body { font-family: monospace; font-size: 12px; padding: 10px; }
-    #status { margin-bottom: 10px; }
-  </style>
-</head>
+<html><head><title>Quality Test</title></head>
 <body>
-  <div id="status">Loading...</div>
-  <pre id="results"></pre>
+<pre id="out">Running...</pre>
+<script type="module">
+import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
+import { parseTVG, resolveExternalPalette, renderTVGToCanvas, loadBitmapTiles } from './src/tvg-parser.ts';
 
-  <script type="module">
-    import JSZip from 'jszip';
-    import { parseTVG, renderTVGToCanvas, resolveExternalPalette, loadBitmapTiles } from './src/tvg-parser.ts';
+const SIZE = 160, TOL = 50;
+const ZIP = './sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
 
-    const ZIP_PATH = 'sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
-    const UNITS_PER_FIELD = 28;
-    const FIELD_CHART = 12;
-    const VIEWPORT_SIZE = FIELD_CHART * UNITS_PER_FIELD; // 336
-    const THUMB_SIZE = 320;
+async function main() {
+  const zip = await JSZip.loadAsync(await (await fetch(ZIP)).arrayBuffer());
+  const thumbFiles = Object.keys(zip.files).filter(f => f.includes('.thumbnails/') && f.endsWith('.tvg.png'));
+  const palFiles = Object.keys(zip.files).filter(f => f.includes('palette-library/') && f.endsWith('.plt'));
+  const palCache = {};
+  const scores = [];
 
-    // Target drawings for the focused test
-    const TARGET_DRAWINGS = [
-      'Shadow_Neck-1', 'Collar-1', 'Eyebrow-1', 'Eyebrow-2', 'Eyebrow-3',
-      'B_Sole-1', 'Sole_B-1', 'Number_Body-2', 'F-Sleeve_bk_F-1',
-      'Light_ear-CTRL_F-1', 'Line_Foot_B-1'
-    ];
+  for (const tp of thumbFiles) {
+    const parts = tp.split('/');
+    const tn = parts.pop().replace(/^\./, '').replace('.tvg.png', '');
+    const ed = parts.slice(0, -1).join('/') + '/';
+    const tf = zip.file(ed + tn + '.tvg');
+    if (!tf) continue;
 
-    function computeSimilarity(canvas, img) {
-      const size = THUMB_SIZE;
-      // Render reference on white bg
-      const refC = document.createElement('canvas');
-      refC.width = size; refC.height = size;
-      const rc = refC.getContext('2d');
-      rc.fillStyle = '#fff';
-      rc.fillRect(0, 0, size, size);
-      rc.drawImage(img, 0, 0, size, size);
-      const refData = rc.getImageData(0, 0, size, size);
-
-      // Render ours on white bg
-      const ourC = document.createElement('canvas');
-      ourC.width = size; ourC.height = size;
-      const oc = ourC.getContext('2d');
-      oc.fillStyle = '#fff';
-      oc.fillRect(0, 0, size, size);
-      oc.drawImage(canvas, 0, 0, size, size);
-      const ourData = oc.getImageData(0, 0, size, size);
-
-      // Find bounding boxes
-      const normSize = 200;
-      const radius = 3;
-      const colorTol = 50;
-
-      let refBBox = [size, size, 0, 0];
-      let ourBBox = [size, size, 0, 0];
-      for (let y = 0; y < size; y++) {
-        for (let x = 0; x < size; x++) {
-          const i = (y * size + x) * 4;
-          const rd = refData.data;
-          if (rd[i+3] > 10 && !(rd[i] > 240 && rd[i+1] > 240 && rd[i+2] > 240)) {
-            if (x < refBBox[0]) refBBox[0] = x;
-            if (y < refBBox[1]) refBBox[1] = y;
-            if (x > refBBox[2]) refBBox[2] = x;
-            if (y > refBBox[3]) refBBox[3] = y;
-          }
-          const od = ourData.data;
-          if (od[i+3] > 10 && !(od[i] > 240 && od[i+1] > 240 && od[i+2] > 240)) {
-            if (x < ourBBox[0]) ourBBox[0] = x;
-            if (y < ourBBox[1]) ourBBox[1] = y;
-            if (x > ourBBox[2]) ourBBox[2] = x;
-            if (y > ourBBox[3]) ourBBox[3] = y;
-          }
-        }
-      }
-
-      const rw = refBBox[2] - refBBox[0] + 1;
-      const rh = refBBox[3] - refBBox[1] + 1;
-      const ow = ourBBox[2] - ourBBox[0] + 1;
-      const oh = ourBBox[3] - ourBBox[1] + 1;
-      if (rw <= 0 || rh <= 0 || ow <= 0 || oh <= 0) return { coverage: 0, color: 0, shape: 0, overall: 0 };
-
-      // Normalize both to same bbox
-      const nrc = document.createElement('canvas');
-      nrc.width = normSize; nrc.height = normSize;
-      const nrx = nrc.getContext('2d');
-      nrx.fillStyle = '#fff'; nrx.fillRect(0, 0, normSize, normSize);
-      nrx.drawImage(refC, refBBox[0], refBBox[1], rw, rh, 0, 0, normSize, normSize);
-      const nrd = nrx.getImageData(0, 0, normSize, normSize);
-
-      const noc = document.createElement('canvas');
-      noc.width = normSize; noc.height = normSize;
-      const nox = noc.getContext('2d');
-      nox.fillStyle = '#fff'; nox.fillRect(0, 0, normSize, normSize);
-      nox.drawImage(ourC, ourBBox[0], ourBBox[1], ow, oh, 0, 0, normSize, normSize);
-      const nod = nox.getImageData(0, 0, normSize, normSize);
-
-      // Coverage
-      let refContent = 0, covered = 0;
-      for (let y = 0; y < normSize; y++) {
-        for (let x = 0; x < normSize; x++) {
-          const i = (y * normSize + x) * 4;
-          const rd = nrd.data;
-          if (rd[i+3] < 10 || (rd[i] > 240 && rd[i+1] > 240 && rd[i+2] > 240)) continue;
-          refContent++;
-          let found = false;
-          for (let dy = -radius; dy <= radius && !found; dy++) {
-            for (let dx = -radius; dx <= radius && !found; dx++) {
-              const nx = x + dx, ny = y + dy;
-              if (nx < 0 || nx >= normSize || ny < 0 || ny >= normSize) continue;
-              const ni = (ny * normSize + nx) * 4;
-              const od = nod.data;
-              if (od[ni+3] > 10 && !(od[ni] > 240 && od[ni+1] > 240 && od[ni+2] > 240)) found = true;
-            }
-          }
-          if (found) covered++;
-        }
-      }
-      const coverageScore = refContent > 0 ? Math.round(covered / refContent * 100) : 0;
-
-      // Color accuracy
-      let colorMatch = 0, colorTotal = 0;
-      for (let i = 0; i < nrd.data.length; i += 4) {
-        const rd = nrd.data, od = nod.data;
-        const ri = rd[i+3] > 10 && !(rd[i] > 240 && rd[i+1] > 240 && rd[i+2] > 240);
-        const oi = od[i+3] > 10 && !(od[i] > 240 && od[i+1] > 240 && od[i+2] > 240);
-        if (!ri && !oi) continue;
-        colorTotal++;
-        if (!ri || !oi) continue;
-        const dr = Math.abs(rd[i] - od[i]);
-        const dg = Math.abs(rd[i+1] - od[i+1]);
-        const db = Math.abs(rd[i+2] - od[i+2]);
-        if (dr <= colorTol && dg <= colorTol && db <= colorTol) colorMatch++;
-      }
-      const colorScore = colorTotal > 0 ? Math.round(colorMatch / colorTotal * 100) : 0;
-
-      // Shape (edge overlap)
-      function edgeMap(data, sz) {
-        const edges = new Uint8Array(sz * sz);
-        for (let ey = 1; ey < sz - 1; ey++) {
-          for (let ex = 1; ex < sz - 1; ex++) {
-            let maxGrad = 0;
-            for (let ch = 0; ch < 3; ch++) {
-              const tl = data[((ey-1)*sz+(ex-1))*4+ch], tc = data[((ey-1)*sz+ex)*4+ch], tr = data[((ey-1)*sz+(ex+1))*4+ch];
-              const ml = data[(ey*sz+(ex-1))*4+ch], mr = data[(ey*sz+(ex+1))*4+ch];
-              const bl = data[((ey+1)*sz+(ex-1))*4+ch], bc = data[((ey+1)*sz+ex)*4+ch], br = data[((ey+1)*sz+(ex+1))*4+ch];
-              const gx = -tl - 2*ml - bl + tr + 2*mr + br;
-              const gy = -tl - 2*tc - tr + bl + 2*bc + br;
-              const g = Math.sqrt(gx*gx + gy*gy);
-              if (g > maxGrad) maxGrad = g;
-            }
-            if (maxGrad > 30) edges[ey * sz + ex] = 1;
-          }
-        }
-        return edges;
-      }
-      const refEdges = edgeMap(nrd.data, normSize);
-      const ourEdges = edgeMap(nod.data, normSize);
-      let refS = 0, bothS = 0;
-      for (let y = 0; y < normSize; y++) {
-        for (let x = 0; x < normSize; x++) {
-          const idx = y * normSize + x;
-          if (refEdges[idx]) {
-            refS++;
-            let found2 = false;
-            for (let dy2 = -2; dy2 <= 2 && !found2; dy2++) {
-              for (let dx2 = -2; dx2 <= 2 && !found2; dx2++) {
-                const nx2 = x+dx2, ny2 = y+dy2;
-                if (nx2 >= 0 && nx2 < normSize && ny2 >= 0 && ny2 < normSize && ourEdges[ny2*normSize+nx2]) found2 = true;
-              }
-            }
-            if (found2) bothS++;
-          }
-        }
-      }
-      const shapeScore = refS > 0 ? Math.round(bothS / refS * 100) : 0;
-
-      const overall = Math.round(coverageScore * 0.4 + colorScore * 0.3 + shapeScore * 0.3);
-      return { coverage: coverageScore, color: colorScore, shape: shapeScore, overall };
+    const pals = {};
+    for (const pf of palFiles.filter(f => f.startsWith(ed))) {
+      const n = pf.split('/').pop().replace('.plt', '');
+      if (!palCache[pf]) palCache[pf] = await zip.file(pf).async('text');
+      pals[n] = palCache[pf];
     }
 
-    function loadImage(url) {
-      return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = url;
+    try {
+      const d = parseTVG(await tf.async('arraybuffer'));
+      for (const [n, x] of Object.entries(pals)) resolveExternalPalette(d, x, n);
+      const c = renderTVGToCanvas(d, SIZE, SIZE, 336, { supersample: 2 });
+      if (!c) continue;
+      // Load bitmap tiles if present (async)
+      await loadBitmapTiles(c);
+
+      const tb = await zip.file(tp).async('arraybuffer');
+      const img = await new Promise(r => {
+        const i = new Image();
+        i.onload = () => r(i); i.onerror = () => r(null);
+        i.src = URL.createObjectURL(new Blob([tb], {type: 'image/png'}));
       });
-    }
+      if (!img) continue;
 
-    async function main() {
-      const status = document.getElementById('status');
-      const resultsEl = document.getElementById('results');
+      const cc = document.createElement('canvas');
+      cc.width = SIZE; cc.height = SIZE;
+      const cx = cc.getContext('2d');
+      cx.fillStyle = '#fff'; cx.fillRect(0, 0, SIZE, SIZE);
+      cx.drawImage(img, 0, 0, SIZE, SIZE);
+      const rd = cx.getImageData(0, 0, SIZE, SIZE);
+      cx.fillStyle = '#fff'; cx.fillRect(0, 0, SIZE, SIZE);
+      cx.drawImage(c, 0, 0, SIZE, SIZE);
+      const od = cx.getImageData(0, 0, SIZE, SIZE);
 
-      status.textContent = 'Loading ZIP...';
-      const resp = await fetch(ZIP_PATH);
-      const buf = await resp.arrayBuffer();
-      const zip = await JSZip.loadAsync(buf);
-
-      // Load palettes (including color names for better matching)
-      status.textContent = 'Loading palettes...';
-      const palettes = [];
-      const pltPaths = [];
-      zip.forEach((path) => { if (path.endsWith('.plt') && path.includes('palette-library/')) pltPaths.push(path); });
-      for (const path of pltPaths) {
-        const text = await zip.file(path).async('text');
-        // Extract palette name from path (e.g., "palette-library/Anna/Anna.plt" -> "Anna")
-        const palName = path.replace(/.*palette-library\//, '').replace(/\/[^/]+\.plt$/, '');
-        for (const line of text.split('\n')) {
-          const m = line.match(/^Solid\s+(\S+)\s+(0x\w+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
-          if (m) palettes.push({ name: m[1], r: +m[3], g: +m[4], b: +m[5], a: +m[6], id: m[2], paletteName: palName });
-        }
+      let s = 0;
+      for (let i = 0; i < SIZE * SIZE; i++) {
+        const x = i * 4;
+        if (Math.abs(rd.data[x] - od.data[x]) <= TOL &&
+            Math.abs(rd.data[x+1] - od.data[x+1]) <= TOL &&
+            Math.abs(rd.data[x+2] - od.data[x+2]) <= TOL) s++;
       }
+      const isBitmap = d.bitmapTiles.length > 0 && d.layers.every(l => l.shapes.length === 0);
+      scores.push({n: tn, s: s / (SIZE * SIZE) * 100, bitmap: isBitmap});
+    } catch (e) {}
+  }
 
-      // Find ALL TVG files with thumbnails
-      status.textContent = 'Discovering drawings...';
-      const tvgFiles = [];
-      const thumbFiles = [];
-      zip.forEach((p) => {
-        if (p.endsWith('.tvg')) tvgFiles.push(p);
-        if (p.includes('.thumbnails/') && p.endsWith('.tvg.png')) thumbFiles.push(p);
-      });
-
-      const prefix = tvgFiles[0].substring(0, tvgFiles[0].indexOf('elements/'));
-
-      // Build mapping: tvgName -> { tvgPath, thumbPath }
-      const drawingMap = new Map();
-      for (const tp of thumbFiles) {
-        // Extract drawing name from thumbnail path: ".thumbnails/.DrawingName-1.tvg.png" -> "DrawingName-1"
-        const match = tp.match(/\.thumbnails\/\.(.+)\.tvg\.png$/);
-        if (!match) continue;
-        const tvgName = match[1];
-        const tvgPath = tvgFiles.find(p => p.endsWith('/' + tvgName + '.tvg'));
-        if (tvgPath) {
-          drawingMap.set(tvgName, { tvgPath, thumbPath: tp });
-        }
-      }
-
-      // Determine which test to run based on URL params
-      const urlParams = new URLSearchParams(window.location.search);
-      const mode = urlParams.get('mode') || 'full'; // 'target' or 'full'
-
-      let testDrawings;
-      if (mode === 'target') {
-        testDrawings = TARGET_DRAWINGS.filter(n => drawingMap.has(n)).map(n => ({ name: n, ...drawingMap.get(n) }));
-      } else {
-        // Full test: all drawings with thumbnails
-        testDrawings = Array.from(drawingMap.entries()).map(([name, info]) => ({ name, ...info }));
-      }
-
-      const allResults = [];
-      let processed = 0;
-
-      for (const d of testDrawings) {
-        processed++;
-        status.textContent = `Processing ${processed}/${testDrawings.length}: ${d.name}...`;
-
-        try {
-          const tvgBuf = await zip.file(d.tvgPath).async('arraybuffer');
-          const drawing = parseTVG(tvgBuf);
-          if (palettes.length > 0) resolveExternalPalette(drawing, palettes);
-
-          // Skip bitmap-only drawings
-          let hasVectors = false;
-          for (const l of drawing.layers) {
-            for (const s of l.shapes) {
-              for (const c of s.components) {
-                if (c.path && c.path.segments.length > 0) { hasVectors = true; break; }
-              }
-              if (hasVectors) break;
-            }
-            if (hasVectors) break;
-          }
-          if (!hasVectors) {
-            allResults.push({ name: d.name, coverage: 0, color: 0, shape: 0, overall: 0, skip: 'bitmap' });
-            continue;
-          }
-
-          const canvas = renderTVGToCanvas(drawing, THUMB_SIZE, THUMB_SIZE, VIEWPORT_SIZE, { skipClipping: false });
-          if (!canvas) {
-            allResults.push({ name: d.name, coverage: 0, color: 0, shape: 0, overall: 0, skip: 'no-render' });
-            continue;
-          }
-          if (canvas.__bitmapTiles) await loadBitmapTiles(canvas);
-
-          // Load thumbnail
-          const thumbFile = zip.file(d.thumbPath);
-          if (!thumbFile) {
-            allResults.push({ name: d.name, coverage: 0, color: 0, shape: 0, overall: 0, skip: 'no-thumb' });
-            continue;
-          }
-          const thumbBlob = new Blob([await thumbFile.async('arraybuffer')], { type: 'image/png' });
-          const thumbUrl = URL.createObjectURL(thumbBlob);
-          const img = await loadImage(thumbUrl);
-          URL.revokeObjectURL(thumbUrl);
-
-          const scores = computeSimilarity(canvas, img);
-          allResults.push({ name: d.name, ...scores });
-        } catch (e) {
-          allResults.push({ name: d.name, coverage: 0, color: 0, shape: 0, overall: 0, skip: 'error: ' + e.message });
-        }
-      }
-
-      // Sort by overall score ascending (worst first)
-      allResults.sort((a, b) => a.overall - b.overall);
-
-      // Format results
-      const lines = [];
-      lines.push('TVG RENDER QUALITY REPORT');
-      lines.push('=' .repeat(80));
-      lines.push(`${'Name'.padEnd(35)} ${'Cover'.padStart(6)} ${'Color'.padStart(6)} ${'Shape'.padStart(6)} ${'ALL'.padStart(6)}  Notes`);
-      lines.push('-'.repeat(80));
-
-      let totalOverall = 0, countValid = 0;
-      const below90 = [];
-      for (const r of allResults) {
-        const notes = r.skip || (r.overall < 90 ? 'LOW' : '');
-        lines.push(`${r.name.padEnd(35)} ${String(r.coverage).padStart(5)}% ${String(r.color).padStart(5)}% ${String(r.shape).padStart(5)}% ${String(r.overall).padStart(5)}%  ${notes}`);
-        if (!r.skip) {
-          totalOverall += r.overall;
-          countValid++;
-          if (r.overall < 90) below90.push(r);
-        }
-      }
-
-      const avg = countValid > 0 ? Math.round(totalOverall / countValid) : 0;
-      lines.push('-'.repeat(80));
-      lines.push(`AVERAGE (${countValid} drawings): ${avg}%`);
-      lines.push(`Below 90%: ${below90.length} drawings`);
-
-      status.textContent = `Done! ${countValid} drawings tested, avg=${avg}%`;
-      resultsEl.textContent = lines.join('\n');
-
-      // Store results on window for Playwright extraction
-      window.__qualityResults = { results: allResults, average: avg, below90Count: below90.length, totalValid: countValid };
-    }
-
-    main().catch(e => {
-      document.getElementById('status').textContent = 'Error: ' + e.message;
-      console.error(e);
-    });
-  </script>
-</body>
-</html>
+  scores.sort((a, b) => a.s - b.s);
+  const vecScores = scores.filter(x => !x.bitmap);
+  const bmpScores = scores.filter(x => x.bitmap);
+  const avg = scores.reduce((s, x) => s + x.s, 0) / scores.length;
+  const vecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.s, 0) / vecScores.length : 0;
+  const lines = [
+    `ALL: ${avg.toFixed(1)}% avg (${scores.length} drawings) | >=98%: ${scores.filter(x => x.s >= 98).length} | >=95%: ${scores.filter(x => x.s >= 95).length} | >=90%: ${scores.filter(x => x.s >= 90).length}`,
+    `VECTOR: ${vecAvg.toFixed(1)}% avg (${vecScores.length}) | >=98%: ${vecScores.filter(x => x.s >= 98).length} | >=95%: ${vecScores.filter(x => x.s >= 95).length}`,
+    `BITMAP: ${bmpScores.length ? (bmpScores.reduce((s,x) => s + x.s, 0) / bmpScores.length).toFixed(1) : 'N/A'}% avg (${bmpScores.length})`,
+    '',
+    'Bottom 15 vectors:',
+    ...vecScores.slice(0, 15).map(x => `  ${x.n}: ${x.s.toFixed(1)}%`),
+  ];
+  document.getElementById('out').textContent = lines.join('\n');
+  document.title = 'DONE';
+}
+main().catch(e => { document.getElementById('out').textContent = 'ERROR: ' + e.message; document.title = 'DONE'; });
+</script>
+</body></html>

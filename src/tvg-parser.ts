@@ -74,6 +74,8 @@ export interface TVGComponent {
   insideColorId: bigint | null;
   paletteIndex: number | null; // Palette position index for fills without TGCO
   color: { r: number; g: number; b: number; a: number } | null;
+  /** Resolved inside color for two-sided strokes (inner side fill contribution). */
+  insideColor: { r: number; g: number; b: number; a: number } | null;
   transform: TVGTransform | null;
   path: TVGPath | null;
   strokeWidth: number | null;
@@ -362,6 +364,13 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
             comp.color = { r: entry.r, g: entry.g, b: entry.b, a: entry.a };
           }
         }
+        // Resolve insideColorId for two-sided strokes
+        if (comp.insideColorId !== null) {
+          const insideEntry = paletteMap.get(comp.insideColorId);
+          if (insideEntry) {
+            comp.insideColor = { r: insideEntry.r, g: insideEntry.g, b: insideEntry.b, a: insideEntry.a };
+          }
+        }
         // Fills: use paletteIndex as TPAL index to get colorId for external palette resolution.
         // Set colorId from TPAL entry's id so resolveExternalPalette can override with .plt colors.
         // Only fall back to TPAL RGBA if the entry's id is 0 (no external reference).
@@ -409,6 +418,32 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
             fills[i].color = { ...lastColor };
           } else {
             lastColor = fills[i].color!;
+          }
+        }
+      }
+    }
+  }
+
+  // Apply pointQuantum coordinate snapping: Harmony quantizes coordinates to a grid.
+  // Snapping aligns our coordinates to that grid, improving fill chain matching.
+  const q = drawing.pointQuantum;
+  if (q !== null && q > 0) {
+    for (const layer of drawing.layers) {
+      for (const shape of layer.shapes) {
+        for (const comp of shape.components) {
+          if (!comp.path) continue;
+          for (const seg of comp.path.segments) {
+            seg.x = Math.round(seg.x / q) * q;
+            seg.y = Math.round(seg.y / q) * q;
+            if (seg.type === 'Q') {
+              seg.cx = Math.round(seg.cx / q) * q;
+              seg.cy = Math.round(seg.cy / q) * q;
+            } else if (seg.type === 'C') {
+              seg.c1x = Math.round(seg.c1x / q) * q;
+              seg.c1y = Math.round(seg.c1y / q) * q;
+              seg.c2x = Math.round(seg.c2x / q) * q;
+              seg.c2y = Math.round(seg.c2y / q) * q;
+            }
           }
         }
       }
@@ -826,6 +861,7 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
     insideColorId: null,
     paletteIndex: null,
     color: null,
+    insideColor: null,
     transform: null,
     path: null,
     strokeWidth: null,
@@ -1737,6 +1773,8 @@ export interface TVGRenderOptions {
   supersample?: number;
   /** Skip flood-fill clipping for faster rendering (e.g., grid thumbnails). */
   skipClipping?: boolean;
+  /** Skip white background pre-composite (for matte/compositor sources). */
+  skipBackgroundComposite?: boolean;
 }
 
 export function renderTVGToCanvas(
@@ -1803,15 +1841,44 @@ export function renderTVGToCanvas(
         }
       }
     }
+    // Expand bounds by max stroke width to prevent thick strokes from clipping
+    let maxStrokeW = 0;
+    for (const layer of drawing.layers) {
+      for (const shape of layer.shapes) {
+        for (const comp of shape.components) {
+          if (comp.strokeWidth !== null && comp.strokeWidth > maxStrokeW) maxStrokeW = comp.strokeWidth;
+          if (comp.thicknessProfile) {
+            for (const pt of comp.thicknessProfile.points) {
+              if (pt.leftOffset + pt.rightOffset > maxStrokeW) maxStrokeW = pt.leftOffset + pt.rightOffset;
+            }
+          }
+        }
+      }
+    }
+    const halfStroke = maxStrokeW / 2;
+    minX -= halfStroke;
+    minY -= halfStroke;
+    maxX += halfStroke;
+    maxY += halfStroke;
+
     // Toon Boom thumbnail viewport formula (from empirical measurement):
     // viewport = max(fieldChart * 28, contentExtent + 227)
     // The +227 TVG units (~8.1 fields) provides margin around the content.
     const contentExtent = Math.max(maxX - minX, maxY - minY);
-    viewportSize = Math.max(viewport, contentExtent + 227);
+    // Origin-aware viewport sizing only in compositor mode (centerOnOrigin),
+    // where all elements share origin-centered coordinate space and may be
+    // far from origin (e.g., feet at Y=-1600). For standalone thumbnails,
+    // we center on content centroid, so origin distance is irrelevant.
+    const centerOnOrigin = options?.centerOnOrigin ?? false;
+    if (centerOnOrigin) {
+      const originExtent = 2 * Math.max(Math.abs(minX), Math.abs(maxX), Math.abs(minY), Math.abs(maxY));
+      viewportSize = Math.max(viewport, contentExtent + 227, originExtent + 100);
+    } else {
+      viewportSize = Math.max(viewport, contentExtent + 227);
+    }
 
     // When centerOnOrigin is set (compositor mode), center on (0,0) so all elements
     // share the same coordinate space. Otherwise center on content centroid.
-    const centerOnOrigin = options?.centerOnOrigin ?? false;
     const centerX = centerOnOrigin ? 0 : (minX + maxX) / 2;
     const centerY = centerOnOrigin ? 0 : (minY + maxY) / 2;
 
@@ -1996,16 +2063,16 @@ export function renderTVGToCanvas(
 
     // Very sparse strokes: skip clipping entirely (Approach A)
     if (strokeDensity >= 0.01) {
-      // Adaptive dilation radius in 2x space (Approach A):
-      // Dense strokes (>0.1): radius 6 in 2x (= 3px in 1x)
-      // Normal strokes: radius 4 in 2x (= 2px in 1x)
-      const DR2x = strokeDensity > 0.1 ? 6 : 4;
+      // Adaptive dilation radius in mask space (Approach A):
+      // Dense strokes (>0.1): radius 9 in 3x (= 3px in 1x)
+      // Normal strokes: radius 6 in 3x (= 2px in 1x)
+      const DR2x = strokeDensity > 0.1 ? 9 : 6;
 
       // Hi-res mask for flood-fill clipping.
-      // Without supersampling: use 2x resolution (Approach C) for sub-pixel gap closure.
+      // Without supersampling: use 3x resolution for better sub-pixel gap closure.
       // With supersampling: the SS resolution already provides enough detail, so use
-      // SS resolution directly (avoid 2x*SS which would be excessive memory).
-      const maskScale = SS > 1 ? 1 : 2;
+      // SS resolution directly (avoid 3x*SS which would be excessive memory).
+      const maskScale = SS > 1 ? 1 : 3;
       const mw = ssWidth * maskScale;
       const mh = ssHeight * maskScale;
       const maskCanvas = document.createElement('canvas');
@@ -2035,7 +2102,9 @@ export function renderTVGToCanvas(
         if (maskData.data[i * 4 + 3] > 30) isWall[i] = 1;
       }
 
-      // Dilate by adaptive radius in 2x space to close sub-pixel gaps
+      // Morphological close (dilate then erode) to close sub-pixel gaps
+      // while preserving original wall thickness. Dilate-only permanently
+      // thickens walls, causing fills to overflow past stroke boundaries.
       const dilated = new Uint8Array(mw * mh);
       const DR2xSq = DR2x * DR2x;
       for (let y = 0; y < mh; y++) {
@@ -2056,47 +2125,80 @@ export function renderTVGToCanvas(
         }
       }
 
-      // BFS flood-fill from edges of 2x mask to find "outside" region
+      // Erode by (R-1) to restore original wall thickness while keeping gaps closed.
+      // The net effect is a morphological close that seals sub-pixel gaps without
+      // permanently thickening the walls.
+      const erodeR = DR2x - 1;
+      const closed = new Uint8Array(mw * mh);
+      if (erodeR > 0) {
+        const erodeRSq = erodeR * erodeR;
+        for (let y = 0; y < mh; y++) {
+          for (let x = 0; x < mw; x++) {
+            const idx = y * mw + x;
+            if (!dilated[idx]) continue;
+            // A dilated pixel survives erosion only if all pixels within erodeR are also dilated
+            let allDilated = true;
+            for (let dy = -erodeR; dy <= erodeR && allDilated; dy++) {
+              const ny = y + dy;
+              if (ny < 0 || ny >= mh) { allDilated = false; continue; }
+              for (let dx = -erodeR; dx <= erodeR && allDilated; dx++) {
+                if (dx * dx + dy * dy > erodeRSq) continue;
+                const nx = x + dx;
+                if (nx < 0 || nx >= mw || !dilated[ny * mw + nx]) allDilated = false;
+              }
+            }
+            if (allDilated) closed[idx] = 1;
+          }
+        }
+      } else {
+        closed.set(dilated);
+      }
+
+      // BFS flood-fill from edges of mask to find "outside" region
+      // Uses morphologically closed wall map to prevent fill overflow
       const outside2x = new Uint8Array(mw * mh);
       const queue: number[] = [];
       for (let x = 0; x < mw; x++) {
-        if (!dilated[x]) { outside2x[x] = 1; queue.push(x); }
+        if (!closed[x]) { outside2x[x] = 1; queue.push(x); }
         const b = (mh - 1) * mw + x;
-        if (!dilated[b]) { outside2x[b] = 1; queue.push(b); }
+        if (!closed[b]) { outside2x[b] = 1; queue.push(b); }
       }
       for (let y = 1; y < mh - 1; y++) {
-        if (!dilated[y * mw]) { outside2x[y * mw] = 1; queue.push(y * mw); }
+        if (!closed[y * mw]) { outside2x[y * mw] = 1; queue.push(y * mw); }
         const r = y * mw + mw - 1;
-        if (!dilated[r]) { outside2x[r] = 1; queue.push(r); }
+        if (!closed[r]) { outside2x[r] = 1; queue.push(r); }
       }
       let head = 0;
       while (head < queue.length) {
         const idx = queue[head++];
         const x = idx % mw, y = (idx / mw) | 0;
-        if (x > 0 && !outside2x[idx - 1] && !dilated[idx - 1]) { outside2x[idx - 1] = 1; queue.push(idx - 1); }
-        if (x < mw - 1 && !outside2x[idx + 1] && !dilated[idx + 1]) { outside2x[idx + 1] = 1; queue.push(idx + 1); }
-        if (y > 0 && !outside2x[idx - mw] && !dilated[idx - mw]) { outside2x[idx - mw] = 1; queue.push(idx - mw); }
-        if (y < mh - 1 && !outside2x[idx + mw] && !dilated[idx + mw]) { outside2x[idx + mw] = 1; queue.push(idx + mw); }
+        if (x > 0 && !outside2x[idx - 1] && !closed[idx - 1]) { outside2x[idx - 1] = 1; queue.push(idx - 1); }
+        if (x < mw - 1 && !outside2x[idx + 1] && !closed[idx + 1]) { outside2x[idx + 1] = 1; queue.push(idx + 1); }
+        if (y > 0 && !outside2x[idx - mw] && !closed[idx - mw]) { outside2x[idx - mw] = 1; queue.push(idx - mw); }
+        if (y < mh - 1 && !outside2x[idx + mw] && !closed[idx + mw]) { outside2x[idx + mw] = 1; queue.push(idx + mw); }
       }
 
-      // Downsample outside map from mask resolution to SS resolution:
-      // A pixel is "outside" only if ALL corresponding mask pixels are outside.
-      // This conservative approach prevents erasing edge pixels that are partially inside.
-      const outside = new Uint8Array(ssWidth * ssHeight);
+      // Downsample outside map from mask resolution to SS resolution with
+      // coverage-based edge smoothing. Instead of binary in/out, compute the
+      // fraction of sub-pixels that are outside for partial alpha at edges.
+      // outsideCoverage: 255 = fully outside, 0 = fully inside, partial = edge
+      const outsideCoverage = new Uint8Array(ssWidth * ssHeight);
       if (maskScale === 1) {
-        // No downsampling needed — mask is at same resolution as fill canvas
-        outside.set(outside2x);
+        for (let i = 0; i < ssWidth * ssHeight; i++) {
+          outsideCoverage[i] = outside2x[i] ? 255 : 0;
+        }
       } else {
+        const totalSubPixels = maskScale * maskScale;
         for (let y = 0; y < ssHeight; y++) {
           for (let x = 0; x < ssWidth; x++) {
             const x2 = x * maskScale, y2 = y * maskScale;
-            let allOutside = true;
-            for (let dy = 0; dy < maskScale && allOutside; dy++) {
-              for (let dx = 0; dx < maskScale && allOutside; dx++) {
-                if (!outside2x[(y2 + dy) * mw + (x2 + dx)]) allOutside = false;
+            let outsideCount = 0;
+            for (let dy = 0; dy < maskScale; dy++) {
+              for (let dx = 0; dx < maskScale; dx++) {
+                if (outside2x[(y2 + dy) * mw + (x2 + dx)]) outsideCount++;
               }
             }
-            if (allOutside) outside[y * ssWidth + x] = 1;
+            outsideCoverage[y * ssWidth + x] = (outsideCount * 255 / totalSubPixels) | 0;
           }
         }
       }
@@ -2107,15 +2209,21 @@ export function renderTVGToCanvas(
       let fillPixels = 0, erasedPixels = 0;
       for (let i = 0; i < ssWidth * ssHeight; i++) {
         if (fillData.data[i * 4 + 3] > 0) fillPixels++;
-        if (outside[i] && fillData.data[i * 4 + 3] > 0) erasedPixels++;
+        if (outsideCoverage[i] > 0 && fillData.data[i * 4 + 3] > 0) erasedPixels += outsideCoverage[i] / 255;
       }
       // For pencil-only drawings (no boundary strokes), overlay fills often extend
       // beyond the main outline — allow more aggressive clipping (60% vs 50%).
       const leakThreshold = hasBoundaryStrokes ? 0.5 : 0.6;
       if (fillPixels > 0 && erasedPixels / fillPixels < leakThreshold) {
-        // Safe to clip - less than threshold of fill would be removed
+        // Safe to clip — apply coverage-based alpha for smooth edges
         for (let i = 0; i < ssWidth * ssHeight; i++) {
-          if (outside[i]) fillData.data[i * 4 + 3] = 0;
+          if (outsideCoverage[i] >= 255) {
+            fillData.data[i * 4 + 3] = 0;
+          } else if (outsideCoverage[i] > 0) {
+            // Partial coverage: blend alpha for anti-aliased edges
+            const insideFraction = (255 - outsideCoverage[i]) / 255;
+            fillData.data[i * 4 + 3] = (fillData.data[i * 4 + 3] * insideFraction) | 0;
+          }
         }
         fillCtx.putImageData(fillData, 0, 0);
       } else if (fillPixels > 0) {
@@ -2161,13 +2269,15 @@ export function renderTVGToCanvas(
     }
   }
 
-  // Pre-composite against white background
-  ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.globalCompositeOperation = 'destination-over';
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, ssWidth, ssHeight);
-  ctx.restore();
+  // Pre-composite against white background (skip for matte/compositor sources)
+  if (!options?.skipBackgroundComposite) {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'destination-over';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, ssWidth, ssHeight);
+    ctx.restore();
+  }
 
   // Downsample from SS resolution to output resolution
   if (SS > 1) {
@@ -2350,7 +2460,7 @@ function perShapeFloodFillClip(
           }
         }
 
-        // Build wall map and dilate
+        // Build wall map and morphological close (dilate + erode)
         const maskData = shapeMaskCtx.getImageData(0, 0, mw, mh);
         const isWall = new Uint8Array(mw * mh);
         for (let i = 0; i < mw * mh; i++) {
@@ -2377,27 +2487,53 @@ function perShapeFloodFillClip(
           }
         }
 
+        // Erode by (R-1) to restore original wall thickness
+        const erodeR = DR2x - 1;
+        const closed = new Uint8Array(mw * mh);
+        if (erodeR > 0) {
+          const erodeRSq = erodeR * erodeR;
+          for (let y = 0; y < mh; y++) {
+            for (let x = 0; x < mw; x++) {
+              const idx = y * mw + x;
+              if (!dilated[idx]) continue;
+              let allDilated = true;
+              for (let dy = -erodeR; dy <= erodeR && allDilated; dy++) {
+                const ny = y + dy;
+                if (ny < 0 || ny >= mh) { allDilated = false; continue; }
+                for (let dx = -erodeR; dx <= erodeR && allDilated; dx++) {
+                  if (dx * dx + dy * dy > erodeRSq) continue;
+                  const nx = x + dx;
+                  if (nx < 0 || nx >= mw || !dilated[ny * mw + nx]) allDilated = false;
+                }
+              }
+              if (allDilated) closed[idx] = 1;
+            }
+          }
+        } else {
+          closed.set(dilated);
+        }
+
         // BFS flood-fill from edges to find outside region
         const outside2x = new Uint8Array(mw * mh);
         const queue: number[] = [];
         for (let x = 0; x < mw; x++) {
-          if (!dilated[x]) { outside2x[x] = 1; queue.push(x); }
+          if (!closed[x]) { outside2x[x] = 1; queue.push(x); }
           const b = (mh - 1) * mw + x;
-          if (!dilated[b]) { outside2x[b] = 1; queue.push(b); }
+          if (!closed[b]) { outside2x[b] = 1; queue.push(b); }
         }
         for (let y = 1; y < mh - 1; y++) {
-          if (!dilated[y * mw]) { outside2x[y * mw] = 1; queue.push(y * mw); }
+          if (!closed[y * mw]) { outside2x[y * mw] = 1; queue.push(y * mw); }
           const r = y * mw + mw - 1;
-          if (!dilated[r]) { outside2x[r] = 1; queue.push(r); }
+          if (!closed[r]) { outside2x[r] = 1; queue.push(r); }
         }
         let head = 0;
         while (head < queue.length) {
           const idx = queue[head++];
           const x = idx % mw, y = (idx / mw) | 0;
-          if (x > 0 && !outside2x[idx - 1] && !dilated[idx - 1]) { outside2x[idx - 1] = 1; queue.push(idx - 1); }
-          if (x < mw - 1 && !outside2x[idx + 1] && !dilated[idx + 1]) { outside2x[idx + 1] = 1; queue.push(idx + 1); }
-          if (y > 0 && !outside2x[idx - mw] && !dilated[idx - mw]) { outside2x[idx - mw] = 1; queue.push(idx - mw); }
-          if (y < mh - 1 && !outside2x[idx + mw] && !dilated[idx + mw]) { outside2x[idx + mw] = 1; queue.push(idx + mw); }
+          if (x > 0 && !outside2x[idx - 1] && !closed[idx - 1]) { outside2x[idx - 1] = 1; queue.push(idx - 1); }
+          if (x < mw - 1 && !outside2x[idx + 1] && !closed[idx + 1]) { outside2x[idx + 1] = 1; queue.push(idx + 1); }
+          if (y > 0 && !outside2x[idx - mw] && !closed[idx - mw]) { outside2x[idx - mw] = 1; queue.push(idx - mw); }
+          if (y < mh - 1 && !outside2x[idx + mw] && !closed[idx + mw]) { outside2x[idx + mw] = 1; queue.push(idx + mw); }
         }
 
         // Downsample outside map to shape-fill resolution
@@ -2694,6 +2830,21 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
       }
     }
 
+    // Inside-color fill: strokes with insideColor contribute fill on their inner side.
+    // In Harmony, two-sided strokes have an "inside color" that fills the region
+    // on one side of the stroke path.
+    if (pass === 'fill') {
+      for (const comp of strokeComps) {
+        if (!comp.insideColor || !comp.path || comp.path.segments.length < 3) continue;
+        const ic = comp.insideColor;
+        if (ic.a < 1) continue;
+        const path = buildPath2D(comp.path);
+        path.closePath();
+        ctx.fillStyle = `rgba(${ic.r},${ic.g},${ic.b},${ic.a / 255})`;
+        ctx.fill(path);
+      }
+    }
+
     // Render stroke/pencil components individually
     if (pass === 'stroke') {
       for (const comp of strokeComps) {
@@ -2729,7 +2880,7 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
             ctx.lineJoin = comp.joinType;
             ctx.stroke(path);
           } else {
-            renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, fillStyle);
+            renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, fillStyle, comp.fromTipType, comp.toTipType);
           }
         } else {
           const path = buildPath2D(comp.path!);
@@ -2768,9 +2919,12 @@ function renderStrokeMask(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, def
       } else if (comp.componentType === 4) {
         sw = defaultStrokeWidth;
       } else {
-        // Invisible boundary strokes: use width 1.0 for the mask to ensure
-        // continuous lines. Visible strokes drawn on top cover this imprecision.
-        sw = 1.0;
+        // Invisible boundary strokes: use width scaled to ensure continuous
+        // lines in mask space. At small scales, 1.0 TVG unit may be sub-pixel,
+        // so use max(1.0, 2.0/scale) to guarantee walls are thick enough.
+        const xform = ctx.getTransform();
+        const ctxScale = Math.sqrt(xform.a * xform.a + xform.b * xform.b);
+        sw = Math.max(1.0, ctxScale > 0 ? 2.0 / ctxScale : 1.0);
       }
       if (sw < 0.05) continue;
 
@@ -2786,7 +2940,7 @@ function renderStrokeMask(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, def
           ctx.lineJoin = comp.joinType;
           ctx.stroke(path);
         } else {
-          renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, 'rgba(255,255,255,1)');
+          renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, 'rgba(255,255,255,1)', comp.fromTipType, comp.toTipType);
         }
       } else {
         const path = buildPath2D(comp.path!);
@@ -2897,7 +3051,7 @@ function computeSegmentArcLengths(segs: TVGSegment[]): number[] {
         lx = nx; ly = ny;
       }
     } else if (seg.type === 'C') {
-      const steps = 12;
+      const steps = 16;
       let lx = prev.x, ly = prev.y;
       for (let s = 1; s <= steps; s++) {
         const t = s / steps;
@@ -2991,6 +3145,8 @@ function renderVariableWidthStroke(
   path: TVGPath,
   profile: TVGThicknessProfile,
   fillStyle: string,
+  fromTipType: TVGTipType = 'round',
+  toTipType: TVGTipType = 'round',
 ): void {
   const segs = path.segments;
   if (segs.length < 2) return;
@@ -3000,8 +3156,8 @@ function renderVariableWidthStroke(
   const totalLen = segArcStarts[segArcStarts.length - 1];
   if (totalLen < 0.01) return;
 
-  // Higher sample density for better quality (was: max 80, 2px spacing)
-  const numSamples = Math.max(30, Math.min(200, Math.ceil(totalLen)));
+  // Higher sample density for better quality
+  const numSamples = Math.max(40, Math.min(300, Math.ceil(totalLen)));
 
   // Map from thickness domain to centerline parameter
   const [domainStart, domainEnd] = profile.domain;
@@ -3045,20 +3201,28 @@ function renderVariableWidthStroke(
     // Closed stroke: connect end directly to right side (no end cap)
     outlinePath.lineTo(rightPoints[rightPoints.length - 1].x, rightPoints[rightPoints.length - 1].y);
   } else {
-    // End cap: cubic bezier round cap (matching Toon Boom's 1.33x cap offset)
+    // End cap: shape depends on tip type
     if (lastPt && profile.points.length > 0) {
       const lastTP = profile.points[profile.points.length - 1];
-      const capScale = 1.33;
+      // Cap scale varies by tip type: round=1.33, square=1.0, flat=0
+      const capScale = toTipType === 'butt' ? 0 : toTipType === 'square' ? 1.0 : 1.33;
       const lastLeft = leftPoints[leftPoints.length - 1];
       const lastRight = rightPoints[rightPoints.length - 1];
-      // Tangent direction at end
-      const tdx = -lastPt.ny;
-      const tdy = lastPt.nx;
-      const cp1x = lastLeft.x + tdx * capScale * lastTP.leftOffset;
-      const cp1y = lastLeft.y + tdy * capScale * lastTP.leftOffset;
-      const cp2x = lastRight.x + tdx * capScale * lastTP.rightOffset;
-      const cp2y = lastRight.y + tdy * capScale * lastTP.rightOffset;
-      outlinePath.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, lastRight.x, lastRight.y);
+      if (capScale === 0) {
+        // Flat cap: straight line between left and right
+        outlinePath.lineTo(lastRight.x, lastRight.y);
+      } else {
+        // Tangent direction at end, modulated by tip tangent values
+        const tdx = -lastPt.ny;
+        const tdy = lastPt.nx;
+        const tipTangentL = profile.tipTangentLeftTo !== undefined ? profile.tipTangentLeftTo : 1;
+        const tipTangentR = profile.tipTangentRightTo !== undefined ? profile.tipTangentRightTo : 1;
+        const cp1x = lastLeft.x + tdx * capScale * lastTP.leftOffset * tipTangentL;
+        const cp1y = lastLeft.y + tdy * capScale * lastTP.leftOffset * tipTangentL;
+        const cp2x = lastRight.x + tdx * capScale * lastTP.rightOffset * tipTangentR;
+        const cp2y = lastRight.y + tdy * capScale * lastTP.rightOffset * tipTangentR;
+        outlinePath.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, lastRight.x, lastRight.y);
+      }
     } else {
       outlinePath.lineTo(rightPoints[rightPoints.length - 1].x, rightPoints[rightPoints.length - 1].y);
     }
@@ -3069,20 +3233,27 @@ function renderVariableWidthStroke(
   }
 
   if (!isClosed) {
-    // Start cap: cubic bezier round cap
+    // Start cap: shape depends on tip type
     if (firstPt && profile.points.length > 0) {
       const firstTP = profile.points[0];
-      const capScale = 1.33;
+      const capScale = fromTipType === 'butt' ? 0 : fromTipType === 'square' ? 1.0 : 1.33;
       const firstRight = rightPoints[0];
       const firstLeft = leftPoints[0];
-      // Tangent direction at start (backward = negative tangent)
-      const tdx = firstPt.ny;
-      const tdy = -firstPt.nx;
-      const cp1x = firstRight.x + tdx * capScale * firstTP.rightOffset;
-      const cp1y = firstRight.y + tdy * capScale * firstTP.rightOffset;
-      const cp2x = firstLeft.x + tdx * capScale * firstTP.leftOffset;
-      const cp2y = firstLeft.y + tdy * capScale * firstTP.leftOffset;
-      outlinePath.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, firstLeft.x, firstLeft.y);
+      if (capScale === 0) {
+        // Flat cap: straight line back to start
+        outlinePath.lineTo(firstLeft.x, firstLeft.y);
+      } else {
+        // Tangent direction at start (backward = negative tangent)
+        const tdx = firstPt.ny;
+        const tdy = -firstPt.nx;
+        const tipTangentL = profile.tipTangentLeftFrom !== undefined ? profile.tipTangentLeftFrom : 1;
+        const tipTangentR = profile.tipTangentRightFrom !== undefined ? profile.tipTangentRightFrom : 1;
+        const cp1x = firstRight.x + tdx * capScale * firstTP.rightOffset * tipTangentR;
+        const cp1y = firstRight.y + tdy * capScale * firstTP.rightOffset * tipTangentR;
+        const cp2x = firstLeft.x + tdx * capScale * firstTP.leftOffset * tipTangentL;
+        const cp2y = firstLeft.y + tdy * capScale * firstTP.leftOffset * tipTangentL;
+        outlinePath.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, firstLeft.x, firstLeft.y);
+      }
     }
   }
 
