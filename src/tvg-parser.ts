@@ -1363,6 +1363,9 @@ export interface TVGRenderOptions {
   /** Center the viewport on the origin (0,0) instead of the content centroid.
    *  Used by the compositor so all elements share the same coordinate space. */
   centerOnOrigin?: boolean;
+  /** Supersampling factor for antialiasing (e.g., 2 for 2x supersampling).
+   *  Renders internally at width*SS x height*SS then downsamples. */
+  supersample?: number;
 }
 
 export function renderTVGToCanvas(
@@ -1392,9 +1395,14 @@ export function renderTVGToCanvas(
     return null;
   }
 
+  // Supersampling: render at SS× resolution then downsample for antialiasing
+  const SS = options?.supersample && options.supersample > 1 ? options.supersample : 1;
+  const ssWidth = width * SS;
+  const ssHeight = height * SS;
+
   const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = ssWidth;
+  canvas.height = ssHeight;
   const ctx = canvas.getContext('2d')!;
 
   // Use field chart viewport if provided (e.g., 336 = 12 fields × 28 units/field).
@@ -1436,9 +1444,9 @@ export function renderTVGToCanvas(
     const centerX = centerOnOrigin ? 0 : (minX + maxX) / 2;
     const centerY = centerOnOrigin ? 0 : (minY + maxY) / 2;
 
-    scale = Math.min(width, height) / viewportSize;
-    offsetX = width / 2 - centerX * scale;
-    offsetY = height / 2 + centerY * scale;
+    scale = Math.min(ssWidth, ssHeight) / viewportSize;
+    offsetX = ssWidth / 2 - centerX * scale;
+    offsetY = ssHeight / 2 + centerY * scale;
     ctx.setTransform(scale, 0, 0, -scale, offsetX, offsetY);
   } else {
     // Auto-fit to path bounds
@@ -1468,9 +1476,9 @@ export function renderTVGToCanvas(
     if (drawingWidth < 0.01 || drawingHeight < 0.01) return null;
     viewportSize = Math.max(drawingWidth, drawingHeight);
 
-    const padding = 4;
-    const availW = width - padding * 2;
-    const availH = height - padding * 2;
+    const padding = 4 * SS;
+    const availW = ssWidth - padding * 2;
+    const availH = ssHeight - padding * 2;
     scale = Math.min(availW / drawingWidth, availH / drawingHeight);
     offsetX = padding + (availW - drawingWidth * scale) / 2 - minX * scale;
     offsetY = padding + (availH - drawingHeight * scale) / 2 + maxY * scale;
@@ -1503,8 +1511,8 @@ export function renderTVGToCanvas(
   //   3. Composite clipped fills, then visible strokes on top
 
   const fillCanvas = document.createElement('canvas');
-  fillCanvas.width = width;
-  fillCanvas.height = height;
+  fillCanvas.width = ssWidth;
+  fillCanvas.height = ssHeight;
   const fillCtx = fillCanvas.getContext('2d')!;
   fillCtx.setTransform(ctx.getTransform());
 
@@ -1519,11 +1527,27 @@ export function renderTVGToCanvas(
     if (drawingHasFills) break;
   }
 
+  // Compute the primary non-Line fill color from the palette for boundary-stroke fills.
+  // Shapes with only ct=2 boundary strokes need the element's fill color (not Line/black).
+  const utilityNamesSet = new Set([
+    'line', 'mask', 'invis', 'handles', 'invisible', 'shadow',
+    'controller', 'eye_lid_ctrl', 'null', 'transparent',
+  ]);
+  let defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null = null;
+  for (const entry of drawing.palette) {
+    const nameLower = entry.name.toLowerCase();
+    if (!utilityNamesSet.has(nameLower) && entry.a > 0 &&
+        !(entry.r === 0 && entry.g === 0 && entry.b === 0)) {
+      defaultBoundaryFillColor = { r: entry.r, g: entry.g, b: entry.b, a: entry.a };
+      break;
+    }
+  }
+
   // Pass 1: Render all fills to offscreen canvas
   for (const layerType of fillOrder) {
     for (const layer of drawing.layers) {
       if (layer.type !== layerType) continue;
-      renderLayerPass(fillCtx, layer, defaultStrokeWidth, 'fill', drawingHasFills);
+      renderLayerPass(fillCtx, layer, defaultStrokeWidth, 'fill', drawingHasFills, defaultBoundaryFillColor);
     }
   }
 
@@ -1574,7 +1598,7 @@ export function renderTVGToCanvas(
       }
     }
 
-    const canvasArea = width * height;
+    const canvasArea = ssWidth * ssHeight;
     const strokeDensity = canvasArea > 0 ? totalStrokeLength / canvasArea : 0;
 
     // Very sparse strokes: skip clipping entirely (Approach A)
@@ -1584,21 +1608,24 @@ export function renderTVGToCanvas(
       // Normal strokes: radius 4 in 2x (= 2px in 1x)
       const DR2x = strokeDensity > 0.1 ? 6 : 4;
 
-      // 2x resolution mask (Approach C): render stroke mask at double resolution
-      // Sub-pixel gaps at 1x become 1px gaps at 2x, which dilation can reliably close
-      const mw = width * 2;
-      const mh = height * 2;
+      // Hi-res mask for flood-fill clipping.
+      // Without supersampling: use 2x resolution (Approach C) for sub-pixel gap closure.
+      // With supersampling: the SS resolution already provides enough detail, so use
+      // SS resolution directly (avoid 2x*SS which would be excessive memory).
+      const maskScale = SS > 1 ? 1 : 2;
+      const mw = ssWidth * maskScale;
+      const mh = ssHeight * maskScale;
       const maskCanvas = document.createElement('canvas');
       maskCanvas.width = mw;
       maskCanvas.height = mh;
       const maskCtx = maskCanvas.getContext('2d')!;
 
-      // Scale the transform by 2x for the hi-res mask
+      // Scale the transform for the mask resolution
       const baseTransform = ctx.getTransform();
       maskCtx.setTransform(
-        baseTransform.a * 2, baseTransform.b * 2,
-        baseTransform.c * 2, baseTransform.d * 2,
-        baseTransform.e * 2, baseTransform.f * 2,
+        baseTransform.a * maskScale, baseTransform.b * maskScale,
+        baseTransform.c * maskScale, baseTransform.d * maskScale,
+        baseTransform.e * maskScale, baseTransform.f * maskScale,
       );
 
       for (const layerType of strokeOrder) {
@@ -1659,35 +1686,39 @@ export function renderTVGToCanvas(
         if (y < mh - 1 && !outside2x[idx + mw] && !dilated[idx + mw]) { outside2x[idx + mw] = 1; queue.push(idx + mw); }
       }
 
-      // Downsample outside map from 2x to 1x:
-      // A 1x pixel is "outside" only if ALL 4 corresponding 2x pixels are outside.
+      // Downsample outside map from mask resolution to SS resolution:
+      // A pixel is "outside" only if ALL corresponding mask pixels are outside.
       // This conservative approach prevents erasing edge pixels that are partially inside.
-      const outside = new Uint8Array(width * height);
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const x2 = x * 2, y2 = y * 2;
-          if (
-            outside2x[y2 * mw + x2] &&
-            outside2x[y2 * mw + x2 + 1] &&
-            outside2x[(y2 + 1) * mw + x2] &&
-            outside2x[(y2 + 1) * mw + x2 + 1]
-          ) {
-            outside[y * width + x] = 1;
+      const outside = new Uint8Array(ssWidth * ssHeight);
+      if (maskScale === 1) {
+        // No downsampling needed — mask is at same resolution as fill canvas
+        outside.set(outside2x);
+      } else {
+        for (let y = 0; y < ssHeight; y++) {
+          for (let x = 0; x < ssWidth; x++) {
+            const x2 = x * maskScale, y2 = y * maskScale;
+            let allOutside = true;
+            for (let dy = 0; dy < maskScale && allOutside; dy++) {
+              for (let dx = 0; dx < maskScale && allOutside; dx++) {
+                if (!outside2x[(y2 + dy) * mw + (x2 + dx)]) allOutside = false;
+              }
+            }
+            if (allOutside) outside[y * ssWidth + x] = 1;
           }
         }
       }
 
       // Erase outside pixels from fill canvas, with leak detection fallback.
       // If clipping removes >50% of fill pixels, the mask leaked — skip clipping.
-      const fillData = fillCtx.getImageData(0, 0, width, height);
+      const fillData = fillCtx.getImageData(0, 0, ssWidth, ssHeight);
       let fillPixels = 0, erasedPixels = 0;
-      for (let i = 0; i < width * height; i++) {
+      for (let i = 0; i < ssWidth * ssHeight; i++) {
         if (fillData.data[i * 4 + 3] > 0) fillPixels++;
         if (outside[i] && fillData.data[i * 4 + 3] > 0) erasedPixels++;
       }
       if (fillPixels > 0 && erasedPixels / fillPixels < 0.5) {
         // Safe to clip - less than 50% of fill would be removed
-        for (let i = 0; i < width * height; i++) {
+        for (let i = 0; i < ssWidth * ssHeight; i++) {
           if (outside[i]) fillData.data[i * 4 + 3] = 0;
         }
         fillCtx.putImageData(fillData, 0, 0);
@@ -1709,6 +1740,26 @@ export function renderTVGToCanvas(
       if (layer.type !== layerType) continue;
       renderLayerPass(ctx, layer, defaultStrokeWidth, 'stroke');
     }
+  }
+
+  // Pre-composite against white background
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'destination-over';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, ssWidth, ssHeight);
+  ctx.restore();
+
+  // Downsample from SS resolution to output resolution
+  if (SS > 1) {
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = width;
+    outCanvas.height = height;
+    const outCtx = outCanvas.getContext('2d')!;
+    outCtx.imageSmoothingEnabled = true;
+    outCtx.imageSmoothingQuality = 'high';
+    outCtx.drawImage(canvas, 0, 0, width, height);
+    return outCanvas;
   }
 
   return canvas;
@@ -1813,7 +1864,7 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement): Promise<boolea
 }
 
 
-function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defaultStrokeWidth: number, pass: 'fill' | 'stroke', drawingHasFills = false): void {
+function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defaultStrokeWidth: number, pass: 'fill' | 'stroke', drawingHasFills = false, defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null = null): void {
   for (const shape of layer.shapes) {
     // Separate fill components from stroke/pencil components
     const fillComps = shape.components.filter(c => c.componentType === 0 && c.path && c.path.segments.length > 1 && !isDegenerate(c.path)
@@ -1896,11 +1947,10 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
       const boundaryOnly = strokeComps.filter(c => c.componentType === 2 && c.path && c.path.segments.length > 1);
       const pencilsInShape = strokeComps.filter(c => c.componentType === 4);
       if (boundaryOnly.length >= 2 && pencilsInShape.length === 0) {
-        // Boundary strokes should have color resolved from palette already
-        let boundaryColor: { r: number; g: number; b: number; a: number } | null = null;
-        for (const comp of boundaryOnly) {
-          if (comp.color && comp.color.a > 0) { boundaryColor = comp.color; break; }
-        }
+        // Use the primary non-Line palette color for boundary-stroke fills.
+        // Boundary strokes get "Line" color (typically black) during color resolution,
+        // but when used as fill regions they should use the element's actual fill color.
+        const boundaryColor = defaultBoundaryFillColor;
         if (boundaryColor) {
           const path = new Path2D();
           for (const comp of boundaryOnly) {
