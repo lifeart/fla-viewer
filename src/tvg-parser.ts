@@ -295,7 +295,12 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
   // Find palette colors by role
   let lineColor: { r: number; g: number; b: number; a: number } | null = null;
   let defaultFillColor: { r: number; g: number; b: number; a: number } | null = null;
-  const utilityNames = new Set(['line', 'mask', 'invis', 'handles', 'invisible', 'shadow']);
+  // Utility colors that should not be used as default fill colors.
+  // These are rig controls, masks, and invisible markers - not visible content.
+  const utilityNames = new Set([
+    'line', 'mask', 'invis', 'handles', 'invisible', 'shadow',
+    'controller', 'eye_lid_ctrl', 'null', 'transparent',
+  ]);
 
   for (const entry of drawing.palette) {
     const nameLower = entry.name.toLowerCase();
@@ -1331,11 +1336,17 @@ export function resolveExternalPalette(
  * Render a TVG drawing to an HTMLCanvasElement.
  * Returns the canvas element, or null if the drawing has no renderable content.
  */
+export interface TVGRenderOptions {
+  /** Include underlay art layer (Mask colors). Default: false (skip for clean render). */
+  includeUnderlay?: boolean;
+}
+
 export function renderTVGToCanvas(
   drawing: TVGDrawing,
   width: number,
   height: number,
   viewport?: number,
+  options?: TVGRenderOptions,
 ): HTMLCanvasElement | null {
   // Check for any vector data
   let hasVectors = false;
@@ -1439,10 +1450,15 @@ export function renderTVGToCanvas(
   // Default stroke width: 1 TVG unit ≈ 1 pixel at standard viewport/canvas ratio
   const defaultStrokeWidth = 1.0;
 
-  // Toon Boom art layer order (bottom to top): underlay, color, line, overlay.
-  // Note: overlay is the TOP layer, above line art.
-  const fillOrder: TVGArtLayer['type'][] = ['underlay', 'color', 'line', 'overlay'];
-  const strokeOrder: TVGArtLayer['type'][] = ['underlay', 'color', 'line', 'overlay'];
+  // Art layer order. Skip underlay by default: it contains Mask-colored fills
+  // used for CUTTER clip regions, not visible content. In debug mode (includeUnderlay),
+  // render all layers including underlay to show the raw drawing structure.
+  const includeUnderlay = options?.includeUnderlay ?? false;
+  const layerTypes: TVGArtLayer['type'][] = includeUnderlay
+    ? ['underlay', 'color', 'line', 'overlay']
+    : ['color', 'line', 'overlay'];
+  const fillOrder = layerTypes;
+  const strokeOrder = layerTypes;
 
   // Three-pass rendering with dilated flood-fill clipping:
   //   1. Render fills to offscreen canvas
