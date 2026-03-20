@@ -391,14 +391,21 @@ export async function renderCompositeFrame(
     }
   }
 
-  // Evaluate node recursively
+  // Evaluate node recursively with cycle detection
   const evalCache = new Map<string, CompositeResult | null>();
+  const inProgress = new Set<string>(); // cycle detection
 
-  async function evaluateNode(nodeId: string): Promise<CompositeResult | null> {
+  async function evaluateNode(nodeId: string, depth = 0): Promise<CompositeResult | null> {
     if (evalCache.has(nodeId)) return evalCache.get(nodeId)!;
+    if (inProgress.has(nodeId) || depth > 50) {
+      // Cycle or too deep
+      evalCache.set(nodeId, null);
+      return null;
+    }
+    inProgress.add(nodeId);
 
     const node = graph.nodes.get(nodeId);
-    if (!node) { evalCache.set(nodeId, null); return null; }
+    if (!node) { evalCache.set(nodeId, null); inProgress.delete(nodeId); return null; }
 
     let result: CompositeResult | null = null;
 
@@ -417,7 +424,7 @@ export async function renderCompositeFrame(
         // PEG passes through its single input with a transform applied
         const inputs = graph.inEdges.get(nodeId) || [];
         if (inputs.length === 0) break;
-        result = await evaluateNode(inputs[0].sourceId);
+        result = await evaluateNode(inputs[0].sourceId, depth + 1);
         break;
       }
 
@@ -429,7 +436,7 @@ export async function renderCompositeFrame(
 
         const layers: CompositeResult[] = [];
         for (const edge of inputs) {
-          const layer = await evaluateNode(edge.sourceId);
+          const layer = await evaluateNode(edge.sourceId, depth + 1);
           if (layer) layers.push(layer);
         }
 
@@ -461,11 +468,11 @@ export async function renderCompositeFrame(
         const subjectEdge = inputs.find(e => e.targetPort === 1);
 
         if (!subjectEdge) break;
-        const subject = await evaluateNode(subjectEdge.sourceId);
+        const subject = await evaluateNode(subjectEdge.sourceId, depth + 1);
         if (!subject) break;
 
         if (!matteEdge) { result = subject; break; }
-        const matte = await evaluateNode(matteEdge.sourceId);
+        const matte = await evaluateNode(matteEdge.sourceId, depth + 1);
         if (!matte) { result = subject; break; }
 
         // Apply matte as clip
@@ -490,7 +497,7 @@ export async function renderCompositeFrame(
       case 'FADE': {
         const inputs = graph.inEdges.get(nodeId) || [];
         if (inputs.length === 0) break;
-        result = await evaluateNode(inputs[0].sourceId);
+        result = await evaluateNode(inputs[0].sourceId, depth + 1);
         if (result) {
           const transparency = evaluateColumn(graph, node.attrs.get('transparency')?.col, frame,
             node.attrs.get('transparency')?.value ?? 100);
@@ -505,7 +512,7 @@ export async function renderCompositeFrame(
         // Check if visible
         const softRender = node.attrs.get('softrender');
         if (softRender && softRender.value === 0) break; // hidden
-        result = await evaluateNode(inputs[0].sourceId);
+        result = await evaluateNode(inputs[0].sourceId, depth + 1);
         break;
       }
 
@@ -513,7 +520,44 @@ export async function renderCompositeFrame(
         // Find MULTIPORT_OUT inside this group
         const mpoId = `${nodeId}/Multi-Port-Out`;
         if (graph.nodes.has(mpoId)) {
-          result = await evaluateNode(mpoId);
+          result = await evaluateNode(mpoId, depth + 1);
+        }
+        break;
+      }
+
+      case 'MULTIPORT_IN': {
+        // MULTIPORT_IN receives inputs from OUTSIDE the group.
+        // Look for edges pointing to the parent group from the parent's scope.
+        const parentGroupId = node.groupPath;
+        const parentInputs = graph.inEdges.get(parentGroupId) || [];
+        if (parentInputs.length > 0) {
+          // Sort by port and try to composite if multiple inputs
+          const sorted = parentInputs.slice().sort((a, b) => a.targetPort - b.targetPort);
+          if (sorted.length === 1) {
+            result = await evaluateNode(sorted[0].sourceId, depth + 1);
+          } else {
+            // Multiple inputs to the group - composite them
+            const layers: CompositeResult[] = [];
+            for (const edge of sorted) {
+              const layer = await evaluateNode(edge.sourceId, depth + 1);
+              if (layer) layers.push(layer);
+            }
+            if (layers.length === 1) result = layers[0];
+            else if (layers.length > 1) {
+              const outCanvas = document.createElement('canvas');
+              outCanvas.width = canvasWidth;
+              outCanvas.height = canvasHeight;
+              const outCtx = outCanvas.getContext('2d')!;
+              for (const layer of layers) {
+                outCtx.globalAlpha = layer.opacity;
+                const dx = (canvasWidth - layer.canvas.width) / 2;
+                const dy = (canvasHeight - layer.canvas.height) / 2;
+                outCtx.drawImage(layer.canvas, dx, dy);
+              }
+              outCtx.globalAlpha = 1;
+              result = { canvas: outCanvas, opacity: 1 };
+            }
+          }
         }
         break;
       }
@@ -522,12 +566,13 @@ export async function renderCompositeFrame(
         // Pass-through for unknown types (COLOR_ART, LINE_ART, etc.)
         const inputs = graph.inEdges.get(nodeId) || [];
         if (inputs.length > 0) {
-          result = await evaluateNode(inputs[0].sourceId);
+          result = await evaluateNode(inputs[0].sourceId, depth + 1);
         }
         break;
       }
     }
 
+    inProgress.delete(nodeId);
     evalCache.set(nodeId, result);
     return result;
   }
