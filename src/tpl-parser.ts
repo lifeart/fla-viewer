@@ -867,16 +867,15 @@ function buildDocument(
   const bitmaps = new Map<string, BitmapItem>();
   const frames: Frame[] = [];
 
-  // Use the thumbnail's native resolution as the document size.
-  // This prevents blurry upscaling (e.g., 320x240 thumbnails scaled to 4096x3112).
-  // The FLA player will fit-to-viewport anyway, so native thumbnail size looks sharp.
-  let renderWidth = metadata.width;
-  let renderHeight = metadata.height;
+  // Use the first thumbnail's actual dimensions as the document size.
+  // This prevents the tiny-square bug where a 1280px grid image is placed
+  // on a 4096x3112 document canvas.
   const firstThumb = thumbnails.get(0);
-  if (firstThumb && firstThumb.naturalWidth > 0) {
-    renderWidth = firstThumb.naturalWidth;
-    renderHeight = firstThumb.naturalHeight;
-  }
+  let renderWidth = firstThumb?.naturalWidth || firstThumb?.width || metadata.width;
+  let renderHeight = firstThumb?.naturalHeight || firstThumb?.height || metadata.height;
+  // Sanity check: if dimensions are unreasonably large or zero, cap them
+  if (renderWidth <= 0 || renderWidth > 4096) renderWidth = Math.min(metadata.width, 1920);
+  if (renderHeight <= 0 || renderHeight > 4096) renderHeight = Math.min(metadata.height, 1920);
 
   for (let i = 0; i < metadata.totalFrames; i++) {
     const img = thumbnails.get(i);
