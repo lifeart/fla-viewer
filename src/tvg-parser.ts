@@ -2631,31 +2631,37 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement): Promise<boolea
 
   // Detect if tiles need channel swap. Harmony bitmap TVGs sometimes store
   // pixels as GRBA (byte-swapped 16-bit pairs) instead of standard RGBA.
-  // Detection: decode all tiles, count fully-opaque pixels (a=255) in both
-  // normal and swapped interpretations. Real art should have many a=255 pixels.
+  // We try both interpretations and pick the one with more fully-opaque pixels
+  // AND fewer "zombie" pixels (visible color but zero alpha).
   let needsChannelSwap = false;
   {
-    let opaqueNormal = 0, opaqueSwapped = 0, totalSampled = 0;
+    let opaqueNormal = 0, opaqueSwapped = 0;
+    let zombieNormal = 0, zombieSwapped = 0;
+    let totalVisible = 0;
     for (const { img } of loaded) {
       const tc = document.createElement('canvas');
       tc.width = img.width; tc.height = img.height;
       const tctx = tc.getContext('2d')!;
       tctx.drawImage(img, 0, 0);
       const d = tctx.getImageData(0, 0, img.width, img.height).data;
-      // Sample every 4th pixel for speed
       for (let i = 0; i < d.length; i += 16) {
         const r = d[i], g = d[i+1], b = d[i+2], a = d[i+3];
-        if (r === 0 && g === 0 && b === 0 && a === 0) continue; // skip empty
-        totalSampled++;
+        if (r === 0 && g === 0 && b === 0 && a === 0) continue;
+        totalVisible++;
+        // Normal RGBA interpretation
         if (a === 255) opaqueNormal++;
-        // In swapped [G,R,A,B]: real alpha = b (byte 2)
+        if (a === 0 && (r > 10 || g > 10 || b > 10)) zombieNormal++;
+        // Swapped interpretation: real alpha = byte 2 (B position)
         if (b === 255) opaqueSwapped++;
+        if (b === 0 && (r > 10 || g > 10 || a > 10)) zombieSwapped++;
       }
-      if (totalSampled > 500) break; // enough samples
+      if (totalVisible > 2000) break;
     }
-    // If swapped interpretation yields significantly more opaque pixels, channels are swapped
-    if (totalSampled > 20 && opaqueSwapped > opaqueNormal * 1.5) {
-      needsChannelSwap = true;
+    if (totalVisible > 50) {
+      // Score each interpretation: more opaque + fewer zombie = better
+      const scoreNormal = opaqueNormal - zombieNormal * 10;
+      const scoreSwapped = opaqueSwapped - zombieSwapped * 10;
+      needsChannelSwap = scoreSwapped > scoreNormal;
     }
   }
 
