@@ -672,3 +672,229 @@ Types serialized via `DB_PersistentStore` (`operator<<` / `operator>>`):
 - `CM_TextureData` / `CM_ShareTextureData` — texture data
 - `CM_ColorRecoveryInfo` — color recovery info
 - `GR_Listener::Event` — listener event
+
+## Additional Binary Findings
+
+Second-pass analysis of `libToonBoomGraphicCore.1.0.0.dylib` (Harmony 24 Premium build 23443), focusing on areas not covered above.
+
+### 1. TGRV Tag — Path Reversal, Not Winding
+
+No symbol named "TGRV" exists in the binary. The TGRV tag we see in TVG files is handled generically by the tagged-format reader, not by a dedicated class. What TGRV stores is a **path reversal flag**, not a winding rule. Key evidence:
+
+- `GR_BezierPath2d::Reverse()` — reverses point order of an entire bezier path
+- `GR_BezierPath2d::AppendReverse()` / `AppendFrontReverse()` — append a path in reversed direction
+- `GR_BezierPath2d::isReverseEqual()` — compare paths ignoring direction
+- `GR_ThicknessPath::reverse()` — reverses thickness path to match reversed centerline
+- `GR_ThicknessBinder::reverse()` / `reverseParameters()` — reverses thickness binding
+- `GR_FunctionPath::reverse()` — reverses opacity function path
+
+The orientation tests in the binary (`Number of 2D orientation tests`, `subsegment %p with orientation %d`) relate to the **contour topology builder** (`BuildContoursAndComponents`), not to a fill rule. Contour children use orientation to determine inside vs. outside.
+
+**Implication for our renderer**: The TGRV flag likely indicates whether the bezier path points are stored in reversed order. If we ignore it, paths should still render correctly since our `evenodd` fill doesn't depend on winding direction. However, if we ever implement proper contour-based fill, the reversal flag determines whether a sub-contour is a hole or a solid region.
+
+### 2. TGSD Component Types — No Additional Values Found
+
+No `ComponentType` enum was found in exported symbols or strings. The component type values (0, 1, 2, 4) are likely used only as integer constants in the TVG binary format, not as a named C++ enum. The binary confirms the rendering distinction through class hierarchy:
+- `GR_Contour` — fill component (types 0, 4)
+- `GR_VectorStroke` — stroke component (types 1, 2)
+
+### 3. GR_Layer::LayerType — The Layer Type Enum
+
+While "shape type" had no direct hits, the binary reveals `GR_Layer::LayerType`:
+- `GR_Layer::GR_Layer(GR_VectorDrawingObj*, LayerType)` — constructor takes LayerType
+- `GR_DrawingAccess::SetLayerType(GR_Layer*, LayerType)` — can change layer type
+- `GR_DrawingAccess::CreateLayerAbove(LayerType, ...)` / `CreateLayerUnder(LayerType, ...)`
+
+This is used for the art layers in the TVG (ColorArt, LineArt, etc.), not for individual shapes. The values 0,1,4,5,6,7 we see in TGSD likely encode component properties (fill vs stroke, closed vs open, visibility).
+
+### 4. Bitmap Tile Compositing — Pixel Formats and Operations
+
+The bitmap tile system is more sophisticated than previously documented:
+
+**Pixel formats** (all 8-bit and beyond):
+- `BM_Pixel1` — 1-bit monochrome
+- `BM_Pixel2` — 2-bit
+- `BM_Pixel4` — 4-bit
+- `BM_PixelBgr8` — 24-bit BGR (no alpha)
+- `BM_PixelRgb8` — 24-bit RGB (no alpha)
+- `BM_PixelArgb8` — 32-bit ARGB (alpha first)
+- `BM_PixelBgra8` — 32-bit BGRA
+- `BM_PixelRgba8` — 32-bit RGBA
+- `BM_PixelGray8` — 8-bit grayscale
+- `BM_PixelHsv8` — 8-bit HSV
+- `BM_PixelHsva8` — 8-bit HSVA
+- `BM_PixelGray16` — 16-bit grayscale
+- `BM_PixelRgba16` — 16-bit RGBA
+- `BM_PixelRgbaUnsigned16` — unsigned 16-bit RGBA
+- `BM_PixelRgbaFloat` — 32-bit float RGBA
+
+**Compose operations** (from template instantiations):
+1. `ComposeOperationSrcOverwriteDst` — direct copy
+2. `ComposeOperationRepaintNonPremultiplied` — repaint (non-premultiplied)
+3. `ComposeOperationSrcAlphaNonPremultiplied` — src alpha blend (non-premultiplied)
+4. `ComposeOperationSrcAlphaInverseNonPremultiplied` — inverted src alpha blend
+5. `ComposeOperationSrcOverDstWithAlphaBlendingPremultiplied` — standard src-over (premultiplied)
+6. `ComposeOperationSrcOverDstWithAlphaBlendingNonPremultiplied` — src-over (non-premultiplied)
+7. `ComposeOperationSrcUnderDstWithAlphaBlendingNonPremultiplied` — src-under (dst-over)
+
+**Key insight**: Bitmap TVGs store tiles as `BM_PixelRgba8` (RGBA, 8-bit per channel). The compositing engine handles both premultiplied and non-premultiplied alpha. The default compositing uses **non-premultiplied** alpha for most operations, with premultiplied only for the standard src-over blend.
+
+**Implication for our renderer**: We should ensure bitmap tile compositing uses non-premultiplied alpha. The Canvas 2D API uses premultiplied internally, so we need to be aware of potential rounding differences, especially for semi-transparent bitmap tiles.
+
+### 5. Implicit Scale / Point Quantum — Not Found
+
+No symbols or strings matching "implicitScale", "pointQuantum", or "quantiz" were found in GraphicCore. Coordinate quantization (if any) is likely handled at a higher level or not used in the modern tagged format.
+
+### 6. DB_PersistentStore / Tagged Format
+
+The tagged format uses a policy-based reader/writer:
+- `GIO_TaggedTVGReadPolicy` — reads tagged TVG objects via `ParseObject(DB_PersistentStore, CPersistentObjBase*)`
+- `GIO_TaggedTVGWritePolicy` — writes via `WriteObject(DB_PersistentStore, CPersistentObjBase*)`
+- `GIO_TaggedPenstyleListPolicy` — separate policy for pen style lists
+- Constructor: `GIO_TaggedTVGWritePolicy(DB_Certificate*, unsigned int version, int format)`
+- Validation: `GIO_TaggedTVGReadPolicy::isValid(DB_PersistentStore, unsigned int)`
+- Error message: `"TvgStreamer::LoadTaggedFormat: format not allowed"` and `"Not a valid Tagged file."`
+
+**Format versioning**: `GIO_TvgStreamer` has:
+- `setOverrideStorageFormat(int)` — override output format
+- `setOverrideStorageVersion(unsigned int)` — override version
+- `isNewFormat(DB_PersistentStore, bool)` — detect new vs old format
+- `convertToNewFormat(PL_FileSpec, CM_ColorRecoveryContext)` — format migration
+- `getFileFormat(PL_FileSpec)` — detect file format
+
+**TVGO database**: `GIO_TvgoDatabase` is an SQLite-based storage:
+- `add(QString, DB_SqlBlob)` / `read(QString, DB_SqlBlob)` / `update(QString, DB_SqlBlob)` / `clear()`
+- Used for the `.tvgo` format (optimized TVG cache in a database)
+
+**Load order** (from `GR_VectorDrawingObj::Load`):
+1. `LoadNodePosition` — z-order positions
+2. `LoadSharedBezierPath` — shared paths (referenced by multiple strokes)
+3. `LoadVectorAndTextLayers` → `LoadVectorAndTextGraph` — vector strokes + text
+4. `LoadBitmapLayers` → `LoadBitmapGraph` — bitmap layers
+5. `LoadPalette` — embedded palette
+
+### 7. Gap Closing Algorithm — GR_GapFinder
+
+Full API of the gap-closing system (used in the Paint Bucket tool, not in rendering):
+
+- `GR_GapFinder(CGraphicOps&, double)` — constructor with default gap length
+- `setGapLength(double)` — maximum gap to close
+- `setMinGapLength(double)` — minimum gap threshold
+- `setCurrentDrawing(GR_VectorDrawingObj*, GR_ColorDict*)` — set drawing context
+- `setAllowGapsInsidePaintedContours(bool)` — whether to close gaps inside already-painted areas
+- `gapEdges()` — returns computed gap edges
+
+Related paint methods:
+- `GR_Paint::FilterGaps(PaintOutline&)` — filter gaps from paint outline
+- `GR_Paint::CreateGapLayer(Math::Segment2d::Intersection&)` — create invisible layer that closes gap
+- `GR_Paint::DeleteAllGapLayers()` — cleanup
+- `GR_DrawingToolbox::CloseGapsOnColorArt(...)` — high-level gap closing
+- `GR_DrawingToolbox::closeGapAtBezierPathEndPoints(double, GR_BezierPath2d&)`
+- `GR_BezierPath2d::GetMinGap()` / `GetMaxGap()` — gap measurement between paths
+- `GR_Bezier2d::GapTest` — enum/struct for gap testing
+
+**Not relevant for rendering**: This is a tool-time feature for the Paint Bucket. TVG files store the final painted contours, not gap-closing instructions.
+
+### 8. Color Space — Non-Premultiplied Default, Linear Color Transforms
+
+- `SR_LinearColorTransform` — linear color space transform in software renderer
+- `GR_LinearShaderColorTransform` — linear color transform for shaders
+- No sRGB/gamma references found — Harmony works in **linear color space** internally
+
+The compose operations overwhelmingly use `NonPremultiplied` variants, confirming:
+- **Default pixel format**: Non-premultiplied RGBA
+- **Premultiplied** only used for the standard src-over alpha blend operation
+
+### 9. Software Renderer Sampling Architecture
+
+The sampling system is more complex than previously documented:
+
+**Three sampling modes**:
+1. `SR_SamplingUnfiltered` — no AA filtering (fast preview)
+   - `addOpaque(scanline, mask, color)` — opaque pixel
+   - `AddNoAlpha(scanline, mask, color, shaderId)` — no alpha
+   - `AddWithAlpha(scanline, mask, color, shaderId)` — with alpha
+2. `SR_SamplingFiltered` (base) — 2D AA filtering
+   - `SR_FilteredSubPixel` — sub-pixel coverage data
+   - `fillInteriorPixels()` — fill fully covered pixels
+   - `applyTransparency()` — apply transparency
+3. `SR_SamplingFiltered2d` / `SR_SamplingFiltered3d` — specialized versions
+   - 3d version: `compose2dOn3d()`, `computeTransparency()`, `computeTwoPixelIntersection()`, `computeThreePixelIntersection()` — Z-buffer compositing with sub-pixel accuracy
+
+**SR_FilteredWeight**: Controls the AA filter kernel. Constructed with a single `double` parameter (likely the filter radius or exponent).
+
+**Rendering pipeline**:
+1. `SR_ShadedObject::Prepare(Viewport, RendererOptions)` — setup
+2. `SR_Polygon::Add(float x, float y)` — add vertices
+3. `SR_Polygon::OpenOutline()` / `CloseOutline()` — outline control
+4. `SR_ShadedObject::Shade(SR_Sampling&)` — scanline shading
+5. `SR_Sampling::PushMask()` / `PopMask()` — nested masking
+6. `SR_Sampling::ActivateTransparencyList()` — transparency
+
+### 10. Additional Rendering Details
+
+**GR_StrokeData::Flip()** — flip a stroke (mirror). This is separate from `Reverse()`.
+
+**Tip types** (from `GR_ThicknessEnum`):
+- `GR_ThicknessEnum::Tip` — pen tip shape enum
+- `GR_ThicknessEnum::Side` — left/right side of stroke
+- `GR_ThicknessEnum::Direction` — start/end direction
+- `GR_VectorStroke::setTipType(Direction, Tip)` — set tip shape per end
+- `GR_VectorStroke::setTipTangent(Side, Direction, double)` — tangent control per side per end
+- `GR_ThicknessPath::setBezierTip(Direction, GR_Bezier2d)` — bezier-shaped tip
+
+**Opacity path** (per-stroke opacity variation):
+- `GR_VectorStroke::setSharedOpacityPath(GR_FunctionPath)` — set opacity function
+- `GR_ThicknessBinder::setOpacityPath(GR_FunctionPath)` — bind opacity to thickness
+- `GR_LineStyle::opacityColorId()` — opacity can reference a palette color
+- `GR_LineStyle::setOpacityTilingENS_` — opacity texture tiling
+- `GR_LineStyle::setOpacityTextureOffset/Scaling` — opacity texture transform
+- `CPenStyle::opacityRange()` — pen style opacity range
+
+**Line texture system**:
+- `GR_LineStyle::addTextureInfo()` — add texture to line
+- `GR_LineStyle::loadTextureInfo(DB_PersistentStore)` — deserialize
+- `GR_LineStyle::setTextureOffset/setTextureScaling/transformTexture` — texture placement
+- `GR_LineStyle::setTextureTiling(bool)` — repeat texture along stroke
+- `GR_LineStyle::setWrapTextureAtTips(bool)` — wrap texture at stroke ends
+
+**Shared bezier paths**: `GR_VectorDrawingObj::LoadSharedBezierPath(DB_PersistentStore)` — TVG files can share bezier path data between strokes. This is an optimization where multiple strokes reference the same centerline path. Our parser should check for this to avoid duplicate path data.
+
+**Contour rendering methods** (important for our fill rendering):
+- `GR_Renderer::drawContourUsingDelaunay()` — Delaunay triangulation (primary)
+- `GR_Renderer::drawContourUsingFastTriangle()` — fast triangle method
+- `GR_Renderer::drawContourVolume()` — volume (3D extrusion)
+- `GR_Renderer::contourIsInteresting(CGraphicOps, GR_Contour*, double)` — skip trivial contours
+- `GR_Renderer::feedContourPointsToCollection(GR_Contour*, bool)` — extract points
+
+**Stamp brush composite**: `GR_StampBrushComposite` renders brush stamps:
+- `Prepare(CGraphicOps, w, h, CPenStyle, ...)` — prepare stamp
+- `DrawLivePreview(CGraphicOps, CPenStyle, i, Point2d)` — live preview
+- Loaded from pen style definitions
+
+**Variable stroke render modes**: `GR_Renderer::VariableStrokeRenderMode` enum exists but values not exposed as strings. `drawVariableStrokes(CGraphicOps, ThicknessOutline, double, VS_CanvasObjBuilder*, deque<StrokeInfo>, uint, VariableStrokeRenderMode)` — the mode likely controls: filled outline, centerline only, or outline only.
+
+**Thickness discretization scale**: `GR_ThicknessDiscretizer::setDiscretizationScale(double)` and `setThicknessRenderParameters(GR_ThicknessRenderParameters)` — the discretization quality can be adjusted, likely based on zoom level.
+
+**GR_Delaunay triangulation details**:
+- `GR_Delaunay::Triangulation::computeTextureCoords(Math::Matrix2x3)` — texture coordinates for triangulated fills
+- `GR_Delaunay::TriangulationHashTable::build()` — spatial hash for triangle lookup
+- `GR_Delaunay::Triangulation::interpolate(...)` — interpolate values within triangulation
+- `GR_Delaunay::Settings` — configuration struct for triangulation quality
+
+**SR_Triangulation extensions**:
+- `addTriangleFan(Math::TexturedPolyline2d)` — fan from polyline
+- `addTriangleStrip(GR_TexturedTriangleStrip)` — textured strip
+- `addTriangleMesh(Math::Matrix2x3, Math::TiledBox2di, double)` — mesh for bitmap tiles
+
+### 11. CelCore TVG Tags (from libToonBoomCelCore)
+
+Additional 4-char tags found in CelCore:
+- `TBHD` — bitmap header
+- `TBMP` — bitmap data
+- `TCCP` — (unknown, possibly color conversion profile)
+- `TIFD` / `TIFF` — TIFF-related
+- `TONE` — tone/shading
+- `TRAK` — tracking data
+- `TVGO` — optimized TVG object (database-cached format)
+- `TXTL` — text layer
