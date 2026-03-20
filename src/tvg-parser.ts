@@ -1840,12 +1840,9 @@ export function renderTVGToCanvas(
     // viewport = max(fieldChart * 28, contentExtent + 227)
     // The +227 TVG units (~8.1 fields) provides margin around the content.
     const contentExtent = Math.max(maxX - minX, maxY - minY);
-    // Origin-aware viewport sizing only in compositor mode (centerOnOrigin),
-    // where all elements share origin-centered coordinate space and may be
-    // far from origin (e.g., feet at Y=-1600). For standalone thumbnails,
-    // we center on content centroid, so origin distance is irrelevant.
     const centerOnOrigin = options?.centerOnOrigin ?? false;
     if (centerOnOrigin) {
+      // Compositor mode: origin-centered, expand to fit all content
       const originExtent = 2 * Math.max(Math.abs(minX), Math.abs(maxX), Math.abs(minY), Math.abs(maxY));
       viewportSize = Math.max(viewport, contentExtent + 227, originExtent + 100);
     } else {
