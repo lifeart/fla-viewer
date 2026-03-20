@@ -369,15 +369,17 @@ export async function renderCompositeFrame(
   progress('Evaluating scene graph...');
   console.log(`[Compositor] Root: ${graph.rootOutputId}, Nodes: ${graph.nodes.size}, Drawing cols: ${graph.drawingColumns.size}`);
 
+  // Element render size: proportional to output canvas.
+  // Each element has a fieldChart (typically 12) which defines its viewport in TVG units.
+  // We render elements at a size that maps the field chart viewport to a portion of the output.
+  // The output canvas represents the full project resolution.
+  // For a 12-field element on a 1920-wide canvas: element renders at ~canvasWidth pixels.
+  const elemRenderSize = Math.min(canvasWidth, canvasHeight);
+
   // Cache for loaded TVG drawings
   const tvgCache = new Map<string, HTMLCanvasElement | null>();
   const tvgFiles: string[] = [];
   zip.forEach((p: string) => { if (p.endsWith('.tvg')) tvgFiles.push(p); });
-
-  // Find the prefix (top-level folder in ZIP)
-  const prefix = tvgFiles.length > 0
-    ? tvgFiles[0].substring(0, tvgFiles[0].indexOf('elements/'))
-    : '';
 
   let loadCount = 0;
 
@@ -405,8 +407,7 @@ export async function renderCompositeFrame(
       }
 
       const viewportSize = element.fieldChart * TVG_UNITS_PER_FIELD;
-      const thumbSize = 200; // Element render size
-      const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize, viewportSize);
+      const canvas = renderTVGToCanvas(drawing, elemRenderSize, elemRenderSize, viewportSize);
 
       if (canvas && (canvas as any).__bitmapTiles) {
         await loadBitmapTiles(canvas);
@@ -452,10 +453,54 @@ export async function renderCompositeFrame(
       }
 
       case 'PEG': {
-        // PEG passes through its single input with a transform applied
+        // PEG applies a transform to its input and passes through
         const inputs = graph.inEdges.get(nodeId) || [];
         if (inputs.length === 0) break;
-        result = await evaluateNode(inputs[0].sourceId, depth + 1);
+        const child = await evaluateNode(inputs[0].sourceId, depth + 1);
+        if (!child) break;
+
+        // Build transform from PEG attributes
+        const transform = buildTransformMatrix(node, graph, frame);
+
+        // Check if transform is non-identity
+        const isIdentity = transform.a === 1 && transform.b === 0 && transform.c === 0 &&
+                          transform.d === 1 && transform.e === 0 && transform.f === 0;
+
+        if (isIdentity) {
+          result = child;
+        } else {
+          // Apply transform by rendering child onto a new canvas
+          const outCanvas = document.createElement('canvas');
+          outCanvas.width = canvasWidth;
+          outCanvas.height = canvasHeight;
+          const outCtx = outCanvas.getContext('2d')!;
+
+          // Convert TVG-space transform to pixel-space:
+          // TVG coordinates → pixel coordinates
+          // The element is rendered centered on its canvas. The PEG transform
+          // offsets it in TVG field units. We need to convert to pixels.
+          const pixelsPerField = Math.min(canvasWidth, canvasHeight) / 12; // approximate
+
+          outCtx.save();
+          // Move to center of output canvas
+          outCtx.translate(canvasWidth / 2, canvasHeight / 2);
+          // Apply TVG-space transform scaled to pixels
+          // Note: TVG Y is up, canvas Y is down - flip Y for position
+          outCtx.translate(
+            transform.e * pixelsPerField / TVG_UNITS_PER_FIELD,
+            -transform.f * pixelsPerField / TVG_UNITS_PER_FIELD,
+          );
+          if (transform.a !== 1 || transform.d !== 1) {
+            outCtx.scale(transform.a, transform.d);
+          }
+          // Draw child centered
+          outCtx.translate(-canvasWidth / 2, -canvasHeight / 2);
+          outCtx.globalAlpha = child.opacity;
+          outCtx.drawImage(child.canvas, 0, 0);
+          outCtx.restore();
+
+          result = { canvas: outCanvas, opacity: 1 };
+        }
         break;
       }
 
