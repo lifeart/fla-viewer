@@ -360,10 +360,14 @@ export async function renderCompositeFrame(
   canvasHeight: number,
   onProgress?: (msg: string) => void,
 ): Promise<HTMLCanvasElement | null> {
-  if (!graph.rootOutputId) return null;
+  if (!graph.rootOutputId) {
+    console.warn('[Compositor] No root output node found');
+    return null;
+  }
 
   const progress = onProgress || (() => {});
   progress('Evaluating scene graph...');
+  console.log(`[Compositor] Root: ${graph.rootOutputId}, Nodes: ${graph.nodes.size}, Drawing cols: ${graph.drawingColumns.size}`);
 
   // Cache for loaded TVG drawings
   const tvgCache = new Map<string, HTMLCanvasElement | null>();
@@ -608,8 +612,12 @@ export async function renderCompositeFrame(
   }
 
   const finalResult = await evaluateNode(graph.rootOutputId);
-  if (!finalResult) return null;
+  if (!finalResult) {
+    console.warn(`[Compositor] No result from root node ${graph.rootOutputId}`);
+    return null;
+  }
 
+  console.log(`[Compositor] Success: loaded ${loadCount} drawings, output ${finalResult.canvas.width}x${finalResult.canvas.height}`);
   progress(`Composited ${loadCount} drawings`);
   return finalResult.canvas;
 }
