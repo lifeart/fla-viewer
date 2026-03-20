@@ -46,6 +46,18 @@ export interface TVGThicknessProfile {
   domain: [number, number]; // [start, end] - which portion of the thickness path applies
 }
 
+/**
+ * Harmony join types for stroke corners.
+ * Maps to Canvas lineJoin: 'round', 'miter', 'bevel'.
+ */
+export type TVGJoinType = 'round' | 'miter' | 'bevel';
+
+/**
+ * Harmony tip (cap) types for stroke endpoints.
+ * FLAT_TIP -> 'butt', ROUND_TIP -> 'round', BEVEL_TIP -> 'square'.
+ */
+export type TVGTipType = 'round' | 'butt' | 'square';
+
 export interface TVGComponent {
   componentType: number; // 0=fill, 1=unknown, 2=stroke, 4=pencil
   colorId: bigint | null;
@@ -55,6 +67,11 @@ export interface TVGComponent {
   path: TVGPath | null;
   strokeWidth: number | null;
   thicknessProfile: TVGThicknessProfile | null;
+  joinType: TVGJoinType; // Stroke join type (default: 'round')
+  fromTipType: TVGTipType; // Start cap type (default: 'round')
+  toTipType: TVGTipType; // End cap type (default: 'round')
+  gradientType?: 'linear' | 'radial';
+  gradientStops?: { pos: number; r: number; g: number; b: number; a: number }[];
 }
 
 export interface TVGTransform {
@@ -781,6 +798,9 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
     path: null,
     strokeWidth: null,
     thicknessProfile: null,
+    joinType: 'round',
+    fromTipType: 'round',
+    toTipType: 'round',
   };
 
   while (reader.pos < endPos - 4) {
@@ -821,13 +841,26 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
         reader.pos = tbEnd;
       }
     } else if (tag === 'tGTI') {
-      // Stroke properties (fallback width if tGTB didn't set one)
+      // Stroke properties: 8-byte sentinel + f64 width + optional join/tip bytes
       const len = reader.readU32LE();
       if (len >= 16 && reader.remaining >= len) {
         const tiEnd = reader.pos + len;
         reader.skip(8); // sentinel
+        const width = reader.readF64LE();
         if (comp.strokeWidth === null) {
-          comp.strokeWidth = reader.readF64LE();
+          comp.strokeWidth = width;
+        }
+        // After the 8-byte sentinel + 8-byte width (16 bytes), remaining bytes
+        // may encode join type and tip types (from/to). Based on Harmony's
+        // GR_VectorStroke serialization: joinType(u8), fromTipType(u8), toTipType(u8).
+        const remaining = tiEnd - reader.pos;
+        if (remaining >= 3) {
+          const joinByte = reader.readU8();
+          const fromTipByte = reader.readU8();
+          const toTipByte = reader.readU8();
+          comp.joinType = decodeJoinType(joinByte);
+          comp.fromTipType = decodeTipType(fromTipByte);
+          comp.toTipType = decodeTipType(toTipByte);
         }
         reader.pos = tiEnd;
       } else {
@@ -978,6 +1011,26 @@ function parseTGCO(reader: BinaryReader, comp: TVGComponent, len: number): void 
   }
 }
 
+// ── Join/Tip Type Decoders ──
+
+/** Decode a join type byte: 0=ROUND, 1=MITER, 2=BEVEL */
+function decodeJoinType(b: number): TVGJoinType {
+  switch (b) {
+    case 1: return 'miter';
+    case 2: return 'bevel';
+    default: return 'round';
+  }
+}
+
+/** Decode a tip (cap) type byte: 0=ROUND, 1=FLAT, 2=BEVEL */
+function decodeTipType(b: number): TVGTipType {
+  switch (b) {
+    case 1: return 'butt';   // FLAT_TIP
+    case 2: return 'square'; // BEVEL_TIP
+    default: return 'round'; // ROUND_TIP
+  }
+}
+
 // ── tGTB Parsing (Pencil Thickness) ──
 
 /**
@@ -992,7 +1045,7 @@ function parseTGCO(reader: BinaryReader, comp: TVGComponent, len: number): void 
  */
 function parseTGTB(
   reader: BinaryReader, len: number, prevProfile: TVGThicknessProfile | null,
-): { maxWidth: number; profile: TVGThicknessProfile } | null {
+): { maxWidth: number; profile: TVGThicknessProfile; fromTip: TVGTipType; toTip: TVGTipType; join: TVGJoinType } | null {
   if (len < 10) return null;
   const startPos = reader.pos;
   const endPos = startPos + len;
@@ -1015,7 +1068,7 @@ function parseTGTB(
           const w = pt.leftOffset + pt.rightOffset;
           if (w > maxWidth) maxWidth = w;
         }
-        return { maxWidth, profile };
+        return { maxWidth, profile, fromTip: 'round', toTip: 'round', join: 'round' };
       }
       return null;
     }
@@ -1061,16 +1114,29 @@ function parseTGTB(
       if (width > maxWidth) maxWidth = width;
     }
 
-    // Read 5-byte trailer (expected to be zeros)
+    // Read 5-byte trailer: may contain tip/join type info.
+    // Format hypothesis: fromTipType(u8), toTipType(u8), joinType(u8), 2 bytes padding/flags
+    let fromTip: TVGTipType = 'round';
+    let toTip: TVGTipType = 'round';
+    let join: TVGJoinType = 'round';
     if (reader.pos + 5 <= endPos) {
-      reader.skip(5);
+      const b0 = reader.readU8();
+      const b1 = reader.readU8();
+      const b2 = reader.readU8();
+      reader.skip(2); // remaining trailer bytes
+      // Only apply if the values look like valid enum values (0-2)
+      if (b0 <= 2 && b1 <= 2 && b2 <= 2) {
+        fromTip = decodeTipType(b0);
+        toTip = decodeTipType(b1);
+        join = decodeJoinType(b2);
+      }
     }
 
     // Read domain
     const domain = readTGTBDomain(reader, endPos);
 
     if (maxWidth <= 0) return null;
-    return { maxWidth, profile: { points, domain: domain || [0, 1] } };
+    return { maxWidth, profile: { points, domain: domain || [0, 1] }, fromTip, toTip, join };
   } catch (_e) {
     reader.pos = startPos;
     return null;
@@ -1311,6 +1377,8 @@ export interface ExternalPaletteColor {
   id: string; // hex ID string like "0xABC123"
   name?: string; // color entry name (e.g., "Skin", "Hair")
   paletteName?: string; // source palette file name without .plt (e.g., "Anna")
+  gradientType?: 'linear' | 'radial';
+  stops?: { pos: number; r: number; g: number; b: number; a: number }[];
 }
 
 /**
@@ -1440,6 +1508,15 @@ export function resolveExternalPalette(
     return result;
   }
 
+  // Helper: apply color (and gradient info if present) from an external palette entry to a component
+  const applyExtColor = (comp: TVGComponent, ext: ExternalPaletteColor) => {
+    comp.color = { r: ext.r, g: ext.g, b: ext.b, a: ext.a };
+    if (ext.gradientType && ext.stops && ext.stops.length > 0) {
+      comp.gradientType = ext.gradientType;
+      comp.gradientStops = ext.stops;
+    }
+  };
+
   for (const layer of drawing.layers) {
     for (const shape of layer.shapes) {
       for (const comp of shape.components) {
@@ -1447,7 +1524,7 @@ export function resolveExternalPalette(
           const ext = extMap.get(comp.colorId);
           if (ext) {
             // External palette always overrides (more authoritative than internal TPAL)
-            comp.color = { r: ext.r, g: ext.g, b: ext.b, a: ext.a };
+            applyExtColor(comp, ext);
           } else {
             // Fallback: match by palette name + color entry name
             const tpalEntry = tpalById.get(comp.colorId);
@@ -1467,13 +1544,13 @@ export function resolveExternalPalette(
                 if (byName) {
                   const named = byName.get(tpalEntry.name);
                   if (named) {
-                    comp.color = { r: named.r, g: named.g, b: named.b, a: named.a };
+                    applyExtColor(comp, named);
                   }
                 } else {
                   // Last resort: match color name across ALL palettes
                   const globalMatch = globalNameMap.get(tpalEntry.name);
                   if (globalMatch) {
-                    comp.color = { r: globalMatch.r, g: globalMatch.g, b: globalMatch.b, a: globalMatch.a };
+                    applyExtColor(comp, globalMatch);
                   }
                 }
               }
@@ -2904,17 +2981,29 @@ function chainAndFillComponents(
   // - Nested chain groups: combine into one compound path with evenodd (preserves holes)
   // - Non-nested chains: fill independently with nonzero winding (avoids false holes)
   let fillColor: { r: number; g: number; b: number; a: number } | null = null;
+  let gradientComp: TVGComponent | null = null;
   for (const chain of chains) {
     for (const info of chain) {
       const comp = allFillComps[info.ci];
-      if (comp.color) { fillColor = comp.color; break; }
+      if (comp.color) {
+        fillColor = comp.color;
+        if (comp.gradientType && comp.gradientStops && comp.gradientStops.length > 0) {
+          gradientComp = comp;
+        }
+        break;
+      }
     }
     if (fillColor) break;
   }
   if (!fillColor) return;
 
-  const fillStyle = `rgba(${fillColor.r},${fillColor.g},${fillColor.b},${fillColor.a / 255})`;
-  ctx.fillStyle = fillStyle;
+  // Use gradient fill if available, otherwise solid color
+  const gradientFill = gradientComp ? createGradientFill(ctx, gradientComp) : null;
+  if (gradientFill) {
+    ctx.fillStyle = gradientFill;
+  } else {
+    ctx.fillStyle = `rgba(${fillColor.r},${fillColor.g},${fillColor.b},${fillColor.a / 255})`;
+  }
 
   // Helper: add a chain to a Path2D
   const addChainToPath = (path: Path2D, chain: typeof chains[0], isFirstChain: boolean) => {
@@ -3037,6 +3126,64 @@ function isDegenerate(path: TVGPath): boolean {
     return xs.size <= 1 || ys.size <= 1;
   }
   return false;
+}
+
+/**
+ * Create a CanvasGradient from a component's gradient data and TGCO transform.
+ * The TGCO transform maps the gradient coordinate space to TVG coordinate space:
+ * - LinearGradient: maps (0,0)->(1,0) to the gradient line
+ * - RadialGradient: maps the unit circle to the gradient ellipse
+ *
+ * Returns null if the component doesn't have valid gradient data.
+ */
+function createGradientFill(
+  ctx: CanvasRenderingContext2D,
+  comp: TVGComponent,
+): CanvasGradient | null {
+  if (!comp.gradientType || !comp.gradientStops || comp.gradientStops.length === 0) {
+    return null;
+  }
+
+  const t = comp.transform;
+  // Without a TGCO transform, we can't position the gradient. Use a default.
+  const a = t ? t.a : 1;
+  const b = t ? t.b : 0;
+  const c = t ? t.c : 0;
+  const d = t ? t.d : 1;
+  const tx = t ? t.tx : 0;
+  const ty = t ? t.ty : 0;
+
+  let gradient: CanvasGradient;
+
+  if (comp.gradientType === 'linear') {
+    // Transform (0,0) and (1,0) through the affine matrix to get gradient endpoints
+    const x0 = tx;
+    const y0 = ty;
+    const x1 = a + tx;
+    const y1 = b + ty;
+    gradient = ctx.createLinearGradient(x0, y0, x1, y1);
+  } else {
+    // Radial: the transform maps the unit circle to an ellipse.
+    // Canvas 2D radial gradients are circular, so we approximate by using the
+    // average scale factor as the radius and the transform's translation as center.
+    // For a proper elliptical gradient we'd need to apply the transform to the
+    // context, but that would affect the path too. Instead we use a circular
+    // approximation centered at the transform origin.
+    const cx = tx;
+    const cy = ty;
+    const scaleX = Math.sqrt(a * a + b * b);
+    const scaleY = Math.sqrt(c * c + d * d);
+    const radius = (scaleX + scaleY) / 2;
+    gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+  }
+
+  // Add color stops (positions normalized from 0-100 to 0-1)
+  for (const stop of comp.gradientStops) {
+    const offset = Math.max(0, Math.min(1, stop.pos / 100));
+    gradient.addColorStop(offset, `rgba(${stop.r},${stop.g},${stop.b},${stop.a / 255})`);
+  }
+
+  return gradient;
 }
 
 function buildPath2D(tvgPath: TVGPath): Path2D {
