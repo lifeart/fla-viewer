@@ -1508,11 +1508,22 @@ export function renderTVGToCanvas(
   const fillCtx = fillCanvas.getContext('2d')!;
   fillCtx.setTransform(ctx.getTransform());
 
+  // Check if the drawing has ANY fill components (for pencil-fill decision)
+  let drawingHasFills = false;
+  for (const layer of drawing.layers) {
+    for (const shape of layer.shapes) {
+      if (shape.components.some(c => c.componentType === 0 && c.path && c.path.segments.length > 1)) {
+        drawingHasFills = true; break;
+      }
+    }
+    if (drawingHasFills) break;
+  }
+
   // Pass 1: Render all fills to offscreen canvas
   for (const layerType of fillOrder) {
     for (const layer of drawing.layers) {
       if (layer.type !== layerType) continue;
-      renderLayerPass(fillCtx, layer, defaultStrokeWidth, 'fill');
+      renderLayerPass(fillCtx, layer, defaultStrokeWidth, 'fill', drawingHasFills);
     }
   }
 
@@ -1802,7 +1813,7 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement): Promise<boolea
 }
 
 
-function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defaultStrokeWidth: number, pass: 'fill' | 'stroke'): void {
+function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defaultStrokeWidth: number, pass: 'fill' | 'stroke', drawingHasFills = false): void {
   for (const shape of layer.shapes) {
     // Separate fill components from stroke/pencil components
     const fillComps = shape.components.filter(c => c.componentType === 0 && c.path && c.path.segments.length > 1 && !isDegenerate(c.path)
@@ -1855,10 +1866,11 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
       }
     }
 
-    // Pencil-fill: shapes with ONLY pencil strokes (no fills) should be rendered
-    // as filled regions. The pencil tool creates strokes that together define a
-    // closed filled shape (e.g., eyebrows, collar, shadow shapes).
-    if (pass === 'fill' && fillComps.length === 0) {
+    // Pencil-fill: shapes with shapeType 1 or 5, no fill components, and only
+    // pencil strokes should render as filled regions. ShapeType 1/5 are fill-associated
+    // types, while 4/6 are outline types. Also requires the drawing to have no other fills.
+    if (pass === 'fill' && fillComps.length === 0 && !drawingHasFills
+        && (shape.shapeType === 1 || shape.shapeType === 5)) {
       const pencilComps = strokeComps.filter(c => c.componentType === 4 && c.path && c.path.segments.length > 1 && c.color);
       if (pencilComps.length > 0) {
         const path = new Path2D();
