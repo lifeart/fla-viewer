@@ -238,9 +238,13 @@ function parseModule(moduleEl: Element, groupPath: string, graph: SceneGraph): v
 
   graph.nodes.set(nodeId, node);
 
-  // Track MULTIPORT_OUT as potential root output
-  if (moduleType === 'MULTIPORT_OUT' && groupPath.split('/').length <= 2) {
-    graph.rootOutputId = nodeId;
+  // Track MULTIPORT_OUT as potential root output (at top-level scope)
+  if ((moduleType === 'MULTIPORT_OUT' || moduleType === 'WRITE' || moduleType === 'DISPLAY') &&
+      groupPath.split('/').length <= 2) {
+    // Prefer MULTIPORT_OUT at the shallowest level
+    if (!graph.rootOutputId || groupPath.split('/').length < (graph.nodes.get(graph.rootOutputId)?.groupPath.split('/').length ?? 999)) {
+      graph.rootOutputId = nodeId;
+    }
   }
 }
 
@@ -517,10 +521,13 @@ export async function renderCompositeFrame(
       }
 
       case 'group': {
-        // Find MULTIPORT_OUT inside this group
-        const mpoId = `${nodeId}/Multi-Port-Out`;
-        if (graph.nodes.has(mpoId)) {
-          result = await evaluateNode(mpoId, depth + 1);
+        // Find MULTIPORT_OUT inside this group (can be named "Multi-Port-Out" or "GroupOUT")
+        for (const mpoName of ['Multi-Port-Out', 'GroupOUT']) {
+          const mpoId = `${nodeId}/${mpoName}`;
+          if (graph.nodes.has(mpoId)) {
+            result = await evaluateNode(mpoId, depth + 1);
+            break;
+          }
         }
         break;
       }
