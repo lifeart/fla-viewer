@@ -327,7 +327,10 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
         // Only fall back to TPAL RGBA if the entry's id is 0 (no external reference).
         if (comp.componentType === 0 && comp.color === null && comp.paletteIndex !== null) {
           const idx = comp.paletteIndex;
-          if (idx >= 0 && idx < drawing.palette.length) {
+          // paletteIndex=0 typically means "unset/default" (not "TPAL entry 0").
+          // Entry 0 is usually "Line" which is wrong for fills.
+          // Only use paletteIndex > 0 as actual TPAL lookups.
+          if (idx > 0 && idx < drawing.palette.length) {
             const entry = drawing.palette[idx];
             const nameLower = entry.name.toLowerCase();
             if (entry.a > 0 && nameLower !== 'line') {
