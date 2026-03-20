@@ -833,6 +833,9 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
         if (result) {
           comp.strokeWidth = result.maxWidth;
           comp.thicknessProfile = result.profile;
+          comp.fromTipType = result.fromTip;
+          comp.toTipType = result.toTip;
+          comp.joinType = result.join;
         }
         // Fallback: inherit width from previous component if type=0x00 returned null
         if (comp.strokeWidth === null && prevTGTBWidth != null) {
