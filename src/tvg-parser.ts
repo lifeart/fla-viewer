@@ -1882,9 +1882,39 @@ function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defa
             else if (seg.type === 'C') path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
           }
         }
+        path.closePath(); // Auto-close for non-closing pencil paths
         const color = pencilComps[0].color!;
         ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${color.a / 255})`;
         ctx.fill(path, 'evenodd');
+      }
+    }
+
+    // Boundary-stroke fill: shapes with ONLY ct=2 boundary strokes (no fills, no pencils)
+    // that chain into a closed region should render as filled shapes.
+    // Example: Number_Body-2 has 9 boundary strokes forming the digit "2".
+    if (pass === 'fill' && fillComps.length === 0 && !drawingHasFills) {
+      const boundaryOnly = strokeComps.filter(c => c.componentType === 2 && c.path && c.path.segments.length > 1);
+      const pencilsInShape = strokeComps.filter(c => c.componentType === 4);
+      if (boundaryOnly.length >= 2 && pencilsInShape.length === 0) {
+        // Boundary strokes should have color resolved from palette already
+        let boundaryColor: { r: number; g: number; b: number; a: number } | null = null;
+        for (const comp of boundaryOnly) {
+          if (comp.color && comp.color.a > 0) { boundaryColor = comp.color; break; }
+        }
+        if (boundaryColor) {
+          const path = new Path2D();
+          for (const comp of boundaryOnly) {
+            for (const seg of comp.path!.segments) {
+              if (seg.type === 'M') path.moveTo(seg.x, seg.y);
+              else if (seg.type === 'L') path.lineTo(seg.x, seg.y);
+              else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y);
+              else if (seg.type === 'C') path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
+            }
+          }
+          path.closePath();
+          ctx.fillStyle = `rgba(${boundaryColor.r},${boundaryColor.g},${boundaryColor.b},${boundaryColor.a / 255})`;
+          ctx.fill(path, 'evenodd');
+        }
       }
     }
 
