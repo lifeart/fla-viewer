@@ -29,7 +29,7 @@ if (!elementName || !drawingName) {
   process.exit(1);
 }
 
-const browser = await puppeteer.launch({ headless: 'new' });
+const browser = await puppeteer.launch({ headless: 'new', protocolTimeout: 0 });
 
 try {
   const page = await browser.newPage();
