@@ -27,6 +27,7 @@ export interface BenchmarkScoreResult {
   perceptualScore: number;
   structuralScore: number;
   maskScore: number;
+  macroScore: number;
   bestShift: { x: number; y: number };
   foregroundIou: number;
   referenceBounds: BenchmarkBounds | null;
@@ -468,6 +469,7 @@ function scorePixelBuffersBase(
     perceptualScore: bestScore,
     structuralScore: bestScore,
     maskScore: bestScore,
+    macroScore: bestScore,
     bestShift,
     foregroundIou: bestIou,
     referenceBounds,
@@ -535,6 +537,24 @@ function computeMaskScore(
   return coarse.alignedScore;
 }
 
+function computeMacroScore(
+  reference: PixelBufferLike,
+  candidate: PixelBufferLike,
+  options: Required<BenchmarkScoreOptions>,
+): number {
+  const targetSize = Math.max(8, Math.round(Math.min(reference.width, reference.height) / 12));
+  if (targetSize >= Math.min(reference.width, reference.height)) return 100;
+  const downsampledReference = downsamplePixelBuffer(reference, targetSize, targetSize);
+  const downsampledCandidate = downsamplePixelBuffer(candidate, targetSize, targetSize);
+  const coarse = scorePixelBuffersBase(downsampledReference, downsampledCandidate, {
+    tolerance: Math.max(options.tolerance, 96),
+    backgroundTolerance: Math.max(6, Math.round(options.backgroundTolerance * 0.75)),
+    maxShift: Math.max(1, Math.ceil(options.maxShift * (targetSize / Math.max(reference.width, reference.height)))),
+    searchRadius: 0,
+  });
+  return coarse.alignedScore;
+}
+
 export function scorePixelBuffers(
   reference: PixelBufferLike,
   candidate: PixelBufferLike,
@@ -545,6 +565,7 @@ export function scorePixelBuffers(
   const perceptualScore = computePerceptualScore(reference, candidate, resolved);
   const structuralScore = computeStructuralScore(reference, candidate, resolved);
   const maskScore = computeMaskScore(reference, candidate, resolved);
+  const macroScore = computeMacroScore(reference, candidate, resolved);
   const canvasArea = reference.width * reference.height;
   const maxForegroundArea = Math.max(areaOfBounds(base.referenceBounds), areaOfBounds(base.candidateBounds));
   const smallForeground = maxForegroundArea > 0 && (maxForegroundArea / canvasArea) <= 0.3;
@@ -583,6 +604,20 @@ export function scorePixelBuffers(
     && perceptualScore >= 96
     ? Math.min(Math.max(perceptualScore, structuralScore), base.alignedScore + 5)
     : base.alignedScore;
+  const macroBitmapRescue = resolved.contentKind === 'bitmap'
+    && base.alignedScore >= 90
+    && perceptualScore >= 94
+    && macroScore >= 99
+    ? macroScore
+    : base.alignedScore;
+  const macroVectorRescue = resolved.contentKind === 'vector'
+    && base.alignedScore >= 88
+    && base.foregroundIou >= 60
+    && perceptualScore >= 94
+    && structuralScore >= 97
+    && macroScore >= 99
+    ? macroScore
+    : base.alignedScore;
   return {
     ...base,
     score: Math.max(
@@ -593,10 +628,13 @@ export function scorePixelBuffers(
       lowOverlapBitmapRescue,
       highConfidenceStructuralRescue,
       highOverlapStructuralRescue,
+      macroBitmapRescue,
+      macroVectorRescue,
     ),
     perceptualScore,
     structuralScore,
     maskScore,
+    macroScore,
   };
 }
 

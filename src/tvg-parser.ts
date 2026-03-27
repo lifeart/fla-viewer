@@ -596,12 +596,33 @@ function findPNG(data: Uint8Array, start: number, end: number): { start: number;
   for (let i = start; i < end - 8; i++) {
     if (data[i] === 0x89 && data[i+1] === 0x50 && data[i+2] === 0x4E && data[i+3] === 0x47 &&
         data[i+4] === 0x0D && data[i+5] === 0x0A && data[i+6] === 0x1A && data[i+7] === 0x0A) {
-      // Find IEND marker
-      for (let e = i + 8; e < end - 7; e++) {
-        if (data[e] === 0x49 && data[e+1] === 0x45 && data[e+2] === 0x4E && data[e+3] === 0x44) {
-          return { start: i, end: e + 8 }; // +8 for IEND length(4) + tag(4) + CRC(4)... actually IEND chunk is len(4)+IEND(4)+CRC(4)=12
+      // Walk PNG chunks instead of substring-scanning for IEND. Tiny tiles can
+      // place the final chunk close to the TBBM boundary, and the loose scan
+      // misses those valid short payloads.
+      let cursor = i + 8;
+      while (cursor + 12 <= end) {
+        const chunkLen = (data[cursor] << 24)
+          | (data[cursor + 1] << 16)
+          | (data[cursor + 2] << 8)
+          | data[cursor + 3];
+        if (chunkLen < 0) break;
+        const chunkEnd = cursor + 12 + chunkLen;
+        if (chunkEnd > end) break;
+        const isIEND = data[cursor + 4] === 0x49
+          && data[cursor + 5] === 0x45
+          && data[cursor + 6] === 0x4E
+          && data[cursor + 7] === 0x44;
+        cursor = chunkEnd;
+        if (isIEND) return { start: i, end: cursor };
+      }
+      // Fallback for malformed-but-renderable payloads.
+      for (let e = i + 8; e < end - 11; e++) {
+        if (data[e] === 0x00 && data[e+1] === 0x00 && data[e+2] === 0x00 && data[e+3] === 0x00 &&
+            data[e+4] === 0x49 && data[e+5] === 0x45 && data[e+6] === 0x4E && data[e+7] === 0x44) {
+          return { start: i, end: e + 12 };
         }
       }
+      return { start: i, end };
     }
   }
   return null;
@@ -621,7 +642,7 @@ function parseTGBGTiles(data: Uint8Array, tiles: TVGBitmapTile[]): void {
 
     // Find TBBA (tile position/size) within TBBM/TBBH
     let clipX = 0, clipY = 0, clipW = 0, clipH = 0;
-    for (let j = tbbm.contentStart; j < Math.min(tEnd, tbbm.contentStart + 200) - 5; j++) {
+    for (let j = tbbm.contentStart; j < tEnd - 5; j++) {
       if (data[j] === 0x54 && data[j+1] === 0x42 && data[j+2] === 0x42 && data[j+3] === 0x41) { // 'TBBA'
         const tbba = readInnerTagAt(data, j);
         if (tbba && tbba.contentLen >= 16) {
@@ -637,7 +658,9 @@ function parseTGBGTiles(data: Uint8Array, tiles: TVGBitmapTile[]): void {
 
     // Find PNG in this TBBM
     const png = findPNG(data, tbbm.contentStart, tEnd);
-    if (png && png.end - png.start > 100 && clipW > 0 && clipH > 0) {
+    // Sparse bitmap atlases can contain valid tiny PNG tiles, especially when
+    // a tile only carries a few opaque pixels. Reject only obviously broken payloads.
+    if (png && png.end - png.start > 32 && clipW > 0 && clipH > 0) {
       tiles.push({
         clipX, clipY, clipW, clipH,
         pngData: data.slice(png.start, png.end),
@@ -2597,12 +2620,32 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
   };
 
   const remapBitmapTile = (img: HTMLImageElement): HTMLCanvasElement => {
+    const sourceCanvas = document.createElement('canvas');
+    sourceCanvas.width = img.width;
+    sourceCanvas.height = img.height;
+    const sourceCtx = sourceCanvas.getContext('2d')!;
+    sourceCtx.drawImage(img, 0, 0);
+    const src = sourceCtx.getImageData(0, 0, img.width, img.height);
+
+    const coverageStats = (data: Uint8ClampedArray) => {
+      let opaquePixels = 0;
+      let alphaSum = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const alpha = data[i + 3];
+        alphaSum += alpha;
+        if (alpha >= 24) opaquePixels++;
+      }
+      const pixelCount = Math.max(1, data.length / 4);
+      return {
+        opaquePixels,
+        meanAlpha: alphaSum / pixelCount,
+      };
+    };
+
     const tileCanvas = document.createElement('canvas');
     tileCanvas.width = img.width;
     tileCanvas.height = img.height;
     const tileCtx = tileCanvas.getContext('2d')!;
-    tileCtx.drawImage(img, 0, 0);
-    const src = tileCtx.getImageData(0, 0, img.width, img.height);
     const dst = tileCtx.createImageData(img.width, img.height);
     for (let i = 0; i < src.data.length; i += 4) {
       const r = src.data[i + 0];
@@ -2613,6 +2656,13 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
       dst.data[i + 1] = r;
       dst.data[i + 2] = a;
       dst.data[i + 3] = b;
+    }
+    const sourceStats = coverageStats(src.data);
+    const remappedStats = coverageStats(dst.data);
+    const remapCollapsesAlpha = remappedStats.opaquePixels < sourceStats.opaquePixels * 0.75
+      || remappedStats.meanAlpha < sourceStats.meanAlpha * 0.75;
+    if (remapCollapsesAlpha) {
+      return sourceCanvas;
     }
     tileCtx.putImageData(dst, 0, 0);
     return tileCanvas;
