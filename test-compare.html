@@ -26,6 +26,8 @@
   <select id="sortBy">
     <option value="score-asc">Worst first</option>
     <option value="score-desc">Best first</option>
+    <option value="focused-asc">Worst focused</option>
+    <option value="focused-desc">Best focused</option>
     <option value="name">By name</option>
   </select>
   <b style="margin-left:12px">Show:</b>
@@ -33,6 +35,8 @@
     <option value="all">All</option>
     <option value="bad">Below 95%</option>
     <option value="ok">Below 98%</option>
+    <option value="focused-bad">Focused below 50%</option>
+    <option value="suspicious">Aligned high, focused low</option>
     <option value="vector">Vector only</option>
   </select>
 </div>
@@ -42,6 +46,9 @@
 <script type="module">
 import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
 import { parseTVG, resolveExternalPalette, renderTVGToCanvas, loadBitmapTiles } from './src/tvg-parser.ts';
+import { scoreCanvasSources } from './src/tvg-benchmark.ts';
+import { loadPalettes, flattenExternalPaletteColors } from './src/tpl-palette.ts';
+import { parseXStageMetadata, parseElements, TVG_UNITS_PER_FIELD } from './src/tpl-parser.ts';
 
 const SIZE = 160, TOL = 50;
 const ZIP = './sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
@@ -50,32 +57,32 @@ const results = [];
 
 async function main() {
   const zip = await JSZip.loadAsync(await (await fetch(ZIP)).arrayBuffer());
+  const xstagePath = Object.keys(zip.files).find(f => f.endsWith('/scene.xstage')) || 'scene.xstage';
+  const xml = new DOMParser().parseFromString(await zip.file(xstagePath).async('text'), 'text/xml');
+  parseXStageMetadata(xml);
+  const elements = parseElements(xml);
+  const elementMap = new Map(elements.map(element => [element.name, element]));
   const thumbFiles = Object.keys(zip.files).filter(f => f.includes('.thumbnails/') && f.endsWith('.tvg.png'));
-  const palFiles = Object.keys(zip.files).filter(f => f.includes('palette-library/') && f.endsWith('.plt'));
-  const palCache = {};
+  const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
   const statusEl = document.getElementById('status');
 
   for (let ti = 0; ti < thumbFiles.length; ti++) {
     const tp = thumbFiles[ti];
     const parts = tp.split('/');
     const tn = parts.pop().replace(/^\./, '').replace('.tvg.png', '');
+    const elementName = parts[parts.length - 2];
     const ed = parts.slice(0, -1).join('/') + '/';
     const tf = zip.file(ed + tn + '.tvg');
     if (!tf) continue;
 
     statusEl.textContent = `Loading ${ti + 1}/${thumbFiles.length}: ${tn}...`;
 
-    const pals = {};
-    for (const pf of palFiles.filter(f => f.startsWith(ed))) {
-      const n = pf.split('/').pop().replace('.plt', '');
-      if (!palCache[pf]) palCache[pf] = await zip.file(pf).async('text');
-      pals[n] = palCache[pf];
-    }
-
     try {
       const d = parseTVG(await tf.async('arraybuffer'));
-      for (const [n, x] of Object.entries(pals)) resolveExternalPalette(d, x, n);
-      const c = renderTVGToCanvas(d, SIZE, SIZE, 336, { supersample: 2 });
+      if (externalColors.length > 0) resolveExternalPalette(d, externalColors);
+      const element = elementMap.get(elementName);
+      const viewport = (element?.fieldChart || 12) * TVG_UNITS_PER_FIELD || 336;
+      const c = renderTVGToCanvas(d, SIZE, SIZE, viewport, { supersample: 2 });
       if (!c) continue;
       await loadBitmapTiles(c);
 
@@ -94,7 +101,6 @@ async function main() {
       rc.fillStyle = '#fff'; rc.fillRect(0, 0, SIZE, SIZE);
       rc.drawImage(img, 0, 0, SIZE, SIZE);
       const rd = rc.getImageData(0, 0, SIZE, SIZE);
-
       // Our render canvas
       const ourCanvas = document.createElement('canvas');
       ourCanvas.width = SIZE; ourCanvas.height = SIZE;
@@ -102,20 +108,19 @@ async function main() {
       oc.fillStyle = '#fff'; oc.fillRect(0, 0, SIZE, SIZE);
       oc.drawImage(c, 0, 0, SIZE, SIZE);
       const od = oc.getImageData(0, 0, SIZE, SIZE);
+      const scoreResult = scoreCanvasSources(refCanvas, ourCanvas, SIZE, { tolerance: TOL });
 
       // Diff canvas (highlight differences in red)
       const diffCanvas = document.createElement('canvas');
       diffCanvas.width = SIZE; diffCanvas.height = SIZE;
       const dc = diffCanvas.getContext('2d');
       const dd = dc.createImageData(SIZE, SIZE);
-      let match = 0;
       for (let i = 0; i < SIZE * SIZE; i++) {
         const x = i * 4;
         const dr = Math.abs(rd.data[x] - od.data[x]);
         const dg = Math.abs(rd.data[x+1] - od.data[x+1]);
         const db = Math.abs(rd.data[x+2] - od.data[x+2]);
         if (dr <= TOL && dg <= TOL && db <= TOL) {
-          match++;
           // Show original with slight dimming
           dd.data[x] = od.data[x] * 0.4; dd.data[x+1] = od.data[x+1] * 0.4; dd.data[x+2] = od.data[x+2] * 0.4; dd.data[x+3] = 255;
         } else {
@@ -127,16 +132,18 @@ async function main() {
       dc.putImageData(dd, 0, 0);
 
       const isBitmap = d.bitmapTiles.length > 0 && d.layers.every(l => l.shapes.length === 0);
-      const score = match / (SIZE * SIZE) * 100;
+      const score = scoreResult.score;
 
-      results.push({ name: tn, score, bitmap: isBitmap, refCanvas, ourCanvas, diffCanvas });
+      results.push({ name: tn, score, bitmap: isBitmap, refCanvas, ourCanvas, diffCanvas, scoreResult });
     } catch (e) {}
   }
 
   const vecScores = results.filter(x => !x.bitmap);
   const vecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.score, 0) / vecScores.length : 0;
+  const vecFocusedAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.scoreResult.normalizedScore, 0) / vecScores.length : 0;
   const allAvg = results.reduce((s, x) => s + x.score, 0) / results.length;
-  statusEl.textContent = `Done: ${results.length} drawings | All avg: ${allAvg.toFixed(1)}% | Vector avg: ${vecAvg.toFixed(1)}% | >=98%: ${vecScores.filter(x => x.score >= 98).length}/${vecScores.length} | >=95%: ${vecScores.filter(x => x.score >= 95).length}/${vecScores.length}`;
+  const allFocusedAvg = results.reduce((s, x) => s + x.scoreResult.normalizedScore, 0) / results.length;
+  statusEl.textContent = `Done: ${results.length} drawings | All avg: ${allAvg.toFixed(1)}% aligned / ${allFocusedAvg.toFixed(1)}% focused | Vector avg: ${vecAvg.toFixed(1)}% aligned / ${vecFocusedAvg.toFixed(1)}% focused | >=98%: ${vecScores.filter(x => x.score >= 98).length}/${vecScores.length} | >=95%: ${vecScores.filter(x => x.score >= 95).length}/${vecScores.length}`;
   document.title = `Compare: ${vecAvg.toFixed(1)}% vec avg`;
   render();
 }
@@ -150,10 +157,14 @@ function render() {
   let items = [...results];
   if (filterBy === 'bad') items = items.filter(x => x.score < 95);
   else if (filterBy === 'ok') items = items.filter(x => x.score < 98);
+  else if (filterBy === 'focused-bad') items = items.filter(x => x.scoreResult.normalizedScore < 50);
+  else if (filterBy === 'suspicious') items = items.filter(x => x.score >= 90 && x.scoreResult.normalizedScore < 25);
   else if (filterBy === 'vector') items = items.filter(x => !x.bitmap);
 
   if (sortBy === 'score-asc') items.sort((a, b) => a.score - b.score);
   else if (sortBy === 'score-desc') items.sort((a, b) => b.score - a.score);
+  else if (sortBy === 'focused-asc') items.sort((a, b) => a.scoreResult.normalizedScore - b.scoreResult.normalizedScore);
+  else if (sortBy === 'focused-desc') items.sort((a, b) => b.scoreResult.normalizedScore - a.scoreResult.normalizedScore);
   else items.sort((a, b) => a.name.localeCompare(b.name));
 
   for (const r of items) {
@@ -168,7 +179,7 @@ function render() {
     div.appendChild(imgs);
     const label = document.createElement('div');
     label.className = 'label';
-    label.innerHTML = `<span class="score">${r.score.toFixed(1)}%</span> ${r.name}${r.bitmap ? ' [bmp]' : ''}`;
+    label.innerHTML = `<span class="score">${r.score.toFixed(1)}%</span> aligned / ${r.scoreResult.normalizedScore.toFixed(1)}% focused ${r.name}${r.bitmap ? ' [bmp]' : ''}`;
     div.appendChild(label);
     grid.appendChild(div);
   }

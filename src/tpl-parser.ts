@@ -1,7 +1,12 @@
 import JSZip from 'jszip';
 import { parseTVG, renderTVGToCanvas, resolveExternalPalette, loadBitmapTiles } from './tvg-parser';
 import type { ExternalPaletteColor } from './tvg-parser';
-import { parseSceneGraph, renderCompositeFrame } from './tpl-compositor';
+import {
+  loadPalettes,
+  flattenExternalPaletteColors,
+} from './tpl-palette';
+export type { TPLGradientStop, TPLPaletteColor, TPLPalette } from './tpl-palette';
+import type { TPLPalette } from './tpl-palette';
 import type {
   FLADocument,
   Timeline,
@@ -64,31 +69,6 @@ export interface TPLExposure {
   frames: { start: number; end: number; drawing: string }[];
 }
 
-export interface TPLGradientStop {
-  pos: number; // 0-100
-  r: number;
-  g: number;
-  b: number;
-  a: number;
-}
-
-export interface TPLPaletteColor {
-  type: 'solid' | 'gradient';
-  name: string;
-  id: string;
-  r: number;
-  g: number;
-  b: number;
-  a: number;
-  gradientType?: 'linear' | 'radial';
-  stops?: TPLGradientStop[];
-}
-
-export interface TPLPalette {
-  name: string;
-  colors: TPLPaletteColor[];
-}
-
 /**
  * Detect whether a ZIP file is a Toon Boom .tpl archive.
  * Checks for the presence of scene.xstage inside the ZIP.
@@ -122,42 +102,6 @@ function findFile(zip: JSZip, filename: string): string | null {
   }
 
   return null;
-}
-
-/**
- * Find all files matching a pattern prefix in the ZIP.
- */
-function findFiles(zip: JSZip, prefix: string): string[] {
-  const results: string[] = [];
-
-  // Try direct
-  zip.forEach((path) => {
-    if (path.startsWith(prefix)) {
-      results.push(path);
-    }
-  });
-
-  if (results.length > 0) return results;
-
-  // Try inside top-level folders
-  const topDirs = new Set<string>();
-  zip.forEach((relativePath) => {
-    const firstSlash = relativePath.indexOf('/');
-    if (firstSlash > 0) {
-      topDirs.add(relativePath.substring(0, firstSlash + 1));
-    }
-  });
-
-  for (const dir of topDirs) {
-    zip.forEach((path) => {
-      if (path.startsWith(dir + prefix)) {
-        results.push(path);
-      }
-    });
-    if (results.length > 0) return results;
-  }
-
-  return results;
 }
 
 /**
@@ -262,7 +206,7 @@ export async function parseTPL(
 /**
  * Extract metadata from the scene.xstage XML.
  */
-function parseXStageMetadata(xmlDoc: Document): TPLMetadata {
+export function parseXStageMetadata(xmlDoc: Document): TPLMetadata {
   const project = xmlDoc.documentElement;
   const version = project.getAttribute('version') || '';
   const source = project.getAttribute('source') || '';
@@ -350,7 +294,7 @@ function parseXStageMetadata(xmlDoc: Document): TPLMetadata {
 /**
  * Parse element registry from scene.xstage.
  */
-function parseElements(xmlDoc: Document): TPLElement[] {
+export function parseElements(xmlDoc: Document): TPLElement[] {
   const elements: TPLElement[] = [];
   const elNodes = xmlDoc.querySelectorAll('elements > element');
   elNodes.forEach(el => {
@@ -474,110 +418,6 @@ function parseExposures(xmlDoc: Document, elements: TPLElement[]): TPLExposure[]
 }
 
 /**
- * Load palette files from the archive.
- */
-async function loadPalettes(zip: JSZip): Promise<TPLPalette[]> {
-  const palettes: TPLPalette[] = [];
-  // Find ALL .plt files, including element-level palette-library/ directories
-  const pltFiles = findFiles(zip, 'palette-library/');
-
-  // Also find element-level palettes that might be nested deeper
-  const seenPaths = new Set(pltFiles);
-  zip.forEach((path) => {
-    if (path.endsWith('.plt') && path.includes('palette-library/') && !seenPaths.has(path)) {
-      pltFiles.push(path);
-    }
-  });
-
-  for (const path of pltFiles) {
-    if (!path.endsWith('.plt')) continue;
-    const file = zip.file(path);
-    if (!file) continue;
-
-    const text = await file.async('text');
-    const palette = parsePLT(text, path);
-    if (palette) palettes.push(palette);
-  }
-
-  return palettes;
-}
-
-/**
- * Parse a .plt palette file.
- */
-function parsePLT(text: string, path: string): TPLPalette | null {
-  const lines = text.split('\n');
-  if (lines.length < 1 || !lines[0].includes('PaletteFile')) return null;
-
-  // Extract palette name from path
-  const name = path.split('/').pop()?.replace('.plt', '') || 'Unknown';
-
-  const colors: TPLPaletteColor[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line || line.startsWith('{') || line.startsWith('}')) continue;
-
-    // Solid format: Solid  Name  0xID  R G B A
-    const solidMatch = line.match(/^Solid\s+(\S+)\s+(0x\w+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
-    if (solidMatch) {
-      colors.push({
-        type: 'solid',
-        name: solidMatch[1],
-        id: solidMatch[2],
-        r: parseInt(solidMatch[3], 10),
-        g: parseInt(solidMatch[4], 10),
-        b: parseInt(solidMatch[5], 10),
-        a: parseInt(solidMatch[6], 10),
-      });
-      continue;
-    }
-
-    // Gradient format: Gradient  Name  0xID  Linear/Radial
-    // Followed by { pos R G B A, ... } on subsequent lines
-    const gradMatch = line.match(/^Gradient\s+(\S+)\s+(0x\w+)\s+(Linear|Radial)/i);
-    if (gradMatch) {
-      const gradientType = gradMatch[3].toLowerCase() === 'radial' ? 'radial' as const : 'linear' as const;
-      const stops: TPLGradientStop[] = [];
-
-      // Parse stop lines inside { ... } block
-      for (let j = i + 1; j < lines.length; j++) {
-        const stopLine = lines[j].trim();
-        if (stopLine.startsWith('{')) continue; // opening brace line
-        if (stopLine.startsWith('}') || stopLine === '') break; // closing brace or blank
-
-        // Stop format: "pos R G B A" (possibly with leading { or trailing , or })
-        const cleaned = stopLine.replace(/[{},]/g, '').trim();
-        const stopMatch = cleaned.match(/^\s*([\d.]+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
-        if (stopMatch) {
-          stops.push({
-            pos: parseFloat(stopMatch[1]),
-            r: parseInt(stopMatch[2], 10),
-            g: parseInt(stopMatch[3], 10),
-            b: parseInt(stopMatch[4], 10),
-            a: parseInt(stopMatch[5], 10),
-          });
-        }
-
-        if (stopLine.includes('}')) break; // end of block
-      }
-
-      // Use the first stop color as the fallback solid color
-      const firstStop = stops.length > 0 ? stops[0] : { r: 128, g: 128, b: 128, a: 255 };
-      colors.push({
-        type: 'gradient',
-        name: gradMatch[1],
-        id: gradMatch[2],
-        r: firstStop.r, g: firstStop.g, b: firstStop.b, a: firstStop.a,
-        gradientType,
-        stops,
-      });
-    }
-  }
-
-  return { name, colors };
-}
-
-/**
  * Parse and render TVG vector drawings into a composite overview image.
  * Returns null if no TVG files could be parsed.
  */
@@ -594,21 +434,7 @@ async function renderTVGElements(
   if (tvgFiles.length === 0) return null;
 
   // Build external palette from .plt files for color resolution
-  const externalColors: ExternalPaletteColor[] = [];
-  for (const palette of metadata.palettes) {
-    for (const color of palette.colors) {
-      if (color.type === 'solid') {
-        externalColors.push({ r: color.r, g: color.g, b: color.b, a: color.a, id: color.id, name: color.name, paletteName: palette.name });
-      } else if (color.type === 'gradient' && color.stops && color.stops.length > 0) {
-        externalColors.push({
-          r: color.r, g: color.g, b: color.b, a: color.a,
-          id: color.id, name: color.name, paletteName: palette.name,
-          gradientType: color.gradientType,
-          stops: color.stops,
-        });
-      }
-    }
-  }
+  const externalColors: ExternalPaletteColor[] = flattenExternalPaletteColors(metadata.palettes);
 
   // Build element lookup by folder name to get fieldChart
   const elementByFolder = new Map<string, TPLElement>();
@@ -646,7 +472,7 @@ async function renderTVGElements(
           viewportSize = elem.fieldChart * TVG_UNITS_PER_FIELD;
         }
       }
-      const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize, viewportSize, { skipClipping: true });
+      const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize, viewportSize);
       if (canvas) {
         // Load bitmap tiles asynchronously if present
         if ((canvas as any).__bitmapTiles) {
@@ -866,17 +692,6 @@ async function composeElementOverview(
   ctx.fillText(`Rig Overview — ${count} element drawings`, canvasWidth / 2, canvasHeight - 15);
 
   // Convert canvas to image
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.src = canvas.toDataURL('image/png');
-  });
-}
-
-/**
- * Convert a canvas to an HTMLImageElement.
- */
-function canvasToImage(canvas: HTMLCanvasElement): Promise<HTMLImageElement> {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => resolve(img);

@@ -8,6 +8,7 @@
 <script type="module">
 import JSZip from 'jszip';
 import { parseTVG, renderTVGToCanvas, resolveExternalPalette } from './src/tvg-parser.ts';
+import { loadPalettes, flattenExternalPaletteColors } from './src/tpl-palette.ts';
 
 const ZIP_PATH = 'sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
 const TARGET = 'F-Hand_OL_1_F-12';
@@ -15,18 +16,7 @@ const TARGET = 'F-Hand_OL_1_F-12';
 async function main() {
   const resp = await fetch(ZIP_PATH);
   const zip = await JSZip.loadAsync(await resp.arrayBuffer());
-
-  // Load palettes
-  const palettes = [];
-  const pltPaths = [];
-  zip.forEach(p => { if (p.endsWith('.plt') && p.includes('palette-library/')) pltPaths.push(p); });
-  for (const p of pltPaths) {
-    const text = await zip.file(p).async('text');
-    for (const line of text.split('\n')) {
-      const m = line.match(/^Solid\s+(\S+)\s+(0x\w+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
-      if (m) palettes.push({ r: +m[3], g: +m[4], b: +m[5], a: +m[6], id: m[2] });
-    }
-  }
+  const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
 
   const tvgFiles = [];
   zip.forEach(p => { if (p.endsWith('.tvg')) tvgFiles.push(p); });
@@ -35,7 +25,7 @@ async function main() {
 
   const buf = await zip.file(tvgPath).async('arraybuffer');
   const drawing = parseTVG(buf);
-  resolveExternalPalette(drawing, palettes);
+  if (externalColors.length > 0) resolveExternalPalette(drawing, externalColors);
 
   // Dump structure
   const lines = [];

@@ -5,6 +5,7 @@
 <script type="module">
 import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
 import { parseTVG, resolveExternalPalette, renderTVGToCanvas } from './src/tvg-parser.ts';
+import { loadPalettes, flattenExternalPaletteColors } from './src/tpl-palette.ts';
 
 const ZIP = './sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
 const ELEMENT = new URLSearchParams(location.search).get('e') || 'color';
@@ -13,19 +14,15 @@ const SIZE = 320;
 
 async function main() {
   const zip = await JSZip.loadAsync(await (await fetch(ZIP)).arrayBuffer());
+  const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
   const prefix = Object.keys(zip.files).find(f => f.includes(ELEMENT + '/'))?.split(ELEMENT)[0] + ELEMENT + '/';
-  const palFiles = Object.keys(zip.files).filter(f => f.startsWith(prefix + 'palette-library/') && f.endsWith('.plt'));
-  const pals = {};
-  for (const pf of palFiles) {
-    pals[pf.split('/').pop().replace('.plt','')] = await zip.file(pf).async('text');
-  }
 
   const drawingName = ELEMENT + '-' + DRAWING;
   const tvg = zip.file(prefix + drawingName + '.tvg');
   if (!tvg) { document.getElementById('out').textContent = 'Not found: ' + drawingName; document.title = 'DONE'; return; }
 
   const d = parseTVG(await tvg.async('arraybuffer'));
-  for (const [n,x] of Object.entries(pals)) resolveExternalPalette(d, x, n);
+  if (externalColors.length > 0) resolveExternalPalette(d, externalColors);
 
   const thumb = zip.file(prefix + '.thumbnails/.' + drawingName + '.tvg.png');
   const out = document.getElementById('out');

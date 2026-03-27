@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>TVG Benchmark</title>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: monospace; background: #111; color: #ddd; padding: 16px; }
+    pre { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+<pre id="status">Starting benchmark...</pre>
+<script type="module">
+import JSZip from 'jszip';
+import { parseTVG, renderTVGToCanvas, resolveExternalPalette, loadBitmapTiles } from './src/tvg-parser.ts';
+import { scoreCanvasSources } from './src/tvg-benchmark.ts';
+import { loadPalettes, flattenExternalPaletteColors } from './src/tpl-palette.ts';
+import { parseXStageMetadata, parseElements, TVG_UNITS_PER_FIELD } from './src/tpl-parser.ts';
+
+const DEFAULT_ZIP = './sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
+const DEFAULT_SIZE = 160;
+const DEFAULT_TOL = 50;
+const DEFAULT_MAX_SHIFT = 8;
+const DEFAULT_BACKGROUND_TOL = 12;
+const DEFAULT_SEARCH_RADIUS = 2;
+
+function findFile(zip, filename) {
+  if (zip.file(filename)) return filename;
+  const topDirs = new Set();
+  zip.forEach((relativePath) => {
+    const firstSlash = relativePath.indexOf('/');
+    if (firstSlash > 0) topDirs.add(relativePath.substring(0, firstSlash + 1));
+  });
+  for (const dir of topDirs) {
+    const path = dir + filename;
+    if (zip.file(path)) return path;
+  }
+  return null;
+}
+
+async function loadImageFromZip(zip, path) {
+  const file = zip.file(path);
+  if (!file) return null;
+  const blob = new Blob([await file.async('arraybuffer')], { type: 'image/png' });
+  return await new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = URL.createObjectURL(blob);
+  });
+}
+
+async function runBenchmark() {
+  const params = new URLSearchParams(location.search);
+  const zipPath = params.get('zip') || DEFAULT_ZIP;
+  const size = Number(params.get('size') || DEFAULT_SIZE);
+  const tolerance = Number(params.get('tolerance') || DEFAULT_TOL);
+  const maxShift = Number(params.get('maxShift') || DEFAULT_MAX_SHIFT);
+  const backgroundTolerance = Number(params.get('backgroundTolerance') || DEFAULT_BACKGROUND_TOL);
+  const searchRadius = Number(params.get('searchRadius') || DEFAULT_SEARCH_RADIUS);
+  const status = document.getElementById('status');
+
+  const zip = await JSZip.loadAsync(await (await fetch(zipPath)).arrayBuffer());
+  const xstagePath = findFile(zip, 'scene.xstage');
+  if (!xstagePath) throw new Error('scene.xstage not found');
+  const xml = new DOMParser().parseFromString(await zip.file(xstagePath).async('text'), 'text/xml');
+  const metadata = parseXStageMetadata(xml);
+  const elements = parseElements(xml);
+  const elementMap = new Map(elements.map((element) => [element.name, element]));
+  const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+
+  const thumbFiles = Object.keys(zip.files)
+    .filter((path) => path.includes('.thumbnails/') && path.endsWith('.tvg.png'))
+    .sort();
+
+  const results = [];
+  for (let index = 0; index < thumbFiles.length; index++) {
+    const thumbPath = thumbFiles[index];
+    const parts = thumbPath.split('/');
+    const thumbName = parts[parts.length - 1].replace(/^\./, '').replace('.tvg.png', '');
+    const elementName = parts[parts.length - 3];
+    const drawingPath = parts.slice(0, -1).join('/').replace('/.thumbnails', '') + '/' + thumbName + '.tvg';
+    const tvgFile = zip.file(drawingPath);
+    if (!tvgFile) continue;
+
+    status.textContent = `Benchmarking ${index + 1}/${thumbFiles.length}: ${thumbName}`;
+
+    const drawing = parseTVG(await tvgFile.async('arraybuffer'));
+    if (externalColors.length > 0) resolveExternalPalette(drawing, externalColors);
+
+    const element = elementMap.get(elementName);
+    const viewport = (element?.fieldChart || 12) * TVG_UNITS_PER_FIELD || 336;
+    const canvas = renderTVGToCanvas(drawing, size, size, viewport, { supersample: 2 });
+    if (!canvas) continue;
+    await loadBitmapTiles(canvas, drawing.diagnostics);
+
+    const reference = await loadImageFromZip(zip, thumbPath);
+    if (!reference) continue;
+
+    const scoreResult = scoreCanvasSources(reference, canvas, size, {
+      tolerance,
+      maxShift,
+      backgroundTolerance,
+      searchRadius,
+    });
+    const bitmapOnly = drawing.bitmapTiles.length > 0 && drawing.layers.every((layer) => layer.shapes.length === 0);
+    results.push({
+      drawing: thumbName,
+      element: elementName,
+      viewport,
+      bitmapOnly,
+      score: scoreResult.score,
+      rawScore: scoreResult.rawScore,
+      alignedScore: scoreResult.alignedScore,
+      normalizedScore: scoreResult.normalizedScore,
+      bestShift: scoreResult.bestShift,
+      foregroundIou: scoreResult.foregroundIou,
+      diagnostics: drawing.diagnostics,
+    });
+  }
+
+  const vector = results.filter((entry) => !entry.bitmapOnly);
+  const bitmap = results.filter((entry) => entry.bitmapOnly);
+  const average = (items) => items.length ? items.reduce((sum, item) => sum + item.score, 0) / items.length : 0;
+  const averageNormalized = (items) => items.length ? items.reduce((sum, item) => sum + item.normalizedScore, 0) / items.length : 0;
+  const errorDiagnostics = results.filter((entry) => entry.diagnostics.events.some((event) => event.severity === 'error')).map((entry) => entry.drawing);
+
+  const summary = {
+    zipPath,
+    drawings: results.length,
+    metric: {
+      type: 'rgb-tolerance-aligned-focused',
+      tolerance,
+      maxShift,
+      backgroundTolerance,
+      searchRadius,
+    },
+    vectorAverage: average(vector),
+    bitmapAverage: average(bitmap),
+    overallAverage: average(results),
+    normalizedVectorAverage: averageNormalized(vector),
+    normalizedBitmapAverage: averageNormalized(bitmap),
+    normalizedOverallAverage: averageNormalized(results),
+    minVector: vector.reduce((min, item) => Math.min(min, item.score), Infinity),
+    minBitmap: bitmap.reduce((min, item) => Math.min(min, item.score), Infinity),
+    errorDiagnostics,
+  };
+
+  const benchmark = { summary, results };
+  window.__benchmarkResult = benchmark;
+  window.__benchmarkDone = true;
+  status.textContent = JSON.stringify(summary, null, 2);
+}
+
+runBenchmark().catch((error) => {
+  window.__benchmarkResult = { error: error instanceof Error ? error.message : String(error) };
+  window.__benchmarkDone = true;
+  document.getElementById('status').textContent = `ERROR: ${error instanceof Error ? error.stack || error.message : String(error)}`;
+});
+</script>
+</body>
+</html>

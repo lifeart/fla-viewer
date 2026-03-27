@@ -4,6 +4,7 @@ import JSZip from 'jszip';
 import { createCanvas, type Canvas as NodeCanvas } from 'canvas';
 import { parseTVG, resolveExternalPalette } from '/Users/lifeart/Repos/fla-viewer/src/tvg-parser.ts';
 import type { TVGDrawing, TVGArtLayer, TVGComponent, TVGPath, TVGThicknessProfile } from '/Users/lifeart/Repos/fla-viewer/src/tvg-parser.ts';
+import { loadPalettes, flattenExternalPaletteColors } from '/Users/lifeart/Repos/fla-viewer/src/tpl-palette.ts';
 
 const ZIP_PATH = '/Users/lifeart/Repos/fla-viewer/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
 const UNITS_PER_FIELD = 28;
@@ -370,18 +371,7 @@ const DRAWINGS = [
 async function main() {
   const zipBuf = readFileSync(ZIP_PATH);
   const zip = await JSZip.loadAsync(zipBuf);
-
-  // Load palettes
-  const palettes: any[] = [];
-  const pltPaths: string[] = [];
-  zip.forEach((path: string) => { if (path.endsWith('.plt') && path.includes('palette-library/')) pltPaths.push(path); });
-  for (const path of pltPaths) {
-    const text = await zip.file(path)!.async('text');
-    for (const line of text.split('\n')) {
-      const m = line.match(/^Solid\s+(\S+)\s+(0x\w+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
-      if (m) palettes.push({ r: +m[3], g: +m[4], b: +m[5], a: +m[6], id: m[2] });
-    }
-  }
+  const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
 
   const tvgFiles: string[] = [];
   zip.forEach((p: string) => { if (p.endsWith('.tvg')) tvgFiles.push(p); });
@@ -393,7 +383,7 @@ async function main() {
 
     const buf = await zip.file(tvgPath)!.async('arraybuffer');
     const drawing = parseTVG(buf);
-    if (palettes.length > 0) resolveExternalPalette(drawing, palettes);
+    if (externalColors.length > 0) resolveExternalPalette(drawing, externalColors);
 
     const canvas = renderTVGNode(drawing, THUMB_SIZE, THUMB_SIZE, VIEWPORT_SIZE);
     const pngBuf = canvas.toBuffer('image/png');

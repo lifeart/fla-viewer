@@ -6,6 +6,7 @@
 <script type="module">
 import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
 import { parseTVG, resolveExternalPalette, renderTVGToCanvas } from './src/tvg-parser.ts';
+import { loadPalettes, flattenExternalPaletteColors } from './src/tpl-palette.ts';
 
 const ZIP_URL = './sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
 const ELEMENT = 'F-Hand_OL_1_F';
@@ -16,15 +17,9 @@ async function main() {
   const resp = await fetch(ZIP_URL);
   const buf = await resp.arrayBuffer();
   const zip = await JSZip.loadAsync(buf);
+  const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
 
   const prefix = Object.keys(zip.files).find(f => f.includes(ELEMENT + '/'))?.split(ELEMENT)[0] + ELEMENT + '/';
-
-  const palFiles = Object.keys(zip.files).filter(f => f.includes('palette-library/') && f.endsWith('.plt'));
-  const palettes = {};
-  for (const pf of palFiles) {
-    const name = pf.split('/').pop().replace('.plt', '');
-    palettes[name] = await zip.file(pf).async('text');
-  }
 
   const out = document.getElementById('out');
 
@@ -36,9 +31,7 @@ async function main() {
 
     const tvgBuf = await tvgFile.async('arraybuffer');
     const drawing = parseTVG(tvgBuf);
-    for (const [name, xml] of Object.entries(palettes)) {
-      resolveExternalPalette(drawing, xml, name);
-    }
+    if (externalColors.length > 0) resolveExternalPalette(drawing, externalColors);
 
     const thumbFile = zip.file(prefix + `.thumbnails/.${drawingName}.tvg.png`);
     let thumbUrl = null;

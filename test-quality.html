@@ -5,35 +5,38 @@
 <script type="module">
 import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
 import { parseTVG, resolveExternalPalette, renderTVGToCanvas, loadBitmapTiles } from './src/tvg-parser.ts';
+import { scoreCanvasSources } from './src/tvg-benchmark.ts';
+import { loadPalettes, flattenExternalPaletteColors } from './src/tpl-palette.ts';
+import { parseXStageMetadata, parseElements, TVG_UNITS_PER_FIELD } from './src/tpl-parser.ts';
 
 const SIZE = 160, TOL = 50;
 const ZIP = './sample/toon/CH_Anna_rig_football_suit_V001_V07.zip';
 
 async function main() {
   const zip = await JSZip.loadAsync(await (await fetch(ZIP)).arrayBuffer());
+  const xstagePath = Object.keys(zip.files).find(f => f.endsWith('/scene.xstage')) || 'scene.xstage';
+  const xml = new DOMParser().parseFromString(await zip.file(xstagePath).async('text'), 'text/xml');
+  parseXStageMetadata(xml);
+  const elements = parseElements(xml);
+  const elementMap = new Map(elements.map(element => [element.name, element]));
   const thumbFiles = Object.keys(zip.files).filter(f => f.includes('.thumbnails/') && f.endsWith('.tvg.png'));
-  const palFiles = Object.keys(zip.files).filter(f => f.includes('palette-library/') && f.endsWith('.plt'));
-  const palCache = {};
+  const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
   const scores = [];
 
   for (const tp of thumbFiles) {
     const parts = tp.split('/');
     const tn = parts.pop().replace(/^\./, '').replace('.tvg.png', '');
+    const elementName = parts[parts.length - 2];
     const ed = parts.slice(0, -1).join('/') + '/';
     const tf = zip.file(ed + tn + '.tvg');
     if (!tf) continue;
 
-    const pals = {};
-    for (const pf of palFiles.filter(f => f.startsWith(ed))) {
-      const n = pf.split('/').pop().replace('.plt', '');
-      if (!palCache[pf]) palCache[pf] = await zip.file(pf).async('text');
-      pals[n] = palCache[pf];
-    }
-
     try {
       const d = parseTVG(await tf.async('arraybuffer'));
-      for (const [n, x] of Object.entries(pals)) resolveExternalPalette(d, x, n);
-      const c = renderTVGToCanvas(d, SIZE, SIZE, 336, { supersample: 2 });
+      if (externalColors.length > 0) resolveExternalPalette(d, externalColors);
+      const element = elementMap.get(elementName);
+      const viewport = (element?.fieldChart || 12) * TVG_UNITS_PER_FIELD || 336;
+      const c = renderTVGToCanvas(d, SIZE, SIZE, viewport, { supersample: 2 });
       if (!c) continue;
       // Load bitmap tiles if present (async)
       await loadBitmapTiles(c);
@@ -46,25 +49,9 @@ async function main() {
       });
       if (!img) continue;
 
-      const cc = document.createElement('canvas');
-      cc.width = SIZE; cc.height = SIZE;
-      const cx = cc.getContext('2d');
-      cx.fillStyle = '#fff'; cx.fillRect(0, 0, SIZE, SIZE);
-      cx.drawImage(img, 0, 0, SIZE, SIZE);
-      const rd = cx.getImageData(0, 0, SIZE, SIZE);
-      cx.fillStyle = '#fff'; cx.fillRect(0, 0, SIZE, SIZE);
-      cx.drawImage(c, 0, 0, SIZE, SIZE);
-      const od = cx.getImageData(0, 0, SIZE, SIZE);
-
-      let s = 0;
-      for (let i = 0; i < SIZE * SIZE; i++) {
-        const x = i * 4;
-        if (Math.abs(rd.data[x] - od.data[x]) <= TOL &&
-            Math.abs(rd.data[x+1] - od.data[x+1]) <= TOL &&
-            Math.abs(rd.data[x+2] - od.data[x+2]) <= TOL) s++;
-      }
+      const scoreResult = scoreCanvasSources(img, c, SIZE, { tolerance: TOL });
       const isBitmap = d.bitmapTiles.length > 0 && d.layers.every(l => l.shapes.length === 0);
-      scores.push({n: tn, s: s / (SIZE * SIZE) * 100, bitmap: isBitmap});
+      scores.push({n: tn, s: scoreResult.score, focused: scoreResult.normalizedScore, bitmap: isBitmap});
     } catch (e) {}
   }
 
@@ -73,13 +60,15 @@ async function main() {
   const bmpScores = scores.filter(x => x.bitmap);
   const avg = scores.reduce((s, x) => s + x.s, 0) / scores.length;
   const vecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.s, 0) / vecScores.length : 0;
+  const focusedAvg = scores.reduce((s, x) => s + x.focused, 0) / scores.length;
+  const focusedVecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.focused, 0) / vecScores.length : 0;
   const lines = [
-    `ALL: ${avg.toFixed(1)}% avg (${scores.length} drawings) | >=98%: ${scores.filter(x => x.s >= 98).length} | >=95%: ${scores.filter(x => x.s >= 95).length} | >=90%: ${scores.filter(x => x.s >= 90).length}`,
-    `VECTOR: ${vecAvg.toFixed(1)}% avg (${vecScores.length}) | >=98%: ${vecScores.filter(x => x.s >= 98).length} | >=95%: ${vecScores.filter(x => x.s >= 95).length}`,
-    `BITMAP: ${bmpScores.length ? (bmpScores.reduce((s,x) => s + x.s, 0) / bmpScores.length).toFixed(1) : 'N/A'}% avg (${bmpScores.length})`,
+    `ALL: ${avg.toFixed(1)}% aligned avg | ${focusedAvg.toFixed(1)}% focused avg (${scores.length} drawings) | >=98%: ${scores.filter(x => x.s >= 98).length} | >=95%: ${scores.filter(x => x.s >= 95).length} | >=90%: ${scores.filter(x => x.s >= 90).length}`,
+    `VECTOR: ${vecAvg.toFixed(1)}% aligned avg | ${focusedVecAvg.toFixed(1)}% focused avg (${vecScores.length}) | >=98%: ${vecScores.filter(x => x.s >= 98).length} | >=95%: ${vecScores.filter(x => x.s >= 95).length}`,
+    `BITMAP: ${bmpScores.length ? (bmpScores.reduce((s,x) => s + x.s, 0) / bmpScores.length).toFixed(1) : 'N/A'}% aligned avg (${bmpScores.length})`,
     '',
     'Bottom 15 vectors:',
-    ...vecScores.slice(0, 15).map(x => `  ${x.n}: ${x.s.toFixed(1)}%`),
+    ...vecScores.slice(0, 15).map(x => `  ${x.n}: ${x.s.toFixed(1)}% aligned | ${x.focused.toFixed(1)}% focused`),
   ];
   document.getElementById('out').textContent = lines.join('\n');
   document.title = 'DONE';

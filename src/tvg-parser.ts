@@ -10,12 +10,36 @@ export interface TVGBitmapTile {
   pngData: Uint8Array;
 }
 
+export interface TVGDiagnosticEvent {
+  severity: 'info' | 'warn' | 'error';
+  code: string;
+  tag?: string;
+  offset: number;
+  length?: number;
+  context: 'top-level' | 'main-data' | 'art-layer' | 'component' | 'bitmap' | 'palette' | 'render';
+  note?: string;
+}
+
+export interface TVGDiagnostics {
+  events: TVGDiagnosticEvent[];
+  counts: Record<string, number>;
+}
+
+export type TVGPaint =
+  | { kind: 'solid'; rgba: { r: number; g: number; b: number; a: number } }
+  | {
+      kind: 'gradient';
+      gradientType: 'linear' | 'radial';
+      stops: { pos: number; r: number; g: number; b: number; a: number }[];
+      transform: TVGTransform | null;
+      fallback: { r: number; g: number; b: number; a: number };
+    };
+
 export interface TVGDrawing {
   layers: TVGArtLayer[];
   palette: TVGPaletteEntry[];
   bitmapTiles: TVGBitmapTile[];
-  /** Coordinate quantization factor from TGRV tag (f64, typically ~0.576). */
-  pointQuantum: number | null;
+  diagnostics: TVGDiagnostics;
 }
 
 export interface TVGArtLayer {
@@ -26,6 +50,7 @@ export interface TVGArtLayer {
 export interface TVGShape {
   shapeType: number; // 2=fill, 3=stroke, 6=line
   components: TVGComponent[];
+  nodePosition?: number | null;
 }
 
 export interface TVGThicknessControlPoint {
@@ -74,6 +99,7 @@ export interface TVGComponent {
   insideColorId: bigint | null;
   paletteIndex: number | null; // Palette position index for fills without TGCO
   color: { r: number; g: number; b: number; a: number } | null;
+  fillPaintSource: 'explicit' | 'inherited' | 'default' | 'synthetic' | null;
   /** Resolved inside color for two-sided strokes (inner side fill contribution). */
   insideColor: { r: number; g: number; b: number; a: number } | null;
   transform: TVGTransform | null;
@@ -95,6 +121,9 @@ export interface TVGComponent {
   tgtiOpacityScaleY: number | null;
   tgtiOpacityOffset: number | null;
   tgtiHasTextureFlags: number | null;
+  pathRefHint: number | null;
+  outerPaint: TVGPaint | null;
+  innerPaint: TVGPaint | null;
 }
 
 export interface TVGTransform {
@@ -109,6 +138,8 @@ export interface TVGTransform {
 export interface TVGPath {
   segments: TVGSegment[];
   closed: boolean;
+  tgrvValue: number | null;
+  directionReversed: boolean | null;
 }
 
 export type TVGSegment =
@@ -125,6 +156,32 @@ export interface TVGPaletteEntry {
   g: number;
   b: number;
   a: number;
+}
+
+interface TVGBitmapBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+interface TVGBitmapRenderState {
+  bounds: TVGBitmapBounds;
+  viewport?: number;
+  centerOnOrigin: boolean;
+  diagnostics?: TVGDiagnostics;
+}
+
+function createDiagnostics(): TVGDiagnostics {
+  return { events: [], counts: {} };
+}
+
+function addDiagnostic(
+  diagnostics: TVGDiagnostics,
+  event: TVGDiagnosticEvent,
+): void {
+  diagnostics.events.push(event);
+  diagnostics.counts[event.code] = (diagnostics.counts[event.code] || 0) + 1;
 }
 
 // ── Binary Reader ──
@@ -256,7 +313,7 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
     layers: [],
     palette: [],
     bitmapTiles: [],
-    pointQuantum: null,
+    diagnostics: createDiagnostics(),
   };
 
   // Parse top-level chunks
@@ -265,6 +322,16 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
 
     if (tag === TAG_CERT) {
       const len = reader.readU32LE();
+      if (len > reader.remaining) {
+        addDiagnostic(drawing.diagnostics, {
+          severity: 'error',
+          code: 'TRUNCATED_CHUNK',
+          tag,
+          offset: reader.pos - 8,
+          length: len,
+          context: 'top-level',
+        });
+      }
       reader.skip(len); // Skip certificate
     } else if (tag === TAG_ENDT) {
       // End marker, no payload
@@ -316,6 +383,13 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
       reader.skip(len);
     } else {
       // Unknown tag - scan forward to find next known tag pattern
+      addDiagnostic(drawing.diagnostics, {
+        severity: 'warn',
+        code: 'UNKNOWN_TOP_LEVEL_TAG',
+        tag,
+        offset: reader.pos - 4,
+        context: 'top-level',
+      });
       reader.pos -= 4; // back up to re-scan
       if (!scanToNextTopLevelTag(reader)) {
         break;
@@ -325,7 +399,7 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
 
   // If no vector or bitmap data found, scan raw buffer for TGBG bitmap blocks
   if (drawing.layers.length === 0 && drawing.bitmapTiles.length === 0) {
-    scanForBitmapTiles(new Uint8Array(buffer), drawing);
+    scanForBitmapTiles(new Uint8Array(buffer), drawing, drawing.diagnostics);
   }
 
   // Resolve colors: link components' colorId to palette entries
@@ -355,13 +429,16 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
     }
   }
 
-  for (const layer of drawing.layers) {
-    for (const shape of layer.shapes) {
+  for (let layerIndex = 0; layerIndex < drawing.layers.length; layerIndex++) {
+    const layer = drawing.layers[layerIndex];
+    for (let shapeIndex = 0; shapeIndex < layer.shapes.length; shapeIndex++) {
+      const shape = layer.shapes[shapeIndex];
       for (const comp of shape.components) {
         if (comp.colorId !== null) {
           const entry = paletteMap.get(comp.colorId);
           if (entry) {
             comp.color = { r: entry.r, g: entry.g, b: entry.b, a: entry.a };
+            if (comp.componentType === 0 || comp.componentType === 1) comp.fillPaintSource = 'explicit';
           }
         }
         // Resolve insideColorId for two-sided strokes
@@ -374,7 +451,7 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
         // Fills: use paletteIndex as TPAL index to get colorId for external palette resolution.
         // Set colorId from TPAL entry's id so resolveExternalPalette can override with .plt colors.
         // Only fall back to TPAL RGBA if the entry's id is 0 (no external reference).
-        if (comp.componentType === 0 && comp.color === null && comp.paletteIndex !== null) {
+        if ((comp.componentType === 0 || comp.componentType === 1) && comp.color === null && comp.paletteIndex !== null) {
           const idx = comp.paletteIndex;
           // paletteIndex=0 typically means "unset/default" (not "TPAL entry 0").
           // Entry 0 is usually "Line" which is wrong for fills.
@@ -389,6 +466,7 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
               }
               // Set TPAL color as fallback (external palette will override if matched)
               comp.color = { r: entry.r, g: entry.g, b: entry.b, a: entry.a };
+              comp.fillPaintSource = 'explicit';
             }
           }
         }
@@ -396,30 +474,44 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
         if ((comp.componentType === 2 || comp.componentType === 4) && comp.color === null) {
           comp.color = lineColor ? { ...lineColor } : { r: 0, g: 0, b: 0, a: 255 };
         }
+        updateComponentPaints(comp);
       }
+
+      suppressUnderlayFollowerFillColors(drawing.layers, layerIndex, layer, shape, shapeIndex);
 
       // Fill color inheritance: fills without color inherit from preceding colored fill
       const fills = shape.components.filter(c => c.componentType === 0);
+      const fillCarriers = shape.components.filter(c => c.componentType === 0 || c.componentType === 1);
       let lastColor: { r: number; g: number; b: number; a: number } | null = null;
-      for (const fill of fills) {
-        if (fill.color !== null) {
-          lastColor = fill.color;
-        } else if (lastColor !== null) {
-          fill.color = { ...lastColor };
+      let lastFillSource: TVGComponent['fillPaintSource'] = null;
+      for (const comp of fillCarriers) {
+        if (comp.color !== null) {
+          lastColor = comp.color;
+          lastFillSource = comp.fillPaintSource;
+        } else if (comp.componentType === 0 && lastColor !== null && canInheritFillColor(comp)) {
+          comp.color = { ...lastColor };
+          comp.fillPaintSource = lastFillSource === 'default' ? 'default' : 'inherited';
         }
       }
       // If still no fills have color, apply TPAL heuristic default
       if (defaultFillColor && fills.length > 0 && !fills.some(f => f.color !== null)) {
         fills[0].color = { ...defaultFillColor };
+        fills[0].fillPaintSource = 'default';
         // Re-run inheritance from this seed
         lastColor = defaultFillColor;
+        lastFillSource = 'default';
         for (let i = 1; i < fills.length; i++) {
           if (fills[i].color === null) {
             fills[i].color = { ...lastColor };
+            fills[i].fillPaintSource = lastFillSource === 'default' ? 'default' : 'inherited';
           } else {
             lastColor = fills[i].color!;
+            lastFillSource = fills[i].fillPaintSource;
           }
         }
+      }
+      for (const comp of shape.components) {
+        updateComponentPaints(comp);
       }
     }
   }
@@ -560,7 +652,7 @@ function parseTGBGTiles(data: Uint8Array, tiles: TVGBitmapTile[]): void {
 /** Scan the entire raw TVG buffer for bitmap tile data (TBBM blocks).
  *  Searches UNCO/ZLIB blocks for TGBG markers, then extracts all TBBM tiles
  *  from the containing decoded data (bypassing TGBG length parsing). */
-function scanForBitmapTiles(raw: Uint8Array, drawing: TVGDrawing): void {
+function scanForBitmapTiles(raw: Uint8Array, drawing: TVGDrawing, diagnostics?: TVGDiagnostics): void {
   const scanDecodedForTiles = (decoded: Uint8Array, depth: number): boolean => {
     // Check if this block contains TGBG
     let hasTGBG = false;
@@ -574,7 +666,17 @@ function scanForBitmapTiles(raw: Uint8Array, drawing: TVGDrawing): void {
     if (hasTGBG) {
       // Scan the entire decoded block for TBBM tiles (don't rely on TGBG length)
       parseTGBGTiles(decoded, drawing.bitmapTiles);
-      if (drawing.bitmapTiles.length > 0) return true;
+      if (drawing.bitmapTiles.length > 0) {
+        if (diagnostics) {
+          addDiagnostic(diagnostics, {
+            severity: 'warn',
+            code: 'BITMAP_FALLBACK_SCAN_USED',
+            offset: 0,
+            context: 'bitmap',
+          });
+        }
+        return true;
+      }
     }
 
     // Recurse into nested UNCO/ZLIB blocks (e.g. TLAB wrappers)
@@ -630,6 +732,7 @@ function scanForBitmapTiles(raw: Uint8Array, drawing: TVGDrawing): void {
 
 function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
   while (reader.remaining > 4) {
+    const tagOffset = reader.pos;
     const tag = reader.readTag4();
 
     if (tag === '\0\0\0\0') {
@@ -641,7 +744,14 @@ function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
         const data = readEncodedData(reader);
         parseMainData(new BinaryReader(data.buffer), drawing);
       } catch (_e) {
-        // Skip unparseable TLAB
+        addDiagnostic(drawing.diagnostics, {
+          severity: 'warn',
+          code: 'UNKNOWN_MAIN_DATA_TAG',
+          tag,
+          offset: tagOffset,
+          context: 'main-data',
+          note: 'Failed to parse TLAB wrapper',
+        });
       }
     } else if (tag === TAG_TVCI) {
       // Software identity - encoded block, skip
@@ -674,19 +784,32 @@ function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
 
       try {
         const data = readEncodedData(reader);
-        const layer = parseArtLayer(new BinaryReader(data.buffer), layerType);
+        const layer = parseArtLayer(new BinaryReader(data.buffer), layerType, drawing.diagnostics);
         if (layer.shapes.length > 0) {
           drawing.layers.push(layer);
         }
       } catch (_e) {
-        // Skip unparseable layer
+        addDiagnostic(drawing.diagnostics, {
+          severity: 'warn',
+          code: 'UNKNOWN_MAIN_DATA_TAG',
+          tag,
+          offset: tagOffset,
+          context: 'main-data',
+          note: 'Failed to parse art layer payload',
+        });
       }
     } else if (tag === TAG_TPAL) {
       try {
         const data = readEncodedData(reader);
         drawing.palette = parsePalette(new BinaryReader(data.buffer));
       } catch (_e) {
-        // Skip palette errors
+        addDiagnostic(drawing.diagnostics, {
+          severity: 'warn',
+          code: 'PALETTE_PARSE_SKIPPED',
+          tag,
+          offset: tagOffset,
+          context: 'palette',
+        });
       }
     } else if (tag === TAG_TGBG) {
       // Bitmap group — contains tiled PNG data
@@ -697,16 +820,40 @@ function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
           parseTGBGTiles(tgbgData, drawing.bitmapTiles);
         }
       } catch (_e) {
-        // Skip unparseable TGBG
+        addDiagnostic(drawing.diagnostics, {
+          severity: 'warn',
+          code: 'UNKNOWN_MAIN_DATA_TAG',
+          tag,
+          offset: tagOffset,
+          context: 'bitmap',
+          note: 'Failed to parse TGBG payload',
+        });
       }
     } else if (tag === TAG_TGRV) {
-      // TGRV: coordinate quantization factor (pointQuantum), f64 value (~0.576)
       const rvLen = reader.readU32LE();
       if (rvLen >= 8 && rvLen <= reader.remaining) {
-        drawing.pointQuantum = reader.readF64LE();
+        const tgrvValue = reader.readF64LE();
+        addDiagnostic(drawing.diagnostics, {
+          severity: 'info',
+          code: 'TGRV_PRESENT',
+          tag,
+          offset: tagOffset,
+          length: rvLen,
+          context: 'main-data',
+          note: `main-data value=${tgrvValue}`,
+        });
         if (rvLen > 8) reader.skip(rvLen - 8);
       } else if (rvLen > 0 && rvLen <= reader.remaining) {
         reader.skip(rvLen);
+      } else {
+        addDiagnostic(drawing.diagnostics, {
+          severity: 'error',
+          code: 'TRUNCATED_CHUNK',
+          tag,
+          offset: tagOffset,
+          length: rvLen,
+          context: 'main-data',
+        });
       }
     } else if (tag === TAG_ENDT) {
       break;
@@ -718,11 +865,26 @@ function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
       reader.skip(len);
     } else {
       // Unknown tag in main data - try length-skip
+      addDiagnostic(drawing.diagnostics, {
+        severity: 'warn',
+        code: 'UNKNOWN_MAIN_DATA_TAG',
+        tag,
+        offset: tagOffset,
+        context: 'main-data',
+      });
       if (reader.remaining >= 4) {
         const len = reader.readU32LE();
         if (len > 0 && len <= reader.remaining) {
           reader.skip(len);
         } else {
+          addDiagnostic(drawing.diagnostics, {
+            severity: 'error',
+            code: 'TRUNCATED_CHUNK',
+            tag,
+            offset: tagOffset,
+            length: len,
+            context: 'main-data',
+          });
           break;
         }
       } else {
@@ -734,7 +896,7 @@ function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
 
 // ── Art Layer Parsing ──
 
-function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type']): TVGArtLayer {
+function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type'], diagnostics?: TVGDiagnostics): TVGArtLayer {
   const layer: TVGArtLayer = { type, shapes: [] };
 
   if (reader.remaining < 6) return layer;
@@ -748,8 +910,19 @@ function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type']): TVGArtL
   // Skip any extra preamble bytes (seen: 4 extra bytes before TGLY)
   // Look for TGLY tag
   for (let s = 0; s < shapeCount && reader.remaining > 8; s++) {
+    let nodePosition: number | null = null;
+    if (reader.remaining >= 8) {
+      const candidatePos = reader.pos;
+      const candidateNodePosition = reader.readU32LE();
+      if (reader.peekTag4() === TAG_TGLY) {
+        nodePosition = candidateNodePosition;
+        reader.skip(4); // consume TGLY after the node-position preamble
+      } else {
+        reader.pos = candidatePos;
+      }
+    }
     // Find next TGLY tag
-    if (!scanToTag(reader, TAG_TGLY)) break;
+    if (nodePosition === null && !scanToTag(reader, TAG_TGLY, diagnostics, 'art-layer')) break;
 
     const shapeLen = reader.readU32LE();
     if (shapeLen > reader.remaining) break;
@@ -758,19 +931,19 @@ function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type']): TVGArtL
     const shapeType = reader.readU16LE();
     const componentCount = reader.readU32LE();
 
-    const shape: TVGShape = { shapeType, components: [] };
+    const shape: TVGShape = { shapeType, components: [], nodePosition };
 
     let lastTGTBWidth: number | null = null;
     let lastTGTBProfile: TVGThicknessProfile | null = null;
     for (let c = 0; c < componentCount && reader.pos < shapeEnd; c++) {
       // Find next TGVS
-      if (!scanToTag(reader, TAG_TGVS)) break;
+      if (!scanToTag(reader, TAG_TGVS, diagnostics, 'component')) break;
 
       const vsLen = reader.readU32LE();
       if (vsLen > reader.remaining) break;
 
       const vsEnd = reader.pos + vsLen;
-      const comp = parseComponent(reader, vsEnd, lastTGTBWidth, lastTGTBProfile);
+      const comp = parseComponent(reader, vsEnd, diagnostics, lastTGTBWidth, lastTGTBProfile);
       if (comp) {
         shape.components.push(comp);
         // Track last tGTB width and profile for "reference to previous" inheritance
@@ -792,32 +965,69 @@ function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type']): TVGArtL
     reader.pos = shapeEnd; // Ensure we advance past the TGLY block
   }
 
-  // Type-5 path borrowing: type-5 shapes' N-1 pencil components
-  // borrow paths from the preceding type-1 shape's N fill components.
-  for (let si = 1; si < layer.shapes.length; si++) {
-    const shape = layer.shapes[si];
-    if (shape.shapeType !== 5) continue;
-    const prev = layer.shapes[si - 1];
-    if (prev.shapeType !== 1) continue;
-
-    const prevFills = prev.components.filter(c => c.componentType === 0 && c.path && c.path.segments.length > 0);
-    const pencils = shape.components.filter(c => c.componentType === 4 && (!c.path || c.path.segments.length === 0));
-
-    // Assign paths from fill components to pencil components
-    for (let pi = 0; pi < pencils.length && pi < prevFills.length; pi++) {
-      pencils[pi].path = prevFills[pi].path;
-    }
-  }
+  borrowMissingPencilPaths(layer);
 
   return layer;
 }
 
-function scanToTag(reader: BinaryReader, tag: string): boolean {
+function canBorrowMissingPencilPaths(prev: TVGShape, shape: TVGShape): boolean {
+  const prevFills = prev.components.filter(c => c.componentType === 0 && c.path && c.path.segments.length > 0);
+  const missingPencils = shape.components.filter(c => c.componentType === 4 && (!c.path || c.path.segments.length === 0));
+  if (prev.shapeType !== 1 || prevFills.length === 0 || missingPencils.length === 0) return false;
+
+  if (shape.shapeType === 5) {
+    return true;
+  }
+
+  return (shape.shapeType === 1 || shape.shapeType === 4)
+    && missingPencils.length === shape.components.length
+    && prevFills.length >= missingPencils.length;
+}
+
+function borrowMissingPencilPaths(layer: TVGArtLayer): void {
+  for (let si = 1; si < layer.shapes.length; si++) {
+    const shape = layer.shapes[si];
+    const prev = layer.shapes[si - 1];
+    if (!canBorrowMissingPencilPaths(prev, shape)) continue;
+
+    const prevFills = prev.components.filter(c => c.componentType === 0 && c.path && c.path.segments.length > 0);
+    const pencils = shape.components.filter(c => c.componentType === 4 && (!c.path || c.path.segments.length === 0));
+    for (let pi = 0; pi < pencils.length && pi < prevFills.length; pi++) {
+      const shouldUseHint = prevFills.length !== pencils.length;
+      const pathRefHint = pencils[pi].pathRefHint;
+      const hintedFill = shouldUseHint && pathRefHint !== null
+        ? prevFills[pathRefHint - 1] ?? null
+        : null;
+      pencils[pi].path = hintedFill?.path ?? prevFills[pi].path;
+    }
+  }
+}
+
+export function __borrowMissingPencilPathsForTests(layer: TVGArtLayer): void {
+  borrowMissingPencilPaths(layer);
+}
+
+function scanToTag(
+  reader: BinaryReader,
+  tag: string,
+  diagnostics?: TVGDiagnostics,
+  context: TVGDiagnosticEvent['context'] = 'component',
+): boolean {
   // Look for the tag within the next few bytes
   const startPos = reader.pos;
   const maxScan = Math.min(reader.remaining, 64);
   for (let i = 0; i < maxScan - 3; i++) {
     if (reader.peekTag4() === tag) {
+      if (i > 0 && diagnostics) {
+        addDiagnostic(diagnostics, {
+          severity: 'warn',
+          code: 'SCAN_FORWARD_RECOVERY',
+          tag,
+          offset: startPos,
+          length: i,
+          context,
+        });
+      }
       reader.skip(4); // consume the tag
       return true;
     }
@@ -829,13 +1039,20 @@ function scanToTag(reader: BinaryReader, tag: string): boolean {
 
 // ── Component Parsing ──
 
-function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: number | null, prevTGTBProfile?: TVGThicknessProfile | null): TVGComponent | null {
+function parseComponent(
+  reader: BinaryReader,
+  endPos: number,
+  diagnostics?: TVGDiagnostics,
+  prevTGTBWidth?: number | null,
+  prevTGTBProfile?: TVGThicknessProfile | null,
+): TVGComponent | null {
   const comp: TVGComponent = {
     componentType: -1,
     colorId: null,
     insideColorId: null,
     paletteIndex: null,
     color: null,
+    fillPaintSource: null,
     insideColor: null,
     transform: null,
     path: null,
@@ -853,29 +1070,104 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
     tgtiOpacityScaleY: null,
     tgtiOpacityOffset: null,
     tgtiHasTextureFlags: null,
+    pathRefHint: null,
+    outerPaint: null,
+    innerPaint: null,
   };
+  let pendingTGRVValue: number | null = null;
 
   while (reader.pos < endPos - 4) {
+    const tagOffset = reader.pos;
     const tag = reader.readTag4();
 
     if (tag === TAG_TGSD) {
       const sdLen = reader.readU32LE();
-      if (sdLen > reader.remaining) { reader.pos = endPos; return null; }
+      if (sdLen > reader.remaining) {
+        if (diagnostics) {
+          addDiagnostic(diagnostics, {
+            severity: 'error',
+            code: 'TRUNCATED_CHUNK',
+            tag,
+            offset: tagOffset,
+            length: sdLen,
+            context: 'component',
+          });
+        }
+        reader.pos = endPos; return null;
+      }
       const sdEnd = reader.pos + sdLen;
       parseTGSD(reader, comp, sdLen);
       reader.pos = sdEnd;
     } else if (tag === TAG_TGCO) {
       const coLen = reader.readU32LE();
-      if (coLen > reader.remaining) { reader.pos = endPos; return null; }
+      if (coLen > reader.remaining) {
+        if (diagnostics) {
+          addDiagnostic(diagnostics, {
+            severity: 'error',
+            code: 'TRUNCATED_CHUNK',
+            tag,
+            offset: tagOffset,
+            length: coLen,
+            context: 'component',
+          });
+        }
+        reader.pos = endPos; return null;
+      }
       const coEnd = reader.pos + coLen;
       parseTGCO(reader, comp, coLen);
       reader.pos = coEnd;
     } else if (tag === TAG_TGBP) {
       const bpLen = reader.readU32LE();
-      if (bpLen > reader.remaining) { reader.pos = endPos; return null; }
+      if (bpLen > reader.remaining) {
+        if (diagnostics) {
+          addDiagnostic(diagnostics, {
+            severity: 'error',
+            code: 'TRUNCATED_CHUNK',
+            tag,
+            offset: tagOffset,
+            length: bpLen,
+            context: 'component',
+          });
+        }
+        reader.pos = endPos; return null;
+      }
       const bpEnd = reader.pos + bpLen;
       comp.path = parseTGBP(reader, bpLen);
+      if (comp.path && pendingTGRVValue !== null) {
+        comp.path.tgrvValue = pendingTGRVValue;
+      }
       reader.pos = bpEnd;
+    } else if (tag === TAG_TGRV) {
+      const rvLen = reader.readU32LE();
+      if (rvLen >= 8 && rvLen <= reader.remaining) {
+        pendingTGRVValue = reader.readF64LE();
+        if (comp.path) {
+          comp.path.tgrvValue = pendingTGRVValue;
+        }
+        if (diagnostics) {
+          addDiagnostic(diagnostics, {
+            severity: 'info',
+            code: 'TGRV_PRESENT',
+            tag,
+            offset: tagOffset,
+            length: rvLen,
+            context: 'component',
+            note: `value=${pendingTGRVValue}`,
+          });
+        }
+        if (rvLen > 8) reader.skip(rvLen - 8);
+      } else if (rvLen > 0 && rvLen <= reader.remaining) {
+        reader.skip(rvLen);
+      } else if (diagnostics) {
+        addDiagnostic(diagnostics, {
+          severity: 'error',
+          code: 'TRUNCATED_CHUNK',
+          tag,
+          offset: tagOffset,
+          length: rvLen,
+          context: 'component',
+        });
+      }
     } else if (tag === 'tGTB') {
       // Pencil thickness: extract thickness profile and max width
       const len = reader.readU32LE();
@@ -933,15 +1225,32 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
         reader.skip(Math.min(len, reader.remaining));
       }
     } else {
-      // Check if it looks like a separator byte (0x00 or 0x01)
       reader.pos -= 4;
+      if (reader.pos + 8 <= endPos) {
+        const candidateRef = reader.readU32LE();
+        const nextTag = reader.peekTag4();
+        if (comp.componentType === 4 && nextTag === 'tGTB' && candidateRef > 0 && candidateRef <= 255) {
+          comp.pathRefHint = candidateRef;
+          continue;
+        }
+        reader.pos -= 4;
+      }
       if (reader.pos < endPos) {
         const b = reader.readU8();
         if (b !== 0x00 && b !== 0x01) {
           // Unknown data, try to continue
           reader.pos -= 1;
+          if (diagnostics) {
+            addDiagnostic(diagnostics, {
+              severity: 'warn',
+              code: 'UNKNOWN_COMPONENT_TAG',
+              tag,
+              offset: tagOffset,
+              context: 'component',
+            });
+          }
           // Scan forward to next known tag
-          if (!scanToNextKnownTag(reader, endPos)) {
+          if (!scanToNextKnownTag(reader, endPos, diagnostics)) {
             reader.pos = endPos;
             return comp;
           }
@@ -955,15 +1264,31 @@ function parseComponent(reader: BinaryReader, endPos: number, prevTGTBWidth?: nu
   if (comp.path && comp.thicknessProfile && comp.thicknessProfile.closed && !comp.path.closed) {
     comp.path.closed = true;
   }
+  if (comp.path && pendingTGRVValue !== null) {
+    comp.path.tgrvValue = pendingTGRVValue;
+  }
 
   return comp;
 }
 
-function scanToNextKnownTag(reader: BinaryReader, endPos: number): boolean {
+function scanToNextKnownTag(reader: BinaryReader, endPos: number, diagnostics?: TVGDiagnostics): boolean {
   const knownTags = [TAG_TGSD, TAG_TGCO, TAG_TGBP, TAG_TGRV, 'tGTB', 'tGTI'];
+  const startPos = reader.pos;
   while (reader.pos < endPos - 4) {
     const peek = reader.peekTag4();
-    if (knownTags.includes(peek)) return true;
+    if (knownTags.includes(peek)) {
+      if (reader.pos > startPos && diagnostics) {
+        addDiagnostic(diagnostics, {
+          severity: 'warn',
+          code: 'SCAN_FORWARD_RECOVERY',
+          tag: peek,
+          offset: startPos,
+          length: reader.pos - startPos,
+          context: 'component',
+        });
+      }
+      return true;
+    }
     reader.skip(1);
   }
   return false;
@@ -979,7 +1304,7 @@ function parseTGSD(reader: BinaryReader, comp: TVGComponent, len: number): void 
 
   comp.componentType = reader.readU8();
 
-  if (comp.componentType === 0) {
+  if (comp.componentType === 0 || comp.componentType === 1) {
     // Fill component: byte 1 is a flag for embedded color presence
     // 0x01 = has embedded TGCO sub-tag with color UID
     // 0x00 = no embedded color (needs external project palette / inheritance)
@@ -1003,9 +1328,11 @@ function parseTGSD(reader: BinaryReader, comp: TVGComponent, len: number): void 
         //    The structure is: 4 zero bytes + 0x01 flag + 2 unknown bytes + TGCO tag
         if (len >= 85) {
           // Scan for embedded TGCO in the hasColor=0 variant
-          scanAndParseTGCO(reader, comp, sdEnd);
-          // If TGCO didn't set colorId, try the 24-from-end heuristic
-          if (comp.colorId === null && len >= 26) {
+          const foundTGCO = scanAndParseTGCO(reader, comp, sdEnd);
+          // Only use the 24-from-end heuristic when a real TGCO block exists.
+          // On long hasColor=0 fills without TGCO, this fallback can misread a
+          // trailing payload and pin the component to the wrong explicit color.
+          if (foundTGCO && comp.colorId === null && len >= 26) {
             reader.pos = sdStart + len - 24;
             comp.colorId = reader.readU64LE();
           }
@@ -1023,7 +1350,15 @@ function parseTGSD(reader: BinaryReader, comp: TVGComponent, len: number): void 
     //   bytes[5-12]: colorId (u64)
     //   bytes[13-24]: 12 zero bytes (reserved/padding)
     if (reader.remaining >= 12) {
-      reader.skip(4); // f32 brush size
+      const brushSize = reader.readF32LE();
+      if (Number.isFinite(brushSize) && brushSize > 0) {
+        const shouldUseInlineBrushSize = comp.strokeWidth === null
+          || comp.strokeWidth <= 0.05
+          || (comp.tgtiThickness !== null && Math.abs(comp.strokeWidth - comp.tgtiThickness) < 1e-6);
+        if (shouldUseInlineBrushSize) {
+          comp.strokeWidth = brushSize;
+        }
+      }
       comp.colorId = reader.readU64LE();
       // Read remaining bytes (12 zero bytes for len=25) — currently unused but consumed
       const extraBytes = sdEnd - reader.pos;
@@ -1049,7 +1384,7 @@ function parseTGSD(reader: BinaryReader, comp: TVGComponent, len: number): void 
 }
 
 /** Scan within TGSD data for an embedded TGCO sub-tag and parse it. */
-function scanAndParseTGCO(reader: BinaryReader, comp: TVGComponent, endPos: number): void {
+function scanAndParseTGCO(reader: BinaryReader, comp: TVGComponent, endPos: number): boolean {
   const scanStart = reader.pos;
   while (reader.pos < endPos - 8) {
     if (reader.peekTag4() === TAG_TGCO) {
@@ -1059,12 +1394,13 @@ function scanAndParseTGCO(reader: BinaryReader, comp: TVGComponent, endPos: numb
       if (coEnd <= endPos) {
         parseTGCO(reader, comp, coLen);
         reader.pos = coEnd;
-        return;
+        return true;
       }
     }
     reader.skip(1);
   }
   reader.pos = scanStart;
+  return false;
 }
 
 // ── TGCO Parsing ──
@@ -1414,18 +1750,19 @@ function parseTGBP(reader: BinaryReader, len: number): TVGPath | null {
     // There are trailing bytes — the first one is likely the closed flag (0 or 1)
     const closedByte = reader.readU8();
     closed = closedByte !== 0;
-  } else {
-    // Fallback: infer closed from endpoint proximity
-    if (points.length >= 2) {
-      const first = points[0];
-      const last = points[points.length - 1];
-      const dx = Math.abs(first.x - last.x);
-      const dy = Math.abs(first.y - last.y);
-      closed = dx < 0.001 && dy < 0.001;
-    }
   }
 
-  return { segments, closed };
+  // Some paths return to their start point without setting the explicit closed bit.
+  // Treat those as closed so stroke rendering uses joins instead of open-end caps.
+  if (!closed && points.length >= 2) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    const dx = Math.abs(first.x - last.x);
+    const dy = Math.abs(first.y - last.y);
+    closed = dx < 0.001 && dy < 0.001;
+  }
+
+  return { segments, closed, tgrvValue: null, directionReversed: null };
 }
 
 // ── Palette Parsing ──
@@ -1532,6 +1869,38 @@ export interface ExternalPaletteColor {
   paletteName?: string; // source palette file name without .plt (e.g., "Anna")
   gradientType?: 'linear' | 'radial';
   stops?: { pos: number; r: number; g: number; b: number; a: number }[];
+}
+
+function buildPaint(
+  color: { r: number; g: number; b: number; a: number } | null,
+  gradientType?: 'linear' | 'radial',
+  gradientStops?: { pos: number; r: number; g: number; b: number; a: number }[],
+  transform?: TVGTransform | null,
+): TVGPaint | null {
+  if (!color) return null;
+  if (gradientType && gradientStops && gradientStops.length > 0) {
+    return {
+      kind: 'gradient',
+      gradientType,
+      stops: gradientStops,
+      transform: transform ?? null,
+      fallback: color,
+    };
+  }
+  return { kind: 'solid', rgba: color };
+}
+
+function updateComponentPaints(comp: TVGComponent): void {
+  comp.outerPaint = buildPaint(comp.color, comp.gradientType, comp.gradientStops, comp.transform);
+  comp.innerPaint = comp.insideColor ? { kind: 'solid', rgba: comp.insideColor } : null;
+}
+
+function hasExplicitFillStyle(comp: TVGComponent): boolean {
+  return (comp.componentType === 0 || comp.componentType === 1) && comp.fillPaintSource === 'explicit';
+}
+
+function canInheritFillColor(comp: TVGComponent): boolean {
+  return comp.componentType === 0;
 }
 
 /**
@@ -1664,6 +2033,9 @@ export function resolveExternalPalette(
   // Helper: apply color (and gradient info if present) from an external palette entry to a component
   const applyExtColor = (comp: TVGComponent, ext: ExternalPaletteColor) => {
     comp.color = { r: ext.r, g: ext.g, b: ext.b, a: ext.a };
+    if (comp.componentType === 0 || comp.componentType === 1) {
+      comp.fillPaintSource = 'explicit';
+    }
     if (ext.gradientType && ext.stops && ext.stops.length > 0) {
       comp.gradientType = ext.gradientType;
       comp.gradientStops = ext.stops;
@@ -1710,16 +2082,30 @@ export function resolveExternalPalette(
             }
           }
         }
+        if (comp.insideColorId !== null) {
+          const insideExt = extMap.get(comp.insideColorId);
+          if (insideExt) {
+            comp.insideColor = { r: insideExt.r, g: insideExt.g, b: insideExt.b, a: insideExt.a };
+          }
+        }
+        updateComponentPaints(comp);
       }
       // Re-apply fill inheritance after external palette resolution
-      const fills = shape.components.filter(c => c.componentType === 0);
+      const fillCarriers = shape.components.filter(c => c.componentType === 0 || c.componentType === 1);
       let lastColor: { r: number; g: number; b: number; a: number } | null = null;
-      for (const fill of fills) {
-        if (fill.color !== null) {
-          lastColor = fill.color;
-        } else if (lastColor !== null) {
-          fill.color = { ...lastColor };
+      let lastFillSource: TVGComponent['fillPaintSource'] = null;
+      for (const comp of fillCarriers) {
+        if (comp.color !== null) {
+          lastColor = comp.color;
+          lastFillSource = comp.fillPaintSource;
+        } else if (comp.componentType === 0 && lastColor !== null && canInheritFillColor(comp)) {
+          comp.color = { ...lastColor };
+          comp.fillPaintSource = lastFillSource === 'default' ? 'default' : 'inherited';
         }
+        updateComponentPaints(comp);
+      }
+      for (const comp of shape.components) {
+        updateComponentPaints(comp);
       }
     }
   }
@@ -1752,6 +2138,153 @@ export interface TVGRenderOptions {
   skipBackgroundComposite?: boolean;
 }
 
+function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type'][] {
+  const includeUnderlay = options?.includeUnderlay ?? true;
+  const artLayerFilter = options?.artLayerFilter;
+  if (artLayerFilter && artLayerFilter !== 'all') {
+    return [artLayerFilter];
+  }
+  return includeUnderlay
+    ? ['underlay', 'color', 'line', 'overlay']
+    : ['color', 'line', 'overlay'];
+}
+
+function shapeMayRenderVisibleContent(
+  shape: TVGShape,
+  layer: TVGArtLayer,
+  allLayers: TVGArtLayer[],
+  defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null,
+  defaultStrokeWidth: number,
+): boolean {
+  const fillComps = shape.components.filter(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && comp.path.segments.length > 1
+    && !isDegenerate(comp.path),
+  );
+  if (fillComps.some(comp =>
+    comp.outerPaint !== null
+    || comp.fillPaintSource !== null
+    || comp.paletteIndex !== null
+    || comp.colorId !== null,
+  )) {
+    return true;
+  }
+
+  const strokeComps = shape.components.filter(comp =>
+    (comp.componentType === 2 || comp.componentType === 4)
+    && comp.path
+    && comp.path.segments.length > 0,
+  );
+  if (strokeComps.some(comp =>
+    shouldRenderWidthlessBoundaryStroke(layer, shape, comp)
+    || (comp.outerPaint !== null && resolveStrokeProfile(comp, defaultStrokeWidth) !== null),
+  )) {
+    return true;
+  }
+
+  if (defaultBoundaryFillColor
+    && isBoundaryOnlyShape(shape)
+    && !hasSiblingRenderableFillShape(allLayers, layer, shape)) {
+    return true;
+  }
+
+  const hasOnlyPencils = strokeComps.length > 0 && strokeComps.every(comp => comp.componentType === 4);
+  const hasVisiblePencilPaint = strokeComps.some(comp =>
+    comp.componentType === 4
+    && comp.outerPaint?.kind === 'solid'
+    && comp.outerPaint.rgba.r >= 30
+    && comp.outerPaint.rgba.g >= 30
+    && comp.outerPaint.rgba.b >= 30,
+  );
+  return layer.type !== 'line' && hasOnlyPencils && hasVisiblePencilPaint;
+}
+
+function collectRenderablePoints(
+  drawing: TVGDrawing,
+  activeLayerTypes: TVGArtLayer['type'][],
+  defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null,
+  defaultStrokeWidth: number,
+): { x: number; y: number }[] {
+  const activeTypes = new Set(activeLayerTypes);
+  const allPoints: { x: number; y: number }[] = [];
+  for (const layer of drawing.layers) {
+    if (!activeTypes.has(layer.type)) continue;
+    for (const shape of layer.shapes) {
+      if (!shapeMayRenderVisibleContent(shape, layer, drawing.layers, defaultBoundaryFillColor, defaultStrokeWidth)) {
+        continue;
+      }
+      for (const comp of shape.components) {
+        if (!comp.path) continue;
+        for (const seg of comp.path.segments) {
+          allPoints.push({ x: seg.x, y: seg.y });
+          if (seg.type === 'Q') allPoints.push({ x: seg.cx, y: seg.cy });
+          else if (seg.type === 'C') {
+            allPoints.push({ x: seg.c1x, y: seg.c1y });
+            allPoints.push({ x: seg.c2x, y: seg.c2y });
+          }
+        }
+      }
+    }
+  }
+
+  if (allPoints.length > 0) {
+    return allPoints;
+  }
+
+  for (const layer of drawing.layers) {
+    if (!activeTypes.has(layer.type)) continue;
+    for (const shape of layer.shapes) {
+      for (const comp of shape.components) {
+        if (!comp.path) continue;
+        for (const seg of comp.path.segments) {
+          allPoints.push({ x: seg.x, y: seg.y });
+          if (seg.type === 'Q') allPoints.push({ x: seg.cx, y: seg.cy });
+          else if (seg.type === 'C') {
+            allPoints.push({ x: seg.c1x, y: seg.c1y });
+            allPoints.push({ x: seg.c2x, y: seg.c2y });
+          }
+        }
+      }
+    }
+  }
+  return allPoints;
+}
+
+function computeMaxStrokeWidth(drawing: TVGDrawing, fallbackWidth: number): number {
+  let maxStrokeW = 0;
+  for (const layer of drawing.layers) {
+    for (const shape of layer.shapes) {
+      for (const comp of shape.components) {
+        if (comp.componentType !== 2 && comp.componentType !== 4) continue;
+        if (comp.strokeWidth !== null && comp.strokeWidth > maxStrokeW) {
+          maxStrokeW = comp.strokeWidth;
+        }
+        if (comp.tgtiThickness !== null && comp.tgtiThickness > maxStrokeW) {
+          maxStrokeW = comp.tgtiThickness;
+        }
+        if (comp.thicknessProfile) {
+          for (const pt of comp.thicknessProfile.points) {
+            if (pt.leftOffset + pt.rightOffset > maxStrokeW) {
+              maxStrokeW = pt.leftOffset + pt.rightOffset;
+            }
+          }
+        }
+        if (comp.componentType === 4
+          && comp.strokeWidth === null
+          && comp.thicknessProfile === null
+          && comp.tgtiThickness === null) {
+          maxStrokeW = Math.max(maxStrokeW, fallbackWidth);
+        }
+        if (shouldRenderWidthlessBoundaryStroke(layer, shape, comp)) {
+          maxStrokeW = Math.max(maxStrokeW, fallbackWidth);
+        }
+      }
+    }
+  }
+  return maxStrokeW;
+}
+
 export function renderTVGToCanvas(
   drawing: TVGDrawing,
   width: number,
@@ -1774,7 +2307,7 @@ export function renderTVGToCanvas(
   if (!hasVectors) {
     // No vector data — try bitmap tiles
     if (drawing.bitmapTiles.length > 0) {
-      return renderBitmapTVGToCanvas(drawing.bitmapTiles, width, height, viewport);
+      return renderBitmapTVGToCanvas(drawing, width, height, viewport, options);
     }
     return null;
   }
@@ -1783,8 +2316,20 @@ export function renderTVGToCanvas(
   // Default 2× for quality unless explicitly set to 1 or skipClipping (fast mode).
   const defaultSS = options?.skipClipping ? 1 : 2;
   const SS = options?.supersample !== undefined ? (options.supersample > 1 ? options.supersample : 1) : defaultSS;
+  const defaultStrokeWidth = 1.0;
   const ssWidth = width * SS;
   const ssHeight = height * SS;
+  const layerTypes = getActiveArtLayerTypes(options);
+
+  let defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null = null;
+  for (const entry of drawing.palette) {
+    const nameLower = entry.name.toLowerCase();
+    if (!UTILITY_NAMES.has(nameLower) && entry.a > 0 &&
+        !(entry.r === 0 && entry.g === 0 && entry.b === 0)) {
+      defaultBoundaryFillColor = { r: entry.r, g: entry.g, b: entry.b, a: entry.a };
+      break;
+    }
+  }
 
   const canvas = document.createElement('canvas');
   canvas.width = ssWidth;
@@ -1804,47 +2349,23 @@ export function renderTVGToCanvas(
     // centered on content centroid for proper framing.
     // Auto-expand viewport if content exceeds it to prevent clipping.
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const layer of drawing.layers) {
-      for (const shape of layer.shapes) {
-        for (const comp of shape.components) {
-          if (comp.path) {
-            for (const seg of comp.path.segments) {
-              if (seg.x < minX) minX = seg.x;
-              if (seg.y < minY) minY = seg.y;
-              if (seg.x > maxX) maxX = seg.x;
-              if (seg.y > maxY) maxY = seg.y;
-            }
-          }
-        }
-      }
+    for (const point of collectRenderablePoints(drawing, layerTypes, defaultBoundaryFillColor, defaultStrokeWidth)) {
+      if (point.x < minX) minX = point.x;
+      if (point.y < minY) minY = point.y;
+      if (point.x > maxX) maxX = point.x;
+      if (point.y > maxY) maxY = point.y;
     }
     // Expand bounds by max stroke width to prevent thick strokes from clipping
-    let maxStrokeW = 0;
-    for (const layer of drawing.layers) {
-      for (const shape of layer.shapes) {
-        for (const comp of shape.components) {
-          if (comp.strokeWidth !== null && comp.strokeWidth > maxStrokeW) maxStrokeW = comp.strokeWidth;
-          if (comp.thicknessProfile) {
-            for (const pt of comp.thicknessProfile.points) {
-              if (pt.leftOffset + pt.rightOffset > maxStrokeW) maxStrokeW = pt.leftOffset + pt.rightOffset;
-            }
-          }
-        }
-      }
-    }
+    const maxStrokeW = computeMaxStrokeWidth(drawing, defaultStrokeWidth);
     const halfStroke = maxStrokeW / 2;
     minX -= halfStroke;
     minY -= halfStroke;
     maxX += halfStroke;
     maxY += halfStroke;
 
-    // Toon Boom thumbnail viewport formula (from empirical measurement):
-    // viewport = max(fieldChart * 28, contentExtent + 227)
-    // The +227 TVG units (~8.1 fields) provides margin around the content.
     const contentExtent = Math.max(maxX - minX, maxY - minY);
     const centerOnOrigin = options?.centerOnOrigin ?? false;
     if (centerOnOrigin) {
-      // Compositor mode: origin-centered, expand to fit all content
       const originExtent = 2 * Math.max(Math.abs(minX), Math.abs(maxX), Math.abs(minY), Math.abs(maxY));
       viewportSize = Math.max(viewport, contentExtent + 227, originExtent + 100);
     } else {
@@ -1862,20 +2383,7 @@ export function renderTVGToCanvas(
     ctx.setTransform(scale, 0, 0, -scale, offsetX, offsetY);
   } else {
     // Auto-fit to path bounds
-    const allPoints: { x: number; y: number }[] = [];
-    for (const layer of drawing.layers) {
-      for (const shape of layer.shapes) {
-        for (const comp of shape.components) {
-          if (comp.path) {
-            for (const seg of comp.path.segments) {
-              allPoints.push({ x: seg.x, y: seg.y });
-              if (seg.type === 'Q') allPoints.push({ x: seg.cx, y: seg.cy });
-              else if (seg.type === 'C') { allPoints.push({ x: seg.c1x, y: seg.c1y }); allPoints.push({ x: seg.c2x, y: seg.c2y }); }
-            }
-          }
-        }
-      }
-    }
+    const allPoints = collectRenderablePoints(drawing, layerTypes, defaultBoundaryFillColor, defaultStrokeWidth);
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const p of allPoints) {
       if (p.x < minX) minX = p.x;
@@ -1885,35 +2393,35 @@ export function renderTVGToCanvas(
     }
     const drawingWidth = maxX - minX;
     const drawingHeight = maxY - minY;
-    if (drawingWidth < 0.01 || drawingHeight < 0.01) return null;
-    viewportSize = Math.max(drawingWidth, drawingHeight);
+    if (drawingWidth < 0.01 && drawingHeight < 0.01) return null;
+    if (drawingWidth < 0.01 || drawingHeight < 0.01) {
+      const halfStroke = Math.max(computeMaxStrokeWidth(drawing, defaultStrokeWidth) / 2, 0.5);
+      if (drawingWidth < 0.01) {
+        minX -= halfStroke;
+        maxX += halfStroke;
+      }
+      if (drawingHeight < 0.01) {
+        minY -= halfStroke;
+        maxY += halfStroke;
+      }
+    }
+    const fittedWidth = maxX - minX;
+    const fittedHeight = maxY - minY;
+    viewportSize = Math.max(fittedWidth, fittedHeight);
 
     const padding = 4 * SS;
     const availW = ssWidth - padding * 2;
     const availH = ssHeight - padding * 2;
-    scale = Math.min(availW / drawingWidth, availH / drawingHeight);
-    offsetX = padding + (availW - drawingWidth * scale) / 2 - minX * scale;
-    offsetY = padding + (availH - drawingHeight * scale) / 2 + maxY * scale;
+    scale = Math.min(availW / fittedWidth, availH / fittedHeight);
+    offsetX = padding + (availW - fittedWidth * scale) / 2 - minX * scale;
+    offsetY = padding + (availH - fittedHeight * scale) / 2 + maxY * scale;
     ctx.setTransform(scale, 0, 0, -scale, offsetX, offsetY);
   }
-
-  // Default stroke width: 1 TVG unit ≈ 1 pixel at standard viewport/canvas ratio
-  const defaultStrokeWidth = 1.0;
 
   // Art layer order. Research confirmed Toon Boom thumbnails render ALL layers
   // including underlay (which contains Mask-colored fills visible in thumbnails).
   // The includeUnderlay option defaults to true for thumbnail matching.
   // Set to false for compositor mode where underlay is used as CUTTER clip mask.
-  const includeUnderlay = options?.includeUnderlay ?? true;
-  const artLayerFilter = options?.artLayerFilter;
-  let layerTypes: TVGArtLayer['type'][];
-  if (artLayerFilter && artLayerFilter !== 'all') {
-    layerTypes = [artLayerFilter];
-  } else {
-    layerTypes = includeUnderlay
-      ? ['underlay', 'color', 'line', 'overlay']
-      : ['color', 'line', 'overlay'];
-  }
   const fillOrder = layerTypes;
   const strokeOrder = layerTypes;
 
@@ -1928,307 +2436,16 @@ export function renderTVGToCanvas(
   const fillCtx = fillCanvas.getContext('2d')!;
   fillCtx.setTransform(ctx.getTransform());
 
-  // Check if the drawing has ANY fill components (for pencil-fill decision)
-  let drawingHasFills = false;
-  for (const layer of drawing.layers) {
-    for (const shape of layer.shapes) {
-      if (shape.components.some(c => c.componentType === 0 && c.path && c.path.segments.length > 1)) {
-        drawingHasFills = true; break;
-      }
-    }
-    if (drawingHasFills) break;
-  }
-
-  // Compute the primary non-Line fill color from the palette for boundary-stroke fills.
-  // Shapes with only ct=2 boundary strokes need the element's fill color (not Line/black).
-  const utilityNamesSet = new Set([
-    'line', 'mask', 'invis', 'handles', 'invisible', 'shadow',
-    'controller', 'eye_lid_ctrl', 'null', 'transparent',
-  ]);
-  let defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null = null;
-  for (const entry of drawing.palette) {
-    const nameLower = entry.name.toLowerCase();
-    if (!utilityNamesSet.has(nameLower) && entry.a > 0 &&
-        !(entry.r === 0 && entry.g === 0 && entry.b === 0)) {
-      defaultBoundaryFillColor = { r: entry.r, g: entry.g, b: entry.b, a: entry.a };
-      break;
-    }
-  }
-
-  // Pass 1: Render all fills to offscreen canvas (all layers in order).
-  // Per Harmony's contour topology (HARMONY_RENDERING_INTERNALS.md), overlay fills
-  // are children of the main outline. Flood-fill clipping in Pass 2 clips all fills
-  // (including overlay) to the stroke boundaries.
   for (const layerType of fillOrder) {
     for (const layer of drawing.layers) {
       if (layer.type !== layerType) continue;
-      renderLayerPass(fillCtx, layer, defaultStrokeWidth, 'fill', drawingHasFills, defaultBoundaryFillColor);
+      renderLayerPass(fillCtx, layer, defaultStrokeWidth, 'fill', {
+        defaultBoundaryFillColor,
+        skipClipping: options?.skipClipping ?? false,
+        diagnostics: drawing.diagnostics,
+        allLayers: drawing.layers,
+      });
     }
-  }
-
-  // Skip flood-fill clipping if requested (fast mode for grid thumbnails)
-  const skipClipping = options?.skipClipping ?? false;
-
-  // Check if drawing has stroke components for clipping.
-  // Flood-fill clipping uses stroke boundaries to clip fills.
-  // Traditional boundary strokes (ct=2 without explicit strokeWidth) form sealed regions.
-  // Uniform-width pencil strokes (ct=4) also form reliable boundaries when they have
-  // consistent width, allowing flood-fill clipping for pencil-only drawings.
-  let hasStrokes = false;
-  let hasBoundaryStrokes = false;
-  let hasUniformPencilStrokes = false;
-  for (const layer of drawing.layers) {
-    for (const shape of layer.shapes) {
-      for (const comp of shape.components) {
-        if ((comp.componentType === 2 || comp.componentType === 4) && comp.path && comp.path.segments.length > 0) {
-          hasStrokes = true;
-        }
-        if (comp.componentType === 2 && comp.strokeWidth === null && comp.path && comp.path.segments.length > 0) {
-          hasBoundaryStrokes = true;
-        }
-        // Uniform-width pencil strokes form sealed walls suitable for flood-fill
-        if (comp.componentType === 4 && comp.thicknessProfile && comp.path && comp.path.segments.length > 0) {
-          const uw = getUniformProfileWidth(comp.thicknessProfile);
-          if (uw !== null && uw >= 1.0) hasUniformPencilStrokes = true;
-        }
-      }
-    }
-  }
-  const canClip = hasBoundaryStrokes || hasUniformPencilStrokes;
-
-  if (hasStrokes && canClip && !skipClipping) {
-    // Pass 2: Dilated flood-fill to clip fills to stroke boundaries
-    // Uses 2x resolution mask (Approach C) for better sub-pixel gap closure,
-    // with adaptive dilation radius (Approach A) based on stroke density.
-
-    // Compute stroke density for adaptive dilation (Approach A)
-    let totalStrokeLength = 0;
-    for (const layer of drawing.layers) {
-      for (const shape of layer.shapes) {
-        for (const comp of shape.components) {
-          if ((comp.componentType === 2 || comp.componentType === 4) && comp.path && comp.path.segments.length > 0) {
-            const segs = comp.path.segments;
-            for (let i = 1; i < segs.length; i++) {
-              const prev = segs[i - 1];
-              const seg = segs[i];
-              if (seg.type === 'L' || seg.type === 'M') {
-                const dx = seg.x - prev.x;
-                const dy = seg.y - prev.y;
-                totalStrokeLength += Math.sqrt(dx * dx + dy * dy);
-              } else if (seg.type === 'Q') {
-                // Approximate quadratic bezier length
-                const dx1 = seg.cx - prev.x, dy1 = seg.cy - prev.y;
-                const dx2 = seg.x - seg.cx, dy2 = seg.y - seg.cy;
-                totalStrokeLength += Math.sqrt(dx1 * dx1 + dy1 * dy1) + Math.sqrt(dx2 * dx2 + dy2 * dy2);
-              } else if (seg.type === 'C') {
-                const dx1 = seg.c1x - prev.x, dy1 = seg.c1y - prev.y;
-                const dx2 = seg.c2x - seg.c1x, dy2 = seg.c2y - seg.c1y;
-                const dx3 = seg.x - seg.c2x, dy3 = seg.y - seg.c2y;
-                totalStrokeLength += Math.sqrt(dx1 * dx1 + dy1 * dy1) + Math.sqrt(dx2 * dx2 + dy2 * dy2) + Math.sqrt(dx3 * dx3 + dy3 * dy3);
-              }
-            }
-          }
-        }
-      }
-    }
-
-    const canvasArea = ssWidth * ssHeight;
-    const strokeDensity = canvasArea > 0 ? totalStrokeLength / canvasArea : 0;
-
-    // Very sparse strokes: skip clipping entirely (Approach A)
-    if (strokeDensity >= 0.01) {
-      // Adaptive dilation radius in mask space (Approach A):
-      // Dense strokes (>0.1): radius 9 in 3x (= 3px in 1x)
-      // Normal strokes: radius 6 in 3x (= 2px in 1x)
-      const DR2x = strokeDensity > 0.1 ? 9 : 6;
-
-      // Hi-res mask for flood-fill clipping.
-      // Without supersampling: use 3x resolution for better sub-pixel gap closure.
-      // With supersampling: the SS resolution already provides enough detail, so use
-      // SS resolution directly (avoid 3x*SS which would be excessive memory).
-      const maskScale = SS > 1 ? 1 : 3;
-      const mw = ssWidth * maskScale;
-      const mh = ssHeight * maskScale;
-      const maskCanvas = document.createElement('canvas');
-      maskCanvas.width = mw;
-      maskCanvas.height = mh;
-      const maskCtx = maskCanvas.getContext('2d')!;
-
-      // Scale the transform for the mask resolution
-      const baseTransform = ctx.getTransform();
-      maskCtx.setTransform(
-        baseTransform.a * maskScale, baseTransform.b * maskScale,
-        baseTransform.c * maskScale, baseTransform.d * maskScale,
-        baseTransform.e * maskScale, baseTransform.f * maskScale,
-      );
-
-      for (const layerType of strokeOrder) {
-        for (const layer of drawing.layers) {
-          if (layer.type !== layerType) continue;
-          renderStrokeMask(maskCtx, layer, defaultStrokeWidth);
-        }
-      }
-
-      // Build wall map from 2x stroke mask
-      const maskData = maskCtx.getImageData(0, 0, mw, mh);
-      const isWall = new Uint8Array(mw * mh);
-      for (let i = 0; i < mw * mh; i++) {
-        if (maskData.data[i * 4 + 3] > 30) isWall[i] = 1;
-      }
-
-      // Morphological close (dilate then erode) to close sub-pixel gaps
-      // while preserving original wall thickness. Dilate-only permanently
-      // thickens walls, causing fills to overflow past stroke boundaries.
-      const dilated = new Uint8Array(mw * mh);
-      const DR2xSq = DR2x * DR2x;
-      for (let y = 0; y < mh; y++) {
-        for (let x = 0; x < mw; x++) {
-          const idx = y * mw + x;
-          if (isWall[idx]) { dilated[idx] = 1; continue; }
-          let found = false;
-          for (let dy = -DR2x; dy <= DR2x && !found; dy++) {
-            const ny = y + dy;
-            if (ny < 0 || ny >= mh) continue;
-            for (let dx = -DR2x; dx <= DR2x && !found; dx++) {
-              if (dx * dx + dy * dy > DR2xSq) continue;
-              const nx = x + dx;
-              if (nx >= 0 && nx < mw && isWall[ny * mw + nx]) found = true;
-            }
-          }
-          if (found) dilated[idx] = 1;
-        }
-      }
-
-      // Erode by (R-1) to restore original wall thickness while keeping gaps closed.
-      // The net effect is a morphological close that seals sub-pixel gaps without
-      // permanently thickening the walls.
-      const erodeR = DR2x - 1;
-      const closed = new Uint8Array(mw * mh);
-      if (erodeR > 0) {
-        const erodeRSq = erodeR * erodeR;
-        for (let y = 0; y < mh; y++) {
-          for (let x = 0; x < mw; x++) {
-            const idx = y * mw + x;
-            if (!dilated[idx]) continue;
-            // A dilated pixel survives erosion only if all pixels within erodeR are also dilated
-            let allDilated = true;
-            for (let dy = -erodeR; dy <= erodeR && allDilated; dy++) {
-              const ny = y + dy;
-              if (ny < 0 || ny >= mh) { allDilated = false; continue; }
-              for (let dx = -erodeR; dx <= erodeR && allDilated; dx++) {
-                if (dx * dx + dy * dy > erodeRSq) continue;
-                const nx = x + dx;
-                if (nx < 0 || nx >= mw || !dilated[ny * mw + nx]) allDilated = false;
-              }
-            }
-            if (allDilated) closed[idx] = 1;
-          }
-        }
-      } else {
-        closed.set(dilated);
-      }
-
-      // BFS flood-fill from edges of mask to find "outside" region
-      // Uses morphologically closed wall map to prevent fill overflow
-      const outside2x = new Uint8Array(mw * mh);
-      const queue: number[] = [];
-      for (let x = 0; x < mw; x++) {
-        if (!closed[x]) { outside2x[x] = 1; queue.push(x); }
-        const b = (mh - 1) * mw + x;
-        if (!closed[b]) { outside2x[b] = 1; queue.push(b); }
-      }
-      for (let y = 1; y < mh - 1; y++) {
-        if (!closed[y * mw]) { outside2x[y * mw] = 1; queue.push(y * mw); }
-        const r = y * mw + mw - 1;
-        if (!closed[r]) { outside2x[r] = 1; queue.push(r); }
-      }
-      let head = 0;
-      while (head < queue.length) {
-        const idx = queue[head++];
-        const x = idx % mw, y = (idx / mw) | 0;
-        if (x > 0 && !outside2x[idx - 1] && !closed[idx - 1]) { outside2x[idx - 1] = 1; queue.push(idx - 1); }
-        if (x < mw - 1 && !outside2x[idx + 1] && !closed[idx + 1]) { outside2x[idx + 1] = 1; queue.push(idx + 1); }
-        if (y > 0 && !outside2x[idx - mw] && !closed[idx - mw]) { outside2x[idx - mw] = 1; queue.push(idx - mw); }
-        if (y < mh - 1 && !outside2x[idx + mw] && !closed[idx + mw]) { outside2x[idx + mw] = 1; queue.push(idx + mw); }
-      }
-
-      // Downsample outside map from mask resolution to SS resolution with
-      // coverage-based edge smoothing. Instead of binary in/out, compute the
-      // fraction of sub-pixels that are outside for partial alpha at edges.
-      // outsideCoverage: 255 = fully outside, 0 = fully inside, partial = edge
-      const outsideCoverage = new Uint8Array(ssWidth * ssHeight);
-      if (maskScale === 1) {
-        for (let i = 0; i < ssWidth * ssHeight; i++) {
-          outsideCoverage[i] = outside2x[i] ? 255 : 0;
-        }
-      } else {
-        const totalSubPixels = maskScale * maskScale;
-        for (let y = 0; y < ssHeight; y++) {
-          for (let x = 0; x < ssWidth; x++) {
-            const x2 = x * maskScale, y2 = y * maskScale;
-            let outsideCount = 0;
-            for (let dy = 0; dy < maskScale; dy++) {
-              for (let dx = 0; dx < maskScale; dx++) {
-                if (outside2x[(y2 + dy) * mw + (x2 + dx)]) outsideCount++;
-              }
-            }
-            outsideCoverage[y * ssWidth + x] = (outsideCount * 255 / totalSubPixels) | 0;
-          }
-        }
-      }
-
-      // Erase outside pixels from fill canvas, with leak detection fallback.
-      // If clipping removes >50% of fill pixels, the mask leaked — skip clipping.
-      const fillData = fillCtx.getImageData(0, 0, ssWidth, ssHeight);
-      let fillPixels = 0, erasedPixels = 0;
-      for (let i = 0; i < ssWidth * ssHeight; i++) {
-        if (fillData.data[i * 4 + 3] > 0) fillPixels++;
-        if (outsideCoverage[i] > 0 && fillData.data[i * 4 + 3] > 0) erasedPixels += outsideCoverage[i] / 255;
-      }
-      // For pencil-only drawings (no boundary strokes), overlay fills often extend
-      // beyond the main outline — allow more aggressive clipping (60% vs 50%).
-      const leakThreshold = hasBoundaryStrokes ? 0.5 : 0.6;
-      if (fillPixels > 0 && erasedPixels / fillPixels < leakThreshold) {
-        // Safe to clip — apply coverage-based alpha for smooth edges.
-        // Only apply partial alpha when outside coverage is substantial (>30%),
-        // to avoid darkening interior pixels near stroke boundaries where
-        // only 1-2 sub-pixels overlap the stroke wall.
-        const partialThreshold = Math.floor(255 * 0.3);
-        for (let i = 0; i < ssWidth * ssHeight; i++) {
-          if (outsideCoverage[i] >= 255) {
-            fillData.data[i * 4 + 3] = 0;
-          } else if (outsideCoverage[i] > partialThreshold) {
-            // Substantial outside coverage: apply anti-aliased edge
-            const insideFraction = (255 - outsideCoverage[i]) / 255;
-            fillData.data[i * 4 + 3] = (fillData.data[i * 4 + 3] * insideFraction) | 0;
-          }
-          // else: low outside coverage (<30%) — keep pixel fully opaque
-        }
-        fillCtx.putImageData(fillData, 0, 0);
-      } else if (fillPixels > 0) {
-        // Global flood-fill leaked. For high-shape-count drawings (complex character faces),
-        // try per-shape flood-fill: each fill shape is clipped individually within its
-        // bounding box region, where nearby strokes are more likely to form sealed boundaries.
-        let totalFillShapes = 0;
-        for (const layer of drawing.layers) {
-          for (const shape of layer.shapes) {
-            if (shape.components.some(c => c.componentType === 0 && c.path && c.path.segments.length > 1)) {
-              totalFillShapes++;
-            }
-          }
-        }
-
-        if (totalFillShapes > 5) {
-          perShapeFloodFillClip(
-            fillCtx, drawing, fillOrder, strokeOrder,
-            defaultStrokeWidth, drawingHasFills, defaultBoundaryFillColor,
-            ssWidth, ssHeight, ctx.getTransform(), maskScale, DR2x,
-          );
-        }
-        // else: too few shapes for per-shape approach, keep fills unclipped
-      }
-    }
-    // else: strokeDensity < 0.01, very sparse strokes — skip clipping entirely
   }
 
   // Composite clipped fills onto main canvas
@@ -2273,305 +2490,7 @@ export function renderTVGToCanvas(
   return canvas;
 }
 
-/**
- * Per-shape flood-fill clipping strategy for high-shape-count drawings.
- *
- * When the global flood-fill leaks (>50% of fill erased), this function
- * clips each fill shape individually within its bounding box. In a bounded
- * sub-region, nearby strokes are much more likely to form sealed boundaries
- * around the fills they enclose.
- *
- * Algorithm:
- * 1. Clear the fill canvas (global fills leaked, start fresh)
- * 2. For each shape with fill components, compute its pixel-space bounding box
- * 3. Create a small canvas for that bbox region
- * 4. Render the shape's fills + ALL strokes (from all layers) into that canvas
- * 5. Run dilated flood-fill clipping within that small canvas
- * 6. Composite the clipped result back to the main fill canvas
- */
-function perShapeFloodFillClip(
-  fillCtx: CanvasRenderingContext2D,
-  drawing: TVGDrawing,
-  fillOrder: TVGArtLayer['type'][],
-  strokeOrder: TVGArtLayer['type'][],
-  defaultStrokeWidth: number,
-  drawingHasFills: boolean,
-  defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null,
-  ssWidth: number,
-  ssHeight: number,
-  baseTransform: DOMMatrix,
-  maskScale: number,
-  DR2x: number,
-): void {
-  // Clear the fill canvas — we'll re-render fills per-shape with clipping
-  fillCtx.save();
-  fillCtx.setTransform(1, 0, 0, 1, 0, 0);
-  fillCtx.clearRect(0, 0, ssWidth, ssHeight);
-  fillCtx.restore();
-
-  // Collect all stroke components from all visible layers for the stroke mask
-  const allStrokeComps: TVGComponent[] = [];
-  for (const layerType of strokeOrder) {
-    for (const layer of drawing.layers) {
-      if (layer.type !== layerType) continue;
-      for (const shape of layer.shapes) {
-        for (const comp of shape.components) {
-          if ((comp.componentType === 2 || comp.componentType === 4) && comp.path && comp.path.segments.length > 0) {
-            allStrokeComps.push(comp);
-          }
-        }
-      }
-    }
-  }
-
-  // Compute pixel-space bounding box for a set of path segments
-  const computePixelBBox = (comps: TVGComponent[]): { x1: number; y1: number; x2: number; y2: number } | null => {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const comp of comps) {
-      if (!comp.path) continue;
-      for (const seg of comp.path.segments) {
-        // Transform TVG coords to pixel coords using the base transform
-        // baseTransform maps (tvgX, tvgY) -> (pixX, pixY) with Y-flip
-        const px = baseTransform.a * seg.x + baseTransform.c * seg.y + baseTransform.e;
-        const py = baseTransform.b * seg.x + baseTransform.d * seg.y + baseTransform.f;
-        if (px < minX) minX = px;
-        if (py < minY) minY = py;
-        if (px > maxX) maxX = px;
-        if (py > maxY) maxY = py;
-        // Also check control points for curves
-        if (seg.type === 'Q') {
-          const cx = baseTransform.a * seg.cx + baseTransform.c * seg.cy + baseTransform.e;
-          const cy = baseTransform.b * seg.cx + baseTransform.d * seg.cy + baseTransform.f;
-          if (cx < minX) minX = cx; if (cy < minY) minY = cy;
-          if (cx > maxX) maxX = cx; if (cy > maxY) maxY = cy;
-        } else if (seg.type === 'C') {
-          for (const [cpx, cpy] of [[seg.c1x, seg.c1y], [seg.c2x, seg.c2y]]) {
-            const cx = baseTransform.a * cpx + baseTransform.c * cpy + baseTransform.e;
-            const cy = baseTransform.b * cpx + baseTransform.d * cpy + baseTransform.f;
-            if (cx < minX) minX = cx; if (cy < minY) minY = cy;
-            if (cx > maxX) maxX = cx; if (cy > maxY) maxY = cy;
-          }
-        }
-      }
-    }
-    if (!isFinite(minX)) return null;
-    return { x1: minX, y1: minY, x2: maxX, y2: maxY };
-  };
-
-  // Process each fill shape individually
-  for (const layerType of fillOrder) {
-    for (const layer of drawing.layers) {
-      if (layer.type !== layerType) continue;
-
-      for (const shape of layer.shapes) {
-        const fillComps = shape.components.filter(c =>
-          c.componentType === 0 && c.path && c.path.segments.length > 1 && !isDegenerate(c.path)
-          && (!c.color || c.color.a > 128)
-        );
-        if (fillComps.length === 0) continue;
-
-        // Compute bounding box for this shape's fill components
-        const bbox = computePixelBBox(fillComps);
-        if (!bbox) continue;
-
-        // Add margin (in pixel space) for strokes and dilation
-        const margin = Math.max(20, DR2x * 2);
-        const bx1 = Math.max(0, Math.floor(bbox.x1 - margin));
-        const by1 = Math.max(0, Math.floor(bbox.y1 - margin));
-        const bx2 = Math.min(ssWidth, Math.ceil(bbox.x2 + margin));
-        const by2 = Math.min(ssHeight, Math.ceil(bbox.y2 + margin));
-        const bw = bx2 - bx1;
-        const bh = by2 - by1;
-        if (bw < 2 || bh < 2) continue;
-
-        // Create a small fill canvas for this shape's region
-        const shapeFillCanvas = document.createElement('canvas');
-        shapeFillCanvas.width = bw;
-        shapeFillCanvas.height = bh;
-        const shapeFillCtx = shapeFillCanvas.getContext('2d')!;
-        // Offset the transform so that pixel (bx1, by1) maps to (0, 0)
-        shapeFillCtx.setTransform(
-          baseTransform.a, baseTransform.b,
-          baseTransform.c, baseTransform.d,
-          baseTransform.e - bx1, baseTransform.f - by1,
-        );
-
-        // Render this shape's fills
-        const singleShapeLayer: TVGArtLayer = { type: layer.type, shapes: [shape] };
-        renderLayerPass(shapeFillCtx, singleShapeLayer, defaultStrokeWidth, 'fill', drawingHasFills, defaultBoundaryFillColor);
-
-        // Check if there are any fill pixels to clip
-        const shapeFillData = shapeFillCtx.getImageData(0, 0, bw, bh);
-        let shapeFillPixels = 0;
-        for (let i = 0; i < bw * bh; i++) {
-          if (shapeFillData.data[i * 4 + 3] > 0) shapeFillPixels++;
-        }
-        if (shapeFillPixels === 0) continue;
-
-        // Create stroke mask at mask resolution for this bbox region
-        const mw = bw * maskScale;
-        const mh = bh * maskScale;
-        // Cap mask size to avoid excessive memory for very large shapes
-        if (mw * mh > 4_000_000) {
-          // Too large for per-shape mask — just composite unclipped fills
-          fillCtx.save();
-          fillCtx.setTransform(1, 0, 0, 1, 0, 0);
-          fillCtx.drawImage(shapeFillCanvas, bx1, by1);
-          fillCtx.restore();
-          continue;
-        }
-
-        const shapeMaskCanvas = document.createElement('canvas');
-        shapeMaskCanvas.width = mw;
-        shapeMaskCanvas.height = mh;
-        const shapeMaskCtx = shapeMaskCanvas.getContext('2d')!;
-        shapeMaskCtx.setTransform(
-          baseTransform.a * maskScale, baseTransform.b * maskScale,
-          baseTransform.c * maskScale, baseTransform.d * maskScale,
-          (baseTransform.e - bx1) * maskScale, (baseTransform.f - by1) * maskScale,
-        );
-
-        // Render ALL strokes (from all layers) into the mask
-        for (const sLayerType of strokeOrder) {
-          for (const sLayer of drawing.layers) {
-            if (sLayer.type !== sLayerType) continue;
-            renderStrokeMask(shapeMaskCtx, sLayer, defaultStrokeWidth);
-          }
-        }
-
-        // Build wall map and morphological close (dilate + erode)
-        const maskData = shapeMaskCtx.getImageData(0, 0, mw, mh);
-        const isWall = new Uint8Array(mw * mh);
-        for (let i = 0; i < mw * mh; i++) {
-          if (maskData.data[i * 4 + 3] > 30) isWall[i] = 1;
-        }
-
-        const dilated = new Uint8Array(mw * mh);
-        const DR2xSq = DR2x * DR2x;
-        for (let y = 0; y < mh; y++) {
-          for (let x = 0; x < mw; x++) {
-            const idx = y * mw + x;
-            if (isWall[idx]) { dilated[idx] = 1; continue; }
-            let found = false;
-            for (let dy = -DR2x; dy <= DR2x && !found; dy++) {
-              const ny = y + dy;
-              if (ny < 0 || ny >= mh) continue;
-              for (let dx = -DR2x; dx <= DR2x && !found; dx++) {
-                if (dx * dx + dy * dy > DR2xSq) continue;
-                const nx = x + dx;
-                if (nx >= 0 && nx < mw && isWall[ny * mw + nx]) found = true;
-              }
-            }
-            if (found) dilated[idx] = 1;
-          }
-        }
-
-        // Erode by (R-1) to restore original wall thickness
-        const erodeR = DR2x - 1;
-        const closed = new Uint8Array(mw * mh);
-        if (erodeR > 0) {
-          const erodeRSq = erodeR * erodeR;
-          for (let y = 0; y < mh; y++) {
-            for (let x = 0; x < mw; x++) {
-              const idx = y * mw + x;
-              if (!dilated[idx]) continue;
-              let allDilated = true;
-              for (let dy = -erodeR; dy <= erodeR && allDilated; dy++) {
-                const ny = y + dy;
-                if (ny < 0 || ny >= mh) { allDilated = false; continue; }
-                for (let dx = -erodeR; dx <= erodeR && allDilated; dx++) {
-                  if (dx * dx + dy * dy > erodeRSq) continue;
-                  const nx = x + dx;
-                  if (nx < 0 || nx >= mw || !dilated[ny * mw + nx]) allDilated = false;
-                }
-              }
-              if (allDilated) closed[idx] = 1;
-            }
-          }
-        } else {
-          closed.set(dilated);
-        }
-
-        // BFS flood-fill from edges to find outside region
-        const outside2x = new Uint8Array(mw * mh);
-        const queue: number[] = [];
-        for (let x = 0; x < mw; x++) {
-          if (!closed[x]) { outside2x[x] = 1; queue.push(x); }
-          const b = (mh - 1) * mw + x;
-          if (!closed[b]) { outside2x[b] = 1; queue.push(b); }
-        }
-        for (let y = 1; y < mh - 1; y++) {
-          if (!closed[y * mw]) { outside2x[y * mw] = 1; queue.push(y * mw); }
-          const r = y * mw + mw - 1;
-          if (!closed[r]) { outside2x[r] = 1; queue.push(r); }
-        }
-        let head = 0;
-        while (head < queue.length) {
-          const idx = queue[head++];
-          const x = idx % mw, y = (idx / mw) | 0;
-          if (x > 0 && !outside2x[idx - 1] && !closed[idx - 1]) { outside2x[idx - 1] = 1; queue.push(idx - 1); }
-          if (x < mw - 1 && !outside2x[idx + 1] && !closed[idx + 1]) { outside2x[idx + 1] = 1; queue.push(idx + 1); }
-          if (y > 0 && !outside2x[idx - mw] && !closed[idx - mw]) { outside2x[idx - mw] = 1; queue.push(idx - mw); }
-          if (y < mh - 1 && !outside2x[idx + mw] && !closed[idx + mw]) { outside2x[idx + mw] = 1; queue.push(idx + mw); }
-        }
-
-        // Downsample outside map to shape-fill resolution
-        const outsideShape = new Uint8Array(bw * bh);
-        if (maskScale === 1) {
-          outsideShape.set(outside2x);
-        } else {
-          for (let y = 0; y < bh; y++) {
-            for (let x = 0; x < bw; x++) {
-              const x2 = x * maskScale, y2 = y * maskScale;
-              let allOutside = true;
-              for (let dy = 0; dy < maskScale && allOutside; dy++) {
-                for (let dx = 0; dx < maskScale && allOutside; dx++) {
-                  if (!outside2x[(y2 + dy) * mw + (x2 + dx)]) allOutside = false;
-                }
-              }
-              if (allOutside) outsideShape[y * bw + x] = 1;
-            }
-          }
-        }
-
-        // Clip: erase outside pixels, with per-shape leak detection
-        let shapeErased = 0;
-        for (let i = 0; i < bw * bh; i++) {
-          if (outsideShape[i] && shapeFillData.data[i * 4 + 3] > 0) shapeErased++;
-        }
-
-        if (shapeFillPixels > 0 && shapeErased / shapeFillPixels < 0.7) {
-          // Per-shape clipping succeeded — apply it
-          for (let i = 0; i < bw * bh; i++) {
-            if (outsideShape[i]) shapeFillData.data[i * 4 + 3] = 0;
-          }
-          shapeFillCtx.putImageData(shapeFillData, 0, 0);
-        }
-        // else: even per-shape leaked, keep this shape's fills unclipped
-
-        // Composite clipped shape fills back to main fill canvas
-        fillCtx.save();
-        fillCtx.setTransform(1, 0, 0, 1, 0, 0);
-        fillCtx.drawImage(shapeFillCanvas, bx1, by1);
-        fillCtx.restore();
-      }
-    }
-  }
-}
-
-function renderBitmapTVGToCanvas(
-  tiles: TVGBitmapTile[],
-  width: number,
-  height: number,
-  _viewport?: number,
-): HTMLCanvasElement | null {
-  if (tiles.length === 0) return null;
-
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-
-  // Compute overall bounds from tile clip rects
+function computeBitmapBounds(tiles: TVGBitmapTile[]): TVGBitmapBounds | null {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const tile of tiles) {
     if (tile.clipW > 0 && tile.clipH > 0) {
@@ -2581,21 +2500,46 @@ function renderBitmapTVGToCanvas(
       maxY = Math.max(maxY, tile.clipY + tile.clipH);
     }
   }
+  if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) {
+    return null;
+  }
+  return { minX, minY, maxX, maxY };
+}
 
+function renderBitmapTVGToCanvas(
+  drawing: TVGDrawing,
+  width: number,
+  height: number,
+  viewport?: number,
+  options?: TVGRenderOptions,
+): HTMLCanvasElement | null {
+  const tiles = drawing.bitmapTiles;
+  if (tiles.length === 0) return null;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const bounds = computeBitmapBounds(tiles) ?? { minX: 0, minY: 0, maxX: 0, maxY: 0 };
 
   // Return canvas — actual bitmap rendering happens asynchronously
   // Mark the canvas with bitmap data for async loading
   (canvas as any).__bitmapTiles = tiles;
-  (canvas as any).__bitmapBounds = { minX, minY, maxX, maxY };
+  (canvas as any).__bitmapState = {
+    bounds,
+    viewport,
+    centerOnOrigin: options?.centerOnOrigin ?? false,
+    diagnostics: drawing.diagnostics,
+  } as TVGBitmapRenderState;
   return canvas;
 }
 
 /** Load bitmap tiles asynchronously onto a canvas */
-export async function loadBitmapTiles(canvas: HTMLCanvasElement): Promise<boolean> {
+export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: TVGDiagnostics): Promise<boolean> {
   const tiles = (canvas as any).__bitmapTiles as TVGBitmapTile[] | undefined;
   if (!tiles || tiles.length === 0) return false;
-
-  const bounds = (canvas as any).__bitmapBounds as { minX: number; minY: number; maxX: number; maxY: number };
+  const state = (canvas as any).__bitmapState as TVGBitmapRenderState | undefined;
+  const bounds = state?.bounds ?? { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  const renderDiagnostics = diagnostics ?? state?.diagnostics;
   const ctx = canvas.getContext('2d')!;
   const width = canvas.width;
   const height = canvas.height;
@@ -2614,334 +2558,2471 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement): Promise<boolea
     });
   };
 
+  const remapBitmapTile = (img: HTMLImageElement): HTMLCanvasElement => {
+    const tileCanvas = document.createElement('canvas');
+    tileCanvas.width = img.width;
+    tileCanvas.height = img.height;
+    const tileCtx = tileCanvas.getContext('2d')!;
+    tileCtx.drawImage(img, 0, 0);
+    const src = tileCtx.getImageData(0, 0, img.width, img.height);
+    const dst = tileCtx.createImageData(img.width, img.height);
+    for (let i = 0; i < src.data.length; i += 4) {
+      const r = src.data[i + 0];
+      const g = src.data[i + 1];
+      const b = src.data[i + 2];
+      const a = src.data[i + 3];
+      dst.data[i + 0] = g;
+      dst.data[i + 1] = r;
+      dst.data[i + 2] = a;
+      dst.data[i + 3] = b;
+    }
+    tileCtx.putImageData(dst, 0, 0);
+    return tileCanvas;
+  };
+
   const images = await Promise.all(tiles.map(async (tile) => {
     try {
       const img = await loadImage(tile.pngData);
-      return { tile, img };
+      return { tile, img: remapBitmapTile(img) };
     } catch {
+      if (renderDiagnostics) {
+        addDiagnostic(renderDiagnostics, {
+          severity: 'warn',
+          code: 'BITMAP_TILE_DECODE_FAILED',
+          offset: 0,
+          context: 'bitmap',
+        });
+      }
       return null;
     }
   }));
 
-  const loaded = images.filter((x): x is { tile: TVGBitmapTile; img: HTMLImageElement } => x !== null);
+  const loaded = images.filter((x): x is { tile: TVGBitmapTile; img: HTMLCanvasElement } => x !== null);
   if (loaded.length === 0) return false;
 
-  // Compute bounds from actual image sizes if clip rects are all zero
-  let useClipRects = isFinite(bounds.minX) && (bounds.maxX - bounds.minX) > 0;
+  const hasClipRects = isFinite(bounds.minX) && isFinite(bounds.minY) && (bounds.maxX - bounds.minX) > 0 && (bounds.maxY - bounds.minY) > 0;
+  const largest = loaded.reduce((a, b) => a.img.width * a.img.height > b.img.width * b.img.height ? a : b);
+  const nativeBounds = hasClipRects
+    ? bounds
+    : { minX: 0, minY: 0, maxX: largest.img.width, maxY: largest.img.height };
 
-  // Detect if tiles need channel swap. Harmony bitmap TVGs sometimes store
-  // pixels as GRBA (byte-swapped 16-bit pairs) instead of standard RGBA.
-  // We try both interpretations and pick the one with more fully-opaque pixels
-  // AND fewer "zombie" pixels (visible color but zero alpha).
-  let needsChannelSwap = false;
-  {
-    let opaqueNormal = 0, opaqueSwapped = 0;
-    let zombieNormal = 0, zombieSwapped = 0;
-    let totalVisible = 0;
-    for (const { img } of loaded) {
-      const tc = document.createElement('canvas');
-      tc.width = img.width; tc.height = img.height;
-      const tctx = tc.getContext('2d')!;
-      tctx.drawImage(img, 0, 0);
-      const d = tctx.getImageData(0, 0, img.width, img.height).data;
-      for (let i = 0; i < d.length; i += 16) {
-        const r = d[i], g = d[i+1], b = d[i+2], a = d[i+3];
-        if (r === 0 && g === 0 && b === 0 && a === 0) continue;
-        totalVisible++;
-        // Normal RGBA interpretation
-        if (a === 255) opaqueNormal++;
-        if (a === 0 && (r > 10 || g > 10 || b > 10)) zombieNormal++;
-        // Swapped interpretation: real alpha = byte 2 (B position)
-        if (b === 255) opaqueSwapped++;
-        if (b === 0 && (r > 10 || g > 10 || a > 10)) zombieSwapped++;
-      }
-      if (totalVisible > 2000) break;
-    }
-    if (totalVisible > 50) {
-      // Score each interpretation: more opaque + fewer zombie = better
-      const scoreNormal = opaqueNormal - zombieNormal * 10;
-      const scoreSwapped = opaqueSwapped - zombieSwapped * 10;
-      needsChannelSwap = scoreSwapped > scoreNormal;
-    }
+  if (!hasClipRects && renderDiagnostics) {
+    addDiagnostic(renderDiagnostics, {
+      severity: 'warn',
+      code: 'BITMAP_NO_CLIP_RECTS',
+      offset: 0,
+      context: 'bitmap',
+    });
   }
 
-  // Helper: draw a tile image, optionally fixing channel order
-  const drawTile = (tileImg: HTMLImageElement, dx: number, dy: number, dw: number, dh: number) => {
-    if (!needsChannelSwap) {
-      ctx.drawImage(tileImg, dx, dy, dw, dh);
-      return;
-    }
-    // Fix GRBA → RGBA: decode at native resolution, swap channels, then draw scaled
-    const tc = document.createElement('canvas');
-    tc.width = tileImg.width;
-    tc.height = tileImg.height;
-    const tctx = tc.getContext('2d')!;
-    tctx.drawImage(tileImg, 0, 0);
-    const imgData = tctx.getImageData(0, 0, tc.width, tc.height);
-    const d = imgData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      // Stored as [G, R, A, B] in RGBA positions → swap to [R, G, B, A]
-      const g = d[i], r = d[i+1], a = d[i+2], b = d[i+3];
-      d[i] = r; d[i+1] = g; d[i+2] = b; d[i+3] = a;
-    }
-    tctx.putImageData(imgData, 0, 0);
-    ctx.drawImage(tc, 0, 0, tc.width, tc.height, dx, dy, dw, dh);
-  };
+  const nativeW = Math.max(1, Math.round(nativeBounds.maxX - nativeBounds.minX));
+  const nativeH = Math.max(1, Math.round(nativeBounds.maxY - nativeBounds.minY));
+  const nativeCanvas = document.createElement('canvas');
+  nativeCanvas.width = nativeW;
+  nativeCanvas.height = nativeH;
+  const nativeCtx = nativeCanvas.getContext('2d')!;
 
-  if (useClipRects) {
-    // Composite tiles at native resolution on an intermediate canvas first,
-    // then scale once to output. This prevents sub-pixel gaps between tiles
-    // caused by per-tile floating-point coordinate rounding.
-    const nativeW = Math.round(bounds.maxX - bounds.minX);
-    const nativeH = Math.round(bounds.maxY - bounds.minY);
-    const nativeCanvas = document.createElement('canvas');
-    nativeCanvas.width = nativeW;
-    nativeCanvas.height = nativeH;
-    const nativeCtx = nativeCanvas.getContext('2d')!;
-
+  if (hasClipRects) {
     for (const { tile, img } of loaded) {
-      const dx = tile.clipX - bounds.minX;
-      const dy = tile.clipY - bounds.minY;
-      if (!needsChannelSwap) {
-        nativeCtx.drawImage(img, dx, dy, tile.clipW, tile.clipH);
-      } else {
-        // Channel swap at native resolution
-        const tc = document.createElement('canvas');
-        tc.width = img.width; tc.height = img.height;
-        const tctx = tc.getContext('2d')!;
-        tctx.drawImage(img, 0, 0);
-        const imgData = tctx.getImageData(0, 0, tc.width, tc.height);
-        const d = imgData.data;
-        for (let i = 0; i < d.length; i += 4) {
-          const g = d[i], r = d[i+1], a = d[i+2], b = d[i+3];
-          d[i] = r; d[i+1] = g; d[i+2] = b; d[i+3] = a;
-        }
-        tctx.putImageData(imgData, 0, 0);
-        nativeCtx.drawImage(tc, 0, 0, tc.width, tc.height, dx, dy, tile.clipW, tile.clipH);
-      }
+      nativeCtx.drawImage(
+        img,
+        Math.round(tile.clipX - nativeBounds.minX),
+        Math.round(tile.clipY - nativeBounds.minY),
+        Math.round(tile.clipW),
+        Math.round(tile.clipH),
+      );
     }
-
-    // Scale the composited result to output size
-    const scale = Math.min(width / nativeW, height / nativeH);
-    const dw = nativeW * scale;
-    const dh = nativeH * scale;
-    ctx.drawImage(nativeCanvas, (width - dw) / 2, (height - dh) / 2, dw, dh);
   } else {
-    // No clip rect info — draw the largest tile centered
-    const largest = loaded.reduce((a, b) => a.img.width * a.img.height > b.img.width * b.img.height ? a : b);
-    const scale = Math.min(width / largest.img.width, height / largest.img.height);
-    const dw = largest.img.width * scale;
-    const dh = largest.img.height * scale;
-    drawTile(largest.img, (width - dw) / 2, (height - dh) / 2, dw, dh);
+    nativeCtx.drawImage(largest.img, 0, 0);
   }
+
+  const contentExtent = Math.max(nativeBounds.maxX - nativeBounds.minX, nativeBounds.maxY - nativeBounds.minY);
+  const centerOnOrigin = state?.centerOnOrigin ?? false;
+  const originExtent = 2 * Math.max(
+    Math.abs(nativeBounds.minX),
+    Math.abs(nativeBounds.maxX),
+    Math.abs(nativeBounds.minY),
+    Math.abs(nativeBounds.maxY),
+  );
+  let scale: number;
+  let dx: number;
+  let dy: number;
+  if (state?.viewport && state.viewport > 0 && centerOnOrigin) {
+    const viewportSize = centerOnOrigin
+      ? Math.max(state.viewport, contentExtent, originExtent)
+      : Math.max(state.viewport, contentExtent);
+    const centerX = centerOnOrigin ? 0 : (nativeBounds.minX + nativeBounds.maxX) / 2;
+    const centerY = centerOnOrigin ? 0 : (nativeBounds.minY + nativeBounds.maxY) / 2;
+    scale = Math.min(width, height) / Math.max(viewportSize, 1);
+    dx = width / 2 - (centerX - nativeBounds.minX) * scale;
+    dy = height / 2 - (nativeBounds.maxY - centerY) * scale;
+  } else {
+    const padding = 4;
+    const availW = width - padding * 2;
+    const availH = height - padding * 2;
+    scale = Math.min(availW / nativeW, availH / nativeH);
+    dx = padding + (availW - nativeW * scale) / 2;
+    dy = padding + (availH - nativeH * scale) / 2;
+  }
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.drawImage(nativeCanvas, dx, dy, nativeW * scale, nativeH * scale);
 
   // Clean up
   delete (canvas as any).__bitmapTiles;
-  delete (canvas as any).__bitmapBounds;
+  delete (canvas as any).__bitmapState;
   return true;
 }
 
+type FillStyleKey = string;
+type ContourSource = 'explicit-fill' | 'boundary-stroke' | 'thin-pencil';
 
-function renderLayerPass(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, defaultStrokeWidth: number, pass: 'fill' | 'stroke', _drawingHasFills = false, defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null = null): void {
-  for (const shape of layer.shapes) {
-    // Separate fill components from stroke/pencil components
-    const fillComps = shape.components.filter(c => c.componentType === 0 && c.path && c.path.segments.length > 1 && !isDegenerate(c.path)
-      && (!c.color || c.color.a > 128)); // Skip low-alpha fills (controller/handle colors)
-    const strokeComps = shape.components.filter(c => (c.componentType === 4 || c.componentType === 2) && c.path && c.path.segments.length > 0);
+interface TVGContourFragment {
+  source: ContourSource;
+  layerType: TVGArtLayer['type'];
+  shapeIndex: number;
+  componentIndex: number;
+  styleKey: FillStyleKey | null;
+  style: TVGComponent | null;
+  segments: TVGSegment[];
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  bbox: { minX: number; minY: number; maxX: number; maxY: number };
+  reversible: true;
+  supportOnly: boolean;
+}
 
-    // Fill rendering: group fill components by color, then chain each group
-    // into closed regions. Colorless fills AND invisible stroke boundaries
-    // (ct=2 without strokeWidth) are shared across groups as boundary segments.
-    if (pass === 'fill' && fillComps.length > 0) {
-      const TOL = 2.0;
+interface TVGResolvedContour {
+  source: ContourSource;
+  layerType: TVGArtLayer['type'];
+  shapeIndex: number;
+  styleKey: FillStyleKey;
+  style: TVGComponent | null;
+  fragments: Array<{ fragmentIndex: number; reversed: boolean }>;
+  fragmentCount: number;
+  styledFragmentCount: number;
+  supportFragmentCount: number;
+  path: Path2D;
+  bbox: { minX: number; minY: number; maxX: number; maxY: number };
+  samplePoint: { x: number; y: number } | null;
+  sourceOrder: number;
+  synthesized: boolean;
+  flattened: { x: number; y: number }[];
+}
 
-      // Include invisible stroke boundaries as additional fill boundary components.
-      // In Toon Boom, invisible strokes (ct=2, no width) define fill region edges.
-      // Adding them to the fill chain helps close open regions.
-      const boundaryStrokes = strokeComps.filter(c =>
-        c.componentType === 2 && c.strokeWidth === null && c.path && c.path.segments.length > 1
-      );
-      // Create a combined component array: fills + boundary strokes
-      const allChainComps = [...fillComps, ...boundaryStrokes];
+interface TVGContourNode {
+  contourIndex: number;
+  parent: number | null;
+  children: number[];
+  depth: number;
+}
 
-      // Separate colored fills from colorless boundary fills
-      const colorKey = (c: { r: number; g: number; b: number; a: number }) => `${c.r},${c.g},${c.b},${c.a}`;
-      const colorGroups = new Map<string, number[]>(); // colorKey -> fill indices in allChainComps
-      const boundaryIndices: number[] = []; // colorless fills + boundary strokes
+interface TVGFillBuildResult {
+  contours: TVGResolvedContour[];
+  unresolvedChains: TVGResolvedContour[];
+}
 
-      for (let i = 0; i < allChainComps.length; i++) {
-        const comp = allChainComps[i];
-        if (comp.color && comp.componentType === 0) {
-          const key = colorKey(comp.color);
-          if (!colorGroups.has(key)) colorGroups.set(key, []);
-          colorGroups.get(key)!.push(i);
-        } else {
-          boundaryIndices.push(i);
-        }
-      }
+interface TVGFillRenderOptions {
+  defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null;
+  skipClipping: boolean;
+  diagnostics?: TVGDiagnostics;
+  allLayers?: TVGArtLayer[];
+}
 
-      // If only one color (or no colors), use original single-chain approach
-      // For multi-color shapes, chain each color group + shared boundaries
-      const colorKeys = Array.from(colorGroups.keys());
-      if (colorKeys.length <= 1) {
-        // Single color: chain all components (fills + boundary strokes)
-        chainAndFillComponents(ctx, allChainComps, allChainComps.map((_, i) => i), TOL);
-      } else {
-        // Multi-color: chain each color group separately, including shared boundaries
-        for (const key of colorKeys) {
-          const groupIndices = [...colorGroups.get(key)!, ...boundaryIndices];
-          chainAndFillComponents(ctx, allChainComps, groupIndices, TOL);
-        }
-      }
+interface LocalFillPaintSource {
+  kind: 'path' | 'bbox';
+  path?: Path2D;
+  paint: TVGPaint;
+  fillRule?: CanvasFillRule;
+}
+
+const UTILITY_NAMES = new Set([
+  'line', 'mask', 'invis', 'handles', 'invisible', 'shadow',
+  'controller', 'eye_lid_ctrl', 'null', 'transparent',
+]);
+const CHAIN_TOL = 2.0;
+const AUTO_CLOSE_TOL = 2.0;
+
+function serializeTransform(transform: TVGTransform | null | undefined): string {
+  if (!transform) return 'none';
+  return [
+    transform.a,
+    transform.b,
+    transform.c,
+    transform.d,
+    transform.tx,
+    transform.ty,
+  ].map(x => x.toFixed(6)).join(',');
+}
+
+function paintKeyForComponent(comp: TVGComponent): FillStyleKey | null {
+  if (!comp.outerPaint) return null;
+  if (comp.outerPaint.kind === 'solid') {
+    const { r, g, b, a } = comp.outerPaint.rgba;
+    return `solid:${r},${g},${b},${a}`;
+  }
+  return `gradient:${comp.outerPaint.gradientType}:${serializeTransform(comp.outerPaint.transform)}:${JSON.stringify(comp.outerPaint.stops)}`;
+}
+
+function cloneSolidPaint(color: { r: number; g: number; b: number; a: number }): TVGPaint {
+  return { kind: 'solid', rgba: { ...color } };
+}
+
+function isNearlyBlackSolidPaint(paint: TVGPaint | null, threshold = 12): boolean {
+  return !!paint
+    && paint.kind === 'solid'
+    && paint.rgba.a > 0
+    && paint.rgba.r <= threshold
+    && paint.rgba.g <= threshold
+    && paint.rgba.b <= threshold;
+}
+
+function createSyntheticStyleComponent(paint: TVGPaint): TVGComponent {
+  const color = paint.kind === 'solid' ? paint.rgba : paint.fallback;
+  return {
+    componentType: 0,
+    colorId: null,
+    insideColorId: null,
+    paletteIndex: null,
+    color: { ...color },
+    fillPaintSource: 'synthetic',
+    insideColor: null,
+    transform: paint.kind === 'gradient' ? paint.transform : null,
+    path: null,
+    strokeWidth: null,
+    thicknessProfile: null,
+    joinType: 'round',
+    fromTipType: 'round',
+    toTipType: 'round',
+    gradientType: paint.kind === 'gradient' ? paint.gradientType : undefined,
+    gradientStops: paint.kind === 'gradient' ? paint.stops : undefined,
+    tgtiThickness: null,
+    tgtiTextureScaleX: null,
+    tgtiTextureScaleY: null,
+    tgtiTextureOffset: null,
+    tgtiOpacityThickness: null,
+    tgtiOpacityScaleX: null,
+    tgtiOpacityScaleY: null,
+    tgtiOpacityOffset: null,
+    tgtiHasTextureFlags: null,
+    pathRefHint: null,
+    outerPaint: paint,
+    innerPaint: null,
+  };
+}
+
+function splitPathIntoSubpaths(path: TVGPath): TVGSegment[][] {
+  const subpaths: TVGSegment[][] = [];
+  let current: TVGSegment[] = [];
+  for (const seg of path.segments) {
+    if (seg.type === 'M' && current.length > 0) {
+      subpaths.push(current);
+      current = [seg];
+    } else {
+      current.push(seg);
     }
+  }
+  if (current.length > 0) subpaths.push(current);
+  return subpaths;
+}
 
-    // Pencil-fill: shapes with shapeType 1 or 5, no fill components, and only
-    // pencil strokes should render as filled regions. ShapeType 1/5 are fill-associated
-    // types, while 4/6 are outline types.
-    // The per-shape fillComps check is sufficient — other shapes having fills
-    // (e.g., underlay mask fills) should not prevent pencil-fill in this shape.
-    // However, pencil strokes with "Line" color (typically black/dark) are outlines,
-    // not fill boundaries — skip pencil-fill for those to avoid covering up real fills
-    // from the color layer.
-    if (pass === 'fill' && fillComps.length === 0
-        && (shape.shapeType === 1 || shape.shapeType === 5)) {
-      const pencilComps = strokeComps.filter(c => c.componentType === 4 && c.path && c.path.segments.length > 1 && c.color);
-      // Skip pencil-fill when all pencil components have a dark/line color (r,g,b all < 30).
-      // Dark-colored pencils are outline strokes, not fill-defining boundaries.
-      const allDark = pencilComps.length > 0 && pencilComps.every(c => {
-        const col = c.color!;
-        return col.r < 30 && col.g < 30 && col.b < 30;
-      });
-      if (pencilComps.length > 0 && !allDark) {
-        // Chain pencil paths into one connected path using lineTo for
-        // subsequent components (not moveTo which creates separate sub-paths)
-        const path = new Path2D();
-        let isFirst = true;
-        for (const comp of pencilComps) {
-          for (let si = 0; si < comp.path!.segments.length; si++) {
-            const seg = comp.path!.segments[si];
-            if (si === 0) {
-              if (isFirst) { path.moveTo(seg.x, seg.y); isFirst = false; }
-              else path.lineTo(seg.x, seg.y); // connect to previous
-            }
-            else if (seg.type === 'L') path.lineTo(seg.x, seg.y);
-            else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y);
-            else if (seg.type === 'C') path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
-          }
-        }
-        path.closePath(); // Auto-close for non-closing pencil paths
-        const color = pencilComps[0].color!;
-        ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${color.a / 255})`;
-        ctx.fill(path, 'evenodd');
-      }
+function segmentBounds(segments: TVGSegment[]): { minX: number; minY: number; maxX: number; maxY: number } {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const seg of segments) {
+    minX = Math.min(minX, seg.x);
+    minY = Math.min(minY, seg.y);
+    maxX = Math.max(maxX, seg.x);
+    maxY = Math.max(maxY, seg.y);
+    if (seg.type === 'Q') {
+      minX = Math.min(minX, seg.cx);
+      minY = Math.min(minY, seg.cy);
+      maxX = Math.max(maxX, seg.cx);
+      maxY = Math.max(maxY, seg.cy);
+    } else if (seg.type === 'C') {
+      minX = Math.min(minX, seg.c1x, seg.c2x);
+      minY = Math.min(minY, seg.c1y, seg.c2y);
+      maxX = Math.max(maxX, seg.c1x, seg.c2x);
+      maxY = Math.max(maxY, seg.c1y, seg.c2y);
     }
+  }
+  return { minX, minY, maxX, maxY };
+}
 
-    // Thin pencil strokes as fill boundaries: In Harmony, pencil strokes with
-    // very thin width (sw < 0.1) serve as fill boundaries. When they form closed
-    // shapes, render them as filled regions regardless of shapeType or drawingHasFills.
-    if (pass === 'fill') {
-      const thinPencilComps = strokeComps.filter(c => {
-        if (c.componentType !== 4 || !c.path || c.path.segments.length <= 2 || !c.color) return false;
-        const sw = c.strokeWidth !== null ? c.strokeWidth : defaultStrokeWidth;
-        if (sw >= 0.1) return false;
-        const segs = c.path.segments;
-        const first = segs[0];
-        const last = segs[segs.length - 1];
-        const closeTol = 2.0;
-        return c.path.closed || (Math.abs(first.x - last.x) < closeTol && Math.abs(first.y - last.y) < closeTol);
-      });
-      for (const comp of thinPencilComps) {
-        const path = buildPath2D(comp.path!);
-        path.closePath();
-        const color = comp.color!;
-        ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${color.a / 255})`;
-        ctx.fill(path);
-      }
-    }
-
-    // Boundary-stroke fill: shapes with ONLY ct=2 boundary strokes (no fills, no pencils)
-    // that chain into a closed region should render as filled shapes.
-    // Example: Number_Body-2 has 9 boundary strokes forming the digit "2".
-    // Per-shape check: no fills in this shape (other shapes' fills are irrelevant).
-    if (pass === 'fill' && fillComps.length === 0) {
-      const boundaryOnly = strokeComps.filter(c => c.componentType === 2 && c.path && c.path.segments.length > 1);
-      const pencilsInShape = strokeComps.filter(c => c.componentType === 4);
-      if (boundaryOnly.length >= 2 && pencilsInShape.length === 0) {
-        // Use the primary non-Line palette color for boundary-stroke fills.
-        // Boundary strokes get "Line" color (typically black) during color resolution,
-        // but when used as fill regions they should use the element's actual fill color.
-        const boundaryColor = defaultBoundaryFillColor;
-        if (boundaryColor) {
-          const path = new Path2D();
-          let isFirstB = true;
-          for (const comp of boundaryOnly) {
-            for (let si = 0; si < comp.path!.segments.length; si++) {
-              const seg = comp.path!.segments[si];
-              if (si === 0) {
-                if (isFirstB) { path.moveTo(seg.x, seg.y); isFirstB = false; }
-                else path.lineTo(seg.x, seg.y);
-              } else if (seg.type === 'M') path.moveTo(seg.x, seg.y);
-              else if (seg.type === 'L') path.lineTo(seg.x, seg.y);
-              else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y);
-              else if (seg.type === 'C') path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
-            }
-          }
-          path.closePath();
-          ctx.fillStyle = `rgba(${boundaryColor.r},${boundaryColor.g},${boundaryColor.b},${boundaryColor.a / 255})`;
-          ctx.fill(path, 'evenodd');
-        }
-      }
-    }
-
-
-    // Render stroke/pencil components individually
-    if (pass === 'stroke') {
-      for (const comp of strokeComps) {
-        const color = comp.color;
-        const fillStyle = color
-          ? `rgba(${color.r},${color.g},${color.b},${color.a / 255})`
-          : '#000';
-
-        // Use explicit thickness if available; pencil strokes (ct=4) fall back to
-        // proportional default; brush strokes (ct=2) without explicit width are invisible
-        // boundary strokes used by Toon Boom for fill region definition.
-        let sw: number;
-        if (comp.strokeWidth !== null) {
-          sw = comp.strokeWidth;
-        } else if (comp.componentType === 4) {
-          sw = defaultStrokeWidth;
-        } else {
-          continue; // ct=2 brush strokes without explicit width are invisible boundaries
-        }
-        // Thin pencil strokes (sw < 0.1) are rendered as fill boundaries in the
-        // fill pass. Skip them here in the stroke pass to avoid double-rendering.
-        if (sw < 0.1) continue;
-
-        // Variable-width stroke: render as filled outline using thickness profile
-        if (comp.thicknessProfile && comp.thicknessProfile.points.length >= 2 && comp.path) {
-          // Optimization: uniform thickness profiles can use native ctx.stroke()
-          const uniformWidth = getUniformProfileWidth(comp.thicknessProfile);
-          if (uniformWidth !== null && uniformWidth >= 0.1) {
-            const path = buildPath2D(comp.path);
-            ctx.strokeStyle = fillStyle;
-            ctx.lineWidth = uniformWidth;
-            ctx.lineCap = comp.fromTipType;
-            ctx.lineJoin = comp.joinType;
-            ctx.stroke(path);
-          } else {
-            renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, fillStyle, comp.fromTipType, comp.toTipType);
-          }
-        } else {
-          const path = buildPath2D(comp.path!);
-          ctx.strokeStyle = fillStyle;
-          ctx.lineWidth = sw;
-          ctx.lineCap = comp.fromTipType;
-          ctx.lineJoin = comp.joinType;
-          ctx.stroke(path);
-        }
+function computeShapeBounds(shape: TVGShape): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const comp of shape.components) {
+    if (!comp.path) continue;
+    for (const seg of comp.path.segments) {
+      minX = Math.min(minX, seg.x);
+      minY = Math.min(minY, seg.y);
+      maxX = Math.max(maxX, seg.x);
+      maxY = Math.max(maxY, seg.y);
+      if (seg.type === 'Q') {
+        minX = Math.min(minX, seg.cx);
+        minY = Math.min(minY, seg.cy);
+        maxX = Math.max(maxX, seg.cx);
+        maxY = Math.max(maxY, seg.cy);
+      } else if (seg.type === 'C') {
+        minX = Math.min(minX, seg.c1x, seg.c2x);
+        minY = Math.min(minY, seg.c1y, seg.c2y);
+        maxX = Math.max(maxX, seg.c1x, seg.c2x);
+        maxY = Math.max(maxY, seg.c1y, seg.c2y);
       }
     }
   }
+  return isFinite(minX) ? { minX, minY, maxX, maxY } : null;
+}
+
+function segmentCoordinateEqual(a: number, b: number, epsilon = 0.01): boolean {
+  return Math.abs(a - b) <= epsilon;
+}
+
+function segmentsGeometricallyEqual(a: TVGSegment, b: TVGSegment, epsilon = 0.01): boolean {
+  if (a.type !== b.type) return false;
+  if (!segmentCoordinateEqual(a.x, b.x, epsilon) || !segmentCoordinateEqual(a.y, b.y, epsilon)) return false;
+  if (a.type === 'Q' && b.type === 'Q') {
+    return segmentCoordinateEqual(a.cx, b.cx, epsilon)
+      && segmentCoordinateEqual(a.cy, b.cy, epsilon);
+  }
+  if (a.type === 'C' && b.type === 'C') {
+    return segmentCoordinateEqual(a.c1x, b.c1x, epsilon)
+      && segmentCoordinateEqual(a.c1y, b.c1y, epsilon)
+      && segmentCoordinateEqual(a.c2x, b.c2x, epsilon)
+      && segmentCoordinateEqual(a.c2y, b.c2y, epsilon);
+  }
+  return true;
+}
+
+function pathsGeometricallyEqual(a: TVGPath | null, b: TVGPath | null, epsilon = 0.01): boolean {
+  if (!a || !b) return false;
+  if (a.closed !== b.closed) return false;
+  if (a.segments.length !== b.segments.length) return false;
+  for (let i = 0; i < a.segments.length; i++) {
+    if (!segmentsGeometricallyEqual(a.segments[i], b.segments[i], epsilon)) return false;
+  }
+  return true;
+}
+
+function boundaryShapeSignature(shape: TVGShape): string {
+  return shape.components.map((comp) => {
+    if (!comp.path) return 'nop';
+    return comp.path.segments.map((seg) => {
+      if (seg.type === 'Q') {
+        return `${seg.type}:${seg.x.toFixed(3)},${seg.y.toFixed(3)},${seg.cx.toFixed(3)},${seg.cy.toFixed(3)}`;
+      }
+      if (seg.type === 'C') {
+        return `${seg.type}:${seg.x.toFixed(3)},${seg.y.toFixed(3)},${seg.c1x.toFixed(3)},${seg.c1y.toFixed(3)},${seg.c2x.toFixed(3)},${seg.c2y.toFixed(3)}`;
+      }
+      return `${seg.type}:${seg.x.toFixed(3)},${seg.y.toFixed(3)}`;
+    }).join('|');
+  }).join('||');
+}
+
+function fillCarrierEntries(shape: TVGShape): Array<{ index: number; comp: TVGComponent }> {
+  return shape.components
+    .map((comp, index) => ({ index, comp }))
+    .filter(({ comp }) => (comp.componentType === 0 || comp.componentType === 1) && !!comp.path);
+}
+
+function findMatchingUnderlayShape(
+  layers: TVGArtLayer[],
+  currentLayerIndex: number,
+  currentShape: TVGShape,
+  currentShapeIndex: number,
+): TVGShape | null {
+  const currentFillEntries = fillCarrierEntries(currentShape);
+  if (currentFillEntries.length === 0) return null;
+  for (let layerIndex = currentLayerIndex - 1; layerIndex >= 0; layerIndex--) {
+    const layer = layers[layerIndex];
+    if (layer.type !== 'underlay') continue;
+    const candidate = layer.shapes[currentShapeIndex];
+    if (!candidate) continue;
+    const candidateFillEntries = fillCarrierEntries(candidate);
+    if (candidateFillEntries.length !== currentFillEntries.length) continue;
+    let matches = true;
+    for (let i = 0; i < currentFillEntries.length; i++) {
+      if (!pathsGeometricallyEqual(currentFillEntries[i].comp.path, candidateFillEntries[i].comp.path)) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return candidate;
+  }
+  return null;
+}
+
+function suppressUnderlayFollowerFillColors(
+  layers: TVGArtLayer[],
+  currentLayerIndex: number,
+  currentLayer: TVGArtLayer,
+  currentShape: TVGShape,
+  currentShapeIndex: number,
+): void {
+  if (currentLayer.type !== 'color') return;
+  const currentFillEntries = fillCarrierEntries(currentShape);
+  if (currentFillEntries.length < 2) return;
+  const underlayShape = findMatchingUnderlayShape(layers, currentLayerIndex, currentShape, currentShapeIndex);
+  if (!underlayShape) return;
+  const underlayFillEntries = fillCarrierEntries(underlayShape);
+  const changedIndexes: number[] = [];
+  const suppressedIndexes: number[] = [];
+  for (let i = 0; i < currentFillEntries.length; i++) {
+    const currentKey = paintKeyForComponent(currentFillEntries[i].comp);
+    const underlayKey = paintKeyForComponent(underlayFillEntries[i].comp);
+    if (!underlayKey) return;
+    if (currentKey === null || currentKey === underlayKey) {
+      suppressedIndexes.push(i);
+    } else {
+      changedIndexes.push(i);
+    }
+  }
+  if (changedIndexes.length !== 1 || changedIndexes[0] !== 0 || suppressedIndexes.length === 0) return;
+  for (const entryIndex of suppressedIndexes) {
+    const { comp } = currentFillEntries[entryIndex];
+    comp.color = null;
+    comp.colorId = null;
+    comp.gradientType = undefined;
+    comp.gradientStops = undefined;
+    comp.fillPaintSource = null;
+    updateComponentPaints(comp);
+  }
+}
+
+function boundsIntersect(
+  a: { minX: number; minY: number; maxX: number; maxY: number } | null,
+  b: { minX: number; minY: number; maxX: number; maxY: number } | null,
+  padding = 0,
+): boolean {
+  if (!a || !b) return false;
+  return !(a.maxX < b.minX - padding
+    || a.minX > b.maxX + padding
+    || a.maxY < b.minY - padding
+    || a.minY > b.maxY + padding);
+}
+
+function isBoundaryOnlyShape(shape: TVGShape): boolean {
+  return shape.components.length > 0 && shape.components.every(comp =>
+    comp.componentType === 2
+    && comp.strokeWidth === null
+    && !comp.thicknessProfile
+    && comp.tgtiThickness === null
+    && !!comp.path
+    && comp.path.segments.length > 1,
+  );
+}
+
+function isWidthlessBoundaryStroke(comp: TVGComponent): boolean {
+  return comp.componentType === 2
+    && comp.strokeWidth === null
+    && !comp.thicknessProfile
+    && comp.tgtiThickness === null
+    && !!comp.path
+    && comp.path.segments.length > 0;
+}
+
+function paintHasVisibleAlpha(paint: TVGPaint | null): boolean {
+  if (!paint) return false;
+  if (paint.kind === 'solid') return paint.rgba.a > 0;
+  return paint.fallback.a > 0;
+}
+
+function isLowAlphaSolidFillComponent(comp: TVGComponent, maxAlpha = 80): boolean {
+  return (comp.componentType === 0 || comp.componentType === 1)
+    && comp.strokeWidth === null
+    && comp.outerPaint?.kind === 'solid'
+    && comp.outerPaint.rgba.a > 0
+    && comp.outerPaint.rgba.a <= maxAlpha;
+}
+
+function shouldAttenuateLowAlphaGuideFills(layer: TVGArtLayer): boolean {
+  if (layer.type !== 'color' || layer.shapes.length < 20) return false;
+  if (!layer.shapes.every(shape => shape.components.length === 1)) return false;
+  let lowAlphaFillCount = 0;
+  let pencilCount = 0;
+  for (const shape of layer.shapes) {
+    const comp = shape.components[0];
+    if (isLowAlphaSolidFillComponent(comp)) {
+      lowAlphaFillCount++;
+      continue;
+    }
+    if (comp.componentType === 4
+      && comp.outerPaint?.kind === 'solid'
+      && comp.outerPaint.rgba.a === 255
+      && comp.path
+      && comp.path.segments.length > 0) {
+      pencilCount++;
+    }
+  }
+  return lowAlphaFillCount >= 3 && pencilCount >= 20;
+}
+
+function scalePaintAlpha(paint: TVGPaint, factor: number): TVGPaint {
+  if (factor >= 0.999) return paint;
+  if (paint.kind === 'solid') {
+    return {
+      kind: 'solid',
+      rgba: {
+        ...paint.rgba,
+        a: Math.max(0, Math.min(255, Math.round(paint.rgba.a * factor))),
+      },
+    };
+  }
+  return {
+    ...paint,
+    fallback: {
+      ...paint.fallback,
+      a: Math.max(0, Math.min(255, Math.round(paint.fallback.a * factor))),
+    },
+    stops: paint.stops.map(stop => ({
+      ...stop,
+      a: Math.max(0, Math.min(255, Math.round(stop.a * factor))),
+    })),
+  };
+}
+
+function shouldRenderWidthlessBoundaryStroke(
+  layer: TVGArtLayer,
+  shape: TVGShape,
+  comp: TVGComponent,
+): boolean {
+  if (!isWidthlessBoundaryStroke(comp)) return false;
+  if (layer.type !== 'line') return false;
+  if (!paintHasVisibleAlpha(comp.outerPaint)) return false;
+  if (shape.shapeType === 7 && shape.components.length > 0 && shape.components.every(other => isWidthlessBoundaryStroke(other))) {
+    return true;
+  }
+  return shape.components.some(other =>
+    other !== comp
+    && !!other.path
+    && other.path.segments.length > 0
+    && (other.componentType === 4
+      || other.strokeWidth !== null
+      || other.thicknessProfile !== null
+      || other.tgtiThickness !== null)
+    && paintsEqual(other.outerPaint, comp.outerPaint),
+  );
+}
+
+function collectSiblingBoundaryMaskShapes(
+  allLayers: TVGArtLayer[] | undefined,
+  currentLayer: TVGArtLayer,
+  currentShape: TVGShape,
+): TVGShape[] {
+  if (!allLayers || allLayers.length === 0) return [];
+  const currentBounds = computeShapeBounds(currentShape);
+  if (!currentBounds) return [];
+  const matches: TVGShape[] = [];
+  const seen = new Set<string>();
+  for (const layer of allLayers) {
+    if (layer === currentLayer) continue;
+    for (const shape of layer.shapes) {
+      if (!isBoundaryOnlyShape(shape)) continue;
+      if (boundsIntersect(currentBounds, computeShapeBounds(shape), 0.5)) {
+        const signature = boundaryShapeSignature(shape);
+        if (seen.has(signature)) continue;
+        seen.add(signature);
+        matches.push(shape);
+      }
+    }
+  }
+  return matches;
+}
+
+function shapeHasRenderableFill(shape: TVGShape): boolean {
+  return shape.components.some(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && !isDegenerate(comp.path)
+    && comp.outerPaint !== null
+    && (!comp.color || comp.color.a > 0),
+  );
+}
+
+function shapeHasNonBlackRenderableFill(shape: TVGShape): boolean {
+  return shape.components.some(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && !isDegenerate(comp.path)
+    && comp.outerPaint !== null
+    && (!comp.color || comp.color.a > 0)
+    && !isNearlyBlackSolidPaint(comp.outerPaint),
+  );
+}
+
+function shapeHasOnlyNearBlackRenderableFills(shape: TVGShape): boolean {
+  let hasRenderableFill = false;
+  for (const comp of shape.components) {
+    if ((comp.componentType !== 0 && comp.componentType !== 1)
+      || !comp.path
+      || isDegenerate(comp.path)
+      || comp.outerPaint === null
+      || (comp.color && comp.color.a <= 0)) {
+      continue;
+    }
+    hasRenderableFill = true;
+    if (!isNearlyBlackSolidPaint(comp.outerPaint)) {
+      return false;
+    }
+  }
+  return hasRenderableFill;
+}
+
+function shouldSuppressLargeNearBlackLineFillShape(
+  layer: TVGArtLayer,
+  shape: TVGShape,
+  strokeComps: TVGComponent[],
+): boolean {
+  if (layer.type !== 'line' || strokeComps.length > 0) return false;
+  if (!shapeHasOnlyNearBlackRenderableFills(shape)) return false;
+  const currentBounds = computeShapeBounds(shape);
+  if (!currentBounds) return false;
+  const currentArea = (currentBounds.maxX - currentBounds.minX) * (currentBounds.maxY - currentBounds.minY);
+  if (currentArea < 50000) return false;
+  for (const sibling of layer.shapes) {
+    if (sibling === shape) continue;
+    if (!shapeHasNonBlackRenderableFill(sibling)) continue;
+    if (boundsIntersect(currentBounds, computeShapeBounds(sibling), 0.5)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasSiblingRenderableFillShape(
+  allLayers: TVGArtLayer[] | undefined,
+  currentLayer: TVGArtLayer,
+  currentShape: TVGShape,
+): boolean {
+  if (!allLayers || allLayers.length === 0) return false;
+  const currentBounds = computeShapeBounds(currentShape);
+  if (!currentBounds) return false;
+  for (const layer of allLayers) {
+    if (layer === currentLayer) continue;
+    for (const shape of layer.shapes) {
+      if (!shapeHasRenderableFill(shape)) continue;
+      if (boundsIntersect(currentBounds, computeShapeBounds(shape), 0.5)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function renderableFillComponents(shape: TVGShape): TVGComponent[] {
+  return shape.components.filter(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && !isDegenerate(comp.path)
+    && comp.outerPaint !== null
+    && (!comp.color || comp.color.a > 0),
+  );
+}
+
+function renderableFillPaintKeys(shape: TVGShape): Set<FillStyleKey> {
+  return new Set(
+    renderableFillComponents(shape)
+      .map(comp => paintKeyForComponent(comp))
+      .filter((key): key is FillStyleKey => key !== null),
+  );
+}
+
+function dominantRenderableFillPaintKey(shape: TVGShape): FillStyleKey | null {
+  const counts = new Map<FillStyleKey, number>();
+  for (const comp of renderableFillComponents(shape)) {
+    const key = paintKeyForComponent(comp);
+    if (!key) continue;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+}
+
+function shouldSuppressSeedCarrierFillShape(
+  layer: TVGArtLayer,
+  currentShape: TVGShape,
+): boolean {
+  if (layer.type !== 'line') return false;
+  if (currentShape.components.some(comp =>
+    (comp.componentType === 2 || comp.componentType === 4)
+    && comp.path
+    && comp.path.segments.length > 0,
+  )) return false;
+  const fillComps = renderableFillComponents(currentShape);
+  if (fillComps.length < 4 || fillComps.length > 6) return false;
+  if (renderableFillPaintKeys(currentShape).size !== 1) return false;
+  const explicitCount = fillComps.filter(comp => hasExplicitFillStyle(comp)).length;
+  const inheritedCount = fillComps.filter(comp => comp.fillPaintSource === 'inherited').length;
+  if (explicitCount !== 1 || inheritedCount < fillComps.length - 1) return false;
+  const currentKey = dominantRenderableFillPaintKey(currentShape);
+  const currentBounds = computeShapeBounds(currentShape);
+  if (!currentKey || !currentBounds) return false;
+  return layer.shapes.some(shape => {
+    if (shape === currentShape) return false;
+    const siblingFillComps = renderableFillComponents(shape);
+    if (siblingFillComps.length < fillComps.length * 6) return false;
+    const siblingPaintKeys = renderableFillPaintKeys(shape);
+    if (siblingPaintKeys.size < 2 || !siblingPaintKeys.has(currentKey)) return false;
+    return boundsIntersect(currentBounds, computeShapeBounds(shape), 0.5);
+  });
+}
+
+function flattenSegments(
+  segments: TVGSegment[],
+  closePath = false,
+  quadSteps = 16,
+  cubicSteps = 24,
+): { x: number; y: number }[] {
+  const points: { x: number; y: number }[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg.type === 'M') {
+      points.push({ x: seg.x, y: seg.y });
+      continue;
+    }
+    const prev = segments[i - 1];
+    if (!prev) continue;
+    if (seg.type === 'L') {
+      points.push({ x: seg.x, y: seg.y });
+    } else if (seg.type === 'Q') {
+      for (let step = 1; step <= quadSteps; step++) {
+        const t = step / quadSteps;
+        const mt = 1 - t;
+        points.push({
+          x: mt * mt * prev.x + 2 * mt * t * seg.cx + t * t * seg.x,
+          y: mt * mt * prev.y + 2 * mt * t * seg.cy + t * t * seg.y,
+        });
+      }
+    } else if (seg.type === 'C') {
+      for (let step = 1; step <= cubicSteps; step++) {
+        const t = step / cubicSteps;
+        points.push({
+          x: cubicBezier(t, prev.x, seg.c1x, seg.c2x, seg.x),
+          y: cubicBezier(t, prev.y, seg.c1y, seg.c2y, seg.y),
+        });
+      }
+    }
+  }
+  if (closePath && points.length > 1) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    if (Math.abs(first.x - last.x) > 0.001 || Math.abs(first.y - last.y) > 0.001) {
+      points.push({ ...first });
+    }
+  }
+  return points;
+}
+
+function isPathEffectivelyClosed(path: TVGPath): boolean {
+  if (path.closed || path.segments.length < 3) return path.closed;
+  const first = path.segments[0];
+  const last = path.segments[path.segments.length - 1];
+  return Math.abs(first.x - last.x) < 0.001 && Math.abs(first.y - last.y) < 0.001;
+}
+
+function pointInPolygon(points: { x: number; y: number }[], point: { x: number; y: number }): boolean {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+    const xi = points[i].x;
+    const yi = points[i].y;
+    const xj = points[j].x;
+    const yj = points[j].y;
+    const intersect = ((yi > point.y) !== (yj > point.y))
+      && (point.x < ((xj - xi) * (point.y - yi)) / ((yj - yi) || 1e-9) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function averagePoint(points: { x: number; y: number }[]): { x: number; y: number } {
+  let sx = 0;
+  let sy = 0;
+  for (const point of points) {
+    sx += point.x;
+    sy += point.y;
+  }
+  return { x: sx / Math.max(points.length, 1), y: sy / Math.max(points.length, 1) };
+}
+
+function polygonArea(points: { x: number; y: number }[]): number {
+  if (points.length < 3) return 0;
+  let area = 0;
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+    area += a.x * b.y - b.x * a.y;
+  }
+  return Math.abs(area) / 2;
+}
+
+function chooseSamplePoint(
+  bbox: { minX: number; minY: number; maxX: number; maxY: number },
+  flattened: { x: number; y: number }[],
+): { x: number; y: number } | null {
+  const candidates = [
+    { x: (bbox.minX + bbox.maxX) / 2, y: (bbox.minY + bbox.maxY) / 2 },
+    averagePoint(flattened),
+    averagePoint(flattened.slice(0, Math.max(1, flattened.length - 1))),
+  ];
+  for (const candidate of candidates) {
+    if (pointInPolygon(flattened, candidate)) return candidate;
+  }
+  return null;
+}
+
+function reversedSegments(segments: TVGSegment[]): TVGSegment[] {
+  if (segments.length === 0) return [];
+  const reversed: TVGSegment[] = [{ type: 'M', x: segments[segments.length - 1].x, y: segments[segments.length - 1].y }];
+  for (let i = segments.length - 1; i >= 1; i--) {
+    const seg = segments[i];
+    const dest = segments[i - 1];
+    if (seg.type === 'C') {
+      reversed.push({ type: 'C', c1x: seg.c2x, c1y: seg.c2y, c2x: seg.c1x, c2y: seg.c1y, x: dest.x, y: dest.y });
+    } else if (seg.type === 'Q') {
+      reversed.push({ type: 'Q', cx: seg.cx, cy: seg.cy, x: dest.x, y: dest.y });
+    } else {
+      reversed.push({ type: 'L', x: dest.x, y: dest.y });
+    }
+  }
+  return reversed;
+}
+
+function appendSegmentsToPath(path: Path2D, segments: TVGSegment[], reversed: boolean, isFirst: boolean): boolean {
+  const source = reversed ? reversedSegments(segments) : segments;
+  for (let i = 0; i < source.length; i++) {
+    const seg = source[i];
+    if (i === 0) {
+      if (isFirst) path.moveTo(seg.x, seg.y);
+      else path.lineTo(seg.x, seg.y);
+      continue;
+    }
+    if (seg.type === 'C') path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
+    else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y);
+    else path.lineTo(seg.x, seg.y);
+  }
+  return false;
+}
+
+function buildResolvedContour(
+  fragments: TVGContourFragment[],
+  refs: Array<{ fragmentIndex: number; reversed: boolean }>,
+  styleKey: FillStyleKey,
+  style: TVGComponent | null,
+  synthesized: boolean,
+): TVGResolvedContour | null {
+  const bbox = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  const path = new Path2D();
+  let first = true;
+  let flattened: { x: number; y: number }[] = [];
+  let styledFragmentCount = 0;
+  let supportFragmentCount = 0;
+  for (const ref of refs) {
+    const fragment = fragments[ref.fragmentIndex];
+    if (fragment.supportOnly) supportFragmentCount++;
+    else styledFragmentCount++;
+    appendSegmentsToPath(path, fragment.segments, ref.reversed, first);
+    first = false;
+    const fragBounds = fragment.bbox;
+    bbox.minX = Math.min(bbox.minX, fragBounds.minX);
+    bbox.minY = Math.min(bbox.minY, fragBounds.minY);
+    bbox.maxX = Math.max(bbox.maxX, fragBounds.maxX);
+    bbox.maxY = Math.max(bbox.maxY, fragBounds.maxY);
+    const fragPoints = flattenSegments(ref.reversed ? reversedSegments(fragment.segments) : fragment.segments);
+    if (flattened.length > 0 && fragPoints.length > 0) fragPoints.shift();
+    flattened = flattened.concat(fragPoints);
+  }
+  const head = refs[0];
+  const tail = refs[refs.length - 1];
+  const start = fragments[head.fragmentIndex];
+  const end = fragments[tail.fragmentIndex];
+  const startPoint = head.reversed ? { x: start.endX, y: start.endY } : { x: start.startX, y: start.startY };
+  const endPoint = tail.reversed ? { x: end.startX, y: end.startY } : { x: end.endX, y: end.endY };
+  const closeDistance = Math.hypot(startPoint.x - endPoint.x, startPoint.y - endPoint.y);
+  if (closeDistance > AUTO_CLOSE_TOL) return null;
+  path.closePath();
+  flattened = flattenSegments([
+    { type: 'M', x: flattened[0]?.x ?? startPoint.x, y: flattened[0]?.y ?? startPoint.y },
+    ...flattened.slice(1).map((p): TVGSegment => ({ type: 'L', x: p.x, y: p.y })),
+  ], true);
+  const bboxArea = (bbox.maxX - bbox.minX) * (bbox.maxY - bbox.minY);
+  const polyArea = polygonArea(flattened);
+  if (!synthesized
+    && styledFragmentCount === 1
+    && supportFragmentCount >= 4
+    && (supportFragmentCount / refs.length) >= 0.75
+    && bboxArea > 0
+    && (polyArea / bboxArea) > 0.8) {
+    return null;
+  }
+  const samplePoint = chooseSamplePoint(bbox, flattened);
+  return {
+    source: fragments[refs[0].fragmentIndex].source,
+    layerType: fragments[refs[0].fragmentIndex].layerType,
+    shapeIndex: fragments[refs[0].fragmentIndex].shapeIndex,
+    styleKey,
+    style,
+    fragments: refs,
+    fragmentCount: refs.length,
+    styledFragmentCount,
+    supportFragmentCount,
+    path,
+    bbox,
+    samplePoint,
+    sourceOrder: Math.min(...refs.map(ref => fragments[ref.fragmentIndex].componentIndex)),
+    synthesized,
+    flattened,
+  };
+}
+
+function pickBestChainCandidate(
+  chain: Array<{ fragmentIndex: number; reversed: boolean }>,
+  fragments: TVGContourFragment[],
+  used: Set<number>,
+): { fragmentIndex: number; reversed: boolean; prepend: boolean } | null {
+  const head = chain[0];
+  const tail = chain[chain.length - 1];
+  const headFragment = fragments[head.fragmentIndex];
+  const tailFragment = fragments[tail.fragmentIndex];
+  const headPoint = head.reversed ? { x: headFragment.endX, y: headFragment.endY } : { x: headFragment.startX, y: headFragment.startY };
+  const tailPoint = tail.reversed ? { x: tailFragment.startX, y: tailFragment.startY } : { x: tailFragment.endX, y: tailFragment.endY };
+
+  let best: { rank: number; distance: number; support: number; componentIndex: number; fragmentIndex: number; reversed: boolean; prepend: boolean } | null = null;
+  for (let i = 0; i < fragments.length; i++) {
+    if (used.has(i)) continue;
+    const fragment = fragments[i];
+    const candidates = [
+      { rank: 0, distance: Math.hypot(fragment.startX - tailPoint.x, fragment.startY - tailPoint.y), reversed: false, prepend: false },
+      { rank: 1, distance: Math.hypot(fragment.endX - tailPoint.x, fragment.endY - tailPoint.y), reversed: true, prepend: false },
+      { rank: 2, distance: Math.hypot(fragment.endX - headPoint.x, fragment.endY - headPoint.y), reversed: false, prepend: true },
+      { rank: 3, distance: Math.hypot(fragment.startX - headPoint.x, fragment.startY - headPoint.y), reversed: true, prepend: true },
+    ];
+    for (const candidate of candidates) {
+      if (candidate.distance > CHAIN_TOL) continue;
+      const scored = {
+        ...candidate,
+        support: fragment.supportOnly ? 1 : 0,
+        componentIndex: fragment.componentIndex,
+        fragmentIndex: i,
+      };
+      if (!best
+        || scored.rank < best.rank
+        || (scored.rank === best.rank && scored.distance < best.distance)
+        || (scored.rank === best.rank && scored.distance === best.distance && scored.support < best.support)
+        || (scored.rank === best.rank && scored.distance === best.distance && scored.support === best.support && scored.componentIndex < best.componentIndex)) {
+        best = scored;
+      }
+    }
+  }
+  return best ? { fragmentIndex: best.fragmentIndex, reversed: best.reversed, prepend: best.prepend } : null;
+}
+
+function buildContoursFromFragments(
+  fragments: TVGContourFragment[],
+  styleKey: FillStyleKey,
+  style: TVGComponent | null,
+  synthesized: boolean,
+): TVGFillBuildResult {
+  const contours: TVGResolvedContour[] = [];
+  const unresolvedChains: TVGResolvedContour[] = [];
+  const used = new Set<number>();
+  const styledSeedIndices = fragments
+    .map((fragment, index) => ({ fragment, index }))
+    .filter(({ fragment }) => !fragment.supportOnly && fragment.styleKey === styleKey)
+    .map(({ index }) => index);
+
+  for (const seedIndex of styledSeedIndices) {
+    if (used.has(seedIndex)) continue;
+    const chain: Array<{ fragmentIndex: number; reversed: boolean }> = [{ fragmentIndex: seedIndex, reversed: false }];
+    used.add(seedIndex);
+    while (true) {
+      const candidate = pickBestChainCandidate(chain, fragments, used);
+      if (!candidate) break;
+      used.add(candidate.fragmentIndex);
+      if (candidate.prepend) chain.unshift({ fragmentIndex: candidate.fragmentIndex, reversed: candidate.reversed });
+      else chain.push({ fragmentIndex: candidate.fragmentIndex, reversed: candidate.reversed });
+    }
+
+    const contour = buildResolvedContour(fragments, chain, styleKey, style, synthesized);
+    if (contour) contours.push(contour);
+    else {
+      const fallback = buildResolvedContour(
+        fragments,
+        chain.map(x => ({ ...x })),
+        styleKey,
+        style,
+        synthesized,
+      );
+      if (fallback) unresolvedChains.push(fallback);
+      else {
+        const firstFragment = fragments[chain[0].fragmentIndex];
+        const path = new Path2D();
+        let first = true;
+        for (const ref of chain) {
+          first = appendSegmentsToPath(path, fragments[ref.fragmentIndex].segments, ref.reversed, first);
+        }
+        unresolvedChains.push({
+          source: firstFragment.source,
+          layerType: firstFragment.layerType,
+          shapeIndex: firstFragment.shapeIndex,
+          styleKey,
+          style,
+          fragments: chain,
+          fragmentCount: chain.length,
+          styledFragmentCount: chain.filter(ref => !fragments[ref.fragmentIndex].supportOnly).length,
+          supportFragmentCount: chain.filter(ref => fragments[ref.fragmentIndex].supportOnly).length,
+          path,
+          bbox: firstFragment.bbox,
+          samplePoint: { x: firstFragment.startX, y: firstFragment.startY },
+          sourceOrder: firstFragment.componentIndex,
+          synthesized,
+          flattened: flattenSegments(firstFragment.segments),
+        });
+      }
+    }
+  }
+
+  return { contours, unresolvedChains };
+}
+
+function buildContourTree(contours: TVGResolvedContour[]): TVGContourNode[] {
+  const nodes: TVGContourNode[] = contours.map((_, contourIndex) => ({
+    contourIndex,
+    parent: null,
+    children: [],
+    depth: 0,
+  }));
+  for (let i = 0; i < contours.length; i++) {
+    const contour = contours[i];
+    let parentIndex: number | null = null;
+    let parentArea = Infinity;
+    for (let j = 0; j < contours.length; j++) {
+      if (i === j) continue;
+      const candidate = contours[j];
+      if (contour.bbox.minX < candidate.bbox.minX - 0.5
+        || contour.bbox.maxX > candidate.bbox.maxX + 0.5
+        || contour.bbox.minY < candidate.bbox.minY - 0.5
+        || contour.bbox.maxY > candidate.bbox.maxY + 0.5) {
+        continue;
+      }
+      if (!contour.samplePoint) continue;
+      if (!pointInPolygon(candidate.flattened, contour.samplePoint)) continue;
+      const area = (candidate.bbox.maxX - candidate.bbox.minX) * (candidate.bbox.maxY - candidate.bbox.minY);
+      if (area < parentArea) {
+        parentArea = area;
+        parentIndex = j;
+      }
+    }
+    nodes[i].parent = parentIndex;
+  }
+  for (const node of nodes) {
+    if (node.parent !== null) {
+      nodes[node.parent].children.push(node.contourIndex);
+    }
+  }
+  const visit = (index: number, depth: number) => {
+    nodes[index].depth = depth;
+    nodes[index].children.sort((a, b) => contours[a].sourceOrder - contours[b].sourceOrder);
+    for (const child of nodes[index].children) visit(child, depth + 1);
+  };
+  for (const node of nodes) {
+    if (node.parent === null) visit(node.contourIndex, 0);
+  }
+  return nodes;
+}
+
+function renderContourTree(
+  contours: TVGResolvedContour[],
+): LocalFillPaintSource[] {
+  const tree = buildContourTree(contours);
+  const sources: LocalFillPaintSource[] = [];
+  const renderNode = (index: number) => {
+    const contour = contours[index];
+    const paint = contour.style?.outerPaint ?? null;
+    if (paint) {
+      const compound = new Path2D();
+      compound.addPath(contour.path);
+      for (const childIndex of tree[index].children) {
+        compound.addPath(contours[childIndex].path);
+      }
+      sources.push({
+        kind: 'path',
+        path: compound,
+        paint,
+        fillRule: tree[index].children.length > 0 ? 'evenodd' : 'nonzero',
+      });
+    }
+    for (const childIndex of tree[index].children) {
+      renderNode(childIndex);
+    }
+  };
+  tree
+    .filter(node => node.parent === null)
+    .sort((a, b) => contours[a.contourIndex].sourceOrder - contours[b.contourIndex].sourceOrder)
+    .forEach(node => renderNode(node.contourIndex));
+  return sources;
+}
+
+function paintContourTree(
+  ctx: CanvasRenderingContext2D,
+  contours: TVGResolvedContour[],
+): void {
+  for (const source of renderContourTree(contours)) {
+    if (source.path) {
+      fillPathWithPaint(ctx, source.path, source.paint, source.fillRule ?? 'nonzero');
+    }
+  }
+}
+
+function paintDirectUnresolvedChains(
+  ctx: CanvasRenderingContext2D,
+  chains: TVGResolvedContour[],
+  alphaScale = 1,
+): boolean {
+  let painted = false;
+  for (const chain of chains.sort((a, b) => a.sourceOrder - b.sourceOrder)) {
+    const paint = chain.style?.outerPaint ?? null;
+    if (!paint) continue;
+    fillPathWithPaint(ctx, chain.path, scalePaintAlpha(paint, alphaScale));
+    painted = true;
+  }
+  return painted;
+}
+
+function renderLegacyChainedFillComponents(
+  ctx: CanvasRenderingContext2D,
+  allChainComps: TVGComponent[],
+  indices: number[],
+  tolerance: number,
+  alphaScale = 1,
+): boolean {
+  const compInfos = indices.map(idx => {
+    const segs = allChainComps[idx].path!.segments;
+    return {
+      ci: idx,
+      startX: segs[0].x,
+      startY: segs[0].y,
+      endX: segs[segs.length - 1].x,
+      endY: segs[segs.length - 1].y,
+    };
+  });
+  if (compInfos.length === 0) return false;
+
+  const pickBestCandidate = (
+    chain: Array<{ ci: number; reversed: boolean; startX: number; startY: number; endX: number; endY: number }>,
+    used: Set<number>,
+  ): { infoIndex: number; reversed: boolean; prepend: boolean } | null => {
+    const head = chain[0];
+    const tail = chain[chain.length - 1];
+    let best: { rank: number; distance: number; support: number; componentIndex: number; infoIndex: number; reversed: boolean; prepend: boolean } | null = null;
+    for (let i = 0; i < compInfos.length; i++) {
+      if (used.has(i)) continue;
+      const comp = compInfos[i];
+      const support = (
+        (allChainComps[comp.ci].componentType !== 0 && allChainComps[comp.ci].componentType !== 1)
+        || allChainComps[comp.ci].outerPaint === null
+      ) ? 1 : 0;
+      const candidates = [
+        { rank: 0, distance: Math.hypot(comp.startX - tail.endX, comp.startY - tail.endY), reversed: false, prepend: false },
+        { rank: 1, distance: Math.hypot(comp.endX - tail.endX, comp.endY - tail.endY), reversed: true, prepend: false },
+        { rank: 2, distance: Math.hypot(comp.endX - head.startX, comp.endY - head.startY), reversed: false, prepend: true },
+        { rank: 3, distance: Math.hypot(comp.startX - head.startX, comp.startY - head.startY), reversed: true, prepend: true },
+      ];
+      for (const candidate of candidates) {
+        if (candidate.distance > tolerance) continue;
+        const scored = {
+          ...candidate,
+          support,
+          componentIndex: comp.ci,
+          infoIndex: i,
+        };
+        if (!best
+          || scored.rank < best.rank
+          || (scored.rank === best.rank && scored.distance < best.distance)
+          || (scored.rank === best.rank && scored.distance === best.distance && scored.support < best.support)
+          || (scored.rank === best.rank && scored.distance === best.distance && scored.support === best.support && scored.componentIndex < best.componentIndex)) {
+          best = scored;
+        }
+      }
+    }
+    return best ? { infoIndex: best.infoIndex, reversed: best.reversed, prepend: best.prepend } : null;
+  };
+
+  const used = new Set<number>();
+  const chains: Array<Array<{ ci: number; reversed: boolean; startX: number; startY: number; endX: number; endY: number }>> = [];
+  for (let i = 0; i < compInfos.length; i++) {
+    if (used.has(i)) continue;
+    used.add(i);
+    const chain = [{ ...compInfos[i], reversed: false }];
+    while (true) {
+      const tail = chain[chain.length - 1];
+      const head = chain[0];
+      if (Math.abs(head.startX - tail.endX) < tolerance && Math.abs(head.startY - tail.endY) < tolerance) break;
+      const candidate = pickBestCandidate(chain, used);
+      if (!candidate) break;
+      const comp = compInfos[candidate.infoIndex];
+      used.add(candidate.infoIndex);
+      const info = candidate.reversed
+        ? {
+            ci: comp.ci,
+            startX: comp.endX,
+            startY: comp.endY,
+            endX: comp.startX,
+            endY: comp.startY,
+            reversed: true,
+          }
+        : { ...comp, reversed: false };
+      if (candidate.prepend) chain.unshift(info);
+      else chain.push(info);
+    }
+    chains.push(chain);
+  }
+
+  const paint = indices
+    .map(index => allChainComps[index].outerPaint)
+    .find((candidate): candidate is TVGPaint => candidate !== null);
+  if (!paint) return false;
+
+  const addChainToPath = (path: Path2D, chain: typeof chains[number], isFirstChain: boolean) => {
+    let isFirst = isFirstChain;
+    const head = chain[0];
+    const tail = chain[chain.length - 1];
+    const isClosed = Math.abs(head.startX - tail.endX) + Math.abs(head.startY - tail.endY) < tolerance * 2;
+    for (const info of chain) {
+      const comp = allChainComps[info.ci];
+      const segs = comp.path!.segments;
+      if (!info.reversed) {
+        for (let si = 0; si < segs.length; si++) {
+          const seg = segs[si];
+          if (si === 0) {
+            if (isFirst) {
+              path.moveTo(seg.x, seg.y);
+              isFirst = false;
+            } else {
+              path.lineTo(seg.x, seg.y);
+            }
+          } else if (seg.type === 'C') {
+            path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
+          } else if (seg.type === 'Q') {
+            path.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y);
+          } else {
+            path.lineTo(seg.x, seg.y);
+          }
+        }
+      } else {
+        const lastSeg = segs[segs.length - 1];
+        if (isFirst) {
+          path.moveTo(lastSeg.x, lastSeg.y);
+          isFirst = false;
+        } else {
+          path.lineTo(lastSeg.x, lastSeg.y);
+        }
+        for (let si = segs.length - 1; si >= 1; si--) {
+          const seg = segs[si];
+          const dest = segs[si - 1];
+          if (seg.type === 'C') {
+            path.bezierCurveTo(seg.c2x, seg.c2y, seg.c1x, seg.c1y, dest.x, dest.y);
+          } else if (seg.type === 'Q') {
+            path.quadraticCurveTo(seg.cx, seg.cy, dest.x, dest.y);
+          } else {
+            path.lineTo(dest.x, dest.y);
+          }
+        }
+      }
+    }
+    if (isClosed) path.closePath();
+  };
+
+  if (chains.length === 1) {
+    const path = new Path2D();
+    addChainToPath(path, chains[0], true);
+    fillPathWithPaint(ctx, path, paint);
+    return true;
+  }
+
+  const chainGeometries = chains.map(chain => {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let flattened: { x: number; y: number }[] = [];
+    for (const info of chain) {
+      const comp = allChainComps[info.ci];
+      const sourceSegments = info.reversed ? reversedSegments(comp.path!.segments) : comp.path!.segments;
+      for (const seg of sourceSegments) {
+        minX = Math.min(minX, seg.x);
+        minY = Math.min(minY, seg.y);
+        maxX = Math.max(maxX, seg.x);
+        maxY = Math.max(maxY, seg.y);
+      }
+      const fragPoints = flattenSegments(sourceSegments);
+      if (flattened.length > 0 && fragPoints.length > 0) fragPoints.shift();
+      flattened = flattened.concat(fragPoints);
+    }
+    if (flattened.length > 1) {
+      const first = flattened[0];
+      const last = flattened[flattened.length - 1];
+      if (Math.abs(first.x - last.x) > 0.001 || Math.abs(first.y - last.y) > 0.001) {
+        flattened = flattened.concat({ ...first });
+      }
+    }
+    const bbox = { minX, minY, maxX, maxY };
+    return {
+      bbox,
+      area: (maxX - minX) * (maxY - minY),
+      flattened,
+      samplePoint: chooseSamplePoint(bbox, flattened),
+    };
+  });
+
+  const parent = new Array<number>(chains.length).fill(-1);
+  for (let i = 0; i < chains.length; i++) {
+    let bestParent = -1;
+    let bestArea = Infinity;
+    for (let j = 0; j < chains.length; j++) {
+      if (i === j) continue;
+      const outer = chainGeometries[j];
+      const inner = chainGeometries[i];
+      if (!inner.samplePoint || outer.flattened.length < 3) continue;
+      if (inner.bbox.minX < outer.bbox.minX - 0.5 || inner.bbox.maxX > outer.bbox.maxX + 0.5
+        || inner.bbox.minY < outer.bbox.minY - 0.5 || inner.bbox.maxY > outer.bbox.maxY + 0.5) {
+        continue;
+      }
+      if (!pointInPolygon(outer.flattened, inner.samplePoint)) continue;
+      if (inner.area < outer.area * 0.95 && outer.area < bestArea) {
+        bestParent = j;
+        bestArea = outer.area;
+      }
+    }
+    parent[i] = bestParent;
+  }
+
+  const processed = new Set<number>();
+  for (let i = 0; i < chains.length; i++) {
+    if (processed.has(i) || parent[i] !== -1) continue;
+    const children: number[] = [];
+    for (let j = 0; j < chains.length; j++) {
+      if (parent[j] === i) children.push(j);
+    }
+    const path = new Path2D();
+    addChainToPath(path, chains[i], true);
+    processed.add(i);
+    if (children.length > 0) {
+      for (const child of children) {
+        addChainToPath(path, chains[child], false);
+        processed.add(child);
+      }
+      fillPathWithPaint(ctx, path, scalePaintAlpha(paint, alphaScale), 'evenodd');
+    } else {
+      fillPathWithPaint(ctx, path, scalePaintAlpha(paint, alphaScale));
+    }
+  }
+
+  for (let i = 0; i < chains.length; i++) {
+    if (processed.has(i)) continue;
+    const path = new Path2D();
+    addChainToPath(path, chains[i], true);
+    fillPathWithPaint(ctx, path, scalePaintAlpha(paint, alphaScale));
+  }
+  return true;
+}
+
+function renderLegacyExplicitFillShape(
+  ctx: CanvasRenderingContext2D,
+  shape: TVGShape,
+  strokeComps: TVGComponent[],
+  alphaScale = 1,
+): boolean {
+  const chainableFillComps = shape.components.filter(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && comp.path.segments.length > 1
+    && !isDegenerate(comp.path)
+    && (!comp.color || comp.color.a > 0)
+  );
+  const explicitFillComps = chainableFillComps.filter(comp => hasExplicitFillStyle(comp) && comp.outerPaint);
+  const inheritedSeedFillComps = chainableFillComps.filter(comp =>
+    comp.fillPaintSource === 'inherited' && comp.outerPaint,
+  );
+  const defaultSeedFillComps = chainableFillComps.filter(comp =>
+    comp.fillPaintSource === 'default' && comp.outerPaint,
+  );
+  const paintedFillComps = chainableFillComps.filter(comp => comp.outerPaint !== null);
+  const fillComps = explicitFillComps.length > 0
+    ? explicitFillComps
+    : inheritedSeedFillComps.length > 0
+      ? inheritedSeedFillComps
+      : defaultSeedFillComps.length > 0
+        ? defaultSeedFillComps
+        : paintedFillComps;
+  const supportFillComps = chainableFillComps.filter(comp => comp.outerPaint === null);
+  if (fillComps.length === 0) return false;
+
+  const tolerance = 2.0;
+  const boundaryStrokes = strokeComps.filter(comp =>
+    comp.componentType === 2
+    && comp.strokeWidth === null
+    && comp.path
+    && comp.path.segments.length > 1,
+  );
+  const allChainComps = [...paintedFillComps, ...supportFillComps, ...boundaryStrokes];
+  const colorGroups = new Map<string, number[]>();
+  const boundaryIndices: number[] = [];
+
+  for (let i = 0; i < allChainComps.length; i++) {
+    const comp = allChainComps[i];
+    const key = paintKeyForComponent(comp);
+    if (key) {
+      const group = colorGroups.get(key) ?? [];
+      group.push(i);
+      colorGroups.set(key, group);
+    } else {
+      boundaryIndices.push(i);
+    }
+  }
+
+  const keys = Array.from(colorGroups.keys());
+  if (keys.length === 0) return false;
+  if (keys.length === 1) {
+    return renderLegacyChainedFillComponents(ctx, allChainComps, allChainComps.map((_, index) => index), tolerance, alphaScale);
+  }
+
+  let rendered = false;
+  for (const key of keys) {
+    const groupIndices = [...(colorGroups.get(key) ?? []), ...boundaryIndices];
+    rendered = renderLegacyChainedFillComponents(ctx, allChainComps, groupIndices, tolerance, alphaScale) || rendered;
+  }
+  return rendered;
+}
+
+function computePixelBBoxForShape(
+  shape: TVGShape,
+  baseTransform: DOMMatrix,
+): { x1: number; y1: number; x2: number; y2: number } | null {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const comp of shape.components) {
+    if (!comp.path) continue;
+    for (const seg of comp.path.segments) {
+      const points = [{ x: seg.x, y: seg.y }];
+      if (seg.type === 'Q') points.push({ x: seg.cx, y: seg.cy });
+      else if (seg.type === 'C') points.push({ x: seg.c1x, y: seg.c1y }, { x: seg.c2x, y: seg.c2y });
+      for (const point of points) {
+        const px = baseTransform.a * point.x + baseTransform.c * point.y + baseTransform.e;
+        const py = baseTransform.b * point.x + baseTransform.d * point.y + baseTransform.f;
+        minX = Math.min(minX, px);
+        minY = Math.min(minY, py);
+        maxX = Math.max(maxX, px);
+        maxY = Math.max(maxY, py);
+      }
+    }
+  }
+  if (!isFinite(minX)) return null;
+  return { x1: minX, y1: minY, x2: maxX, y2: maxY };
+}
+
+function unionPixelBBoxes(
+  boxes: Array<{ x1: number; y1: number; x2: number; y2: number } | null>,
+): { x1: number; y1: number; x2: number; y2: number } | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let found = false;
+  for (const box of boxes) {
+    if (!box) continue;
+    minX = Math.min(minX, box.x1);
+    minY = Math.min(minY, box.y1);
+    maxX = Math.max(maxX, box.x2);
+    maxY = Math.max(maxY, box.y2);
+    found = true;
+  }
+  if (!found) return null;
+  return { x1: minX, y1: minY, x2: maxX, y2: maxY };
+}
+
+function clipLocalFillSources(
+  ctx: CanvasRenderingContext2D,
+  layer: TVGArtLayer,
+  shape: TVGShape,
+  fillSources: LocalFillPaintSource[],
+  defaultStrokeWidth: number,
+  skipClipping: boolean,
+  extraMaskShapes: TVGShape[] = [],
+): boolean {
+  const baseTransform = ctx.getTransform();
+  const bbox = unionPixelBBoxes([
+    computePixelBBoxForShape(shape, baseTransform),
+    ...extraMaskShapes.map(maskShape => computePixelBBoxForShape(maskShape, baseTransform)),
+  ]);
+  if (!bbox) return false;
+
+  const margin = 20;
+  const bx1 = Math.floor(bbox.x1 - margin);
+  const by1 = Math.floor(bbox.y1 - margin);
+  const bx2 = Math.ceil(bbox.x2 + margin);
+  const by2 = Math.ceil(bbox.y2 + margin);
+  const bw = Math.max(1, bx2 - bx1);
+  const bh = Math.max(1, by2 - by1);
+
+  const fillCanvas = document.createElement('canvas');
+  fillCanvas.width = bw;
+  fillCanvas.height = bh;
+  const fillCtx = fillCanvas.getContext('2d')!;
+  fillCtx.setTransform(
+    baseTransform.a, baseTransform.b,
+    baseTransform.c, baseTransform.d,
+    baseTransform.e - bx1, baseTransform.f - by1,
+  );
+
+  for (const source of fillSources) {
+    if (source.kind === 'bbox') {
+      fillCtx.save();
+      fillCtx.setTransform(1, 0, 0, 1, 0, 0);
+      fillCtx.fillStyle = paintToCssColor(source.paint);
+      fillCtx.fillRect(0, 0, bw, bh);
+      fillCtx.restore();
+    } else if (source.path) {
+      fillPathWithPaint(fillCtx, source.path, source.paint, source.fillRule ?? 'nonzero');
+    }
+  }
+
+  if (skipClipping) {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(fillCanvas, bx1, by1);
+    ctx.restore();
+    return true;
+  }
+
+  const maskScale = 3;
+  const mw = bw * maskScale;
+  const mh = bh * maskScale;
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = mw;
+  maskCanvas.height = mh;
+  const maskCtx = maskCanvas.getContext('2d')!;
+  maskCtx.setTransform(
+    baseTransform.a * maskScale, baseTransform.b * maskScale,
+    baseTransform.c * maskScale, baseTransform.d * maskScale,
+    (baseTransform.e - bx1) * maskScale, (baseTransform.f - by1) * maskScale,
+  );
+  renderStrokeMask(maskCtx, { ...layer, shapes: [shape, ...extraMaskShapes] }, defaultStrokeWidth);
+
+  const maskData = maskCtx.getImageData(0, 0, mw, mh);
+  const isWall = new Uint8Array(mw * mh);
+  for (let i = 0; i < mw * mh; i++) {
+    if (maskData.data[i * 4 + 3] > 30) isWall[i] = 1;
+  }
+  const dilated = new Uint8Array(mw * mh);
+  const DR2x = 6;
+  const DR2xSq = DR2x * DR2x;
+  for (let y = 0; y < mh; y++) {
+    for (let x = 0; x < mw; x++) {
+      const idx = y * mw + x;
+      if (isWall[idx]) { dilated[idx] = 1; continue; }
+      let found = false;
+      for (let dy = -DR2x; dy <= DR2x && !found; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= mh) continue;
+        for (let dx = -DR2x; dx <= DR2x && !found; dx++) {
+          if (dx * dx + dy * dy > DR2xSq) continue;
+          const nx = x + dx;
+          if (nx >= 0 && nx < mw && isWall[ny * mw + nx]) found = true;
+        }
+      }
+      if (found) dilated[idx] = 1;
+    }
+  }
+  const erodeR = DR2x - 1;
+  const erodeRSq = erodeR * erodeR;
+  const closed = new Uint8Array(mw * mh);
+  for (let y = 0; y < mh; y++) {
+    for (let x = 0; x < mw; x++) {
+      const idx = y * mw + x;
+      if (!dilated[idx]) continue;
+      let allDilated = true;
+      for (let dy = -erodeR; dy <= erodeR && allDilated; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= mh) { allDilated = false; continue; }
+        for (let dx = -erodeR; dx <= erodeR && allDilated; dx++) {
+          if (dx * dx + dy * dy > erodeRSq) continue;
+          const nx = x + dx;
+          if (nx < 0 || nx >= mw || !dilated[ny * mw + nx]) allDilated = false;
+        }
+      }
+      if (allDilated) closed[idx] = 1;
+    }
+  }
+  const outside = new Uint8Array(mw * mh);
+  const queue: number[] = [];
+  for (let x = 0; x < mw; x++) {
+    if (!closed[x]) { outside[x] = 1; queue.push(x); }
+    const b = (mh - 1) * mw + x;
+    if (!closed[b]) { outside[b] = 1; queue.push(b); }
+  }
+  for (let y = 1; y < mh - 1; y++) {
+    const left = y * mw;
+    const right = left + mw - 1;
+    if (!closed[left]) { outside[left] = 1; queue.push(left); }
+    if (!closed[right]) { outside[right] = 1; queue.push(right); }
+  }
+  for (let head = 0; head < queue.length; head++) {
+    const idx = queue[head];
+    const x = idx % mw;
+    const y = Math.floor(idx / mw);
+    const neighbors = [
+      x > 0 ? idx - 1 : -1,
+      x < mw - 1 ? idx + 1 : -1,
+      y > 0 ? idx - mw : -1,
+      y < mh - 1 ? idx + mw : -1,
+    ];
+    for (const neighbor of neighbors) {
+      if (neighbor >= 0 && !outside[neighbor] && !closed[neighbor]) {
+        outside[neighbor] = 1;
+        queue.push(neighbor);
+      }
+    }
+  }
+
+  const fillData = fillCtx.getImageData(0, 0, bw, bh);
+  for (let y = 0; y < bh; y++) {
+    for (let x = 0; x < bw; x++) {
+      let allOutside = true;
+      const x2 = x * maskScale;
+      const y2 = y * maskScale;
+      for (let dy = 0; dy < maskScale && allOutside; dy++) {
+        for (let dx = 0; dx < maskScale && allOutside; dx++) {
+          if (!outside[(y2 + dy) * mw + (x2 + dx)]) allOutside = false;
+        }
+      }
+      if (allOutside) fillData.data[(y * bw + x) * 4 + 3] = 0;
+    }
+  }
+  fillCtx.putImageData(fillData, 0, 0);
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(fillCanvas, bx1, by1);
+  ctx.restore();
+  return true;
+}
+
+function createContourFragment(
+  layerType: TVGArtLayer['type'],
+  shapeIndex: number,
+  componentIndex: number,
+  source: ContourSource,
+  comp: TVGComponent | null,
+  segments: TVGSegment[],
+  styleKey: FillStyleKey | null,
+  supportOnly: boolean,
+): TVGContourFragment | null {
+  const drawableCount = segments.filter(seg => seg.type !== 'M').length;
+  if (drawableCount < 1) return null;
+  const bbox = segmentBounds(segments);
+  if ((bbox.maxX - bbox.minX) < 0.01 && (bbox.maxY - bbox.minY) < 0.01) return null;
+  const start = segments[0];
+  const end = segments[segments.length - 1];
+  return {
+    source,
+    layerType,
+    shapeIndex,
+    componentIndex,
+    styleKey,
+    style: comp,
+    segments,
+    startX: start.x,
+    startY: start.y,
+    endX: end.x,
+    endY: end.y,
+    bbox,
+    reversible: true,
+    supportOnly,
+  };
+}
+
+function collectExplicitFillFragments(
+  shape: TVGShape,
+  layerType: TVGArtLayer['type'],
+  shapeIndex: number,
+): TVGContourFragment[] {
+  const fragments: TVGContourFragment[] = [];
+  const supportBoundaryComps = shape.components.filter(comp =>
+    comp.componentType === 2 && comp.strokeWidth === null && comp.path && comp.path.segments.length > 1,
+  );
+  const explicitPaintKeys = new Set(
+    shape.components
+      .filter(comp =>
+        (comp.componentType === 0 || comp.componentType === 1)
+        && comp.path
+        && !isDegenerate(comp.path)
+        && comp.outerPaint !== null
+        && (!comp.color || comp.color.a > 0)
+        && hasExplicitFillStyle(comp),
+      )
+      .map(comp => paintKeyForComponent(comp))
+      .filter((key): key is FillStyleKey => key !== null),
+  );
+  const hasExplicitStyledFill = shape.components.some(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && !isDegenerate(comp.path)
+    && comp.outerPaint !== null
+    && (!comp.color || comp.color.a > 0)
+    && hasExplicitFillStyle(comp),
+  );
+  const inheritedPaintKeys = new Set(
+    shape.components
+      .filter(comp =>
+        (comp.componentType === 0 || comp.componentType === 1)
+        && comp.path
+        && !isDegenerate(comp.path)
+        && comp.outerPaint !== null
+        && (!comp.color || comp.color.a > 0)
+        && comp.fillPaintSource === 'inherited',
+      )
+      .map(comp => paintKeyForComponent(comp))
+      .filter((key): key is FillStyleKey => key !== null),
+  );
+  const allowInheritedOnlySingleStyle = !hasExplicitStyledFill && inheritedPaintKeys.size === 1;
+  const hasType1CarrierSupport = shape.components.some(comp =>
+    comp.componentType === 1 && comp.path && !isDegenerate(comp.path),
+  );
+  shape.components.forEach((comp, componentIndex) => {
+    if ((comp.componentType !== 0 && comp.componentType !== 1) || !comp.path || isDegenerate(comp.path)) return;
+    if (comp.color && comp.color.a <= 0) return;
+    const canUseInheritedStyle = (allowInheritedOnlySingleStyle
+      || (hasExplicitStyledFill && (
+        explicitPaintKeys.size <= 1
+        || hasType1CarrierSupport
+        || supportBoundaryComps.length > 0
+      )))
+      && comp.outerPaint !== null
+      && comp.fillPaintSource === 'inherited';
+    const styleKey = hasExplicitFillStyle(comp) || canUseInheritedStyle ? paintKeyForComponent(comp) : null;
+    for (const segments of splitPathIntoSubpaths(comp.path)) {
+      const fragment = createContourFragment(
+        layerType,
+        shapeIndex,
+        componentIndex,
+        'explicit-fill',
+        comp,
+        segments,
+        styleKey,
+        styleKey === null,
+      );
+      if (fragment) fragments.push(fragment);
+    }
+  });
+  supportBoundaryComps.forEach((comp, componentIndex) => {
+    for (const segments of splitPathIntoSubpaths(comp.path!)) {
+      const fragment = createContourFragment(
+        layerType,
+        shapeIndex,
+        componentIndex,
+        'boundary-stroke',
+        comp,
+        segments,
+        null,
+        true,
+      );
+      if (fragment) fragments.push(fragment);
+    }
+  });
+  return fragments;
+}
+
+function collectBoundaryFragments(
+  shape: TVGShape,
+  layerType: TVGArtLayer['type'],
+  shapeIndex: number,
+  boundaryStyle: TVGPaint,
+): TVGContourFragment[] {
+  const fragments: TVGContourFragment[] = [];
+  const syntheticStyle = createSyntheticStyleComponent(boundaryStyle);
+  const styleKey = paintKeyForComponent(syntheticStyle) || 'boundary';
+  shape.components.forEach((comp, componentIndex) => {
+    if (comp.componentType !== 2 || comp.strokeWidth !== null || !comp.path) return;
+    for (const segments of splitPathIntoSubpaths(comp.path)) {
+      const fragment = createContourFragment(
+        layerType,
+        shapeIndex,
+        componentIndex,
+        'boundary-stroke',
+        syntheticStyle,
+        segments,
+        styleKey,
+        false,
+      );
+      if (fragment) fragments.push(fragment);
+    }
+  });
+  return fragments;
+}
+
+function buildContoursForShape(
+  fragments: TVGContourFragment[],
+  synthesized: boolean,
+): TVGFillBuildResult {
+  const contours: TVGResolvedContour[] = [];
+  const unresolvedChains: TVGResolvedContour[] = [];
+  const styleKeys = new Set(
+    fragments
+      .filter(fragment => fragment.styleKey !== null && !fragment.supportOnly)
+      .map(fragment => fragment.styleKey as string),
+  );
+  for (const styleKey of styleKeys) {
+    const styleFragments = fragments.filter(fragment =>
+      fragment.styleKey === styleKey || fragment.supportOnly,
+    );
+    const styleComp = styleFragments.find(fragment => !fragment.supportOnly && fragment.style)?.style ?? null;
+    const result = buildContoursFromFragments(styleFragments, styleKey, styleComp, synthesized);
+    contours.push(...result.contours);
+    unresolvedChains.push(...result.unresolvedChains);
+  }
+  return { contours, unresolvedChains };
+}
+
+export function __debugBuildContoursForShape(
+  shape: TVGShape,
+  layerType: TVGArtLayer['type'],
+  shapeIndex: number,
+): {
+  fragments: Array<{
+    componentIndex: number;
+    styleKey: FillStyleKey | null;
+    supportOnly: boolean;
+    startX: number;
+    startY: number;
+    endX: number;
+    endY: number;
+  }>;
+  contours: Array<{
+    styleKey: FillStyleKey;
+    sourceOrder: number;
+    fragmentCount: number;
+    styledFragmentCount: number;
+    supportFragmentCount: number;
+    bbox: { minX: number; minY: number; maxX: number; maxY: number };
+    childCount: number;
+  }>;
+  unresolvedChains: Array<{
+    styleKey: FillStyleKey;
+    sourceOrder: number;
+    fragmentCount: number;
+    styledFragmentCount: number;
+    supportFragmentCount: number;
+  }>;
+} {
+  const fragments = collectExplicitFillFragments(shape, layerType, shapeIndex);
+  const build = buildContoursForShape(fragments, false);
+  const tree = buildContourTree(build.contours);
+  return {
+    fragments: fragments.map(fragment => ({
+      componentIndex: fragment.componentIndex,
+      styleKey: fragment.styleKey,
+      supportOnly: fragment.supportOnly,
+      startX: fragment.startX,
+      startY: fragment.startY,
+      endX: fragment.endX,
+      endY: fragment.endY,
+    })),
+    contours: build.contours.map((contour, index) => ({
+      styleKey: contour.styleKey,
+      sourceOrder: contour.sourceOrder,
+      fragmentCount: contour.fragmentCount,
+      styledFragmentCount: contour.styledFragmentCount,
+      supportFragmentCount: contour.supportFragmentCount,
+      bbox: contour.bbox,
+      childCount: tree[index]?.children.length ?? 0,
+    })),
+    unresolvedChains: build.unresolvedChains.map(contour => ({
+      styleKey: contour.styleKey,
+      sourceOrder: contour.sourceOrder,
+      fragmentCount: contour.fragmentCount,
+      styledFragmentCount: contour.styledFragmentCount,
+      supportFragmentCount: contour.supportFragmentCount,
+    })),
+  };
+}
+
+
+function renderLayerPass(
+  ctx: CanvasRenderingContext2D,
+  layer: TVGArtLayer,
+  defaultStrokeWidth: number,
+  pass: 'fill' | 'stroke',
+  options?: TVGFillRenderOptions,
+): void {
+  const attenuateLowAlphaGuideFills = shouldAttenuateLowAlphaGuideFills(layer);
+  for (let shapeIndex = 0; shapeIndex < layer.shapes.length; shapeIndex++) {
+    const shape = layer.shapes[shapeIndex];
+    const strokeComps = shape.components.filter(c => (c.componentType === 4 || c.componentType === 2) && c.path && c.path.segments.length > 0);
+    const lowAlphaGuideFillScale = attenuateLowAlphaGuideFills
+      && shape.components.length === 1
+      && isLowAlphaSolidFillComponent(shape.components[0])
+      ? 0.5
+      : 1;
+
+    if (pass === 'fill') {
+      if (shouldSuppressLargeNearBlackLineFillShape(layer, shape, strokeComps)) {
+        continue;
+      }
+      if (shouldSuppressSeedCarrierFillShape(layer, shape)) {
+        continue;
+      }
+      const siblingBoundaryMaskShapes = options?.skipClipping
+        ? []
+        : collectSiblingBoundaryMaskShapes(options?.allLayers, layer, shape);
+      const fillCarrierCount = shape.components.filter(comp =>
+        (comp.componentType === 0 || comp.componentType === 1)
+        && comp.path
+        && !isDegenerate(comp.path),
+      ).length;
+      const hasInheritedFillCarriers = shape.components.some(comp =>
+        (comp.componentType === 0 || comp.componentType === 1)
+        && comp.path
+        && comp.outerPaint !== null
+        && comp.fillPaintSource === 'inherited',
+      );
+      const fillPaintKeys = new Set(
+        shape.components
+          .filter(comp =>
+            (comp.componentType === 0 || comp.componentType === 1)
+            && comp.path
+            && comp.outerPaint !== null,
+          )
+          .map(comp => paintKeyForComponent(comp))
+          .filter((key): key is FillStyleKey => key !== null),
+      );
+      const explicitFillPaintKeys = new Set(
+        shape.components
+          .filter(comp =>
+            (comp.componentType === 0 || comp.componentType === 1)
+            && comp.path
+            && comp.outerPaint !== null
+            && hasExplicitFillStyle(comp),
+          )
+          .map(comp => paintKeyForComponent(comp))
+          .filter((key): key is FillStyleKey => key !== null),
+      );
+      const dominantFillPaint = shape.components.find(comp =>
+        (comp.componentType === 0 || comp.componentType === 1)
+        && comp.path
+        && comp.outerPaint !== null,
+      )?.outerPaint ?? null;
+      const explicitFragments = collectExplicitFillFragments(shape, layer.type, shapeIndex);
+      const explicitBuild = buildContoursForShape(explicitFragments, false);
+      const shouldPreferSiblingBoundaryClip = !options?.skipClipping
+        && strokeComps.length === 0
+        && fillCarrierCount > 0
+        && fillCarrierCount <= 12
+        && fillPaintKeys.size === 1
+        && explicitBuild.contours.length === 0
+        && siblingBoundaryMaskShapes.length >= 4
+        && dominantFillPaint !== null;
+      if (shouldPreferSiblingBoundaryClip && clipLocalFillSources(
+        ctx,
+        layer,
+        shape,
+        [{ kind: 'bbox', paint: dominantFillPaint }],
+        defaultStrokeWidth,
+        false,
+        siblingBoundaryMaskShapes,
+      )) {
+        continue;
+      }
+      const shouldPaintSmallUnresolvedDirectly = strokeComps.length === 0
+        && explicitBuild.contours.length === 0
+        && explicitBuild.unresolvedChains.length > 0
+        && siblingBoundaryMaskShapes.length === 0
+        && explicitBuild.unresolvedChains.every(chain =>
+          chain.supportFragmentCount > 0
+          && chain.styledFragmentCount > 0
+          && chain.fragmentCount <= 4
+          && (chain.bbox.maxX - chain.bbox.minX) <= 900
+          && (chain.bbox.maxY - chain.bbox.minY) <= 900,
+        );
+      if (shouldPaintSmallUnresolvedDirectly
+        && paintDirectUnresolvedChains(ctx, explicitBuild.unresolvedChains, lowAlphaGuideFillScale)) {
+        continue;
+      }
+      const shouldPreferLegacyInheritedFillShape = layer.type === 'line'
+        && strokeComps.length === 0
+        && fillCarrierCount >= 2
+        && hasInheritedFillCarriers
+        && explicitFillPaintKeys.size <= 1
+        && fillPaintKeys.size <= 1
+        && !isNearlyBlackSolidPaint(dominantFillPaint);
+      const shouldPreferLegacyInheritedOnlyShape = strokeComps.length === 0
+        && hasInheritedFillCarriers
+        && explicitFillPaintKeys.size === 0
+        && fillPaintKeys.size === 1
+        && explicitBuild.unresolvedChains.length > 0;
+      const shouldPreferLegacyUnresolvedFillOnlyShape = strokeComps.length === 0
+        && siblingBoundaryMaskShapes.length === 0
+        && fillPaintKeys.size === 1
+        && explicitBuild.unresolvedChains.length > 0;
+      const shouldPreferLegacy = (
+        explicitBuild.unresolvedChains.length > explicitBuild.contours.length
+        && explicitBuild.unresolvedChains.length > 0
+      )
+        || shouldPreferLegacyInheritedFillShape
+        || shouldPreferLegacyInheritedOnlyShape
+        || shouldPreferLegacyUnresolvedFillOnlyShape;
+      if ((shouldPreferLegacy || explicitBuild.contours.length === 0)
+        && renderLegacyExplicitFillShape(ctx, shape, strokeComps, lowAlphaGuideFillScale)) {
+        continue;
+      }
+      let renderedExplicit = false;
+      if (explicitBuild.contours.length > 0) {
+        const sortedContours = explicitBuild.contours.sort((a, b) => a.sourceOrder - b.sourceOrder);
+        const contourFillSources = renderContourTree(sortedContours);
+        const shouldClipResolvedContours = !options?.skipClipping
+          && strokeComps.length === 0
+          && siblingBoundaryMaskShapes.length > 0;
+        if (shouldClipResolvedContours
+          && clipLocalFillSources(ctx, layer, shape, contourFillSources, defaultStrokeWidth, false, siblingBoundaryMaskShapes)) {
+          renderedExplicit = true;
+        } else {
+          for (const source of contourFillSources) {
+            if (source.path) {
+              fillPathWithPaint(ctx, source.path, scalePaintAlpha(source.paint, lowAlphaGuideFillScale), source.fillRule ?? 'nonzero');
+            }
+          }
+          renderedExplicit = contourFillSources.length > 0;
+        }
+      }
+
+      const hasLocalClipMask = strokeComps.length > 0 || siblingBoundaryMaskShapes.length > 0;
+      if (explicitBuild.unresolvedChains.length > 0 && !options?.skipClipping && hasLocalClipMask) {
+        const fillSources = explicitBuild.unresolvedChains
+          .map(contour => contour.style?.outerPaint ? {
+            kind: 'path' as const,
+            path: contour.path,
+            paint: contour.style.outerPaint,
+          } : null)
+          .filter((source): source is NonNullable<typeof source> => source !== null);
+        if (fillSources.length > 0 && clipLocalFillSources(ctx, layer, shape, fillSources, defaultStrokeWidth, false, siblingBoundaryMaskShapes)) {
+          renderedExplicit = true;
+        }
+      }
+      if (!renderedExplicit && explicitBuild.unresolvedChains.length > 0 && renderLegacyExplicitFillShape(ctx, shape, strokeComps, lowAlphaGuideFillScale)) {
+        renderedExplicit = true;
+      }
+      if (renderedExplicit) continue;
+
+      const shouldSuppressBoundaryFillFallback = isBoundaryOnlyShape(shape)
+        && hasSiblingRenderableFillShape(options?.allLayers, layer, shape);
+
+      if (options?.defaultBoundaryFillColor && !shouldSuppressBoundaryFillFallback) {
+        const boundaryPaint = cloneSolidPaint(options.defaultBoundaryFillColor);
+        const boundaryFragments = collectBoundaryFragments(shape, layer.type, shapeIndex, boundaryPaint);
+        if (boundaryFragments.length > 0) {
+          const boundaryBuild = buildContoursForShape(boundaryFragments, true);
+          if (boundaryBuild.contours.length > 0) {
+            paintContourTree(ctx, boundaryBuild.contours.sort((a, b) => a.sourceOrder - b.sourceOrder));
+            continue;
+          }
+          if (!options.skipClipping) {
+            if (clipLocalFillSources(ctx, layer, shape, [{ kind: 'bbox', paint: boundaryPaint }], defaultStrokeWidth, false, siblingBoundaryMaskShapes)) {
+              continue;
+            }
+          }
+        }
+      }
+
+      const pencilComps = strokeComps.filter(comp =>
+        comp.componentType === 4
+        && comp.path
+        && comp.outerPaint?.kind === 'solid'
+        && comp.outerPaint.rgba.r >= 30
+        && comp.outerPaint.rgba.g >= 30
+        && comp.outerPaint.rgba.b >= 30,
+      );
+      const hasOnlyPencils = strokeComps.length > 0 && strokeComps.every(comp => comp.componentType === 4);
+      const allowPencilFallback = layer.type !== 'line';
+      if (allowPencilFallback && hasOnlyPencils && pencilComps.length > 0) {
+        const counts = new Map<string, { count: number; paint: TVGPaint }>();
+        for (const comp of pencilComps) {
+          const paint = comp.outerPaint!;
+          const key = JSON.stringify(paint);
+          const entry = counts.get(key) || { count: 0, paint };
+          entry.count++;
+          counts.set(key, entry);
+        }
+        const dominant = Array.from(counts.values()).sort((a, b) => b.count - a.count)[0];
+        if (dominant && clipLocalFillSources(ctx, layer, shape, [{ kind: 'bbox', paint: dominant.paint }], defaultStrokeWidth, !!options?.skipClipping, siblingBoundaryMaskShapes)) {
+          continue;
+        }
+      }
+      continue;
+    }
+
+    if (pass === 'stroke') {
+      for (const comp of strokeComps) {
+        renderStrokeComponent(ctx, layer, shape, comp, defaultStrokeWidth, options?.diagnostics);
+      }
+    }
+  }
+}
+
+interface TVGStrokeSample {
+  x: number;
+  y: number;
+  nx: number;
+  ny: number;
+  leftW: number;
+  rightW: number;
+}
+
+interface TVGStrokeOutline {
+  centerlinePoints: Array<{ x: number; y: number }>;
+  leftEdge: Array<{ x: number; y: number }>;
+  rightEdge: Array<{ x: number; y: number }>;
+  isClosed: boolean;
+  firstSample: TVGStrokeSample | null;
+  lastSample: TVGStrokeSample | null;
+}
+
+function createUniformThicknessProfile(totalWidth: number, closed: boolean): TVGThicknessProfile {
+  const half = Math.max(0, totalWidth / 2);
+  const zero = { x: 0, y: half };
+  return {
+    points: [
+      {
+        loc: 0,
+        leftOffset: half,
+        leftCtrlBack: zero,
+        leftCtrlFwd: zero,
+        rightOffset: half,
+        rightCtrlBack: zero,
+        rightCtrlFwd: zero,
+      },
+      {
+        loc: 1,
+        leftOffset: half,
+        leftCtrlBack: zero,
+        leftCtrlFwd: zero,
+        rightOffset: half,
+        rightCtrlBack: zero,
+        rightCtrlFwd: zero,
+      },
+    ],
+    domain: [0, 1],
+    tipTangentLeftFrom: 1,
+    tipTangentRightFrom: 1,
+    tipTangentLeftTo: 1,
+    tipTangentRightTo: 1,
+    closed,
+  };
+}
+
+function resolveStrokeProfile(
+  comp: TVGComponent,
+  defaultStrokeWidth: number,
+  overrideWidth?: number | null,
+): TVGThicknessProfile | null {
+  if (!comp.path || comp.path.segments.length < 2) return null;
+  if (comp.thicknessProfile) return comp.thicknessProfile;
+  const totalWidth = overrideWidth
+    ?? comp.strokeWidth
+    ?? comp.tgtiThickness
+    ?? (comp.componentType === 4 ? defaultStrokeWidth : null);
+  if (totalWidth === null || totalWidth < 0.05) return null;
+  return createUniformThicknessProfile(totalWidth, isPathEffectivelyClosed(comp.path));
+}
+
+function paintToCssColor(paint: TVGPaint): string {
+  if (paint.kind === 'solid') {
+    const { r, g, b, a } = paint.rgba;
+    return `rgba(${r},${g},${b},${a / 255})`;
+  }
+  const { r, g, b, a } = paint.fallback;
+  return `rgba(${r},${g},${b},${a / 255})`;
+}
+
+function createGradientFill(
+  ctx: CanvasRenderingContext2D,
+  paint: Extract<TVGPaint, { kind: 'gradient' }>,
+): CanvasGradient {
+  const gradient = paint.gradientType === 'linear'
+    ? ctx.createLinearGradient(0, 0, 1, 0)
+    : ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+  for (const stop of paint.stops) {
+    const offset = Math.max(0, Math.min(1, stop.pos / 100));
+    gradient.addColorStop(offset, `rgba(${stop.r},${stop.g},${stop.b},${stop.a / 255})`);
+  }
+  return gradient;
+}
+
+function fillPathWithPaint(
+  ctx: CanvasRenderingContext2D,
+  path: Path2D,
+  paint: TVGPaint,
+  fillRule: CanvasFillRule = 'nonzero',
+): boolean {
+  if (paint.kind === 'solid') {
+    ctx.fillStyle = paintToCssColor(paint);
+    ctx.fill(path, fillRule);
+    return true;
+  }
+
+  const transform = paint.transform;
+  if (transform) {
+    const det = transform.a * transform.d - transform.b * transform.c;
+    if (Math.abs(det) > 1e-8) {
+      try {
+        const matrix = new DOMMatrix([transform.a, transform.b, transform.c, transform.d, transform.tx, transform.ty]);
+        const localPath = new Path2D();
+        localPath.addPath(path, matrix.inverse());
+        ctx.save();
+        ctx.transform(transform.a, transform.b, transform.c, transform.d, transform.tx, transform.ty);
+        ctx.fillStyle = createGradientFill(ctx, paint);
+        ctx.fill(localPath, fillRule);
+        ctx.restore();
+        return true;
+      } catch {
+        // Fall back to the solid backup color below.
+      }
+    }
+  }
+
+  ctx.fillStyle = `rgba(${paint.fallback.r},${paint.fallback.g},${paint.fallback.b},${paint.fallback.a / 255})`;
+  ctx.fill(path, fillRule);
+  return true;
+}
+
+function paintsEqual(a: TVGPaint | null, b: TVGPaint | null): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.kind !== b.kind) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function buildStrokeOutline(path: TVGPath, profile: TVGThicknessProfile): TVGStrokeOutline | null {
+  const segs = path.segments;
+  if (segs.length < 2) return null;
+
+  const { arcStarts: segArcStarts, totalLen } = computeSegmentArcLengths(segs);
+  if (totalLen < 0.01) return null;
+
+  const numSamples = Math.max(40, Math.min(300, Math.ceil(totalLen)));
+  const [domainStart, domainEnd] = profile.domain;
+  const domainLen = domainEnd - domainStart;
+
+  const centerlinePoints: Array<{ x: number; y: number }> = [];
+  const leftEdge: Array<{ x: number; y: number }> = [];
+  const rightEdge: Array<{ x: number; y: number }> = [];
+  let firstSample: TVGStrokeSample | null = null;
+  let lastSample: TVGStrokeSample | null = null;
+
+  const maxIndex = profile.closed ? numSamples - 1 : numSamples;
+  for (let i = 0; i <= maxIndex; i++) {
+    const frac = numSamples > 0 ? i / numSamples : 0;
+    const pt = sampleCenterline(segs, segArcStarts, totalLen, frac);
+    if (!pt) continue;
+    const thicknessT = domainLen > 0 ? domainStart + frac * domainLen : frac;
+    const { leftW, rightW } = interpolateThickness(profile, thicknessT);
+    const sample: TVGStrokeSample = { ...pt, leftW, rightW };
+    centerlinePoints.push({ x: pt.x, y: pt.y });
+    leftEdge.push({ x: pt.x + pt.nx * leftW, y: pt.y + pt.ny * leftW });
+    rightEdge.push({ x: pt.x - pt.nx * rightW, y: pt.y - pt.ny * rightW });
+    if (!firstSample) firstSample = sample;
+    lastSample = sample;
+  }
+
+  if (leftEdge.length < 2 || !firstSample || !lastSample) return null;
+  return {
+    centerlinePoints,
+    leftEdge,
+    rightEdge,
+    isClosed: profile.closed || isPathEffectivelyClosed(path),
+    firstSample,
+    lastSample,
+  };
+}
+
+function tangentFromSample(sample: TVGStrokeSample): { x: number; y: number } {
+  return { x: sample.ny, y: -sample.nx };
+}
+
+function createStrokeOutlinePath(
+  outline: TVGStrokeOutline,
+  profile: TVGThicknessProfile,
+  fromTipType: TVGTipType = 'round',
+  toTipType: TVGTipType = 'round',
+): Path2D {
+  const path = new Path2D();
+  const { leftEdge, rightEdge, firstSample, lastSample, isClosed } = outline;
+  path.moveTo(leftEdge[0].x, leftEdge[0].y);
+  for (let i = 1; i < leftEdge.length; i++) {
+    path.lineTo(leftEdge[i].x, leftEdge[i].y);
+  }
+
+  if (isClosed) {
+    path.lineTo(rightEdge[rightEdge.length - 1].x, rightEdge[rightEdge.length - 1].y);
+  } else if (lastSample && profile.points.length > 0) {
+    const lastProfilePoint = profile.points[profile.points.length - 1];
+    const tangent = tangentFromSample(lastSample);
+    if (toTipType === 'square') {
+      const leftCap = {
+        x: leftEdge[leftEdge.length - 1].x + tangent.x * lastProfilePoint.leftOffset,
+        y: leftEdge[leftEdge.length - 1].y + tangent.y * lastProfilePoint.leftOffset,
+      };
+      const rightCap = {
+        x: rightEdge[rightEdge.length - 1].x + tangent.x * lastProfilePoint.rightOffset,
+        y: rightEdge[rightEdge.length - 1].y + tangent.y * lastProfilePoint.rightOffset,
+      };
+      path.lineTo(leftCap.x, leftCap.y);
+      path.lineTo(rightCap.x, rightCap.y);
+      path.lineTo(rightEdge[rightEdge.length - 1].x, rightEdge[rightEdge.length - 1].y);
+    } else if (toTipType === 'butt') {
+      path.lineTo(rightEdge[rightEdge.length - 1].x, rightEdge[rightEdge.length - 1].y);
+    } else {
+      const tipTangentL = profile.tipTangentLeftTo ?? 1;
+      const tipTangentR = profile.tipTangentRightTo ?? 1;
+      const cp1x = leftEdge[leftEdge.length - 1].x + tangent.x * 1.33 * lastProfilePoint.leftOffset * tipTangentL;
+      const cp1y = leftEdge[leftEdge.length - 1].y + tangent.y * 1.33 * lastProfilePoint.leftOffset * tipTangentL;
+      const cp2x = rightEdge[rightEdge.length - 1].x + tangent.x * 1.33 * lastProfilePoint.rightOffset * tipTangentR;
+      const cp2y = rightEdge[rightEdge.length - 1].y + tangent.y * 1.33 * lastProfilePoint.rightOffset * tipTangentR;
+      path.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, rightEdge[rightEdge.length - 1].x, rightEdge[rightEdge.length - 1].y);
+    }
+  }
+
+  for (let i = rightEdge.length - 2; i >= 0; i--) {
+    path.lineTo(rightEdge[i].x, rightEdge[i].y);
+  }
+
+  if (!isClosed && firstSample && profile.points.length > 0) {
+    const firstProfilePoint = profile.points[0];
+    const tangent = tangentFromSample(firstSample);
+    if (fromTipType === 'square') {
+      const rightCap = {
+        x: rightEdge[0].x - tangent.x * firstProfilePoint.rightOffset,
+        y: rightEdge[0].y - tangent.y * firstProfilePoint.rightOffset,
+      };
+      const leftCap = {
+        x: leftEdge[0].x - tangent.x * firstProfilePoint.leftOffset,
+        y: leftEdge[0].y - tangent.y * firstProfilePoint.leftOffset,
+      };
+      path.lineTo(rightCap.x, rightCap.y);
+      path.lineTo(leftCap.x, leftCap.y);
+      path.lineTo(leftEdge[0].x, leftEdge[0].y);
+    } else if (fromTipType === 'round') {
+      const tipTangentL = profile.tipTangentLeftFrom ?? 1;
+      const tipTangentR = profile.tipTangentRightFrom ?? 1;
+      const cp1x = rightEdge[0].x - tangent.x * 1.33 * firstProfilePoint.rightOffset * tipTangentR;
+      const cp1y = rightEdge[0].y - tangent.y * 1.33 * firstProfilePoint.rightOffset * tipTangentR;
+      const cp2x = leftEdge[0].x - tangent.x * 1.33 * firstProfilePoint.leftOffset * tipTangentL;
+      const cp2y = leftEdge[0].y - tangent.y * 1.33 * firstProfilePoint.leftOffset * tipTangentL;
+      path.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, leftEdge[0].x, leftEdge[0].y);
+    } else {
+      path.lineTo(leftEdge[0].x, leftEdge[0].y);
+    }
+  }
+
+  path.closePath();
+  return path;
+}
+
+function createHalfRibbonPath(outline: TVGStrokeOutline, side: 'outer' | 'inner'): Path2D {
+  const path = new Path2D();
+  const edge = side === 'outer' ? outline.leftEdge : outline.rightEdge;
+  path.moveTo(outline.centerlinePoints[0].x, outline.centerlinePoints[0].y);
+  for (let i = 1; i < outline.centerlinePoints.length; i++) {
+    path.lineTo(outline.centerlinePoints[i].x, outline.centerlinePoints[i].y);
+  }
+  for (let i = edge.length - 1; i >= 0; i--) {
+    path.lineTo(edge[i].x, edge[i].y);
+  }
+  path.closePath();
+  return path;
+}
+
+function renderStrokeOutlineWithPaints(
+  ctx: CanvasRenderingContext2D,
+  comp: TVGComponent,
+  profile: TVGThicknessProfile,
+  outerPaint: TVGPaint | null,
+  innerPaint: TVGPaint | null,
+  diagnostics?: TVGDiagnostics,
+  allowFastPath = true,
+): void {
+  if (!comp.path) return;
+  const fullPaint = outerPaint ?? innerPaint;
+  if (!fullPaint) return;
+
+  if (innerPaint && outerPaint && paintsEqual(innerPaint, outerPaint)) {
+    innerPaint = null;
+  }
+
+  const uniformWidth = getUniformProfileWidth(profile);
+  const canFastPath = allowFastPath
+    && !innerPaint
+    && outerPaint?.kind === 'solid'
+    && uniformWidth !== null
+    && uniformWidth >= 0.1
+    && (isPathEffectivelyClosed(comp.path) || comp.fromTipType === comp.toTipType);
+  if (canFastPath) {
+    const path = buildPath2D(comp.path);
+    ctx.strokeStyle = paintToCssColor(outerPaint);
+    ctx.lineWidth = uniformWidth;
+    ctx.lineCap = isPathEffectivelyClosed(comp.path) ? 'butt' : comp.fromTipType;
+    ctx.lineJoin = comp.joinType;
+    ctx.stroke(path);
+    return;
+  }
+
+  const outline = buildStrokeOutline(comp.path, profile);
+  if (!outline) return;
+  const fullPath = createStrokeOutlinePath(outline, profile, comp.fromTipType, comp.toTipType);
+
+  if (!innerPaint) {
+    fillPathWithPaint(ctx, fullPath, fullPaint);
+    return;
+  }
+
+  if (outerPaint?.kind === 'gradient' || innerPaint.kind === 'gradient') {
+    if (diagnostics) {
+      addDiagnostic(diagnostics, {
+        severity: 'info',
+        code: 'STROKE_GRADIENT_SIDE_FALLBACK',
+        offset: 0,
+        context: 'render',
+        note: 'Rendered dual-sided stroke as a single outline because gradient side splitting is not supported.',
+      });
+    }
+    fillPathWithPaint(ctx, fullPath, outerPaint ?? innerPaint);
+    return;
+  }
+
+  fillPathWithPaint(ctx, createHalfRibbonPath(outline, 'outer'), outerPaint ?? innerPaint);
+  fillPathWithPaint(ctx, createHalfRibbonPath(outline, 'inner'), innerPaint);
+}
+
+function renderStrokeComponent(
+  ctx: CanvasRenderingContext2D,
+  layer: TVGArtLayer,
+  shape: TVGShape,
+  comp: TVGComponent,
+  defaultStrokeWidth: number,
+  diagnostics?: TVGDiagnostics,
+): void {
+  if (!comp.path || comp.path.segments.length < 2) return;
+  const xform = ctx.getTransform();
+  const ctxScale = Math.hypot(xform.a, xform.b) || 1;
+  const boundaryWidth = shouldRenderWidthlessBoundaryStroke(layer, shape, comp)
+    ? Math.max(1.5, 4.0 / ctxScale)
+    : undefined;
+  if (comp.componentType === 2 && comp.strokeWidth === null && !comp.thicknessProfile && comp.tgtiThickness === null && boundaryWidth === undefined) {
+    return;
+  }
+  const profile = resolveStrokeProfile(comp, defaultStrokeWidth, boundaryWidth);
+  if (!profile) return;
+  renderStrokeOutlineWithPaints(ctx, comp, profile, comp.outerPaint, comp.innerPaint, diagnostics);
 }
 
 /**
@@ -2958,47 +5039,22 @@ function renderStrokeMask(ctx: CanvasRenderingContext2D, layer: TVGArtLayer, def
     const strokeComps = shape.components.filter(c => (c.componentType === 4 || c.componentType === 2) && c.path && c.path.segments.length > 0);
 
     for (const comp of strokeComps) {
-      // For the mask, determine stroke width:
-      // - Explicit strokeWidth from the component
-      // - ct=4 pencil: use defaultStrokeWidth
-      // - ct=2 invisible boundary: use a thin boundary width to erase fill overflow
-      let sw: number;
-      if (comp.strokeWidth !== null) {
-        sw = comp.strokeWidth;
-      } else if (comp.componentType === 4) {
-        sw = defaultStrokeWidth;
-      } else {
-        // Invisible boundary strokes: use width scaled to ensure continuous
-        // lines in mask space. At small scales, 1.0 TVG unit may be sub-pixel,
-        // so use max(1.0, 2.0/scale) to guarantee walls are thick enough.
-        const xform = ctx.getTransform();
-        const ctxScale = Math.sqrt(xform.a * xform.a + xform.b * xform.b);
-        sw = Math.max(1.0, ctxScale > 0 ? 2.0 / ctxScale : 1.0);
-      }
-      if (sw < 0.05) continue;
-
-      // Variable-width stroke: render as filled outline
-      if (comp.thicknessProfile && comp.thicknessProfile.points.length >= 2 && comp.path) {
-        // Optimization: uniform thickness profiles can use native ctx.stroke()
-        const uniformWidth = getUniformProfileWidth(comp.thicknessProfile);
-        if (uniformWidth !== null && uniformWidth >= 0.1) {
-          const path = buildPath2D(comp.path);
-          ctx.strokeStyle = 'rgba(255,255,255,1)';
-          ctx.lineWidth = uniformWidth;
-          ctx.lineCap = comp.fromTipType;
-          ctx.lineJoin = comp.joinType;
-          ctx.stroke(path);
-        } else {
-          renderVariableWidthStroke(ctx, comp.path, comp.thicknessProfile, 'rgba(255,255,255,1)', comp.fromTipType, comp.toTipType);
-        }
-      } else {
-        const path = buildPath2D(comp.path!);
-        ctx.strokeStyle = 'rgba(255,255,255,1)';
-        ctx.lineWidth = sw;
-        ctx.lineCap = comp.fromTipType;
-        ctx.lineJoin = comp.joinType;
-        ctx.stroke(path);
-      }
+      const xform = ctx.getTransform();
+      const ctxScale = Math.hypot(xform.a, xform.b) || 1;
+      const boundaryWidth = isWidthlessBoundaryStroke(comp)
+        ? Math.max(1.5, 4.0 / ctxScale)
+        : undefined;
+      const profile = resolveStrokeProfile(comp, defaultStrokeWidth, boundaryWidth);
+      if (!profile) continue;
+      renderStrokeOutlineWithPaints(
+        ctx,
+        comp,
+        profile,
+        { kind: 'solid', rgba: { r: 255, g: 255, b: 255, a: 255 } },
+        null,
+        undefined,
+        true,
+      );
     }
   }
 }
@@ -3034,10 +5090,10 @@ function sampleCenterline(
 
   // Find which segment contains targetLen
   let segIdx = 1;
-  while (segIdx < segs.length - 1 && segArcStarts[segIdx + 1] < targetLen) segIdx++;
+  while (segIdx < segs.length - 1 && segArcStarts[segIdx + 1] <= targetLen) segIdx++;
 
   const segStart = segArcStarts[segIdx];
-  const segEnd = (segIdx + 1 < segArcStarts.length) ? segArcStarts[segIdx + 1] : segArcStarts[segIdx];
+  const segEnd = (segIdx + 1 < segArcStarts.length) ? segArcStarts[segIdx + 1] : totalArcLen;
   const segLen = segEnd - segStart;
   const segT = segLen > 0.001 ? Math.max(0, Math.min(1, (targetLen - segStart) / segLen)) : 0;
 
@@ -3075,11 +5131,12 @@ function sampleCenterline(
  * Compute approximate arc lengths for each path segment using subdivision.
  * Returns array where index i is the cumulative arc length at the START of segment i.
  */
-function computeSegmentArcLengths(segs: TVGSegment[]): number[] {
-  const arcStarts: number[] = [0]; // segment 0 (M) starts at 0
+function computeSegmentArcLengths(segs: TVGSegment[]): { arcStarts: number[]; totalLen: number } {
+  const arcStarts: number[] = new Array(segs.length).fill(0);
   let cumLen = 0;
 
   for (let i = 1; i < segs.length; i++) {
+    arcStarts[i] = cumLen;
     const prev = segs[i - 1];
     const seg = segs[i];
     let segLen = 0;
@@ -3112,10 +5169,9 @@ function computeSegmentArcLengths(segs: TVGSegment[]): number[] {
     }
 
     cumLen += segLen;
-    arcStarts.push(cumLen);
   }
 
-  return arcStarts;
+  return { arcStarts, totalLen: cumLen };
 }
 
 /**
@@ -3188,408 +5244,11 @@ function getUniformProfileWidth(profile: TVGThicknessProfile): number | null {
   return null;
 }
 
-/** Render a variable-width stroke as a filled outline using the thickness profile. */
-function renderVariableWidthStroke(
-  ctx: CanvasRenderingContext2D,
-  path: TVGPath,
-  profile: TVGThicknessProfile,
-  fillStyle: string,
-  fromTipType: TVGTipType = 'round',
-  toTipType: TVGTipType = 'round',
-): void {
-  const segs = path.segments;
-  if (segs.length < 2) return;
-
-  // Compute proper arc lengths along the actual bezier curves
-  const segArcStarts = computeSegmentArcLengths(segs);
-  const totalLen = segArcStarts[segArcStarts.length - 1];
-  if (totalLen < 0.01) return;
-
-  // Higher sample density for better quality
-  const numSamples = Math.max(40, Math.min(300, Math.ceil(totalLen)));
-
-  // Map from thickness domain to centerline parameter
-  const [domainStart, domainEnd] = profile.domain;
-  const domainLen = domainEnd - domainStart;
-
-  const leftPoints: { x: number; y: number }[] = [];
-  const rightPoints: { x: number; y: number }[] = [];
-
-  let firstPt: { x: number; y: number; nx: number; ny: number } | null = null;
-  let lastPt: { x: number; y: number; nx: number; ny: number } | null = null;
-
-  for (let i = 0; i <= numSamples; i++) {
-    const frac = i / numSamples;
-
-    const pt = sampleCenterline(segs, segArcStarts, totalLen, frac);
-    if (!pt) continue;
-
-    // Map centerline fraction to thickness parameter via domain
-    const thicknessT = domainLen > 0 ? domainStart + frac * domainLen : frac;
-
-    const { leftW, rightW } = interpolateThickness(profile, thicknessT);
-
-    leftPoints.push({ x: pt.x + pt.nx * leftW, y: pt.y + pt.ny * leftW });
-    rightPoints.push({ x: pt.x - pt.nx * rightW, y: pt.y - pt.ny * rightW });
-
-    if (!firstPt) firstPt = pt;
-    lastPt = pt;
-  }
-
-  if (leftPoints.length < 2) return;
-
-  // Build filled outline: left forward, end cap/join, right reversed, start cap/join
-  const isClosed = profile.closed;
-  const outlinePath = new Path2D();
-  outlinePath.moveTo(leftPoints[0].x, leftPoints[0].y);
-  for (let i = 1; i < leftPoints.length; i++) {
-    outlinePath.lineTo(leftPoints[i].x, leftPoints[i].y);
-  }
-
-  if (isClosed) {
-    // Closed stroke: connect end directly to right side (no end cap)
-    outlinePath.lineTo(rightPoints[rightPoints.length - 1].x, rightPoints[rightPoints.length - 1].y);
-  } else {
-    // End cap: shape depends on tip type
-    if (lastPt && profile.points.length > 0) {
-      const lastTP = profile.points[profile.points.length - 1];
-      // Cap scale varies by tip type: round=1.33, square=1.0, flat=0
-      const capScale = toTipType === 'butt' ? 0 : toTipType === 'square' ? 1.0 : 1.33;
-      const lastLeft = leftPoints[leftPoints.length - 1];
-      const lastRight = rightPoints[rightPoints.length - 1];
-      if (capScale === 0) {
-        // Flat cap: straight line between left and right
-        outlinePath.lineTo(lastRight.x, lastRight.y);
-      } else {
-        // Tangent direction at end, modulated by tip tangent values
-        const tdx = -lastPt.ny;
-        const tdy = lastPt.nx;
-        const tipTangentL = profile.tipTangentLeftTo !== undefined ? profile.tipTangentLeftTo : 1;
-        const tipTangentR = profile.tipTangentRightTo !== undefined ? profile.tipTangentRightTo : 1;
-        const cp1x = lastLeft.x + tdx * capScale * lastTP.leftOffset * tipTangentL;
-        const cp1y = lastLeft.y + tdy * capScale * lastTP.leftOffset * tipTangentL;
-        const cp2x = lastRight.x + tdx * capScale * lastTP.rightOffset * tipTangentR;
-        const cp2y = lastRight.y + tdy * capScale * lastTP.rightOffset * tipTangentR;
-        outlinePath.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, lastRight.x, lastRight.y);
-      }
-    } else {
-      outlinePath.lineTo(rightPoints[rightPoints.length - 1].x, rightPoints[rightPoints.length - 1].y);
-    }
-  }
-
-  for (let i = rightPoints.length - 2; i >= 0; i--) {
-    outlinePath.lineTo(rightPoints[i].x, rightPoints[i].y);
-  }
-
-  if (!isClosed) {
-    // Start cap: shape depends on tip type
-    if (firstPt && profile.points.length > 0) {
-      const firstTP = profile.points[0];
-      const capScale = fromTipType === 'butt' ? 0 : fromTipType === 'square' ? 1.0 : 1.33;
-      const firstRight = rightPoints[0];
-      const firstLeft = leftPoints[0];
-      if (capScale === 0) {
-        // Flat cap: straight line back to start
-        outlinePath.lineTo(firstLeft.x, firstLeft.y);
-      } else {
-        // Tangent direction at start (backward = negative tangent)
-        const tdx = firstPt.ny;
-        const tdy = -firstPt.nx;
-        const tipTangentL = profile.tipTangentLeftFrom !== undefined ? profile.tipTangentLeftFrom : 1;
-        const tipTangentR = profile.tipTangentRightFrom !== undefined ? profile.tipTangentRightFrom : 1;
-        const cp1x = firstRight.x + tdx * capScale * firstTP.rightOffset * tipTangentR;
-        const cp1y = firstRight.y + tdy * capScale * firstTP.rightOffset * tipTangentR;
-        const cp2x = firstLeft.x + tdx * capScale * firstTP.leftOffset * tipTangentL;
-        const cp2y = firstLeft.y + tdy * capScale * firstTP.leftOffset * tipTangentL;
-        outlinePath.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, firstLeft.x, firstLeft.y);
-      }
-    }
-  }
-
-  outlinePath.closePath();
-
-  ctx.fillStyle = fillStyle;
-  ctx.fill(outlinePath);
-}
-
-/** Chain a subset of fill components by endpoint matching and render filled paths. */
-function chainAndFillComponents(
-  ctx: CanvasRenderingContext2D,
-  allFillComps: TVGComponent[],
-  indices: number[],
-  TOL: number,
-): void {
-  const compInfos = indices.map(idx => {
-    const segs = allFillComps[idx].path!.segments;
-    return {
-      ci: idx,
-      startX: segs[0].x, startY: segs[0].y,
-      endX: segs[segs.length - 1].x, endY: segs[segs.length - 1].y,
-    };
-  });
-
-  // Greedy chain building: link components by matching endpoints
-  const used = new Set<number>();
-  const chains: { ci: number; reversed: boolean; startX: number; startY: number; endX: number; endY: number }[][] = [];
-  for (let i = 0; i < compInfos.length; i++) {
-    if (used.has(i)) continue;
-    used.add(i);
-    const chain: typeof chains[0] = [{ ...compInfos[i], reversed: false }];
-    let changed = true;
-    while (changed) {
-      changed = false;
-      const tail = chain[chain.length - 1];
-      const head = chain[0];
-      if (Math.abs(head.startX - tail.endX) < TOL && Math.abs(head.startY - tail.endY) < TOL) break;
-      for (let j = 0; j < compInfos.length; j++) {
-        if (used.has(j)) continue;
-        const c = compInfos[j];
-        if (Math.abs(c.startX - tail.endX) < TOL && Math.abs(c.startY - tail.endY) < TOL) {
-          chain.push({ ...c, reversed: false }); used.add(j); changed = true; break;
-        }
-        if (Math.abs(c.endX - tail.endX) < TOL && Math.abs(c.endY - tail.endY) < TOL) {
-          chain.push({ ci: c.ci, startX: c.endX, startY: c.endY, endX: c.startX, endY: c.startY, reversed: true });
-          used.add(j); changed = true; break;
-        }
-      }
-      if (changed) continue;
-      for (let j = 0; j < compInfos.length; j++) {
-        if (used.has(j)) continue;
-        const c = compInfos[j];
-        if (Math.abs(c.endX - head.startX) < TOL && Math.abs(c.endY - head.startY) < TOL) {
-          chain.unshift({ ...c, reversed: false }); used.add(j); changed = true; break;
-        }
-        if (Math.abs(c.startX - head.startX) < TOL && Math.abs(c.startY - head.startY) < TOL) {
-          chain.unshift({ ci: c.ci, startX: c.endX, startY: c.endY, endX: c.startX, endY: c.startY, reversed: true });
-          used.add(j); changed = true; break;
-        }
-      }
-    }
-    chains.push(chain);
-  }
-
-  // Contour-based fill with nesting detection.
-  // Harmony fills each contour independently. However, nested contours of the same
-  // color represent holes (like the inside of letter "O"). We detect nesting by
-  // checking bounding box containment, then:
-  // - Nested chain groups: combine into one compound path with evenodd (preserves holes)
-  // - Non-nested chains: fill independently with nonzero winding (avoids false holes)
-  let fillColor: { r: number; g: number; b: number; a: number } | null = null;
-  let gradientComp: TVGComponent | null = null;
-  for (const chain of chains) {
-    for (const info of chain) {
-      const comp = allFillComps[info.ci];
-      if (comp.color) {
-        fillColor = comp.color;
-        if (comp.gradientType && comp.gradientStops && comp.gradientStops.length > 0) {
-          gradientComp = comp;
-        }
-        break;
-      }
-    }
-    if (fillColor) break;
-  }
-  if (!fillColor) return;
-
-  // Use gradient fill if available, otherwise solid color
-  const gradientFill = gradientComp ? createGradientFill(ctx, gradientComp) : null;
-  if (gradientFill) {
-    ctx.fillStyle = gradientFill;
-  } else {
-    ctx.fillStyle = `rgba(${fillColor.r},${fillColor.g},${fillColor.b},${fillColor.a / 255})`;
-  }
-
-  // Helper: add a chain to a Path2D
-  const addChainToPath = (path: Path2D, chain: typeof chains[0], isFirstChain: boolean) => {
-    let isFirst = isFirstChain;
-    const head = chain[0], tail = chain[chain.length - 1];
-    const isClosed = Math.abs(head.startX - tail.endX) + Math.abs(head.startY - tail.endY) < TOL * 2;
-    for (const info of chain) {
-      const comp = allFillComps[info.ci];
-      const segs = comp.path!.segments;
-      if (!info.reversed) {
-        for (let si = 0; si < segs.length; si++) {
-          const seg = segs[si];
-          if (si === 0) {
-            if (isFirst) { path.moveTo(seg.x, seg.y); isFirst = false; }
-            else path.lineTo(seg.x, seg.y);
-          } else if (seg.type === 'C') path.bezierCurveTo(seg.c1x, seg.c1y, seg.c2x, seg.c2y, seg.x, seg.y);
-          else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, seg.x, seg.y);
-          else path.lineTo(seg.x, seg.y);
-        }
-      } else {
-        const lastSeg = segs[segs.length - 1];
-        if (isFirst) { path.moveTo(lastSeg.x, lastSeg.y); isFirst = false; }
-        else path.lineTo(lastSeg.x, lastSeg.y);
-        for (let si = segs.length - 1; si >= 1; si--) {
-          const seg = segs[si];
-          const dest = segs[si - 1];
-          if (seg.type === 'C') path.bezierCurveTo(seg.c2x, seg.c2y, seg.c1x, seg.c1y, dest.x, dest.y);
-          else if (seg.type === 'Q') path.quadraticCurveTo(seg.cx, seg.cy, dest.x, dest.y);
-          else path.lineTo(dest.x, dest.y);
-        }
-      }
-    }
-    if (isClosed) path.closePath();
-  };
-
-  // Contour-based fill (matching Harmony's GR_Contour system):
-  // Each chain = one contour = one independent filled region.
-  // Per binary findings: Harmony does NOT use evenodd/nonzero winding rules.
-  // Instead each contour fills independently, and parent-child nesting
-  // (TopologicalComparison) determines holes.
-  //
-  // For chains that are nested (bbox containment), combine into one path
-  // with evenodd to create holes. Non-nested chains fill independently.
-  if (chains.length === 1) {
-    // Single contour: just fill it
-    const path = new Path2D();
-    addChainToPath(path, chains[0], true);
-    ctx.fill(path);
-  } else {
-    // Multiple chains: detect nesting for hole handling.
-    // Compute bounding boxes.
-    const bboxes = chains.map(chain => {
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (const info of chain) {
-        const comp = allFillComps[info.ci];
-        for (const seg of comp.path!.segments) {
-          if (seg.x < minX) minX = seg.x;
-          if (seg.y < minY) minY = seg.y;
-          if (seg.x > maxX) maxX = seg.x;
-          if (seg.y > maxY) maxY = seg.y;
-        }
-      }
-      return { minX, minY, maxX, maxY, area: (maxX - minX) * (maxY - minY) };
-    });
-
-    // Find parent for each chain (smallest containing chain by bbox).
-    const parent = new Array<number>(chains.length).fill(-1);
-    for (let i = 0; i < chains.length; i++) {
-      let bestParent = -1;
-      let bestArea = Infinity;
-      for (let j = 0; j < chains.length; j++) {
-        if (i === j) continue;
-        const outer = bboxes[j];
-        const inner = bboxes[i];
-        if (inner.minX >= outer.minX && inner.maxX <= outer.maxX &&
-            inner.minY >= outer.minY && inner.maxY <= outer.maxY &&
-            inner.area < outer.area * 0.95 &&
-            outer.area < bestArea) {
-          bestParent = j;
-          bestArea = outer.area;
-        }
-      }
-      parent[i] = bestParent;
-    }
-
-    // Group: root contours and their direct children (holes).
-    const processed = new Set<number>();
-    for (let i = 0; i < chains.length; i++) {
-      if (processed.has(i)) continue;
-      if (parent[i] !== -1) continue; // not a root
-
-      // Collect this root's children (holes)
-      const children: number[] = [];
-      for (let j = 0; j < chains.length; j++) {
-        if (parent[j] === i) children.push(j);
-      }
-
-      if (children.length > 0) {
-        // Root with holes: compound path + evenodd
-        const path = new Path2D();
-        addChainToPath(path, chains[i], true);
-        processed.add(i);
-        for (const childIdx of children) {
-          addChainToPath(path, chains[childIdx], false);
-          processed.add(childIdx);
-        }
-        ctx.fill(path, 'evenodd');
-      } else {
-        // Standalone root: fill independently (no winding rule needed)
-        const path = new Path2D();
-        addChainToPath(path, chains[i], true);
-        processed.add(i);
-        ctx.fill(path);
-      }
-    }
-
-    // Fill any remaining chains (nested children without a processed root)
-    for (let i = 0; i < chains.length; i++) {
-      if (processed.has(i)) continue;
-      const path = new Path2D();
-      addChainToPath(path, chains[i], true);
-      ctx.fill(path);
-    }
-  }
-}
-
-/** Check if a path is degenerate (all points collinear — forms a line, not a shape). */
+/** Check if a path collapses to a point-sized bbox. Line fragments are still valid contour edges. */
 function isDegenerate(path: TVGPath): boolean {
-  if (path.segments.length <= 2) {
-    const xs = new Set(path.segments.map(s => Math.round(s.x * 100)));
-    const ys = new Set(path.segments.map(s => Math.round(s.y * 100)));
-    return xs.size <= 1 || ys.size <= 1;
-  }
-  return false;
-}
-
-/**
- * Create a CanvasGradient from a component's gradient data and TGCO transform.
- * The TGCO transform maps the gradient coordinate space to TVG coordinate space:
- * - LinearGradient: maps (0,0)->(1,0) to the gradient line
- * - RadialGradient: maps the unit circle to the gradient ellipse
- *
- * Returns null if the component doesn't have valid gradient data.
- */
-function createGradientFill(
-  ctx: CanvasRenderingContext2D,
-  comp: TVGComponent,
-): CanvasGradient | null {
-  if (!comp.gradientType || !comp.gradientStops || comp.gradientStops.length === 0) {
-    return null;
-  }
-
-  const t = comp.transform;
-  // Without a TGCO transform, we can't position the gradient. Use a default.
-  const a = t ? t.a : 1;
-  const b = t ? t.b : 0;
-  const c = t ? t.c : 0;
-  const d = t ? t.d : 1;
-  const tx = t ? t.tx : 0;
-  const ty = t ? t.ty : 0;
-
-  let gradient: CanvasGradient;
-
-  if (comp.gradientType === 'linear') {
-    // Transform (0,0) and (1,0) through the affine matrix to get gradient endpoints
-    const x0 = tx;
-    const y0 = ty;
-    const x1 = a + tx;
-    const y1 = b + ty;
-    gradient = ctx.createLinearGradient(x0, y0, x1, y1);
-  } else {
-    // Radial: the transform maps the unit circle to an ellipse.
-    // Canvas 2D radial gradients are circular, so we approximate by using the
-    // average scale factor as the radius and the transform's translation as center.
-    // For a proper elliptical gradient we'd need to apply the transform to the
-    // context, but that would affect the path too. Instead we use a circular
-    // approximation centered at the transform origin.
-    const cx = tx;
-    const cy = ty;
-    const scaleX = Math.sqrt(a * a + b * b);
-    const scaleY = Math.sqrt(c * c + d * d);
-    const radius = (scaleX + scaleY) / 2;
-    gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
-  }
-
-  // Add color stops (positions normalized from 0-100 to 0-1)
-  for (const stop of comp.gradientStops) {
-    const offset = Math.max(0, Math.min(1, stop.pos / 100));
-    gradient.addColorStop(offset, `rgba(${stop.r},${stop.g},${stop.b},${stop.a / 255})`);
-  }
-
-  return gradient;
+  if (path.segments.length <= 1) return true;
+  const bounds = segmentBounds(path.segments);
+  return (bounds.maxX - bounds.minX) < 0.01 && (bounds.maxY - bounds.minY) < 0.01;
 }
 
 function buildPath2D(tvgPath: TVGPath): Path2D {
