@@ -674,6 +674,52 @@ describe('tvg rendering', () => {
     expect(samplePixel(canvas!, 75, 60).a).toBeGreaterThan(0);
   });
 
+  it('does not implicitly fill open unresolved line-layer fill chains', () => {
+    const blackPaint = { kind: 'solid' as const, rgba: { r: 0, g: 0, b: 0, a: 255 } };
+    const drawing = createDrawing([{
+      type: 'line',
+      shapes: [{
+        shapeType: 2,
+        components: [
+          createComponent({
+            componentType: 0,
+            color: { ...blackPaint.rgba },
+            fillPaintSource: 'explicit',
+            outerPaint: blackPaint,
+            path: createPath([
+              { type: 'M', x: -30, y: -20 },
+              { type: 'L', x: 30, y: -20 },
+            ]),
+          }),
+          createComponent({
+            componentType: 0,
+            color: { ...blackPaint.rgba },
+            fillPaintSource: 'explicit',
+            outerPaint: blackPaint,
+            path: createPath([
+              { type: 'M', x: 30, y: -20 },
+              { type: 'L', x: 0, y: 24 },
+            ]),
+          }),
+          createComponent({
+            componentType: 0,
+            color: { ...blackPaint.rgba },
+            fillPaintSource: 'explicit',
+            outerPaint: blackPaint,
+            path: createPath([
+              { type: 'M', x: 0, y: 24 },
+              { type: 'L', x: -18, y: 10 },
+            ]),
+          }),
+        ],
+      }],
+    }]);
+
+    const canvas = renderTVGToCanvas(drawing, 120, 120, 120);
+    expect(canvas).not.toBeNull();
+    expectColorNear(samplePixel(canvas!, 60, 56), { r: 255, g: 255, b: 255 }, 5);
+  });
+
   it('borrows missing pencil paths from the previous fill shape for matching shapeType-1 outlines', () => {
     const pathA = createPath([
       { type: 'M', x: -20, y: -20 },
@@ -740,7 +786,7 @@ describe('tvg rendering', () => {
     expect(layer.shapes[1].components[1].path).toBe(paths[1]);
   });
 
-  it('does not synthesize fills for closed pencil loops on line layers', () => {
+  it('does not synthesize fills for thick closed pencil loops on line layers', () => {
     const drawing = createDrawing([{
       type: 'line',
       shapes: [{
@@ -769,6 +815,42 @@ describe('tvg rendering', () => {
     const center = samplePixel(canvas!, 60, 60);
     const edge = samplePixel(canvas!, 60, 28);
     expectColorNear(center, { r: 255, g: 255, b: 255 }, 10);
+    expect(edge.a).toBeGreaterThan(0);
+  });
+
+  it('synthesizes fills for thin closed pencil loops on line layers', () => {
+    const drawing = createDrawing([{
+      type: 'line',
+      shapes: [{
+        shapeType: 3,
+        components: [
+          createComponent({
+            componentType: 4,
+            strokeWidth: 4,
+            outerPaint: { kind: 'solid', rgba: { r: 197, g: 153, b: 132, a: 255 } },
+            path: createPath([
+              { type: 'M', x: -24, y: -8 },
+              { type: 'C', c1x: -24, c1y: 8, c2x: 0, c2y: 24, x: 24, y: 8 },
+            ]),
+          }),
+          createComponent({
+            componentType: 4,
+            strokeWidth: 4,
+            outerPaint: { kind: 'solid', rgba: { r: 197, g: 153, b: 132, a: 255 } },
+            path: createPath([
+              { type: 'M', x: 24, y: 8 },
+              { type: 'C', c1x: 16, c1y: -16, c2x: -12, c2y: -20, x: -24, y: -8 },
+            ]),
+          }),
+        ],
+      }],
+    }]);
+
+    const canvas = renderTVGToCanvas(drawing, 120, 120, 120);
+    expect(canvas).not.toBeNull();
+    const center = samplePixel(canvas!, 60, 60);
+    const edge = samplePixel(canvas!, 60, 40);
+    expectColorNear(center, { r: 197, g: 153, b: 132 }, 20);
     expect(edge.a).toBeGreaterThan(0);
   });
 

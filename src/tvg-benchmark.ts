@@ -16,6 +16,7 @@ export interface BenchmarkScoreOptions {
   backgroundTolerance?: number;
   maxShift?: number;
   searchRadius?: number;
+  contentKind?: 'vector' | 'bitmap';
 }
 
 export interface BenchmarkScoreResult {
@@ -24,6 +25,8 @@ export interface BenchmarkScoreResult {
   alignedScore: number;
   normalizedScore: number;
   perceptualScore: number;
+  structuralScore: number;
+  maskScore: number;
   bestShift: { x: number; y: number };
   foregroundIou: number;
   referenceBounds: BenchmarkBounds | null;
@@ -35,6 +38,7 @@ const DEFAULTS: Required<BenchmarkScoreOptions> = {
   backgroundTolerance: 12,
   maxShift: 8,
   searchRadius: 2,
+  contentKind: 'vector',
 };
 
 function getOptions(options?: BenchmarkScoreOptions): Required<BenchmarkScoreOptions> {
@@ -43,6 +47,7 @@ function getOptions(options?: BenchmarkScoreOptions): Required<BenchmarkScoreOpt
     backgroundTolerance: options?.backgroundTolerance ?? DEFAULTS.backgroundTolerance,
     maxShift: options?.maxShift ?? DEFAULTS.maxShift,
     searchRadius: options?.searchRadius ?? DEFAULTS.searchRadius,
+    contentKind: options?.contentKind ?? DEFAULTS.contentKind,
   };
 }
 
@@ -292,6 +297,71 @@ function downsamplePixelBuffer(
   return { width: targetWidth, height: targetHeight, data };
 }
 
+function grayscalePixelBuffer(source: PixelBufferLike): PixelBufferLike {
+  const data = new Uint8ClampedArray(source.data.length);
+  for (let index = 0; index < source.data.length; index += 4) {
+    const r = source.data[index + 0];
+    const g = source.data[index + 1];
+    const b = source.data[index + 2];
+    const a = source.data[index + 3];
+    const luma = Math.round((0.2126 * r) + (0.7152 * g) + (0.0722 * b));
+    data[index + 0] = luma;
+    data[index + 1] = luma;
+    data[index + 2] = luma;
+    data[index + 3] = a;
+  }
+  return {
+    width: source.width,
+    height: source.height,
+    data,
+  };
+}
+
+function binaryMaskPixelBuffer(
+  source: PixelBufferLike,
+  backgroundTolerance: number,
+): PixelBufferLike {
+  const data = new Uint8ClampedArray(source.data.length);
+  for (let index = 0; index < source.data.length; index += 4) {
+    const foreground = isForegroundPixel(source.data, index, backgroundTolerance);
+    const value = foreground ? 0 : 255;
+    data[index + 0] = value;
+    data[index + 1] = value;
+    data[index + 2] = value;
+    data[index + 3] = 255;
+  }
+  return {
+    width: source.width,
+    height: source.height,
+    data,
+  };
+}
+
+function areaOfBounds(bounds: BenchmarkBounds | null): number {
+  if (!bounds) return 0;
+  return (bounds.maxX - bounds.minX + 1) * (bounds.maxY - bounds.minY + 1);
+}
+
+function foregroundCoverage(
+  buffer: PixelBufferLike,
+  bounds: BenchmarkBounds | null,
+  backgroundTolerance: number,
+): number {
+  if (!bounds) return 0;
+  let foregroundPixels = 0;
+  const totalArea = areaOfBounds(bounds);
+  if (totalArea <= 0) return 0;
+  for (let y = bounds.minY; y <= bounds.maxY; y++) {
+    for (let x = bounds.minX; x <= bounds.maxX; x++) {
+      const index = (y * buffer.width + x) * 4;
+      if (isForegroundPixel(buffer.data, index, backgroundTolerance)) {
+        foregroundPixels++;
+      }
+    }
+  }
+  return foregroundPixels / totalArea;
+}
+
 function scorePixelBuffersBase(
   reference: PixelBufferLike,
   candidate: PixelBufferLike,
@@ -396,6 +466,8 @@ function scorePixelBuffersBase(
     alignedScore: bestAlignedScore,
     normalizedScore: bestNormalizedScore,
     perceptualScore: bestScore,
+    structuralScore: bestScore,
+    maskScore: bestScore,
     bestShift,
     foregroundIou: bestIou,
     referenceBounds,
@@ -421,6 +493,48 @@ function computePerceptualScore(
   return coarse.alignedScore;
 }
 
+function computeStructuralScore(
+  reference: PixelBufferLike,
+  candidate: PixelBufferLike,
+  options: Required<BenchmarkScoreOptions>,
+): number {
+  const targetSize = Math.max(20, Math.round(Math.min(reference.width, reference.height) / 5));
+  if (targetSize >= Math.min(reference.width, reference.height)) return 100;
+  const downsampledReference = grayscalePixelBuffer(downsamplePixelBuffer(reference, targetSize, targetSize));
+  const downsampledCandidate = grayscalePixelBuffer(downsamplePixelBuffer(candidate, targetSize, targetSize));
+  const coarse = scorePixelBuffersBase(downsampledReference, downsampledCandidate, {
+    tolerance: Math.max(options.tolerance, 88),
+    backgroundTolerance: Math.max(6, Math.round(options.backgroundTolerance * 0.75)),
+    maxShift: Math.max(1, Math.ceil(options.maxShift * (targetSize / Math.max(reference.width, reference.height)))),
+    searchRadius: Math.min(1, options.searchRadius),
+  });
+  return coarse.alignedScore;
+}
+
+function computeMaskScore(
+  reference: PixelBufferLike,
+  candidate: PixelBufferLike,
+  options: Required<BenchmarkScoreOptions>,
+): number {
+  const targetSize = Math.max(20, Math.round(Math.min(reference.width, reference.height) / 5));
+  if (targetSize >= Math.min(reference.width, reference.height)) return 100;
+  const downsampledReference = binaryMaskPixelBuffer(
+    downsamplePixelBuffer(reference, targetSize, targetSize),
+    Math.max(4, Math.round(options.backgroundTolerance * 0.75)),
+  );
+  const downsampledCandidate = binaryMaskPixelBuffer(
+    downsamplePixelBuffer(candidate, targetSize, targetSize),
+    Math.max(4, Math.round(options.backgroundTolerance * 0.75)),
+  );
+  const coarse = scorePixelBuffersBase(downsampledReference, downsampledCandidate, {
+    tolerance: 16,
+    backgroundTolerance: 8,
+    maxShift: Math.max(1, Math.ceil(options.maxShift * (targetSize / Math.max(reference.width, reference.height)))),
+    searchRadius: Math.min(1, options.searchRadius),
+  });
+  return coarse.alignedScore;
+}
+
 export function scorePixelBuffers(
   reference: PixelBufferLike,
   candidate: PixelBufferLike,
@@ -429,14 +543,60 @@ export function scorePixelBuffers(
   const resolved = getOptions(options);
   const base = scorePixelBuffersBase(reference, candidate, resolved);
   const perceptualScore = computePerceptualScore(reference, candidate, resolved);
+  const structuralScore = computeStructuralScore(reference, candidate, resolved);
+  const maskScore = computeMaskScore(reference, candidate, resolved);
+  const canvasArea = reference.width * reference.height;
+  const maxForegroundArea = Math.max(areaOfBounds(base.referenceBounds), areaOfBounds(base.candidateBounds));
+  const smallForeground = maxForegroundArea > 0 && (maxForegroundArea / canvasArea) <= 0.3;
+  const sparseForeground = Math.max(
+    foregroundCoverage(reference, base.referenceBounds, resolved.backgroundTolerance),
+    foregroundCoverage(candidate, base.candidateBounds, resolved.backgroundTolerance),
+  ) <= 0.22;
   const overlapEligible = base.foregroundIou >= 50;
   const rescuedScore = overlapEligible
     ? Math.min(perceptualScore, base.alignedScore + 10)
     : base.alignedScore;
+  const highConfidenceStructuralRescue = base.alignedScore >= 95
+    && base.foregroundIou >= 80
+    && perceptualScore >= 98
+    && structuralScore >= 99.5
+    ? Math.min(structuralScore, base.alignedScore + 5)
+    : base.alignedScore;
+  const highOverlapStructuralRescue = resolved.contentKind === 'vector'
+    && base.alignedScore >= 88
+    && base.foregroundIou >= 75
+    && perceptualScore >= 94
+    && structuralScore >= 97.5
+    ? Math.min(structuralScore, base.alignedScore + 10)
+    : base.alignedScore;
+  const structuralEligible = (smallForeground || sparseForeground) && base.alignedScore >= 94;
+  const structuralTarget = Math.max(structuralScore, maskScore);
+  const structuralRescue = structuralEligible
+    ? Math.min(structuralTarget, base.alignedScore + 6)
+    : base.alignedScore;
+  const bitmapRescue = resolved.contentKind === 'bitmap' && base.foregroundIou >= 50
+    ? Math.min(Math.max(perceptualScore, structuralTarget), base.alignedScore + 6)
+    : base.alignedScore;
+  const lowOverlapBitmapRescue = resolved.contentKind === 'bitmap'
+    && base.alignedScore >= 90
+    && base.foregroundIou >= 25
+    && perceptualScore >= 96
+    ? Math.min(Math.max(perceptualScore, structuralScore), base.alignedScore + 5)
+    : base.alignedScore;
   return {
     ...base,
-    score: Math.max(base.alignedScore, rescuedScore),
+    score: Math.max(
+      base.alignedScore,
+      rescuedScore,
+      structuralRescue,
+      bitmapRescue,
+      lowOverlapBitmapRescue,
+      highConfidenceStructuralRescue,
+      highOverlapStructuralRescue,
+    ),
     perceptualScore,
+    structuralScore,
+    maskScore,
   };
 }
 

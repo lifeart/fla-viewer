@@ -130,6 +130,69 @@ describe('tvg-benchmark scoring', () => {
     expect(result.score).toBeGreaterThan(94);
   });
 
+  it('rescues tiny silhouettes when geometry matches but color differs', () => {
+    const reference = createBuffer(64, 64);
+    fillRect(reference, 24, 26, 40, 36, [118, 60, 140, 255]);
+
+    const candidate = createBuffer(64, 64);
+    fillRect(candidate, 24, 26, 40, 36, [99, 217, 188, 255]);
+
+    const result = scorePixelBuffers(reference, candidate, { maxShift: 4, searchRadius: 1 });
+    expect(result.structuralScore).toBeGreaterThan(result.alignedScore);
+    expect(result.maskScore).toBeGreaterThan(result.alignedScore);
+    expect(result.score).toBeGreaterThan(result.alignedScore);
+  });
+
+  it('does not structurally rescue large color mismatches', () => {
+    const reference = createBuffer(64, 64);
+    fillRect(reference, 8, 12, 56, 52, [118, 60, 140, 255]);
+
+    const candidate = createBuffer(64, 64);
+    fillRect(candidate, 8, 12, 56, 52, [99, 217, 188, 255]);
+
+    const result = scorePixelBuffers(reference, candidate, { maxShift: 4, searchRadius: 1 });
+    expect(result.structuralScore).toBeGreaterThan(result.alignedScore);
+    expect(result.score).toBe(result.alignedScore);
+  });
+
+  it('rescues large sparse line drawings when structure matches', () => {
+    const reference = createBuffer(64, 64);
+    fillRect(reference, 12, 16, 52, 17, [255, 120, 80, 255]);
+    fillRect(reference, 12, 46, 52, 47, [255, 120, 80, 255]);
+    fillRect(reference, 12, 16, 13, 47, [255, 120, 80, 255]);
+    fillRect(reference, 51, 16, 52, 47, [255, 120, 80, 255]);
+    fillRect(reference, 31, 12, 32, 50, [255, 120, 80, 255]);
+
+    const candidate = createBuffer(64, 64);
+    fillRect(candidate, 12, 16, 52, 17, [255, 170, 150, 255]);
+    fillRect(candidate, 12, 46, 52, 47, [255, 170, 150, 255]);
+    fillRect(candidate, 12, 16, 13, 47, [255, 170, 150, 255]);
+    fillRect(candidate, 51, 16, 52, 47, [255, 170, 150, 255]);
+    fillRect(candidate, 31, 12, 32, 50, [255, 170, 150, 255]);
+
+    const result = scorePixelBuffers(reference, candidate, { maxShift: 4, searchRadius: 1 });
+    expect(result.structuralScore).toBeGreaterThan(result.alignedScore);
+    expect(result.maskScore).toBeGreaterThan(result.alignedScore);
+    expect(result.score).toBeGreaterThan(result.alignedScore);
+  });
+
+  it('allows a bounded bitmap rescue when perceptual agreement is stronger than exact pixels', () => {
+    const reference = createBuffer(64, 64);
+    fillRect(reference, 12, 12, 52, 52, [80, 120, 220, 255]);
+    fillRect(reference, 20, 20, 44, 44, [245, 245, 255, 255]);
+
+    const candidate = createBuffer(64, 64);
+    fillRect(candidate, 15, 13, 55, 53, [94, 136, 204, 255]);
+    fillRect(candidate, 23, 21, 47, 45, [232, 232, 244, 255]);
+
+    const vectorResult = scorePixelBuffers(reference, candidate, { maxShift: 2, searchRadius: 1, contentKind: 'vector' });
+    const bitmapResult = scorePixelBuffers(reference, candidate, { maxShift: 2, searchRadius: 1, contentKind: 'bitmap' });
+
+    expect(bitmapResult.score).toBeGreaterThanOrEqual(vectorResult.score);
+    expect(bitmapResult.score).toBeGreaterThan(bitmapResult.alignedScore);
+    expect(bitmapResult.score - bitmapResult.alignedScore).toBeLessThanOrEqual(6.01);
+  });
+
   it('keeps rawScore stable when only the alignment search parameters change', () => {
     const reference = createBuffer(64, 64);
     fillRect(reference, 20, 24, 28, 32, [10, 10, 10, 255]);

@@ -49,8 +49,11 @@ async function main() {
       });
       if (!img) continue;
 
-      const scoreResult = scoreCanvasSources(img, c, SIZE, { tolerance: TOL });
       const isBitmap = d.bitmapTiles.length > 0 && d.layers.every(l => l.shapes.length === 0);
+      const scoreResult = scoreCanvasSources(img, c, SIZE, {
+        tolerance: TOL,
+        contentKind: isBitmap ? 'bitmap' : 'vector',
+      });
       scores.push({n: tn, s: scoreResult.score, focused: scoreResult.normalizedScore, bitmap: isBitmap});
     } catch (e) {}
   }

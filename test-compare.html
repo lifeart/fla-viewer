@@ -108,7 +108,10 @@ async function main() {
       oc.fillStyle = '#fff'; oc.fillRect(0, 0, SIZE, SIZE);
       oc.drawImage(c, 0, 0, SIZE, SIZE);
       const od = oc.getImageData(0, 0, SIZE, SIZE);
-      const scoreResult = scoreCanvasSources(refCanvas, ourCanvas, SIZE, { tolerance: TOL });
+      const scoreResult = scoreCanvasSources(refCanvas, ourCanvas, SIZE, {
+        tolerance: TOL,
+        contentKind: bitmap ? 'bitmap' : 'vector',
+      });
 
       // Diff canvas (highlight differences in red)
       const diffCanvas = document.createElement('canvas');

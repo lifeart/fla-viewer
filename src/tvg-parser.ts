@@ -3806,6 +3806,16 @@ function createRectPathFromBBox(
   return path;
 }
 
+function isContourGeometryClosed(
+  contour: Pick<TVGResolvedContour, 'flattened'>,
+  tolerance = AUTO_CLOSE_TOL,
+): boolean {
+  if (contour.flattened.length < 2) return false;
+  const first = contour.flattened[0];
+  const last = contour.flattened[contour.flattened.length - 1];
+  return Math.hypot(first.x - last.x, first.y - last.y) <= tolerance;
+}
+
 function renderLegacyChainedFillComponents(
   ctx: CanvasRenderingContext2D,
   allChainComps: TVGComponent[],
@@ -4514,6 +4524,47 @@ function collectBoundaryFragments(
   return fragments;
 }
 
+function getMaxProfileWidth(profile: TVGThicknessProfile): number {
+  let maxWidth = 0;
+  for (const point of profile.points) {
+    maxWidth = Math.max(maxWidth, point.leftOffset + point.rightOffset);
+  }
+  return maxWidth;
+}
+
+function collectThinPencilFragments(
+  shape: TVGShape,
+  layerType: TVGArtLayer['type'],
+  shapeIndex: number,
+  pencilStyle: TVGPaint,
+  defaultStrokeWidth: number,
+): TVGContourFragment[] {
+  const fragments: TVGContourFragment[] = [];
+  const syntheticStyle = createSyntheticStyleComponent(pencilStyle);
+  const styleKey = paintKeyForComponent(syntheticStyle) || 'thin-pencil';
+  const maxAllowedWidth = Math.max(defaultStrokeWidth * 1.5, 6);
+  shape.components.forEach((comp, componentIndex) => {
+    if (comp.componentType !== 4 || !comp.path) return;
+    const profile = resolveStrokeProfile(comp, defaultStrokeWidth);
+    const maxWidth = profile ? getMaxProfileWidth(profile) : defaultStrokeWidth;
+    if (maxWidth > maxAllowedWidth) return;
+    for (const segments of splitPathIntoSubpaths(comp.path)) {
+      const fragment = createContourFragment(
+        layerType,
+        shapeIndex,
+        componentIndex,
+        'thin-pencil',
+        syntheticStyle,
+        segments,
+        styleKey,
+        false,
+      );
+      if (fragment) fragments.push(fragment);
+    }
+  });
+  return fragments;
+}
+
 function buildContoursForShape(
   fragments: TVGContourFragment[],
   synthesized: boolean,
@@ -4751,6 +4802,15 @@ function renderLayerPass(
         && siblingBoundaryMaskShapes.length === 0
         && fillPaintKeys.size === 1
         && explicitBuild.unresolvedChains.length > 0;
+      const shouldSkipLegacyForPureOpenUnresolved = layer.type === 'line'
+        && strokeComps.length === 0
+        && siblingBoundaryMaskShapes.length === 0
+        && explicitBuild.contours.length === 0
+        && explicitBuild.unresolvedChains.length > 0
+        && explicitBuild.unresolvedChains.every(chain =>
+          chain.supportFragmentCount === 0
+          && !isContourGeometryClosed(chain),
+        );
       const shouldPreferLegacy = (
         explicitBuild.unresolvedChains.length > explicitBuild.contours.length
         && explicitBuild.unresolvedChains.length > 0
@@ -4758,7 +4818,8 @@ function renderLayerPass(
         || shouldPreferLegacyInheritedFillShape
         || shouldPreferLegacyInheritedOnlyShape
         || shouldPreferLegacyUnresolvedFillOnlyShape;
-      if ((shouldPreferLegacy || explicitBuild.contours.length === 0)
+      if (!shouldSkipLegacyForPureOpenUnresolved
+        && (shouldPreferLegacy || explicitBuild.contours.length === 0)
         && renderLegacyExplicitFillShapeWithSiblingSubtraction(
           ctx,
           shape,
@@ -4803,6 +4864,7 @@ function renderLayerPass(
       }
       if (!renderedExplicit
         && explicitBuild.unresolvedChains.length > 0
+        && !shouldSkipLegacyForPureOpenUnresolved
         && renderLegacyExplicitFillShapeWithSiblingSubtraction(
           ctx,
           shape,
@@ -4843,7 +4905,13 @@ function renderLayerPass(
         && comp.outerPaint.rgba.b >= 30,
       );
       const hasOnlyPencils = strokeComps.length > 0 && strokeComps.every(comp => comp.componentType === 4);
-      const allowPencilFallback = layer.type !== 'line';
+      const allowLineLayerPencilContours = layer.type === 'line'
+        && hasOnlyPencils
+        && pencilComps.length === strokeComps.length
+        && shape.components.every(comp => comp.componentType === 4)
+        && pencilComps.every(comp => !isNearlyBlackSolidPaint(comp.outerPaint))
+        && new Set(pencilComps.map(comp => paintKeyForComponent(comp))).size === 1;
+      const allowPencilFallback = layer.type !== 'line' || allowLineLayerPencilContours;
       if (allowPencilFallback && hasOnlyPencils && pencilComps.length > 0) {
         const counts = new Map<string, { count: number; paint: TVGPaint }>();
         for (const comp of pencilComps) {
@@ -4854,8 +4922,19 @@ function renderLayerPass(
           counts.set(key, entry);
         }
         const dominant = Array.from(counts.values()).sort((a, b) => b.count - a.count)[0];
-        if (dominant && clipLocalFillSources(ctx, layer, shape, [{ kind: 'bbox', paint: dominant.paint }], defaultStrokeWidth, !!options?.skipClipping, siblingBoundaryMaskShapes)) {
-          continue;
+        if (dominant) {
+          const pencilFragments = collectThinPencilFragments(shape, layer.type, shapeIndex, dominant.paint, defaultStrokeWidth);
+          if (pencilFragments.length > 0) {
+            const pencilBuild = buildContoursForShape(pencilFragments, true);
+            if (pencilBuild.contours.length > 0) {
+              paintContourTree(ctx, pencilBuild.contours.sort((a, b) => a.sourceOrder - b.sourceOrder));
+              continue;
+            }
+          }
+          if (layer.type !== 'line'
+            && clipLocalFillSources(ctx, layer, shape, [{ kind: 'bbox', paint: dominant.paint }], defaultStrokeWidth, !!options?.skipClipping, siblingBoundaryMaskShapes)) {
+            continue;
+          }
         }
       }
       continue;

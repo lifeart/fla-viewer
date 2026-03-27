@@ -96,14 +96,15 @@ async function runBenchmark() {
 
     const reference = await loadImageFromZip(zip, thumbPath);
     if (!reference) continue;
+    const bitmapOnly = drawing.bitmapTiles.length > 0 && drawing.layers.every((layer) => layer.shapes.length === 0);
 
     const scoreResult = scoreCanvasSources(reference, canvas, size, {
       tolerance,
       maxShift,
       backgroundTolerance,
       searchRadius,
+      contentKind: bitmapOnly ? 'bitmap' : 'vector',
     });
-    const bitmapOnly = drawing.bitmapTiles.length > 0 && drawing.layers.every((layer) => layer.shapes.length === 0);
     results.push({
       drawing: thumbName,
       element: elementName,
@@ -114,6 +115,8 @@ async function runBenchmark() {
       alignedScore: scoreResult.alignedScore,
       normalizedScore: scoreResult.normalizedScore,
       perceptualScore: scoreResult.perceptualScore,
+      structuralScore: scoreResult.structuralScore,
+      maskScore: scoreResult.maskScore,
       bestShift: scoreResult.bestShift,
       foregroundIou: scoreResult.foregroundIou,
       diagnostics: drawing.diagnostics,
@@ -130,7 +133,7 @@ async function runBenchmark() {
     zipPath,
     drawings: results.length,
     metric: {
-      type: 'rgb-tolerance-aligned-focused-perceptual',
+      type: 'rgb-tolerance-aligned-focused-perceptual-structural-mask',
       tolerance,
       maxShift,
       backgroundTolerance,
