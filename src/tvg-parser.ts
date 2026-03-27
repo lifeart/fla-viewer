@@ -256,6 +256,16 @@ class BinaryReader {
     return String.fromCharCode(this.bytes[this.pos], this.bytes[this.pos + 1], this.bytes[this.pos + 2], this.bytes[this.pos + 3]);
   }
 
+  findTag4(tag: string, from = this.pos): number {
+    const [a, b, c, d] = [tag.charCodeAt(0), tag.charCodeAt(1), tag.charCodeAt(2), tag.charCodeAt(3)];
+    for (let i = Math.max(0, from); i <= this.bytes.length - 4; i++) {
+      if (this.bytes[i] === a && this.bytes[i + 1] === b && this.bytes[i + 2] === c && this.bytes[i + 3] === d) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   skip(n: number): void {
     this.pos += n;
   }
@@ -375,12 +385,43 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
           }
         }
       }
+    } else if (tag === TAG_TPAL) {
+      try {
+        const data = readEncodedData(reader);
+        drawing.palette = parsePalette(new BinaryReader(data.buffer));
+      } catch (_e) {
+        addDiagnostic(drawing.diagnostics, {
+          severity: 'warn',
+          code: 'PALETTE_PARSE_SKIPPED',
+          tag,
+          offset: reader.pos - 4,
+          context: 'palette',
+        });
+      }
+    } else if (tag === 'TLAB') {
+      try {
+        const data = readEncodedData(reader);
+        parseMainData(new BinaryReader(data.buffer), drawing);
+      } catch (_e) {
+        addDiagnostic(drawing.diagnostics, {
+          severity: 'warn',
+          code: 'UNKNOWN_TOP_LEVEL_TAG',
+          tag,
+          offset: reader.pos - 4,
+          context: 'top-level',
+        });
+      }
     } else if (tag === TAG_TTOC) {
       const len = reader.readU32LE();
       reader.skip(len);
+    } else if (tag === TAG_TGBG) {
+      const tagOffset = reader.pos - 4;
+      const tgbgData = readRecoverableInnerTagPayload(reader, tag, drawing.diagnostics, 'bitmap', tagOffset);
+      if (tgbgData && tgbgData.length > 0) {
+        parseTGBGTiles(tgbgData, drawing.bitmapTiles);
+      }
     } else if (tag === TAG_SIGN) {
-      const len = reader.readU32LE();
-      reader.skip(len);
+      skipSignaturePayload(reader, drawing.diagnostics, 'top-level', reader.pos - 4);
     } else {
       // Unknown tag - scan forward to find next known tag pattern
       addDiagnostic(drawing.diagnostics, {
@@ -525,7 +566,7 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
 /** Scan forward to find the next recognized top-level tag or null+UNCO/ZLIB pattern. */
 function scanToNextTopLevelTag(reader: BinaryReader): boolean {
   const knownTopTags = new Set([
-    TAG_CERT, TAG_ENDT, TAG_TVCI, TAG_CREA, TAG_TTOC, TAG_SIGN,
+    TAG_CERT, TAG_ENDT, TAG_TVCI, TAG_CREA, TAG_TTOC, TAG_SIGN, TAG_TGBG, TAG_TPAL, 'TLAB',
     TAG_UNCO, TAG_ZLIB,
   ]);
   while (reader.remaining >= 4) {
@@ -577,6 +618,76 @@ function readInnerTagLength(reader: BinaryReader): number {
   return -1;
 }
 
+function readRecoverableInnerTagPayload(
+  reader: BinaryReader,
+  tag: string,
+  diagnostics: TVGDiagnostics,
+  context: TVGDiagnosticEvent['context'],
+  offset: number,
+): Uint8Array | null {
+  const len = readInnerTagLength(reader);
+  if (len >= 0 && len <= reader.remaining) {
+    return reader.readBytes(len);
+  }
+
+  const recoveryStart = reader.pos;
+  const nextEndt = reader.findTag4(TAG_ENDT, recoveryStart);
+  if (nextEndt > recoveryStart) {
+    addDiagnostic(diagnostics, {
+      severity: 'warn',
+      code: 'SCAN_FORWARD_RECOVERY',
+      tag,
+      offset,
+      length: len,
+      context,
+      note: 'Recovered malformed inner-tag length by scanning to ENDT',
+    });
+    return reader.readBytes(nextEndt - recoveryStart);
+  }
+
+  addDiagnostic(diagnostics, {
+    severity: 'error',
+    code: 'TRUNCATED_CHUNK',
+    tag,
+    offset,
+    length: len,
+    context,
+  });
+  if (reader.remaining > 0) {
+    return reader.readBytes(reader.remaining);
+  }
+  return null;
+}
+
+function skipSignaturePayload(
+  reader: BinaryReader,
+  diagnostics: TVGDiagnostics,
+  context: TVGDiagnosticEvent['context'],
+  offset: number,
+): void {
+  const len = reader.readU32LE();
+  if (len >= 0 && len <= reader.remaining) {
+    reader.skip(len);
+    return;
+  }
+
+  const nextEndt = reader.findTag4(TAG_ENDT, reader.pos);
+  addDiagnostic(diagnostics, {
+    severity: 'warn',
+    code: 'SCAN_FORWARD_RECOVERY',
+    tag: TAG_SIGN,
+    offset,
+    length: len,
+    context,
+    note: 'Recovered malformed SIGN payload by scanning to ENDT',
+  });
+  if (nextEndt >= reader.pos) {
+    reader.pos = nextEndt;
+    return;
+  }
+  reader.skip(reader.remaining);
+}
+
 function readInnerTagAt(data: Uint8Array, pos: number): { tag: string; contentStart: number; contentLen: number } | null {
   if (pos + 5 > data.length) return null;
   const tag = String.fromCharCode(data[pos], data[pos+1], data[pos+2], data[pos+3]);
@@ -592,22 +703,29 @@ function readInnerTagAt(data: Uint8Array, pos: number): { tag: string; contentSt
   return { tag, contentStart: pos + hdrSize, contentLen: len };
 }
 
-function findPNG(data: Uint8Array, start: number, end: number): { start: number; end: number } | null {
-  for (let i = start; i < end - 8; i++) {
+function findPNG(
+  data: Uint8Array,
+  start: number,
+  end: number,
+  extendedEnd = end,
+): { start: number; end: number } | null {
+  const hardEnd = Math.min(end, data.length);
+  const softEnd = Math.min(Math.max(end, extendedEnd), data.length);
+  for (let i = start; i < softEnd - 8; i++) {
     if (data[i] === 0x89 && data[i+1] === 0x50 && data[i+2] === 0x4E && data[i+3] === 0x47 &&
         data[i+4] === 0x0D && data[i+5] === 0x0A && data[i+6] === 0x1A && data[i+7] === 0x0A) {
       // Walk PNG chunks instead of substring-scanning for IEND. Tiny tiles can
       // place the final chunk close to the TBBM boundary, and the loose scan
       // misses those valid short payloads.
       let cursor = i + 8;
-      while (cursor + 12 <= end) {
+      while (cursor + 12 <= softEnd) {
         const chunkLen = (data[cursor] << 24)
           | (data[cursor + 1] << 16)
           | (data[cursor + 2] << 8)
           | data[cursor + 3];
         if (chunkLen < 0) break;
         const chunkEnd = cursor + 12 + chunkLen;
-        if (chunkEnd > end) break;
+        if (chunkEnd > softEnd) break;
         const isIEND = data[cursor + 4] === 0x49
           && data[cursor + 5] === 0x45
           && data[cursor + 6] === 0x4E
@@ -616,13 +734,13 @@ function findPNG(data: Uint8Array, start: number, end: number): { start: number;
         if (isIEND) return { start: i, end: cursor };
       }
       // Fallback for malformed-but-renderable payloads.
-      for (let e = i + 8; e < end - 11; e++) {
+      for (let e = i + 8; e < softEnd - 11; e++) {
         if (data[e] === 0x00 && data[e+1] === 0x00 && data[e+2] === 0x00 && data[e+3] === 0x00 &&
             data[e+4] === 0x49 && data[e+5] === 0x45 && data[e+6] === 0x4E && data[e+7] === 0x44) {
           return { start: i, end: e + 12 };
         }
       }
-      return { start: i, end };
+      return { start: i, end: hardEnd };
     }
   }
   return null;
@@ -657,7 +775,7 @@ function parseTGBGTiles(data: Uint8Array, tiles: TVGBitmapTile[]): void {
     }
 
     // Find PNG in this TBBM
-    const png = findPNG(data, tbbm.contentStart, tEnd);
+    const png = findPNG(data, tbbm.contentStart, tEnd, data.length);
     // Sparse bitmap atlases can contain valid tiny PNG tiles, especially when
     // a tile only carries a few opaque pixels. Reject only obviously broken payloads.
     if (png && png.end - png.start > 32 && clipW > 0 && clipH > 0) {
@@ -865,9 +983,8 @@ function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
     } else if (tag === TAG_TGBG) {
       // Bitmap group — contains tiled PNG data
       try {
-        const tgbgLen = readInnerTagLength(reader);
-        if (tgbgLen > 0 && tgbgLen <= reader.remaining) {
-          const tgbgData = reader.readBytes(tgbgLen);
+        const tgbgData = readRecoverableInnerTagPayload(reader, tag, drawing.diagnostics, 'bitmap', tagOffset);
+        if (tgbgData && tgbgData.length > 0) {
           parseTGBGTiles(tgbgData, drawing.bitmapTiles);
         }
       } catch (_e) {
@@ -912,8 +1029,7 @@ function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
       const len = reader.readU32LE();
       reader.skip(len);
     } else if (tag === TAG_SIGN) {
-      const len = reader.readU32LE();
-      reader.skip(len);
+      skipSignaturePayload(reader, drawing.diagnostics, 'main-data', tagOffset);
     } else {
       // Unknown tag in main data - try length-skip
       addDiagnostic(drawing.diagnostics, {
@@ -2567,6 +2683,41 @@ function snapBitmapBoundsToTileGrid(bounds: TVGBitmapBounds, tileSize: number): 
   };
 }
 
+function drawImageWithProgressiveDownscale(
+  ctx: CanvasRenderingContext2D,
+  source: HTMLCanvasElement,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+): void {
+  let current = source;
+  let currentW = source.width;
+  let currentH = source.height;
+  const targetW = Math.max(1, Math.round(dw));
+  const targetH = Math.max(1, Math.round(dh));
+
+  while (currentW > targetW * 2 || currentH > targetH * 2) {
+    const nextW = Math.max(targetW, Math.ceil(currentW / 2));
+    const nextH = Math.max(targetH, Math.ceil(currentH / 2));
+    const next = document.createElement('canvas');
+    next.width = nextW;
+    next.height = nextH;
+    const nextCtx = next.getContext('2d')!;
+    nextCtx.imageSmoothingEnabled = true;
+    nextCtx.imageSmoothingQuality = 'high';
+    nextCtx.clearRect(0, 0, nextW, nextH);
+    nextCtx.drawImage(current, 0, 0, currentW, currentH, 0, 0, nextW, nextH);
+    current = next;
+    currentW = nextW;
+    currentH = nextH;
+  }
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(current, 0, 0, currentW, currentH, dx, dy, dw, dh);
+}
+
 function renderBitmapTVGToCanvas(
   drawing: TVGDrawing,
   width: number,
@@ -2741,8 +2892,7 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
   let dx: number;
   let dy: number;
   const viewportValue = state?.viewport ?? 0;
-  const shouldUseViewportFit = viewportValue > 0
-    && (centerOnOrigin || (fallbackScanUsed && loaded.length >= 100));
+  const shouldUseViewportFit = viewportValue > 0 && centerOnOrigin;
   if (shouldUseViewportFit) {
     const viewportSize = centerOnOrigin
       ? Math.max(viewportValue, contentExtent, originExtent)
@@ -2753,7 +2903,12 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
     dx = width / 2 - (centerX - fittedBounds.minX) * scale;
     dy = height / 2 - (fittedBounds.maxY - centerY) * scale;
   } else {
-    const padding = fallbackScanUsed && loaded.length < 10 ? 7 : 4;
+    const aspectRatio = nativeW / Math.max(nativeH, 1);
+    const padding = fallbackScanUsed && loaded.length >= 100 && aspectRatio <= 1.2
+      ? 6
+      : fallbackScanUsed && loaded.length < 10
+        ? 7
+        : 4;
     const availW = width - padding * 2;
     const availH = height - padding * 2;
     scale = Math.min(availW / nativeW, availH / nativeH);
@@ -2763,7 +2918,7 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, width, height);
-  ctx.drawImage(nativeCanvas, dx, dy, nativeW * scale, nativeH * scale);
+  drawImageWithProgressiveDownscale(ctx, nativeCanvas, dx, dy, nativeW * scale, nativeH * scale);
 
   // Clean up
   delete (canvas as any).__bitmapTiles;
