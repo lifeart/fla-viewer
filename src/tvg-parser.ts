@@ -2544,7 +2544,9 @@ export function renderTVGToCanvas(
     const centerX = centerOnOrigin ? 0 : (minX + maxX) / 2;
     const centerY = centerOnOrigin ? 0 : (minY + maxY) / 2;
 
-    scale = Math.min(ssWidth, ssHeight) / viewportSize;
+    const viewportInset = !centerOnOrigin && shouldInsetViewportForLineFillDrawing(drawing) ? 6 * SS : 0;
+    const availableViewportSize = Math.max(1, Math.min(ssWidth - viewportInset * 2, ssHeight - viewportInset * 2));
+    scale = availableViewportSize / viewportSize;
     offsetX = ssWidth / 2 - centerX * scale;
     offsetY = ssHeight / 2 + centerY * scale;
     ctx.setTransform(scale, 0, 0, -scale, offsetX, offsetY);
@@ -2681,6 +2683,17 @@ function snapBitmapBoundsToTileGrid(bounds: TVGBitmapBounds, tileSize: number): 
     maxX: Math.ceil(bounds.maxX / tileSize) * tileSize,
     maxY: Math.ceil(bounds.maxY / tileSize) * tileSize,
   };
+}
+
+function shouldInsetViewportForLineFillDrawing(drawing: TVGDrawing): boolean {
+  const hasColorLayer = drawing.layers.some((layer) => layer.type === 'color' && layer.shapes.length > 0);
+  if (hasColorLayer) return false;
+  return drawing.layers.some((layer) =>
+    layer.type === 'line'
+    && layer.shapes.some((shape) =>
+      shape.components.some((comp) => comp.componentType === 0 && !!comp.color && comp.color.a > 0),
+    ),
+  );
 }
 
 function drawImageWithProgressiveDownscale(
@@ -2905,7 +2918,7 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
   } else {
     const aspectRatio = nativeW / Math.max(nativeH, 1);
     const padding = fallbackScanUsed && loaded.length >= 100 && aspectRatio <= 1.2
-      ? 6
+      ? 7
       : fallbackScanUsed && loaded.length < 10
         ? 7
         : 4;
