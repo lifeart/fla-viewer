@@ -117,6 +117,7 @@ async function runBenchmark() {
       perceptualScore: scoreResult.perceptualScore,
       structuralScore: scoreResult.structuralScore,
       maskScore: scoreResult.maskScore,
+      macroScore: scoreResult.macroScore,
       bestShift: scoreResult.bestShift,
       foregroundIou: scoreResult.foregroundIou,
       diagnostics: drawing.diagnostics,
@@ -133,7 +134,7 @@ async function runBenchmark() {
     zipPath,
     drawings: results.length,
     metric: {
-      type: 'rgb-tolerance-aligned-focused-perceptual-structural-mask',
+      type: 'rgb-tolerance-aligned-focused-perceptual-structural-mask-macro-rescue',
       tolerance,
       maxShift,
       backgroundTolerance,

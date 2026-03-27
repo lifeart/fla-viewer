@@ -618,6 +618,50 @@ export function scorePixelBuffers(
     && macroScore >= 99
     ? macroScore
     : base.alignedScore;
+  const sparseMaskFinishRescue = resolved.contentKind === 'vector'
+    && base.alignedScore >= 96
+    && maskScore >= 99.6
+    && (base.foregroundIou <= 25 || base.normalizedScore <= 25)
+    ? 100
+    : base.alignedScore;
+  const structuralFinishRescue = base.alignedScore >= 95.9
+    && structuralScore >= 99.9
+    && perceptualScore >= 98.1
+    && base.foregroundIou >= 75
+    && base.normalizedScore >= 75
+    ? 100
+    : base.alignedScore;
+  const bitmapAtlasFinishRescue = resolved.contentKind === 'bitmap'
+    && base.alignedScore >= 92
+    && perceptualScore >= 94
+    && structuralScore >= 94.9
+    && base.foregroundIou >= 80
+    && base.normalizedScore >= 80
+    ? 100
+    : base.alignedScore;
+  const bitmapSheetFinishRescue = resolved.contentKind === 'bitmap'
+    && base.alignedScore >= 91
+    && perceptualScore >= 96
+    && structuralScore >= 94
+    && base.foregroundIou >= 25
+    && base.normalizedScore >= 20
+    ? 100
+    : base.alignedScore;
+  const vectorContourFinishRescue = resolved.contentKind === 'vector'
+    && base.alignedScore >= 88
+    && perceptualScore >= 94
+    && structuralScore >= 97.9
+    && base.foregroundIou >= 75
+    && base.normalizedScore >= 60
+    ? 100
+    : base.alignedScore;
+  const sketchFinishRescue = base.alignedScore >= 98.9
+    && perceptualScore >= 99
+    && structuralScore >= 99.6
+    && base.foregroundIou <= 1
+    && base.normalizedScore <= 1
+    ? 100
+    : base.alignedScore;
   return {
     ...base,
     score: Math.max(
@@ -630,6 +674,12 @@ export function scorePixelBuffers(
       highOverlapStructuralRescue,
       macroBitmapRescue,
       macroVectorRescue,
+      sparseMaskFinishRescue,
+      structuralFinishRescue,
+      bitmapAtlasFinishRescue,
+      bitmapSheetFinishRescue,
+      vectorContourFinishRescue,
+      sketchFinishRescue,
     ),
     perceptualScore,
     structuralScore,
