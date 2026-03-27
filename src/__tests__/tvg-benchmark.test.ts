@@ -109,6 +109,27 @@ describe('tvg-benchmark scoring', () => {
     expect(result.normalizedScore).toBeLessThan(10);
   });
 
+  it('rescues matched large regions when only tiny interior marks differ', () => {
+    const reference = createBuffer(64, 64);
+    fillRect(reference, 10, 16, 54, 48, [236, 196, 240, 255]);
+    fillRect(reference, 16, 22, 48, 42, [198, 205, 255, 255]);
+    for (let x = 18; x < 48; x += 3) {
+      fillRect(reference, x, 24, x + 1, 40, [126, 128, 184, 255]);
+    }
+    for (let x = 20; x < 44; x += 4) {
+      fillRect(reference, x, 10, x + 2, 14, [140, 120, 186, 255]);
+    }
+
+    const candidate = createBuffer(64, 64);
+    fillRect(candidate, 10, 16, 54, 48, [236, 196, 240, 255]);
+    fillRect(candidate, 16, 22, 48, 42, [198, 205, 255, 255]);
+
+    const result = scorePixelBuffers(reference, candidate, { maxShift: 4, searchRadius: 1 });
+    expect(result.perceptualScore).toBeGreaterThan(result.alignedScore);
+    expect(result.score).toBeGreaterThan(result.alignedScore);
+    expect(result.score).toBeGreaterThan(94);
+  });
+
   it('keeps rawScore stable when only the alignment search parameters change', () => {
     const reference = createBuffer(64, 64);
     fillRect(reference, 20, 24, 28, 32, [10, 10, 10, 255]);

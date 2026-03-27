@@ -113,6 +113,7 @@ async function runBenchmark() {
       rawScore: scoreResult.rawScore,
       alignedScore: scoreResult.alignedScore,
       normalizedScore: scoreResult.normalizedScore,
+      perceptualScore: scoreResult.perceptualScore,
       bestShift: scoreResult.bestShift,
       foregroundIou: scoreResult.foregroundIou,
       diagnostics: drawing.diagnostics,
@@ -129,7 +130,7 @@ async function runBenchmark() {
     zipPath,
     drawings: results.length,
     metric: {
-      type: 'rgb-tolerance-aligned-focused',
+      type: 'rgb-tolerance-aligned-focused-perceptual',
       tolerance,
       maxShift,
       backgroundTolerance,

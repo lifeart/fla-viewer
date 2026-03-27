@@ -649,6 +649,27 @@ function parseTGBGTiles(data: Uint8Array, tiles: TVGBitmapTile[]): void {
   }
 }
 
+function hashBitmapTileData(data: Uint8Array): number {
+  let hash = 2166136261;
+  for (let i = 0; i < data.length; i++) {
+    hash ^= data[i];
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function dedupeBitmapTiles(tiles: TVGBitmapTile[]): TVGBitmapTile[] {
+  const seen = new Set<string>();
+  const deduped: TVGBitmapTile[] = [];
+  for (const tile of tiles) {
+    const key = `${tile.clipX}:${tile.clipY}:${tile.clipW}:${tile.clipH}:${tile.pngData.length}:${hashBitmapTileData(tile.pngData)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(tile);
+  }
+  return deduped;
+}
+
 /** Scan the entire raw TVG buffer for bitmap tile data (TBBM blocks).
  *  Searches UNCO/ZLIB blocks for TGBG markers, then extracts all TBBM tiles
  *  from the containing decoded data (bypassing TGBG length parsing). */
@@ -664,28 +685,22 @@ function scanForBitmapTiles(raw: Uint8Array, drawing: TVGDrawing, diagnostics?: 
     }
 
     if (hasTGBG) {
-      // Scan the entire decoded block for TBBM tiles (don't rely on TGBG length)
+      // Scan the entire decoded block for TBBM tiles (don't rely on TGBG length).
+      // Some bitmap-only TVGs spread tiles across multiple decoded wrappers, so
+      // we cannot stop after the first hit.
+      const before = drawing.bitmapTiles.length;
       parseTGBGTiles(decoded, drawing.bitmapTiles);
-      if (drawing.bitmapTiles.length > 0) {
-        if (diagnostics) {
-          addDiagnostic(diagnostics, {
-            severity: 'warn',
-            code: 'BITMAP_FALLBACK_SCAN_USED',
-            offset: 0,
-            context: 'bitmap',
-          });
-        }
-        return true;
-      }
+      hasTGBG = drawing.bitmapTiles.length > before;
     }
 
     // Recurse into nested UNCO/ZLIB blocks (e.g. TLAB wrappers)
+    let foundAny = hasTGBG;
     if (depth < 3) {
       for (let j = 0; j < decoded.length - 8; j++) {
         if (decoded[j] === 0x55 && decoded[j+1] === 0x4E && decoded[j+2] === 0x43 && decoded[j+3] === 0x4F) { // UNCO
           const innerLen = decoded[j+4] | (decoded[j+5] << 8) | (decoded[j+6] << 16) | (decoded[j+7] << 24);
           if (innerLen > 0 && innerLen <= decoded.length - j - 8) {
-            if (scanDecodedForTiles(decoded.slice(j + 8, j + 8 + innerLen), depth + 1)) return true;
+            foundAny = scanDecodedForTiles(decoded.slice(j + 8, j + 8 + innerLen), depth + 1) || foundAny;
             j += 8 + innerLen - 1;
           }
         } else if (decoded[j] === 0x5A && decoded[j+1] === 0x4C && decoded[j+2] === 0x49 && decoded[j+3] === 0x42) { // ZLIB
@@ -693,16 +708,17 @@ function scanForBitmapTiles(raw: Uint8Array, drawing: TVGDrawing, diagnostics?: 
           if (tl > 4 && tl <= decoded.length - j - 8) {
             try {
               const inner = pako.inflate(decoded.slice(j + 12, j + 12 + tl - 4));
-              if (scanDecodedForTiles(inner, depth + 1)) return true;
+              foundAny = scanDecodedForTiles(inner, depth + 1) || foundAny;
             } catch { /* skip */ }
             j += 8 + tl - 1;
           }
         }
       }
     }
-    return false;
+    return foundAny;
   };
 
+  let foundAny = false;
   for (let i = 20; i < raw.length - 8; i++) {
     const b0 = raw[i], b1 = raw[i+1], b2 = raw[i+2], b3 = raw[i+3];
     // UNCO block
@@ -710,7 +726,7 @@ function scanForBitmapTiles(raw: Uint8Array, drawing: TVGDrawing, diagnostics?: 
       const len = raw[i+4] | (raw[i+5] << 8) | (raw[i+6] << 16) | (raw[i+7] << 24);
       if (len <= 0 || len > raw.length - i - 8) continue;
       const decoded = raw.slice(i + 8, i + 8 + len);
-      if (scanDecodedForTiles(decoded, 0)) return;
+      foundAny = scanDecodedForTiles(decoded, 0) || foundAny;
       i += 8 + len - 1;
     }
     // ZLIB block
@@ -721,9 +737,21 @@ function scanForBitmapTiles(raw: Uint8Array, drawing: TVGDrawing, diagnostics?: 
       if (compressedLen <= 0 || i + 12 + compressedLen > raw.length) continue;
       try {
         const decoded = pako.inflate(raw.slice(i + 12, i + 12 + compressedLen));
-        if (scanDecodedForTiles(decoded, 0)) return;
+        foundAny = scanDecodedForTiles(decoded, 0) || foundAny;
       } catch { /* skip */ }
       i += 8 + totalLen - 1;
+    }
+  }
+
+  if (foundAny) {
+    drawing.bitmapTiles = dedupeBitmapTiles(drawing.bitmapTiles);
+    if (diagnostics) {
+      addDiagnostic(diagnostics, {
+        severity: 'warn',
+        code: 'BITMAP_FALLBACK_SCAN_USED',
+        offset: 0,
+        context: 'bitmap',
+      });
     }
   }
 }

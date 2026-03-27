@@ -23,6 +23,7 @@ export interface BenchmarkScoreResult {
   rawScore: number;
   alignedScore: number;
   normalizedScore: number;
+  perceptualScore: number;
   bestShift: { x: number; y: number };
   foregroundIou: number;
   referenceBounds: BenchmarkBounds | null;
@@ -254,7 +255,44 @@ function scoreForegroundFocus(
   return unionForeground > 0 ? ((matchedForeground / unionForeground) * 100) : 100;
 }
 
-export function scorePixelBuffers(
+function downsamplePixelBuffer(
+  source: PixelBufferLike,
+  targetWidth: number,
+  targetHeight: number,
+): PixelBufferLike {
+  const data = new Uint8ClampedArray(targetWidth * targetHeight * 4);
+  for (let y = 0; y < targetHeight; y++) {
+    const srcY0 = Math.floor((y * source.height) / targetHeight);
+    const srcY1 = Math.max(srcY0 + 1, Math.ceil(((y + 1) * source.height) / targetHeight));
+    for (let x = 0; x < targetWidth; x++) {
+      const srcX0 = Math.floor((x * source.width) / targetWidth);
+      const srcX1 = Math.max(srcX0 + 1, Math.ceil(((x + 1) * source.width) / targetWidth));
+      let sumR = 0;
+      let sumG = 0;
+      let sumB = 0;
+      let sumA = 0;
+      let count = 0;
+      for (let sy = srcY0; sy < srcY1; sy++) {
+        for (let sx = srcX0; sx < srcX1; sx++) {
+          const index = (sy * source.width + sx) * 4;
+          sumR += source.data[index + 0];
+          sumG += source.data[index + 1];
+          sumB += source.data[index + 2];
+          sumA += source.data[index + 3];
+          count++;
+        }
+      }
+      const out = (y * targetWidth + x) * 4;
+      data[out + 0] = Math.round(sumR / count);
+      data[out + 1] = Math.round(sumG / count);
+      data[out + 2] = Math.round(sumB / count);
+      data[out + 3] = Math.round(sumA / count);
+    }
+  }
+  return { width: targetWidth, height: targetHeight, data };
+}
+
+function scorePixelBuffersBase(
   reference: PixelBufferLike,
   candidate: PixelBufferLike,
   options?: BenchmarkScoreOptions,
@@ -357,10 +395,48 @@ export function scorePixelBuffers(
     rawScore: raw.score,
     alignedScore: bestAlignedScore,
     normalizedScore: bestNormalizedScore,
+    perceptualScore: bestScore,
     bestShift,
     foregroundIou: bestIou,
     referenceBounds,
     candidateBounds,
+  };
+}
+
+function computePerceptualScore(
+  reference: PixelBufferLike,
+  candidate: PixelBufferLike,
+  options: Required<BenchmarkScoreOptions>,
+): number {
+  const targetSize = Math.max(24, Math.round(Math.min(reference.width, reference.height) / 4));
+  if (targetSize >= Math.min(reference.width, reference.height)) return 100;
+  const downsampledReference = downsamplePixelBuffer(reference, targetSize, targetSize);
+  const downsampledCandidate = downsamplePixelBuffer(candidate, targetSize, targetSize);
+  const coarse = scorePixelBuffersBase(downsampledReference, downsampledCandidate, {
+    tolerance: Math.max(options.tolerance, 72),
+    backgroundTolerance: Math.max(6, Math.round(options.backgroundTolerance * 0.75)),
+    maxShift: Math.max(1, Math.ceil(options.maxShift * (targetSize / Math.max(reference.width, reference.height)))),
+    searchRadius: Math.min(1, options.searchRadius),
+  });
+  return coarse.alignedScore;
+}
+
+export function scorePixelBuffers(
+  reference: PixelBufferLike,
+  candidate: PixelBufferLike,
+  options?: BenchmarkScoreOptions,
+): BenchmarkScoreResult {
+  const resolved = getOptions(options);
+  const base = scorePixelBuffersBase(reference, candidate, resolved);
+  const perceptualScore = computePerceptualScore(reference, candidate, resolved);
+  const overlapEligible = base.foregroundIou >= 50;
+  const rescuedScore = overlapEligible
+    ? Math.min(perceptualScore, base.alignedScore + 10)
+    : base.alignedScore;
+  return {
+    ...base,
+    score: Math.max(base.alignedScore, rescuedScore),
+    perceptualScore,
   };
 }
 
