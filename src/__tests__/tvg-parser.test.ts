@@ -275,6 +275,66 @@ describe('tvg rendering', () => {
     expectColorNear(pixel, type1Paint.rgba, 50);
   });
 
+  it('does not suppress resolved near-black line fills that overlap colored siblings', () => {
+    const greenPaint = { kind: 'solid' as const, rgba: { r: 40, g: 180, b: 110, a: 255 } };
+    const blackPaint = { kind: 'solid' as const, rgba: { r: 8, g: 8, b: 8, a: 255 } };
+    const rectEdges = (half: number, paint: typeof greenPaint | typeof blackPaint) => ([
+      createComponent({
+        componentType: 0,
+        color: { ...paint.rgba },
+        fillPaintSource: 'explicit',
+        outerPaint: paint,
+        path: createPath([
+          { type: 'M', x: -half, y: -half },
+          { type: 'L', x: half, y: -half },
+        ]),
+      }),
+      createComponent({
+        componentType: 0,
+        color: { ...paint.rgba },
+        fillPaintSource: 'explicit',
+        outerPaint: paint,
+        path: createPath([
+          { type: 'M', x: half, y: -half },
+          { type: 'L', x: half, y: half },
+        ]),
+      }),
+      createComponent({
+        componentType: 0,
+        color: { ...paint.rgba },
+        fillPaintSource: 'explicit',
+        outerPaint: paint,
+        path: createPath([
+          { type: 'M', x: half, y: half },
+          { type: 'L', x: -half, y: half },
+        ]),
+      }),
+      createComponent({
+        componentType: 0,
+        color: { ...paint.rgba },
+        fillPaintSource: 'explicit',
+        outerPaint: paint,
+        path: createPath([
+          { type: 'M', x: -half, y: half },
+          { type: 'L', x: -half, y: -half },
+        ]),
+      }),
+    ]);
+
+    const drawing = createDrawing([{
+      type: 'line',
+      shapes: [
+        { shapeType: 2, components: rectEdges(180, greenPaint) },
+        { shapeType: 2, components: rectEdges(130, blackPaint) },
+      ],
+    }]);
+
+    const canvas = renderTVGToCanvas(drawing, 120, 120, 400);
+    expect(canvas).not.toBeNull();
+    const pixel = samplePixel(canvas!, 60, 60);
+    expectColorNear(pixel, blackPaint.rgba, 20);
+  });
+
   it('renders inherited-only fill shapes through the legacy fallback', () => {
     const inheritedPaint = { kind: 'solid' as const, rgba: { r: 32, g: 188, b: 126, a: 255 } };
     const drawing = createDrawing([{

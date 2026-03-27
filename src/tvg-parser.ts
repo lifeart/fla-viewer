@@ -2506,6 +2506,16 @@ function computeBitmapBounds(tiles: TVGBitmapTile[]): TVGBitmapBounds | null {
   return { minX, minY, maxX, maxY };
 }
 
+function snapBitmapBoundsToTileGrid(bounds: TVGBitmapBounds, tileSize: number): TVGBitmapBounds {
+  if (tileSize <= 0) return bounds;
+  return {
+    minX: Math.floor(bounds.minX / tileSize) * tileSize,
+    minY: Math.floor(bounds.minY / tileSize) * tileSize,
+    maxX: Math.ceil(bounds.maxX / tileSize) * tileSize,
+    maxY: Math.ceil(bounds.maxY / tileSize) * tileSize,
+  };
+}
+
 function renderBitmapTVGToCanvas(
   drawing: TVGDrawing,
   width: number,
@@ -2605,6 +2615,11 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
   const nativeBounds = hasClipRects
     ? bounds
     : { minX: 0, minY: 0, maxX: largest.img.width, maxY: largest.img.height };
+  const fallbackScanUsed = (renderDiagnostics?.counts?.BITMAP_FALLBACK_SCAN_USED ?? 0) > 0;
+  const shouldSnapFallbackAtlasBounds = fallbackScanUsed && hasClipRects && loaded.length >= 32;
+  const fittedBounds = shouldSnapFallbackAtlasBounds
+    ? snapBitmapBoundsToTileGrid(nativeBounds, 256)
+    : nativeBounds;
 
   if (!hasClipRects && renderDiagnostics) {
     addDiagnostic(renderDiagnostics, {
@@ -2615,8 +2630,8 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
     });
   }
 
-  const nativeW = Math.max(1, Math.round(nativeBounds.maxX - nativeBounds.minX));
-  const nativeH = Math.max(1, Math.round(nativeBounds.maxY - nativeBounds.minY));
+  const nativeW = Math.max(1, Math.round(fittedBounds.maxX - fittedBounds.minX));
+  const nativeH = Math.max(1, Math.round(fittedBounds.maxY - fittedBounds.minY));
   const nativeCanvas = document.createElement('canvas');
   nativeCanvas.width = nativeW;
   nativeCanvas.height = nativeH;
@@ -2626,8 +2641,8 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
     for (const { tile, img } of loaded) {
       nativeCtx.drawImage(
         img,
-        Math.round(tile.clipX - nativeBounds.minX),
-        Math.round(tile.clipY - nativeBounds.minY),
+        Math.round(tile.clipX - fittedBounds.minX),
+        Math.round(tile.clipY - fittedBounds.minY),
         Math.round(tile.clipW),
         Math.round(tile.clipH),
       );
@@ -2636,28 +2651,31 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
     nativeCtx.drawImage(largest.img, 0, 0);
   }
 
-  const contentExtent = Math.max(nativeBounds.maxX - nativeBounds.minX, nativeBounds.maxY - nativeBounds.minY);
+  const contentExtent = Math.max(fittedBounds.maxX - fittedBounds.minX, fittedBounds.maxY - fittedBounds.minY);
   const centerOnOrigin = state?.centerOnOrigin ?? false;
   const originExtent = 2 * Math.max(
-    Math.abs(nativeBounds.minX),
-    Math.abs(nativeBounds.maxX),
-    Math.abs(nativeBounds.minY),
-    Math.abs(nativeBounds.maxY),
+    Math.abs(fittedBounds.minX),
+    Math.abs(fittedBounds.maxX),
+    Math.abs(fittedBounds.minY),
+    Math.abs(fittedBounds.maxY),
   );
   let scale: number;
   let dx: number;
   let dy: number;
-  if (state?.viewport && state.viewport > 0 && centerOnOrigin) {
+  const viewportValue = state?.viewport ?? 0;
+  const shouldUseViewportFit = viewportValue > 0
+    && (centerOnOrigin || (fallbackScanUsed && loaded.length >= 100));
+  if (shouldUseViewportFit) {
     const viewportSize = centerOnOrigin
-      ? Math.max(state.viewport, contentExtent, originExtent)
-      : Math.max(state.viewport, contentExtent);
-    const centerX = centerOnOrigin ? 0 : (nativeBounds.minX + nativeBounds.maxX) / 2;
-    const centerY = centerOnOrigin ? 0 : (nativeBounds.minY + nativeBounds.maxY) / 2;
+      ? Math.max(viewportValue, contentExtent, originExtent)
+      : Math.max(viewportValue, contentExtent);
+    const centerX = centerOnOrigin ? 0 : (fittedBounds.minX + fittedBounds.maxX) / 2;
+    const centerY = centerOnOrigin ? 0 : (fittedBounds.minY + fittedBounds.maxY) / 2;
     scale = Math.min(width, height) / Math.max(viewportSize, 1);
-    dx = width / 2 - (centerX - nativeBounds.minX) * scale;
-    dy = height / 2 - (nativeBounds.maxY - centerY) * scale;
+    dx = width / 2 - (centerX - fittedBounds.minX) * scale;
+    dy = height / 2 - (fittedBounds.maxY - centerY) * scale;
   } else {
-    const padding = 4;
+    const padding = fallbackScanUsed && loaded.length < 10 ? 7 : 4;
     const availW = width - padding * 2;
     const availH = height - padding * 2;
     scale = Math.min(availW / nativeW, availH / nativeH);
@@ -3095,6 +3113,12 @@ function shouldRenderWidthlessBoundaryStroke(
   if (layer.type !== 'line') return false;
   if (!paintHasVisibleAlpha(comp.outerPaint)) return false;
   if (shape.shapeType === 7 && shape.components.length > 0 && shape.components.every(other => isWidthlessBoundaryStroke(other))) {
+    const boundaryOnlyComps = shape.components.filter(other => isWidthlessBoundaryStroke(other));
+    const isSingleOpenSegment = boundaryOnlyComps.length === 1
+      && boundaryOnlyComps[0].path !== null
+      && boundaryOnlyComps[0].path.segments.filter(seg => seg.type !== 'M').length <= 1
+      && !boundaryOnlyComps[0].path.closed;
+    if (isSingleOpenSegment) return false;
     return true;
   }
   return shape.components.some(other =>
@@ -3177,9 +3201,11 @@ function shouldSuppressLargeNearBlackLineFillShape(
   layer: TVGArtLayer,
   shape: TVGShape,
   strokeComps: TVGComponent[],
+  resolvedContourCount = 0,
 ): boolean {
   if (layer.type !== 'line' || strokeComps.length > 0) return false;
   if (!shapeHasOnlyNearBlackRenderableFills(shape)) return false;
+  if (resolvedContourCount > 0) return false;
   const currentBounds = computeShapeBounds(shape);
   if (!currentBounds) return false;
   const currentArea = (currentBounds.maxX - currentBounds.minX) * (currentBounds.maxY - currentBounds.minY);
@@ -3212,6 +3238,24 @@ function hasSiblingRenderableFillShape(
     }
   }
   return false;
+}
+
+function collectPreviousNearBlackRenderableFillShapes(
+  layer: TVGArtLayer,
+  shapeIndex: number,
+  currentShape: TVGShape,
+): TVGShape[] {
+  if (shapeIndex <= 0) return [];
+  const currentBounds = computeShapeBounds(currentShape);
+  if (!currentBounds) return [];
+  const blockers: TVGShape[] = [];
+  for (let i = 0; i < shapeIndex; i++) {
+    const sibling = layer.shapes[i];
+    if (!shapeHasOnlyNearBlackRenderableFills(sibling)) continue;
+    if (!boundsIntersect(currentBounds, computeShapeBounds(sibling), 0.5)) continue;
+    blockers.push(sibling);
+  }
+  return blockers;
 }
 
 function renderableFillComponents(shape: TVGShape): TVGComponent[] {
@@ -3478,6 +3522,60 @@ function buildResolvedContour(
   };
 }
 
+function buildUnresolvedChainContour(
+  fragments: TVGContourFragment[],
+  refs: Array<{ fragmentIndex: number; reversed: boolean }>,
+  styleKey: FillStyleKey,
+  style: TVGComponent | null,
+  synthesized: boolean,
+): TVGResolvedContour {
+  const bbox = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  const path = new Path2D();
+  let first = true;
+  let flattened: { x: number; y: number }[] = [];
+  let styledFragmentCount = 0;
+  let supportFragmentCount = 0;
+
+  for (const ref of refs) {
+    const fragment = fragments[ref.fragmentIndex];
+    if (fragment.supportOnly) supportFragmentCount++;
+    else styledFragmentCount++;
+    first = appendSegmentsToPath(path, fragment.segments, ref.reversed, first);
+    bbox.minX = Math.min(bbox.minX, fragment.bbox.minX);
+    bbox.minY = Math.min(bbox.minY, fragment.bbox.minY);
+    bbox.maxX = Math.max(bbox.maxX, fragment.bbox.maxX);
+    bbox.maxY = Math.max(bbox.maxY, fragment.bbox.maxY);
+    const fragPoints = flattenSegments(ref.reversed ? reversedSegments(fragment.segments) : fragment.segments);
+    if (flattened.length > 0 && fragPoints.length > 0) fragPoints.shift();
+    flattened = flattened.concat(fragPoints);
+  }
+
+  const firstFragment = fragments[refs[0].fragmentIndex];
+  const samplePoint = isFinite(bbox.minX) && isFinite(bbox.minY) && isFinite(bbox.maxX) && isFinite(bbox.maxY)
+    ? (chooseSamplePoint(bbox, flattened) ?? { x: firstFragment.startX, y: firstFragment.startY })
+    : { x: firstFragment.startX, y: firstFragment.startY };
+
+  return {
+    source: firstFragment.source,
+    layerType: firstFragment.layerType,
+    shapeIndex: firstFragment.shapeIndex,
+    styleKey,
+    style,
+    fragments: refs,
+    fragmentCount: refs.length,
+    styledFragmentCount,
+    supportFragmentCount,
+    path,
+    bbox: isFinite(bbox.minX) && isFinite(bbox.minY) && isFinite(bbox.maxX) && isFinite(bbox.maxY)
+      ? bbox
+      : firstFragment.bbox,
+    samplePoint,
+    sourceOrder: Math.min(...refs.map(ref => fragments[ref.fragmentIndex].componentIndex)),
+    synthesized,
+    flattened: flattened.length > 0 ? flattened : flattenSegments(firstFragment.segments),
+  };
+}
+
 function pickBestChainCandidate(
   chain: Array<{ fragmentIndex: number; reversed: boolean }>,
   fragments: TVGContourFragment[],
@@ -3549,39 +3647,13 @@ function buildContoursFromFragments(
     const contour = buildResolvedContour(fragments, chain, styleKey, style, synthesized);
     if (contour) contours.push(contour);
     else {
-      const fallback = buildResolvedContour(
+      unresolvedChains.push(buildUnresolvedChainContour(
         fragments,
         chain.map(x => ({ ...x })),
         styleKey,
         style,
         synthesized,
-      );
-      if (fallback) unresolvedChains.push(fallback);
-      else {
-        const firstFragment = fragments[chain[0].fragmentIndex];
-        const path = new Path2D();
-        let first = true;
-        for (const ref of chain) {
-          first = appendSegmentsToPath(path, fragments[ref.fragmentIndex].segments, ref.reversed, first);
-        }
-        unresolvedChains.push({
-          source: firstFragment.source,
-          layerType: firstFragment.layerType,
-          shapeIndex: firstFragment.shapeIndex,
-          styleKey,
-          style,
-          fragments: chain,
-          fragmentCount: chain.length,
-          styledFragmentCount: chain.filter(ref => !fragments[ref.fragmentIndex].supportOnly).length,
-          supportFragmentCount: chain.filter(ref => fragments[ref.fragmentIndex].supportOnly).length,
-          path,
-          bbox: firstFragment.bbox,
-          samplePoint: { x: firstFragment.startX, y: firstFragment.startY },
-          sourceOrder: firstFragment.componentIndex,
-          synthesized,
-          flattened: flattenSegments(firstFragment.segments),
-        });
-      }
+      ));
     }
   }
 
@@ -3690,6 +3762,20 @@ function paintDirectUnresolvedChains(
     painted = true;
   }
   return painted;
+}
+
+function createRectPathFromBBox(
+  bbox: { minX: number; minY: number; maxX: number; maxY: number },
+): Path2D | null {
+  if (!isFinite(bbox.minX) || !isFinite(bbox.minY) || !isFinite(bbox.maxX) || !isFinite(bbox.maxY)) {
+    return null;
+  }
+  const width = bbox.maxX - bbox.minX;
+  const height = bbox.maxY - bbox.minY;
+  if (width <= 0 || height <= 0) return null;
+  const path = new Path2D();
+  path.rect(bbox.minX, bbox.minY, width, height);
+  return path;
 }
 
 function renderLegacyChainedFillComponents(
@@ -3996,6 +4082,43 @@ function renderLegacyExplicitFillShape(
     rendered = renderLegacyChainedFillComponents(ctx, allChainComps, groupIndices, tolerance, alphaScale) || rendered;
   }
   return rendered;
+}
+
+function renderLegacyExplicitFillShapeWithSiblingSubtraction(
+  ctx: CanvasRenderingContext2D,
+  shape: TVGShape,
+  strokeComps: TVGComponent[],
+  siblingBlockers: TVGShape[],
+  alphaScale = 1,
+): boolean {
+  if (siblingBlockers.length === 0) {
+    return renderLegacyExplicitFillShape(ctx, shape, strokeComps, alphaScale);
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = ctx.canvas.width;
+  canvas.height = ctx.canvas.height;
+  const scratch = canvas.getContext('2d');
+  if (!scratch) {
+    return renderLegacyExplicitFillShape(ctx, shape, strokeComps, alphaScale);
+  }
+  scratch.setTransform(ctx.getTransform());
+  if (!renderLegacyExplicitFillShape(scratch, shape, strokeComps, alphaScale)) {
+    return false;
+  }
+  scratch.globalCompositeOperation = 'destination-out';
+  for (const blocker of siblingBlockers) {
+    const blockerStrokeComps = blocker.components.filter(comp =>
+      (comp.componentType === 4 || comp.componentType === 2)
+      && comp.path
+      && comp.path.segments.length > 0,
+    );
+    renderLegacyExplicitFillShape(scratch, blocker, blockerStrokeComps, 1);
+  }
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(canvas, 0, 0);
+  ctx.restore();
+  return true;
 }
 
 function computePixelBBoxForShape(
@@ -4464,11 +4587,13 @@ function renderLayerPass(
     const lowAlphaGuideFillScale = attenuateLowAlphaGuideFills
       && shape.components.length === 1
       && isLowAlphaSolidFillComponent(shape.components[0])
-      ? 0.5
+      ? 0.7
       : 1;
 
     if (pass === 'fill') {
-      if (shouldSuppressLargeNearBlackLineFillShape(layer, shape, strokeComps)) {
+      const explicitFragments = collectExplicitFillFragments(shape, layer.type, shapeIndex);
+      const explicitBuild = buildContoursForShape(explicitFragments, false);
+      if (shouldSuppressLargeNearBlackLineFillShape(layer, shape, strokeComps, explicitBuild.contours.length)) {
         continue;
       }
       if (shouldSuppressSeedCarrierFillShape(layer, shape)) {
@@ -4514,8 +4639,14 @@ function renderLayerPass(
         && comp.path
         && comp.outerPaint !== null,
       )?.outerPaint ?? null;
-      const explicitFragments = collectExplicitFillFragments(shape, layer.type, shapeIndex);
-      const explicitBuild = buildContoursForShape(explicitFragments, false);
+      const shouldSubtractNearBlackSiblingFillBlockers = layer.type === 'line'
+        && strokeComps.length === 0
+        && fillPaintKeys.size > 1
+        && explicitBuild.contours.length === 0
+        && explicitBuild.unresolvedChains.length > 0;
+      const nearBlackSiblingFillBlockers = shouldSubtractNearBlackSiblingFillBlockers
+        ? collectPreviousNearBlackRenderableFillShapes(layer, shapeIndex, shape)
+        : [];
       const shouldPreferSiblingBoundaryClip = !options?.skipClipping
         && strokeComps.length === 0
         && fillCarrierCount > 0
@@ -4550,6 +4681,32 @@ function renderLayerPass(
         && paintDirectUnresolvedChains(ctx, explicitBuild.unresolvedChains, lowAlphaGuideFillScale)) {
         continue;
       }
+      const shouldPreferMaskedRectUnresolvedFill = layer.type === 'line'
+        && !options?.skipClipping
+        && strokeComps.length === 0
+        && fillCarrierCount >= 20
+        && explicitBuild.contours.length === 0
+        && explicitBuild.unresolvedChains.length > 0
+        && fillPaintKeys.size >= 2
+        && siblingBoundaryMaskShapes.length >= 4
+        && explicitBuild.unresolvedChains.every(chain =>
+          chain.styledFragmentCount === 1
+          && chain.supportFragmentCount >= 8,
+        );
+      if (shouldPreferMaskedRectUnresolvedFill) {
+        const rectFillSources = explicitBuild.unresolvedChains
+          .map(chain => {
+            const paint = chain.style?.outerPaint ?? null;
+            const path = createRectPathFromBBox(chain.bbox);
+            if (!paint || !path) return null;
+            return { kind: 'path' as const, path, paint };
+          })
+          .filter((source): source is { kind: 'path'; path: Path2D; paint: TVGPaint } => source !== null);
+        if (rectFillSources.length > 0
+          && clipLocalFillSources(ctx, layer, shape, rectFillSources, defaultStrokeWidth, false, siblingBoundaryMaskShapes)) {
+          continue;
+        }
+      }
       const shouldPreferLegacyInheritedFillShape = layer.type === 'line'
         && strokeComps.length === 0
         && fillCarrierCount >= 2
@@ -4574,7 +4731,13 @@ function renderLayerPass(
         || shouldPreferLegacyInheritedOnlyShape
         || shouldPreferLegacyUnresolvedFillOnlyShape;
       if ((shouldPreferLegacy || explicitBuild.contours.length === 0)
-        && renderLegacyExplicitFillShape(ctx, shape, strokeComps, lowAlphaGuideFillScale)) {
+        && renderLegacyExplicitFillShapeWithSiblingSubtraction(
+          ctx,
+          shape,
+          strokeComps,
+          nearBlackSiblingFillBlockers,
+          lowAlphaGuideFillScale,
+        )) {
         continue;
       }
       let renderedExplicit = false;
@@ -4610,7 +4773,15 @@ function renderLayerPass(
           renderedExplicit = true;
         }
       }
-      if (!renderedExplicit && explicitBuild.unresolvedChains.length > 0 && renderLegacyExplicitFillShape(ctx, shape, strokeComps, lowAlphaGuideFillScale)) {
+      if (!renderedExplicit
+        && explicitBuild.unresolvedChains.length > 0
+        && renderLegacyExplicitFillShapeWithSiblingSubtraction(
+          ctx,
+          shape,
+          strokeComps,
+          nearBlackSiblingFillBlockers,
+          lowAlphaGuideFillScale,
+        )) {
         renderedExplicit = true;
       }
       if (renderedExplicit) continue;
