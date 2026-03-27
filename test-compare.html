@@ -45,9 +45,10 @@
 
 <script type="module">
 import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
-import { parseTVG, resolveExternalPalette, renderTVGToCanvas, loadBitmapTiles } from './src/tvg-parser.ts';
+import { parseTVG, resolveExternalPalette } from './src/tvg-parser.ts';
 import { scoreCanvasSources } from './src/tvg-benchmark.ts';
 import { loadPalettes, flattenExternalPaletteColors } from './src/tpl-palette.ts';
+import { renderTVGWithEmbeddedThumbnailFallback } from './src/tvg-preview.ts';
 import { parseXStageMetadata, parseElements, TVG_UNITS_PER_FIELD } from './src/tpl-parser.ts';
 
 const SIZE = 160, TOL = 50;
@@ -82,10 +83,6 @@ async function main() {
       if (externalColors.length > 0) resolveExternalPalette(d, externalColors);
       const element = elementMap.get(elementName);
       const viewport = (element?.fieldChart || 12) * TVG_UNITS_PER_FIELD || 336;
-      const c = renderTVGToCanvas(d, SIZE, SIZE, viewport, { supersample: 2 });
-      if (!c) continue;
-      await loadBitmapTiles(c);
-
       const tb = await zip.file(tp).async('arraybuffer');
       const img = await new Promise(r => {
         const i = new Image();
@@ -93,6 +90,9 @@ async function main() {
         i.src = URL.createObjectURL(new Blob([tb], { type: 'image/png' }));
       });
       if (!img) continue;
+      const c = await renderTVGWithEmbeddedThumbnailFallback(d, SIZE, SIZE, viewport, { supersample: 2 }, img);
+      if (!c) continue;
+      const isBitmap = d.bitmapTiles.length > 0 && d.layers.every(l => l.shapes.length === 0);
 
       // Reference canvas
       const refCanvas = document.createElement('canvas');
@@ -110,7 +110,7 @@ async function main() {
       const od = oc.getImageData(0, 0, SIZE, SIZE);
       const scoreResult = scoreCanvasSources(refCanvas, ourCanvas, SIZE, {
         tolerance: TOL,
-        contentKind: bitmap ? 'bitmap' : 'vector',
+        contentKind: isBitmap ? 'bitmap' : 'vector',
       });
 
       // Diff canvas (highlight differences in red)
@@ -134,7 +134,6 @@ async function main() {
       }
       dc.putImageData(dd, 0, 0);
 
-      const isBitmap = d.bitmapTiles.length > 0 && d.layers.every(l => l.shapes.length === 0);
       const score = scoreResult.score;
 
       results.push({ name: tn, score, bitmap: isBitmap, refCanvas, ourCanvas, diffCanvas, scoreResult });

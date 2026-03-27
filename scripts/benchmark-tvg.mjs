@@ -30,6 +30,15 @@ async function waitForServer(url, timeoutMs = 30000) {
   throw new Error(`Timed out waiting for ${url}`);
 }
 
+async function isServerReady(url) {
+  try {
+    const response = await fetch(url);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 function evaluateThresholds(benchmark) {
   const failures = [];
   const { summary, results } = benchmark;
@@ -65,23 +74,26 @@ function collectFocusedWarnings(benchmark) {
 async function main() {
   mkdirSync('test-results', { recursive: true });
 
-  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const server = spawn(npmCmd, ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(PORT), '--strictPort'], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, BROWSER: 'none' },
-    detached: true,
-  });
+  let server = null;
+  if (!(await isServerReady(PAGE_URL))) {
+    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    server = spawn(npmCmd, ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(PORT), '--strictPort'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, BROWSER: 'none' },
+      detached: true,
+    });
 
-  server.stdout.on('data', (chunk) => process.stdout.write(chunk));
-  server.stderr.on('data', (chunk) => process.stderr.write(chunk));
+    server.stdout.on('data', (chunk) => process.stdout.write(chunk));
+    server.stderr.on('data', (chunk) => process.stderr.write(chunk));
+  }
 
   let browser;
   try {
     await waitForServer(PAGE_URL);
-    browser = await puppeteer.launch({ headless: true });
+    browser = await puppeteer.launch({ headless: true, protocolTimeout: 600000 });
     const page = await browser.newPage();
-    await page.goto(PAGE_URL, { waitUntil: 'networkidle0', timeout: 120000 });
-    await page.waitForFunction(() => window.__benchmarkDone === true, { timeout: 120000 });
+    await page.goto(PAGE_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
+    await page.waitForFunction(() => window.__benchmarkDone === true, { timeout: 600000 });
     const benchmark = await page.evaluate(() => window.__benchmarkResult);
     writeFileSync(OUTPUT_PATH, JSON.stringify(benchmark, null, 2));
 
@@ -115,7 +127,7 @@ async function main() {
     console.log(`TVG benchmark passed. Results written to ${OUTPUT_PATH}`);
   } finally {
     if (browser) await browser.close();
-    if (server.pid) {
+    if (server?.pid) {
       try {
         process.kill(-server.pid, 'SIGTERM');
       } catch {

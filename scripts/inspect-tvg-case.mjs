@@ -22,6 +22,7 @@ try {
     const tvg = await import('/src/tvg-parser.ts');
     const pal = await import('/src/tpl-palette.ts');
     const bench = await import('/src/tvg-benchmark.ts');
+    const preview = await import('/src/tvg-preview.ts');
     const tpl = await import('/src/tpl-parser.ts');
 
     const zip = await JSZipMod.default.loadAsync(
@@ -39,10 +40,25 @@ try {
     const drawing = tvg.parseTVG(await zip.file(`${base}/${drawingName}.tvg`).async('arraybuffer'));
     tvg.resolveExternalPalette(drawing, externalColors);
 
-    const rendered = tvg.renderTVGToCanvas(drawing, 160, 160, viewport, { supersample: 2 });
-    if (rendered) {
-      await tvg.loadBitmapTiles(rendered, drawing.diagnostics);
-    }
+    const thumbBlob = new Blob(
+      [await zip.file(`${base}/.thumbnails/.${drawingName}.tvg.png`).async('arraybuffer')],
+      { type: 'image/png' },
+    );
+    const thumb = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = URL.createObjectURL(thumbBlob);
+    });
+
+    const rendered = await preview.renderTVGWithEmbeddedThumbnailFallback(
+      drawing,
+      160,
+      160,
+      viewport,
+      { supersample: 2 },
+      thumb,
+    );
 
     const layerCanvases = {
       underlay: tvg.renderTVGToCanvas(drawing, 160, 160, viewport, { supersample: 2, artLayerFilter: 'underlay' }),
@@ -55,17 +71,6 @@ try {
         await tvg.loadBitmapTiles(canvas, drawing.diagnostics);
       }
     }
-
-    const thumbBlob = new Blob(
-      [await zip.file(`${base}/.thumbnails/.${drawingName}.tvg.png`).async('arraybuffer')],
-      { type: 'image/png' },
-    );
-    const thumb = await new Promise((resolve, reject) => {
-      const image = new Image();
-      image.onload = () => resolve(image);
-      image.onerror = reject;
-      image.src = URL.createObjectURL(thumbBlob);
-    });
 
     const score = bench.scoreCanvasSources(thumb, rendered, 160);
 

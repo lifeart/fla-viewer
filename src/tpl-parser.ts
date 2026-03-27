@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
-import { parseTVG, renderTVGToCanvas, resolveExternalPalette, loadBitmapTiles } from './tvg-parser';
+import { parseTVG, resolveExternalPalette } from './tvg-parser';
 import type { ExternalPaletteColor } from './tvg-parser';
+import { renderTVGWithEmbeddedThumbnailFallback } from './tvg-preview';
 import {
   loadPalettes,
   flattenExternalPaletteColors,
@@ -472,12 +473,21 @@ async function renderTVGElements(
           viewportSize = elem.fieldChart * TVG_UNITS_PER_FIELD;
         }
       }
-      const canvas = renderTVGToCanvas(drawing, thumbSize, thumbSize, viewportSize);
+      const thumbPath = tvgFiles[i].replace(/\/([^/]+)\.tvg$/i, '/.thumbnails/.$1.tvg.png');
+      let embeddedThumb: HTMLImageElement | null = null;
+      const thumbFile = zip.file(thumbPath);
+      if (thumbFile) {
+        embeddedThumb = await loadImage(new Blob([await thumbFile.async('arraybuffer')], { type: 'image/png' }));
+      }
+      const canvas = await renderTVGWithEmbeddedThumbnailFallback(
+        drawing,
+        thumbSize,
+        thumbSize,
+        viewportSize,
+        undefined,
+        embeddedThumb,
+      );
       if (canvas) {
-        // Load bitmap tiles asynchronously if present
-        if ((canvas as any).__bitmapTiles) {
-          await loadBitmapTiles(canvas);
-        }
         renderedCanvases.push(canvas);
       }
     } catch (e) {
