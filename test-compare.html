@@ -142,10 +142,12 @@ async function main() {
 
   const vecScores = results.filter(x => !x.bitmap);
   const vecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.score, 0) / vecScores.length : 0;
+  const vecAlignedAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.scoreResult.alignedScore, 0) / vecScores.length : 0;
   const vecFocusedAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.scoreResult.normalizedScore, 0) / vecScores.length : 0;
   const allAvg = results.reduce((s, x) => s + x.score, 0) / results.length;
+  const allAlignedAvg = results.reduce((s, x) => s + x.scoreResult.alignedScore, 0) / results.length;
   const allFocusedAvg = results.reduce((s, x) => s + x.scoreResult.normalizedScore, 0) / results.length;
-  statusEl.textContent = `Done: ${results.length} drawings | All avg: ${allAvg.toFixed(1)}% aligned / ${allFocusedAvg.toFixed(1)}% focused | Vector avg: ${vecAvg.toFixed(1)}% aligned / ${vecFocusedAvg.toFixed(1)}% focused | >=98%: ${vecScores.filter(x => x.score >= 98).length}/${vecScores.length} | >=95%: ${vecScores.filter(x => x.score >= 95).length}/${vecScores.length}`;
+  statusEl.textContent = `Done: ${results.length} drawings | All avg: ${allAvg.toFixed(1)}% final / ${allAlignedAvg.toFixed(1)}% aligned / ${allFocusedAvg.toFixed(1)}% focused | Vector avg: ${vecAvg.toFixed(1)}% final / ${vecAlignedAvg.toFixed(1)}% aligned / ${vecFocusedAvg.toFixed(1)}% focused | >=98%: ${vecScores.filter(x => x.score >= 98).length}/${vecScores.length} | >=95%: ${vecScores.filter(x => x.score >= 95).length}/${vecScores.length}`;
   document.title = `Compare: ${vecAvg.toFixed(1)}% vec avg`;
   render();
 }
@@ -160,7 +162,7 @@ function render() {
   if (filterBy === 'bad') items = items.filter(x => x.score < 95);
   else if (filterBy === 'ok') items = items.filter(x => x.score < 98);
   else if (filterBy === 'focused-bad') items = items.filter(x => x.scoreResult.normalizedScore < 50);
-  else if (filterBy === 'suspicious') items = items.filter(x => x.score >= 90 && x.scoreResult.normalizedScore < 25);
+  else if (filterBy === 'suspicious') items = items.filter(x => x.scoreResult.alignedScore >= 90 && x.scoreResult.normalizedScore < 25);
   else if (filterBy === 'vector') items = items.filter(x => !x.bitmap);
 
   if (sortBy === 'score-asc') items.sort((a, b) => a.score - b.score);
@@ -181,7 +183,7 @@ function render() {
     div.appendChild(imgs);
     const label = document.createElement('div');
     label.className = 'label';
-    label.innerHTML = `<span class="score">${r.score.toFixed(1)}%</span> aligned / ${r.scoreResult.normalizedScore.toFixed(1)}% focused ${r.name}${r.bitmap ? ' [bmp]' : ''}`;
+    label.innerHTML = `<span class="score">${r.score.toFixed(1)}%</span> final / ${r.scoreResult.alignedScore.toFixed(1)}% aligned / ${r.scoreResult.normalizedScore.toFixed(1)}% focused ${r.name}${r.bitmap ? ' [bmp]' : ''}`;
     div.appendChild(label);
     grid.appendChild(div);
   }

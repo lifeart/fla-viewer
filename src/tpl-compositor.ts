@@ -5,7 +5,7 @@
 
 import { parseTVG, renderTVGToCanvas, resolveExternalPalette, loadBitmapTiles } from './tvg-parser';
 import type { ExternalPaletteColor } from './tvg-parser';
-import type { TPLElement, TPLPalette } from './tpl-parser';
+import type { TPLElement } from './tpl-parser';
 import { TVG_UNITS_PER_FIELD } from './tpl-parser';
 import JSZip from 'jszip';
 
@@ -338,7 +338,7 @@ function resolveDrawing(graph: SceneGraph, colName: string, frame: number): { el
 function buildTransformMatrix(
   node: SceneNode, graph: SceneGraph, frame: number,
   canvasWidth: number, canvasHeight: number,
-  fieldX: number, fieldY: number,
+  fieldY: number,
 ): DOMMatrix {
   const getAttr = (name: string, def: number) => {
     const attr = node.attrs.get(name);
@@ -524,7 +524,7 @@ export async function renderCompositeFrame(
 
         // Build this PEG's transform (already in pixel space)
         const pegTransform = buildTransformMatrix(node, graph, frame,
-          canvasWidth, canvasHeight, graph.fieldX, graph.fieldY);
+          canvasWidth, canvasHeight, graph.fieldY);
 
         // Accumulate with child's existing transform
         const childTransform = child.transform || new DOMMatrix();

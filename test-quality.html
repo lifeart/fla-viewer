@@ -52,7 +52,14 @@ async function main() {
         tolerance: TOL,
         contentKind: isBitmap ? 'bitmap' : 'vector',
       });
-      scores.push({n: tn, s: scoreResult.score, focused: scoreResult.normalizedScore, bitmap: isBitmap});
+      scores.push({
+        n: tn,
+        s: scoreResult.score,
+        aligned: scoreResult.alignedScore,
+        raw: scoreResult.rawScore,
+        focused: scoreResult.normalizedScore,
+        bitmap: isBitmap,
+      });
     } catch (e) {}
   }
 
@@ -61,15 +68,19 @@ async function main() {
   const bmpScores = scores.filter(x => x.bitmap);
   const avg = scores.reduce((s, x) => s + x.s, 0) / scores.length;
   const vecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.s, 0) / vecScores.length : 0;
+  const alignedAvg = scores.reduce((s, x) => s + x.aligned, 0) / scores.length;
+  const rawAvg = scores.reduce((s, x) => s + x.raw, 0) / scores.length;
   const focusedAvg = scores.reduce((s, x) => s + x.focused, 0) / scores.length;
+  const alignedVecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.aligned, 0) / vecScores.length : 0;
+  const rawVecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.raw, 0) / vecScores.length : 0;
   const focusedVecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.focused, 0) / vecScores.length : 0;
   const lines = [
-    `ALL: ${avg.toFixed(1)}% aligned avg | ${focusedAvg.toFixed(1)}% focused avg (${scores.length} drawings) | >=98%: ${scores.filter(x => x.s >= 98).length} | >=95%: ${scores.filter(x => x.s >= 95).length} | >=90%: ${scores.filter(x => x.s >= 90).length}`,
-    `VECTOR: ${vecAvg.toFixed(1)}% aligned avg | ${focusedVecAvg.toFixed(1)}% focused avg (${vecScores.length}) | >=98%: ${vecScores.filter(x => x.s >= 98).length} | >=95%: ${vecScores.filter(x => x.s >= 95).length}`,
-    `BITMAP: ${bmpScores.length ? (bmpScores.reduce((s,x) => s + x.s, 0) / bmpScores.length).toFixed(1) : 'N/A'}% aligned avg (${bmpScores.length})`,
+    `ALL: ${avg.toFixed(1)}% final avg | ${alignedAvg.toFixed(1)}% aligned avg | ${rawAvg.toFixed(1)}% raw avg | ${focusedAvg.toFixed(1)}% focused avg (${scores.length} drawings) | >=98%: ${scores.filter(x => x.s >= 98).length} | >=95%: ${scores.filter(x => x.s >= 95).length} | >=90%: ${scores.filter(x => x.s >= 90).length}`,
+    `VECTOR: ${vecAvg.toFixed(1)}% final avg | ${alignedVecAvg.toFixed(1)}% aligned avg | ${rawVecAvg.toFixed(1)}% raw avg | ${focusedVecAvg.toFixed(1)}% focused avg (${vecScores.length}) | >=98%: ${vecScores.filter(x => x.s >= 98).length} | >=95%: ${vecScores.filter(x => x.s >= 95).length}`,
+    `BITMAP: ${bmpScores.length ? (bmpScores.reduce((s,x) => s + x.s, 0) / bmpScores.length).toFixed(1) : 'N/A'}% final avg (${bmpScores.length})`,
     '',
     'Bottom 15 vectors:',
-    ...vecScores.slice(0, 15).map(x => `  ${x.n}: ${x.s.toFixed(1)}% aligned | ${x.focused.toFixed(1)}% focused`),
+    ...vecScores.slice(0, 15).map(x => `  ${x.n}: ${x.s.toFixed(1)}% final | ${x.aligned.toFixed(1)}% aligned | ${x.raw.toFixed(1)}% raw | ${x.focused.toFixed(1)}% focused`),
   ];
   document.getElementById('out').textContent = lines.join('\n');
   document.title = 'DONE';

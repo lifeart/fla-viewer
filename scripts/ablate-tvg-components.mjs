@@ -154,8 +154,14 @@ try {
         closed: component.path?.closed ?? false,
         removeScore: removedScore.score,
         removeDelta: removedScore.score - baseScore.score,
+        removeAlignedScore: removedScore.alignedScore,
+        removeAlignedDelta: removedScore.alignedScore - baseScore.alignedScore,
+        removeRawScore: removedScore.rawScore,
+        removeRawDelta: removedScore.rawScore - baseScore.rawScore,
         removeNormalizedDelta: removedScore.normalizedScore - baseScore.normalizedScore,
         onlyScore: onlyScore.score,
+        onlyAlignedScore: onlyScore.alignedScore,
+        onlyRawScore: onlyScore.rawScore,
         onlyNormalizedScore: onlyScore.normalizedScore,
       });
     }

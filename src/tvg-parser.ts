@@ -45,12 +45,25 @@ export interface TVGDrawing {
 export interface TVGArtLayer {
   type: 'underlay' | 'color' | 'line' | 'overlay';
   shapes: TVGShape[];
+  textLabels?: TVGTextLabel[];
 }
 
 export interface TVGShape {
   shapeType: number; // 2=fill, 3=stroke, 6=line
   components: TVGComponent[];
   nodePosition?: number | null;
+}
+
+export interface TVGTextLabel {
+  text: string;
+  fontFamily: string;
+  fontSize: number;
+  x: number;
+  y: number;
+  scaleX: number;
+  scaleY: number;
+  matrixB?: number;
+  matrixC?: number;
 }
 
 export interface TVGThicknessControlPoint {
@@ -95,14 +108,17 @@ export type TVGTipType = 'round' | 'butt' | 'square';
 export interface TVGComponent {
   componentType: number; // 0=fill, 1=unknown, 2=stroke, 4=pencil
   colorId: bigint | null;
+  contourColorId: bigint | null;
   /** Inside color ID from second TGCO entry (usually 0xFFFFFFFFFFFFFFFF = null). */
   insideColorId: bigint | null;
   paletteIndex: number | null; // Palette position index for fills without TGCO
   color: { r: number; g: number; b: number; a: number } | null;
+  contourColor: { r: number; g: number; b: number; a: number } | null;
   fillPaintSource: 'explicit' | 'inherited' | 'default' | 'synthetic' | null;
   /** Resolved inside color for two-sided strokes (inner side fill contribution). */
   insideColor: { r: number; g: number; b: number; a: number } | null;
   transform: TVGTransform | null;
+  contourTransform: TVGTransform | null;
   path: TVGPath | null;
   strokeWidth: number | null;
   thicknessProfile: TVGThicknessProfile | null;
@@ -111,6 +127,8 @@ export interface TVGComponent {
   toTipType: TVGTipType; // End cap type (default: 'round')
   gradientType?: 'linear' | 'radial';
   gradientStops?: { pos: number; r: number; g: number; b: number; a: number }[];
+  contourGradientType?: 'linear' | 'radial';
+  contourGradientStops?: { pos: number; r: number; g: number; b: number; a: number }[];
   /** tGTI full fields (76-byte structure) */
   tgtiThickness: number | null;
   tgtiTextureScaleX: number | null;
@@ -123,6 +141,7 @@ export interface TVGComponent {
   tgtiHasTextureFlags: number | null;
   pathRefHint: number | null;
   outerPaint: TVGPaint | null;
+  contourPaint: TVGPaint | null;
   innerPaint: TVGPaint | null;
 }
 
@@ -294,6 +313,8 @@ const TAG_tLAA = 'tLAA';
 const TAG_tOAA = 'tOAA';
 const TAG_TGLY = 'TGLY';
 const TAG_TGVS = 'TGVS';
+const TAG_TGND = 'TGND';
+const TAG_TGTL = 'TGTL';
 const TAG_TGSD = 'TGSD';
 const TAG_TGBP = 'TGBP';
 const TAG_TGCO = 'TGCO';
@@ -480,6 +501,12 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
           if (entry) {
             comp.color = { r: entry.r, g: entry.g, b: entry.b, a: entry.a };
             if (comp.componentType === 0 || comp.componentType === 1) comp.fillPaintSource = 'explicit';
+          }
+        }
+        if (comp.contourColorId !== null) {
+          const entry = paletteMap.get(comp.contourColorId);
+          if (entry) {
+            comp.contourColor = { r: entry.r, g: entry.g, b: entry.b, a: entry.a };
           }
         }
         // Resolve insideColorId for two-sided strokes
@@ -1063,8 +1090,158 @@ function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
 
 // ── Art Layer Parsing ──
 
+const utf16LeDecoder = new TextDecoder('utf-16le');
+const utf16BeDecoder = new TextDecoder('utf-16be');
+
+function isPlausibleTGTLString(value: string): boolean {
+  const normalized = value.replace(/\0/g, '').trim();
+  if (normalized.length === 0 || normalized.length > 96) return false;
+  return /^[\p{L}\p{N}\s,./&+_\-:\r]+$/u.test(normalized);
+}
+
+function sanitizeTGTLString(value: string): string {
+  const sanitized = value
+    .replace(/\0/g, '')
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .replace(/[^\p{L}\p{N}\s,./&+_\-:\r]+$/u, '')
+    .trim();
+  const asciiRuns = sanitized.match(/[A-Za-z0-9][A-Za-z0-9 ,./&+_\-:\r]*/g);
+  if (asciiRuns && asciiRuns.length > 0) {
+    return asciiRuns.sort((a, b) => b.length - a.length)[0].trim();
+  }
+  return sanitized;
+}
+
+function scoreTGTLStringCandidate(value: string): number {
+  if (!isPlausibleTGTLString(value)) return Number.NEGATIVE_INFINITY;
+  const basicAsciiChars = value.match(/[A-Za-z0-9 ,./&+_\-:\r]/g)?.length ?? 0;
+  const latinChars = value.match(/[\p{Script=Latin}]/gu)?.length ?? 0;
+  const cjkChars = value.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu)?.length ?? 0;
+  if (basicAsciiChars === 0 && cjkChars === 0) return Number.NEGATIVE_INFINITY;
+  return value.length + basicAsciiChars * 6 + Math.max(0, latinChars - basicAsciiChars) - cjkChars * 6;
+}
+
+function extractLengthPrefixedUTF16Strings(data: Uint8Array): Array<{ offset: number; value: string }> {
+  const strings: Array<{ offset: number; value: string }> = [];
+  for (let offset = 0; offset <= data.length - 4; offset++) {
+    const charLen = data[offset] | (data[offset + 1] << 8);
+    if (charLen <= 0 || charLen > 96) continue;
+    let best: string | null = null;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    let bestEnd = -1;
+    for (const start of [offset + 2, offset + 4, offset + 6, offset + 8]) {
+      const end = start + charLen * 2;
+      if (end > data.length) continue;
+      const slice = data.slice(start, end);
+      for (const decoded of [
+        sanitizeTGTLString(utf16LeDecoder.decode(slice)),
+        sanitizeTGTLString(utf16BeDecoder.decode(slice)),
+      ]) {
+        const score = scoreTGTLStringCandidate(decoded);
+        if (score <= bestScore) continue;
+        best = decoded;
+        bestScore = score;
+        bestEnd = end;
+      }
+    }
+    if (!best) continue;
+    const previous = strings[strings.length - 1];
+    if (!previous || previous.offset !== offset || previous.value !== best) {
+      strings.push({ offset, value: best });
+    }
+    offset = Math.max(offset, bestEnd - 1);
+  }
+  return strings;
+}
+
+function parseTGTLTextLabel(data: Uint8Array): TVGTextLabel | null {
+  const strings = extractLengthPrefixedUTF16Strings(data);
+  if (strings.length === 0) return null;
+  const candidates = strings
+    .map(entry => ({ ...entry, score: scoreTGTLStringCandidate(entry.value) }))
+    .filter(entry => Number.isFinite(entry.score));
+  const text = candidates
+    .filter(entry => !/arial/i.test(entry.value))
+    .sort((a, b) => b.score - a.score || b.value.length - a.value.length)[0]?.value;
+  if (!text) return null;
+  const fontFamily = candidates
+    .filter(entry => /arial/i.test(entry.value))
+    .sort((a, b) => b.score - a.score || b.value.length - a.value.length)[0]?.value
+    ?? candidates[1]?.value
+    ?? 'Arial';
+  const normalizedFontFamily = /^rial$/i.test(fontFamily) ? 'Arial' : fontFamily;
+
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  let fontSize = 5;
+  let scaleX = 1;
+  let matrixB = 0;
+  let matrixC = 0;
+  let scaleY = 1;
+  let x = 0;
+  let y = 0;
+
+  for (let offset = data.length - 32; offset >= 76; offset--) {
+    const boundA = view.getFloat64(offset, true);
+    const boundB = view.getFloat64(offset + 24, true);
+    if (!Number.isFinite(boundA) || !Number.isFinite(boundB)) continue;
+    if (Math.abs(boundA - 2500) > 0.01 || Math.abs(boundB - 2500) > 0.01) continue;
+    const maybeY = view.getFloat64(offset - 8, true);
+    const maybeX = view.getFloat64(offset - 16, true);
+    const maybeMatrixD = view.getFloat64(offset - 24, true);
+    const maybeMatrixC = view.getFloat64(offset - 32, true);
+    const maybeMatrixB = view.getFloat64(offset - 40, true);
+    const maybeScaleX = view.getFloat64(offset - 48, true);
+    const maybeFontSize = view.getFloat64(offset - 76, true);
+    if (![maybeFontSize, maybeScaleX, maybeMatrixB, maybeMatrixC, maybeMatrixD, maybeX, maybeY].every(Number.isFinite)) continue;
+    fontSize = maybeFontSize / 4;
+    scaleX = maybeScaleX;
+    matrixB = maybeMatrixB;
+    matrixC = maybeMatrixC;
+    scaleY = maybeMatrixD;
+    x = maybeX;
+    y = maybeY;
+    break;
+  }
+
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return {
+    text,
+    fontFamily: normalizedFontFamily,
+    fontSize: Math.max(4, fontSize),
+    x,
+    y,
+    scaleX: Number.isFinite(scaleX) ? scaleX : 1,
+    scaleY: Number.isFinite(scaleY) ? scaleY : 1,
+    matrixB: Number.isFinite(matrixB) ? matrixB : 0,
+    matrixC: Number.isFinite(matrixC) ? matrixC : 0,
+  };
+}
+
+function parseTrailingTextLabels(reader: BinaryReader): TVGTextLabel[] {
+  const labels: TVGTextLabel[] = [];
+  const tgndPos = reader.findTag4(TAG_TGND, reader.pos);
+  if (tgndPos < 0) return labels;
+  reader.pos = tgndPos + 4;
+  if (reader.remaining < 4) return labels;
+  const tgndLen = reader.readU32LE();
+  const tgndEnd = reader.pos + Math.min(tgndLen, reader.remaining);
+  let cursor = reader.pos;
+  while (cursor + 8 <= tgndEnd) {
+    const next = reader.findTag4(TAG_TGTL, cursor);
+    if (next < 0 || next + 8 > tgndEnd) break;
+    reader.pos = next + 4;
+    const labelLen = reader.readU32LE();
+    if (labelLen <= 0 || labelLen > tgndEnd - reader.pos) break;
+    const payload = reader.readBytes(labelLen);
+    const label = parseTGTLTextLabel(payload);
+    if (label) labels.push(label);
+    cursor = reader.pos;
+  }
+  return labels;
+}
+
 function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type'], diagnostics?: TVGDiagnostics): TVGArtLayer {
-  const layer: TVGArtLayer = { type, shapes: [] };
+  const layer: TVGArtLayer = { type, shapes: [], textLabels: [] };
 
   if (reader.remaining < 6) return layer;
 
@@ -1132,6 +1309,7 @@ function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type'], diagnost
     reader.pos = shapeEnd; // Ensure we advance past the TGLY block
   }
 
+  layer.textLabels = parseTrailingTextLabels(reader);
   borrowMissingPencilPaths(layer);
 
   return layer;
@@ -1216,18 +1394,23 @@ function parseComponent(
   const comp: TVGComponent = {
     componentType: -1,
     colorId: null,
+    contourColorId: null,
     insideColorId: null,
     paletteIndex: null,
     color: null,
+    contourColor: null,
     fillPaintSource: null,
     insideColor: null,
     transform: null,
+    contourTransform: null,
     path: null,
     strokeWidth: null,
     thicknessProfile: null,
     joinType: 'round',
     fromTipType: 'round',
     toTipType: 'round',
+    contourGradientType: undefined,
+    contourGradientStops: undefined,
     tgtiThickness: null,
     tgtiTextureScaleX: null,
     tgtiTextureScaleY: null,
@@ -1239,6 +1422,7 @@ function parseComponent(
     tgtiHasTextureFlags: null,
     pathRefHint: null,
     outerPaint: null,
+    contourPaint: null,
     innerPaint: null,
   };
   let pendingTGRVValue: number | null = null;
@@ -1510,7 +1694,8 @@ function parseTGSD(reader: BinaryReader, comp: TVGComponent, len: number): void 
       }
     }
   } else if (comp.componentType === 4) {
-    // Pencil component: has inline color ID
+    // Type-4 contour component: keep the inline stroke color, but also capture
+    // any embedded TGCO fill paint used for contour-based fill recovery.
     // Full structure is 25 bytes when len=25:
     //   byte[0]: componentType (already read)
     //   bytes[1-4]: f32 brush size (~10.0)
@@ -1527,7 +1712,7 @@ function parseTGSD(reader: BinaryReader, comp: TVGComponent, len: number): void 
         }
       }
       comp.colorId = reader.readU64LE();
-      // Read remaining bytes (12 zero bytes for len=25) — currently unused but consumed
+      scanAndParseTGCO(reader, comp, sdEnd, 'contour');
       const extraBytes = sdEnd - reader.pos;
       if (extraBytes > 0) {
         reader.skip(extraBytes);
@@ -1551,7 +1736,12 @@ function parseTGSD(reader: BinaryReader, comp: TVGComponent, len: number): void 
 }
 
 /** Scan within TGSD data for an embedded TGCO sub-tag and parse it. */
-function scanAndParseTGCO(reader: BinaryReader, comp: TVGComponent, endPos: number): boolean {
+function scanAndParseTGCO(
+  reader: BinaryReader,
+  comp: TVGComponent,
+  endPos: number,
+  target: 'stroke' | 'contour' = 'stroke',
+): boolean {
   const scanStart = reader.pos;
   while (reader.pos < endPos - 8) {
     if (reader.peekTag4() === TAG_TGCO) {
@@ -1559,7 +1749,7 @@ function scanAndParseTGCO(reader: BinaryReader, comp: TVGComponent, endPos: numb
       const coLen = reader.readU32LE();
       const coEnd = reader.pos + coLen;
       if (coEnd <= endPos) {
-        parseTGCO(reader, comp, coLen);
+        parseTGCO(reader, comp, coLen, target);
         reader.pos = coEnd;
         return true;
       }
@@ -1572,7 +1762,12 @@ function scanAndParseTGCO(reader: BinaryReader, comp: TVGComponent, endPos: numb
 
 // ── TGCO Parsing ──
 
-function parseTGCO(reader: BinaryReader, comp: TVGComponent, len: number): void {
+function parseTGCO(
+  reader: BinaryReader,
+  comp: TVGComponent,
+  len: number,
+  target: 'stroke' | 'contour' = 'stroke',
+): void {
   if (len < 57) return;
 
   // Entry 1 (bytes 0-56): outside color (colorType + transform + colorId)
@@ -1587,12 +1782,21 @@ function parseTGCO(reader: BinaryReader, comp: TVGComponent, len: number): void 
   const tx = reader.readF64LE(); // translateX
   const ty = reader.readF64LE(); // translateY
 
-  comp.transform = { a, b, c, d, tx, ty };
+  if (target === 'contour') {
+    comp.contourTransform = { a, b, c, d, tx, ty };
+  } else {
+    comp.transform = { a, b, c, d, tx, ty };
+  }
 
   // Read colorId from remaining bytes (8-byte UID after the 49-byte header+transform).
   // This is the authoritative source for both fills and strokes when TGCO is present.
-  if (len >= 57 && comp.colorId === null) {
-    comp.colorId = reader.readU64LE();
+  if (len >= 57) {
+    const colorId = reader.readU64LE();
+    if (target === 'contour') {
+      if (comp.contourColorId === null) comp.contourColorId = colorId;
+    } else if (comp.colorId === null) {
+      comp.colorId = colorId;
+    }
   }
 
   // Entry 2 (bytes 57-113): inside color (same structure: colorType + transform + colorId)
@@ -2059,6 +2263,12 @@ function buildPaint(
 
 function updateComponentPaints(comp: TVGComponent): void {
   comp.outerPaint = buildPaint(comp.color, comp.gradientType, comp.gradientStops, comp.transform);
+  comp.contourPaint = buildPaint(
+    comp.contourColor,
+    comp.contourGradientType,
+    comp.contourGradientStops,
+    comp.contourTransform,
+  );
   comp.innerPaint = comp.insideColor ? { kind: 'solid', rgba: comp.insideColor } : null;
 }
 
@@ -2208,6 +2418,13 @@ export function resolveExternalPalette(
       comp.gradientStops = ext.stops;
     }
   };
+  const applyExtContourColor = (comp: TVGComponent, ext: ExternalPaletteColor) => {
+    comp.contourColor = { r: ext.r, g: ext.g, b: ext.b, a: ext.a };
+    if (ext.gradientType && ext.stops && ext.stops.length > 0) {
+      comp.contourGradientType = ext.gradientType;
+      comp.contourGradientStops = ext.stops;
+    }
+  };
 
   for (const layer of drawing.layers) {
     for (const shape of layer.shapes) {
@@ -2247,6 +2464,12 @@ export function resolveExternalPalette(
                 }
               }
             }
+          }
+        }
+        if (comp.contourColorId !== null) {
+          const ext = extMap.get(comp.contourColorId);
+          if (ext) {
+            applyExtContourColor(comp, ext);
           }
         }
         if (comp.insideColorId !== null) {
@@ -2544,7 +2767,7 @@ export function renderTVGToCanvas(
     const centerX = centerOnOrigin ? 0 : (minX + maxX) / 2;
     const centerY = centerOnOrigin ? 0 : (minY + maxY) / 2;
 
-    const viewportInset = !centerOnOrigin && shouldInsetViewportForLineFillDrawing(drawing) ? 6 * SS : 0;
+    const viewportInset = !centerOnOrigin && shouldInsetViewportForLineFillDrawing(drawing) ? 8 * SS : 0;
     const availableViewportSize = Math.max(1, Math.min(ssWidth - viewportInset * 2, ssHeight - viewportInset * 2));
     scale = availableViewportSize / viewportSize;
     offsetX = ssWidth / 2 - centerX * scale;
@@ -3044,17 +3267,29 @@ function isNearlyBlackSolidPaint(paint: TVGPaint | null, threshold = 12): boolea
     && paint.rgba.b <= threshold;
 }
 
+function isDarkSolidPaint(paint: TVGPaint | null, threshold = 64): boolean {
+  return !!paint
+    && paint.kind === 'solid'
+    && paint.rgba.a > 0
+    && paint.rgba.r <= threshold
+    && paint.rgba.g <= threshold
+    && paint.rgba.b <= threshold;
+}
+
 function createSyntheticStyleComponent(paint: TVGPaint): TVGComponent {
   const color = paint.kind === 'solid' ? paint.rgba : paint.fallback;
   return {
     componentType: 0,
     colorId: null,
+    contourColorId: null,
     insideColorId: null,
     paletteIndex: null,
     color: { ...color },
+    contourColor: null,
     fillPaintSource: 'synthetic',
     insideColor: null,
     transform: paint.kind === 'gradient' ? paint.transform : null,
+    contourTransform: null,
     path: null,
     strokeWidth: null,
     thicknessProfile: null,
@@ -3063,6 +3298,8 @@ function createSyntheticStyleComponent(paint: TVGPaint): TVGComponent {
     toTipType: 'round',
     gradientType: paint.kind === 'gradient' ? paint.gradientType : undefined,
     gradientStops: paint.kind === 'gradient' ? paint.stops : undefined,
+    contourGradientType: undefined,
+    contourGradientStops: undefined,
     tgtiThickness: null,
     tgtiTextureScaleX: null,
     tgtiTextureScaleY: null,
@@ -3074,6 +3311,7 @@ function createSyntheticStyleComponent(paint: TVGPaint): TVGComponent {
     tgtiHasTextureFlags: null,
     pathRefHint: null,
     outerPaint: paint,
+    contourPaint: null,
     innerPaint: null,
   };
 }
@@ -3192,6 +3430,30 @@ function fillCarrierEntries(shape: TVGShape): Array<{ index: number; comp: TVGCo
   return shape.components
     .map((comp, index) => ({ index, comp }))
     .filter(({ comp }) => (comp.componentType === 0 || comp.componentType === 1) && !!comp.path);
+}
+
+function expandLegacyChainComponents(components: TVGComponent[]): TVGComponent[] {
+  const expanded: TVGComponent[] = [];
+  for (const comp of components) {
+    if (!comp.path) continue;
+    const subpaths = splitPathIntoSubpaths(comp.path)
+      .filter(segments => segments.some(segment => segment.type !== 'M'));
+    if (subpaths.length <= 1) {
+      expanded.push(comp);
+      continue;
+    }
+    for (const segments of subpaths) {
+      expanded.push({
+        ...comp,
+        path: {
+          ...comp.path,
+          segments,
+          closed: false,
+        },
+      });
+    }
+  }
+  return expanded;
 }
 
 function findMatchingUnderlayShape(
@@ -3446,8 +3708,10 @@ function shapeHasOnlyNearBlackRenderableFills(shape: TVGShape): boolean {
 function shouldSuppressLargeNearBlackLineFillShape(
   layer: TVGArtLayer,
   shape: TVGShape,
+  shapeIndex: number,
   strokeComps: TVGComponent[],
   resolvedContourCount = 0,
+  layerShapes: TVGShape[] = layer.shapes,
 ): boolean {
   if (layer.type !== 'line' || strokeComps.length > 0) return false;
   if (!shapeHasOnlyNearBlackRenderableFills(shape)) return false;
@@ -3456,7 +3720,8 @@ function shouldSuppressLargeNearBlackLineFillShape(
   if (!currentBounds) return false;
   const currentArea = (currentBounds.maxX - currentBounds.minX) * (currentBounds.maxY - currentBounds.minY);
   if (currentArea < 50000) return false;
-  for (const sibling of layer.shapes) {
+  for (let siblingIndex = shapeIndex + 1; siblingIndex < layerShapes.length; siblingIndex++) {
+    const sibling = layerShapes[siblingIndex];
     if (sibling === shape) continue;
     if (!shapeHasNonBlackRenderableFill(sibling)) continue;
     if (boundsIntersect(currentBounds, computeShapeBounds(sibling), 0.5)) {
@@ -3486,17 +3751,16 @@ function hasSiblingRenderableFillShape(
   return false;
 }
 
-function collectPreviousNearBlackRenderableFillShapes(
+function collectOverlappingNearBlackRenderableFillShapes(
   layer: TVGArtLayer,
-  shapeIndex: number,
   currentShape: TVGShape,
+  layerShapes: TVGShape[] = layer.shapes,
 ): TVGShape[] {
-  if (shapeIndex <= 0) return [];
   const currentBounds = computeShapeBounds(currentShape);
   if (!currentBounds) return [];
   const blockers: TVGShape[] = [];
-  for (let i = 0; i < shapeIndex; i++) {
-    const sibling = layer.shapes[i];
+  for (const sibling of layerShapes) {
+    if (sibling === currentShape) continue;
     if (!shapeHasOnlyNearBlackRenderableFills(sibling)) continue;
     if (!boundsIntersect(currentBounds, computeShapeBounds(sibling), 0.5)) continue;
     blockers.push(sibling);
@@ -3559,6 +3823,66 @@ function shouldSuppressSeedCarrierFillShape(
     if (siblingPaintKeys.size < 2 || !siblingPaintKeys.has(currentKey)) return false;
     return boundsIntersect(currentBounds, computeShapeBounds(shape), 0.5);
   });
+}
+
+function preRenderLargeLineFillCarrierPriority(
+  layer: TVGArtLayer,
+  shape: TVGShape,
+  shapeIndex: number,
+): number {
+  if (layer.type !== 'line') return 0;
+  const strokeComps = shape.components.filter(comp =>
+    (comp.componentType === 4 || comp.componentType === 2)
+    && comp.path
+    && comp.path.segments.length > 0,
+  );
+  if (strokeComps.length > 0) return 0;
+  const fillComps = renderableFillComponents(shape);
+  if (fillComps.length < 40) return 0;
+  const fillPaintKeys = renderableFillPaintKeys(shape);
+  if (fillPaintKeys.size === 0 || fillPaintKeys.size > 2) return 0;
+  const explicitFillCount = fillComps.filter(comp => hasExplicitFillStyle(comp)).length;
+  const inheritedFillCount = fillComps.filter(comp => comp.fillPaintSource === 'inherited').length;
+  if (inheritedFillCount < 20) return 0;
+  const explicitBuild = buildContoursForShape(collectExplicitFillFragments(shape, layer.type, shapeIndex), false);
+  if (fillPaintKeys.size === 1) {
+    if (explicitFillCount !== 1 || inheritedFillCount < fillComps.length - 1) return 0;
+    if (explicitBuild.contours.length < 2) return 0;
+    if (explicitBuild.unresolvedChains.length === 0) return 1;
+    if (explicitBuild.unresolvedChains.length !== 1) return 0;
+    const [chain] = explicitBuild.unresolvedChains;
+    return chain.supportFragmentCount === 0 && chain.styledFragmentCount >= 20 ? 1 : 0;
+  }
+  if (explicitFillCount !== 2 || inheritedFillCount < fillComps.length - 2) return 0;
+  if (explicitBuild.contours.length > 1) return 0;
+  if (explicitBuild.unresolvedChains.length === 0 || explicitBuild.unresolvedChains.length > 2) return 0;
+  return explicitBuild.unresolvedChains.every(chain =>
+    chain.styledFragmentCount === 1
+    && chain.supportFragmentCount >= 8
+    && chain.fragmentCount >= 20,
+  ) ? 2 : 0;
+}
+
+function shouldPreferLegacyMixedDominantUnresolvedLineShape(
+  layer: TVGArtLayer,
+  strokeComps: TVGComponent[],
+  fillCarrierCount: number,
+  hasInheritedFillCarriers: boolean,
+  fillPaintKeys: Set<FillStyleKey>,
+  explicitFillPaintKeys: Set<FillStyleKey>,
+  explicitBuild: TVGFillBuildResult,
+): boolean {
+  if (layer.type !== 'line' || strokeComps.length > 0) return false;
+  if (fillCarrierCount < 20 || !hasInheritedFillCarriers) return false;
+  if (fillPaintKeys.size !== 1 || explicitFillPaintKeys.size > 1) return false;
+  if (explicitBuild.contours.length === 0 || explicitBuild.unresolvedChains.length !== 1) return false;
+  const [chain] = explicitBuild.unresolvedChains;
+  if (chain.supportFragmentCount !== 0 || chain.styledFragmentCount < 20) return false;
+  const resolvedStyledFragmentCount = explicitBuild.contours.reduce(
+    (sum, contour) => sum + contour.styledFragmentCount,
+    0,
+  );
+  return chain.styledFragmentCount > resolvedStyledFragmentCount;
 }
 
 function flattenSegments(
@@ -3732,7 +4056,11 @@ function buildResolvedContour(
   const startPoint = head.reversed ? { x: start.endX, y: start.endY } : { x: start.startX, y: start.startY };
   const endPoint = tail.reversed ? { x: end.startX, y: end.startY } : { x: end.endX, y: end.endY };
   const closeDistance = Math.hypot(startPoint.x - endPoint.x, startPoint.y - endPoint.y);
-  if (closeDistance > AUTO_CLOSE_TOL) return null;
+  const allowSupportDominatedAutoClose = !synthesized
+    && styledFragmentCount === 1
+    && supportFragmentCount >= 8
+    && closeDistance <= CHAIN_TOL * 8;
+  if (closeDistance > AUTO_CLOSE_TOL && !allowSupportDominatedAutoClose) return null;
   path.closePath();
   flattened = flattenSegments([
     { type: 'M', x: flattened[0]?.x ?? startPoint.x, y: flattened[0]?.y ?? startPoint.y },
@@ -3745,7 +4073,9 @@ function buildResolvedContour(
     && supportFragmentCount >= 4
     && (supportFragmentCount / refs.length) >= 0.75
     && bboxArea > 0
-    && (polyArea / bboxArea) > 0.8) {
+    && (polyArea / bboxArea) > 0.8
+    && !allowSupportDominatedAutoClose
+  ) {
     return null;
   }
   const samplePoint = chooseSamplePoint(bbox, flattened);
@@ -4034,14 +4364,146 @@ function isContourGeometryClosed(
   return Math.hypot(first.x - last.x, first.y - last.y) <= tolerance;
 }
 
-function renderLegacyChainedFillComponents(
-  ctx: CanvasRenderingContext2D,
+interface LegacyChainInfo {
+  ci: number;
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+}
+
+interface LegacyChainLink extends LegacyChainInfo {
+  reversed: boolean;
+}
+
+interface LegacyChainGeometry {
+  bbox: { minX: number; minY: number; maxX: number; maxY: number };
+  area: number;
+  signedArea: number;
+  flattened: { x: number; y: number }[];
+  samplePoint: { x: number; y: number } | null;
+}
+
+function polygonSignedArea(points: { x: number; y: number }[]): number {
+  if (points.length < 3) return 0;
+  let total = 0;
+  for (let i = 0; i < points.length - 1; i++) {
+    total += (points[i].x * points[i + 1].y) - (points[i + 1].x * points[i].y);
+  }
+  return total / 2;
+}
+
+function legacyChainEndpointGap(chain: LegacyChainLink[]): number {
+  const head = chain[0];
+  const tail = chain[chain.length - 1];
+  return Math.hypot(head.startX - tail.endX, head.startY - tail.endY);
+}
+
+function isLegacyChainClosed(chain: LegacyChainLink[], tolerance: number): boolean {
+  const head = chain[0];
+  const tail = chain[chain.length - 1];
+  return Math.abs(head.startX - tail.endX) + Math.abs(head.startY - tail.endY) < tolerance * 2;
+}
+
+function legacyChainBounds(
+  chain: LegacyChainLink[],
+  allChainComps: TVGComponent[],
+): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const info of chain) {
+    const comp = allChainComps[info.ci];
+    if (!comp.path) continue;
+    const sourceSegments = info.reversed ? reversedSegments(comp.path.segments) : comp.path.segments;
+    for (const seg of sourceSegments) {
+      minX = Math.min(minX, seg.x);
+      minY = Math.min(minY, seg.y);
+      maxX = Math.max(maxX, seg.x);
+      maxY = Math.max(maxY, seg.y);
+      if (seg.type === 'Q') {
+        minX = Math.min(minX, seg.cx);
+        minY = Math.min(minY, seg.cy);
+        maxX = Math.max(maxX, seg.cx);
+        maxY = Math.max(maxY, seg.cy);
+      } else if (seg.type === 'C') {
+        minX = Math.min(minX, seg.c1x, seg.c2x);
+        minY = Math.min(minY, seg.c1y, seg.c2y);
+        maxX = Math.max(maxX, seg.c1x, seg.c2x);
+        maxY = Math.max(maxY, seg.c1y, seg.c2y);
+      }
+    }
+  }
+  if (!Number.isFinite(minX)) return null;
+  return { minX, minY, maxX, maxY };
+}
+
+function selectLegacyDrawableChains(
+  chains: LegacyChainLink[][],
+  allChainComps: TVGComponent[],
+  tolerance: number,
+): { drawableChains: LegacyChainLink[][]; autoCloseChains: Set<LegacyChainLink[]> } {
+  const closedChains = chains.filter(chain => isLegacyChainClosed(chain, tolerance));
+  const autoCloseChains = new Set<LegacyChainLink[]>();
+  const drawableChainSet = new Set<LegacyChainLink[]>(
+    chains.length > 1 && closedChains.length > 0 ? closedChains : chains,
+  );
+
+  const openChains = chains.filter(chain => !isLegacyChainClosed(chain, tolerance));
+  if (chains.length > 1 && closedChains.length > 0 && openChains.length === 1) {
+    const candidate = openChains[0];
+    const paintedFillComps = allChainComps.filter(comp =>
+      (comp.componentType === 0 || comp.componentType === 1) && comp.outerPaint !== null,
+    );
+    const hasOnlyPaintedFillCarriers = allChainComps.length > 0 && allChainComps.every(comp =>
+      (comp.componentType === 0 || comp.componentType === 1) && comp.outerPaint !== null,
+    );
+    const explicitCount = paintedFillComps.filter(comp => hasExplicitFillStyle(comp)).length;
+    const inheritedCount = paintedFillComps.filter(comp => comp.fillPaintSource === 'inherited').length;
+    const largestClosedChain = closedChains.reduce((max, chain) => Math.max(max, chain.length), 0);
+    const bounds = legacyChainBounds(candidate, allChainComps);
+    const diagonal = bounds
+      ? Math.hypot(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY)
+      : 0;
+    const dominantPaint = paintedFillComps[0]?.outerPaint ?? null;
+    const gapLimit = Math.min(256, diagonal * 0.06);
+    const isLargeDarkCarrier = dominantPaint !== null
+      && isDarkSolidPaint(dominantPaint)
+      && paintedFillComps.length >= 40;
+    const allowDominantDarkCarrierGap = isLargeDarkCarrier
+      && candidate.length >= Math.ceil(paintedFillComps.length * 0.7)
+      && legacyChainEndpointGap(candidate) <= Math.min(1600, diagonal * 0.3);
+
+    if (hasOnlyPaintedFillCarriers
+      && paintedFillComps.length >= 8
+      && explicitCount === 1
+      && inheritedCount >= paintedFillComps.length - 1
+      && candidate.length >= Math.ceil(paintedFillComps.length * 0.5)
+      && candidate.length > largestClosedChain * 2
+      && diagonal > 0
+      && (legacyChainEndpointGap(candidate) <= gapLimit || allowDominantDarkCarrierGap)) {
+      drawableChainSet.add(candidate);
+      autoCloseChains.add(candidate);
+    }
+  }
+
+  return {
+    drawableChains: chains.filter(chain => drawableChainSet.has(chain)),
+    autoCloseChains,
+  };
+}
+
+function buildLegacyChains(
   allChainComps: TVGComponent[],
   indices: number[],
   tolerance: number,
-  alphaScale = 1,
-): boolean {
-  const compInfos = indices.map(idx => {
+): {
+  chains: LegacyChainLink[][];
+  drawableChains: LegacyChainLink[][];
+  autoCloseChains: Set<LegacyChainLink[]>;
+} {
+  const compInfos: LegacyChainInfo[] = indices.map(idx => {
     const segs = allChainComps[idx].path!.segments;
     return {
       ci: idx,
@@ -4051,10 +4513,10 @@ function renderLegacyChainedFillComponents(
       endY: segs[segs.length - 1].y,
     };
   });
-  if (compInfos.length === 0) return false;
+  if (compInfos.length === 0) return { chains: [], drawableChains: [], autoCloseChains: new Set() };
 
   const pickBestCandidate = (
-    chain: Array<{ ci: number; reversed: boolean; startX: number; startY: number; endX: number; endY: number }>,
+    chain: LegacyChainLink[],
     used: Set<number>,
   ): { infoIndex: number; reversed: boolean; prepend: boolean } | null => {
     const head = chain[0];
@@ -4094,11 +4556,11 @@ function renderLegacyChainedFillComponents(
   };
 
   const used = new Set<number>();
-  const chains: Array<Array<{ ci: number; reversed: boolean; startX: number; startY: number; endX: number; endY: number }>> = [];
+  const chains: LegacyChainLink[][] = [];
   for (let i = 0; i < compInfos.length; i++) {
     if (used.has(i)) continue;
     used.add(i);
-    const chain = [{ ...compInfos[i], reversed: false }];
+    const chain: LegacyChainLink[] = [{ ...compInfos[i], reversed: false }];
     while (true) {
       const tail = chain[chain.length - 1];
       const head = chain[0];
@@ -4123,6 +4585,91 @@ function renderLegacyChainedFillComponents(
     chains.push(chain);
   }
 
+  const { drawableChains, autoCloseChains } = selectLegacyDrawableChains(chains, allChainComps, tolerance);
+  return { chains, drawableChains, autoCloseChains };
+}
+
+function analyzeLegacyDrawableChains(
+  drawableChains: LegacyChainLink[][],
+  allChainComps: TVGComponent[],
+): {
+  chainGeometries: LegacyChainGeometry[];
+  parent: number[];
+} {
+  const chainGeometries = drawableChains.map(chain => {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let flattened: { x: number; y: number }[] = [];
+    for (const info of chain) {
+      const comp = allChainComps[info.ci];
+      const sourceSegments = info.reversed ? reversedSegments(comp.path!.segments) : comp.path!.segments;
+      for (const seg of sourceSegments) {
+        minX = Math.min(minX, seg.x);
+        minY = Math.min(minY, seg.y);
+        maxX = Math.max(maxX, seg.x);
+        maxY = Math.max(maxY, seg.y);
+      }
+      const fragPoints = flattenSegments(sourceSegments);
+      if (flattened.length > 0 && fragPoints.length > 0) fragPoints.shift();
+      flattened = flattened.concat(fragPoints);
+    }
+    if (flattened.length > 1) {
+      const first = flattened[0];
+      const last = flattened[flattened.length - 1];
+      if (Math.abs(first.x - last.x) > 0.001 || Math.abs(first.y - last.y) > 0.001) {
+        flattened = flattened.concat({ ...first });
+      }
+    }
+    const bbox = { minX, minY, maxX, maxY };
+    return {
+      bbox,
+      area: (maxX - minX) * (maxY - minY),
+      signedArea: polygonSignedArea(flattened),
+      flattened,
+      samplePoint: chooseSamplePoint(bbox, flattened),
+    };
+  });
+
+  const parent = new Array<number>(drawableChains.length).fill(-1);
+  for (let i = 0; i < drawableChains.length; i++) {
+    let bestParent = -1;
+    let bestArea = Infinity;
+    for (let j = 0; j < drawableChains.length; j++) {
+      if (i === j) continue;
+      const outer = chainGeometries[j];
+      const inner = chainGeometries[i];
+      if (!inner.samplePoint || outer.flattened.length < 3) continue;
+      if (inner.bbox.minX < outer.bbox.minX - 0.5 || inner.bbox.maxX > outer.bbox.maxX + 0.5
+        || inner.bbox.minY < outer.bbox.minY - 0.5 || inner.bbox.maxY > outer.bbox.maxY + 0.5) {
+        continue;
+      }
+      if (!pointInPolygon(outer.flattened, inner.samplePoint)) continue;
+      if (inner.area < outer.area * 0.95 && outer.area < bestArea) {
+        bestParent = j;
+        bestArea = outer.area;
+      }
+    }
+    parent[i] = bestParent;
+  }
+
+  return { chainGeometries, parent };
+}
+
+function renderLegacyChainedFillComponents(
+  ctx: CanvasRenderingContext2D,
+  allChainComps: TVGComponent[],
+  indices: number[],
+  tolerance: number,
+  alphaScale = 1,
+): boolean {
+  const { chains, drawableChains, autoCloseChains } = buildLegacyChains(allChainComps, indices, tolerance);
+  if (chains.length === 0) return false;
+  let activeDrawableChains = drawableChains;
+  let activeAutoCloseChains = autoCloseChains;
+  if (activeDrawableChains.length === 0) return false;
+
   const paint = indices
     .map(index => allChainComps[index].outerPaint)
     .find((candidate): candidate is TVGPaint => candidate !== null);
@@ -4130,9 +4677,7 @@ function renderLegacyChainedFillComponents(
 
   const addChainToPath = (path: Path2D, chain: typeof chains[number], isFirstChain: boolean) => {
     let isFirst = isFirstChain;
-    const head = chain[0];
-    const tail = chain[chain.length - 1];
-    const isClosed = Math.abs(head.startX - tail.endX) + Math.abs(head.startY - tail.endY) < tolerance * 2;
+    const isClosed = isLegacyChainClosed(chain, tolerance) || activeAutoCloseChains.has(chain);
     for (const info of chain) {
       const comp = allChainComps[info.ci];
       const segs = comp.path!.segments;
@@ -4178,96 +4723,40 @@ function renderLegacyChainedFillComponents(
     if (isClosed) path.closePath();
   };
 
-  if (chains.length === 1) {
+  if (activeDrawableChains.length === 1) {
     const path = new Path2D();
-    addChainToPath(path, chains[0], true);
+    addChainToPath(path, activeDrawableChains[0], true);
     fillPathWithPaint(ctx, path, paint);
     return true;
   }
 
-  const chainGeometries = chains.map(chain => {
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    let flattened: { x: number; y: number }[] = [];
-    for (const info of chain) {
-      const comp = allChainComps[info.ci];
-      const sourceSegments = info.reversed ? reversedSegments(comp.path!.segments) : comp.path!.segments;
-      for (const seg of sourceSegments) {
-        minX = Math.min(minX, seg.x);
-        minY = Math.min(minY, seg.y);
-        maxX = Math.max(maxX, seg.x);
-        maxY = Math.max(maxY, seg.y);
-      }
-      const fragPoints = flattenSegments(sourceSegments);
-      if (flattened.length > 0 && fragPoints.length > 0) fragPoints.shift();
-      flattened = flattened.concat(fragPoints);
-    }
-    if (flattened.length > 1) {
-      const first = flattened[0];
-      const last = flattened[flattened.length - 1];
-      if (Math.abs(first.x - last.x) > 0.001 || Math.abs(first.y - last.y) > 0.001) {
-        flattened = flattened.concat({ ...first });
-      }
-    }
-    const bbox = { minX, minY, maxX, maxY };
-    return {
-      bbox,
-      area: (maxX - minX) * (maxY - minY),
-      flattened,
-      samplePoint: chooseSamplePoint(bbox, flattened),
-    };
-  });
-
-  const parent = new Array<number>(chains.length).fill(-1);
-  for (let i = 0; i < chains.length; i++) {
-    let bestParent = -1;
-    let bestArea = Infinity;
-    for (let j = 0; j < chains.length; j++) {
-      if (i === j) continue;
-      const outer = chainGeometries[j];
-      const inner = chainGeometries[i];
-      if (!inner.samplePoint || outer.flattened.length < 3) continue;
-      if (inner.bbox.minX < outer.bbox.minX - 0.5 || inner.bbox.maxX > outer.bbox.maxX + 0.5
-        || inner.bbox.minY < outer.bbox.minY - 0.5 || inner.bbox.maxY > outer.bbox.maxY + 0.5) {
-        continue;
-      }
-      if (!pointInPolygon(outer.flattened, inner.samplePoint)) continue;
-      if (inner.area < outer.area * 0.95 && outer.area < bestArea) {
-        bestParent = j;
-        bestArea = outer.area;
-      }
-    }
-    parent[i] = bestParent;
+  const { parent } = analyzeLegacyDrawableChains(activeDrawableChains, allChainComps);
+  const childrenByParent = new Map<number, number[]>();
+  for (let i = 0; i < parent.length; i++) {
+    const siblings = childrenByParent.get(parent[i]) ?? [];
+    siblings.push(i);
+    childrenByParent.set(parent[i], siblings);
   }
 
-  const processed = new Set<number>();
-  for (let i = 0; i < chains.length; i++) {
-    if (processed.has(i) || parent[i] !== -1) continue;
-    const children: number[] = [];
-    for (let j = 0; j < chains.length; j++) {
-      if (parent[j] === i) children.push(j);
-    }
+  const renderChainNode = (index: number) => {
+    const children = childrenByParent.get(index) ?? [];
     const path = new Path2D();
-    addChainToPath(path, chains[i], true);
-    processed.add(i);
+    addChainToPath(path, activeDrawableChains[index], true);
     if (children.length > 0) {
       for (const child of children) {
-        addChainToPath(path, chains[child], false);
-        processed.add(child);
+        addChainToPath(path, activeDrawableChains[child], false);
       }
       fillPathWithPaint(ctx, path, scalePaintAlpha(paint, alphaScale), 'evenodd');
     } else {
       fillPathWithPaint(ctx, path, scalePaintAlpha(paint, alphaScale));
     }
-  }
+    for (const child of children) {
+      renderChainNode(child);
+    }
+  };
 
-  for (let i = 0; i < chains.length; i++) {
-    if (processed.has(i)) continue;
-    const path = new Path2D();
-    addChainToPath(path, chains[i], true);
-    fillPathWithPaint(ctx, path, scalePaintAlpha(paint, alphaScale));
+  for (const root of childrenByParent.get(-1) ?? []) {
+    renderChainNode(root);
   }
   return true;
 }
@@ -4278,13 +4767,13 @@ function renderLegacyExplicitFillShape(
   strokeComps: TVGComponent[],
   alphaScale = 1,
 ): boolean {
-  const chainableFillComps = shape.components.filter(comp =>
+  const chainableFillComps = expandLegacyChainComponents(shape.components.filter(comp =>
     (comp.componentType === 0 || comp.componentType === 1)
     && comp.path
     && comp.path.segments.length > 1
     && !isDegenerate(comp.path)
     && (!comp.color || comp.color.a > 0)
-  );
+  ));
   const explicitFillComps = chainableFillComps.filter(comp => hasExplicitFillStyle(comp) && comp.outerPaint);
   const inheritedSeedFillComps = chainableFillComps.filter(comp =>
     comp.fillPaintSource === 'inherited' && comp.outerPaint,
@@ -4304,12 +4793,12 @@ function renderLegacyExplicitFillShape(
   if (fillComps.length === 0) return false;
 
   const tolerance = 2.0;
-  const boundaryStrokes = strokeComps.filter(comp =>
+  const boundaryStrokes = expandLegacyChainComponents(strokeComps.filter(comp =>
     comp.componentType === 2
     && comp.strokeWidth === null
     && comp.path
     && comp.path.segments.length > 1,
-  );
+  ));
   const allChainComps = [...paintedFillComps, ...supportFillComps, ...boundaryStrokes];
   const colorGroups = new Map<string, number[]>();
   const boundaryIndices: number[] = [];
@@ -4329,13 +4818,25 @@ function renderLegacyExplicitFillShape(
   const keys = Array.from(colorGroups.keys());
   if (keys.length === 0) return false;
   if (keys.length === 1) {
-    return renderLegacyChainedFillComponents(ctx, allChainComps, allChainComps.map((_, index) => index), tolerance, alphaScale);
+    return renderLegacyChainedFillComponents(
+      ctx,
+      allChainComps,
+      allChainComps.map((_, index) => index),
+      tolerance,
+      alphaScale,
+    );
   }
 
   let rendered = false;
   for (const key of keys) {
     const groupIndices = [...(colorGroups.get(key) ?? []), ...boundaryIndices];
-    rendered = renderLegacyChainedFillComponents(ctx, allChainComps, groupIndices, tolerance, alphaScale) || rendered;
+    rendered = renderLegacyChainedFillComponents(
+      ctx,
+      allChainComps,
+      groupIndices,
+      tolerance,
+      alphaScale,
+    ) || rendered;
   }
   return rendered;
 }
@@ -4696,6 +5197,26 @@ function collectExplicitFillFragments(
       if (fragment) fragments.push(fragment);
     }
   });
+  shape.components.forEach((comp, componentIndex) => {
+    if (comp.componentType !== 4 || !comp.path || isDegenerate(comp.path)) return;
+    if (!paintHasVisibleAlpha(comp.contourPaint) || isNearlyBlackSolidPaint(comp.contourPaint)) return;
+    const syntheticStyle = createSyntheticStyleComponent(comp.contourPaint!);
+    const styleKey = paintKeyForComponent(syntheticStyle);
+    if (!styleKey) return;
+    for (const segments of splitPathIntoSubpaths(comp.path)) {
+      const fragment = createContourFragment(
+        layerType,
+        shapeIndex,
+        componentIndex,
+        'thin-pencil',
+        syntheticStyle,
+        segments,
+        styleKey,
+        false,
+      );
+      if (fragment) fragments.push(fragment);
+    }
+  });
   supportBoundaryComps.forEach((comp, componentIndex) => {
     for (const segments of splitPathIntoSubpaths(comp.path!)) {
       const fragment = createContourFragment(
@@ -4826,6 +5347,7 @@ export function __debugBuildContoursForShape(
     fragmentCount: number;
     styledFragmentCount: number;
     supportFragmentCount: number;
+    componentIndexes: number[];
     bbox: { minX: number; minY: number; maxX: number; maxY: number };
     childCount: number;
   }>;
@@ -4835,11 +5357,20 @@ export function __debugBuildContoursForShape(
     fragmentCount: number;
     styledFragmentCount: number;
     supportFragmentCount: number;
+    componentIndexes: number[];
+    bbox: { minX: number; minY: number; maxX: number; maxY: number };
+    closeDistance: number;
+    allowSupportDominatedAutoClose: boolean;
+    supportDominatedRejectRatio: number | null;
+    rebuildsAsContour: boolean;
+    rebuiltSamplePoint: { x: number; y: number } | null;
   }>;
 } {
   const fragments = collectExplicitFillFragments(shape, layerType, shapeIndex);
   const build = buildContoursForShape(fragments, false);
   const tree = buildContourTree(build.contours);
+  const styleFragmentsForContour = (styleKey: FillStyleKey) =>
+    fragments.filter(fragment => fragment.styleKey === styleKey || fragment.supportOnly);
   return {
     fragments: fragments.map(fragment => ({
       componentIndex: fragment.componentIndex,
@@ -4850,23 +5381,208 @@ export function __debugBuildContoursForShape(
       endX: fragment.endX,
       endY: fragment.endY,
     })),
-    contours: build.contours.map((contour, index) => ({
-      styleKey: contour.styleKey,
-      sourceOrder: contour.sourceOrder,
-      fragmentCount: contour.fragmentCount,
-      styledFragmentCount: contour.styledFragmentCount,
-      supportFragmentCount: contour.supportFragmentCount,
-      bbox: contour.bbox,
-      childCount: tree[index]?.children.length ?? 0,
-    })),
-    unresolvedChains: build.unresolvedChains.map(contour => ({
-      styleKey: contour.styleKey,
-      sourceOrder: contour.sourceOrder,
-      fragmentCount: contour.fragmentCount,
-      styledFragmentCount: contour.styledFragmentCount,
-      supportFragmentCount: contour.supportFragmentCount,
-    })),
+    contours: build.contours.map((contour, index) => {
+      const styleFragments = styleFragmentsForContour(contour.styleKey);
+      return {
+        styleKey: contour.styleKey,
+        sourceOrder: contour.sourceOrder,
+        fragmentCount: contour.fragmentCount,
+        styledFragmentCount: contour.styledFragmentCount,
+        supportFragmentCount: contour.supportFragmentCount,
+        componentIndexes: contour.fragments.map(ref => styleFragments[ref.fragmentIndex]?.componentIndex ?? -1),
+        bbox: contour.bbox,
+        childCount: tree[index]?.children.length ?? 0,
+      };
+    }),
+    unresolvedChains: build.unresolvedChains.map(contour => {
+      const styleFragments = styleFragmentsForContour(contour.styleKey);
+      const head = contour.fragments[0];
+      const tail = contour.fragments[contour.fragments.length - 1];
+      const startFragment = styleFragments[head.fragmentIndex];
+      const endFragment = styleFragments[tail.fragmentIndex];
+      const startPoint = head.reversed
+        ? { x: startFragment?.endX ?? 0, y: startFragment?.endY ?? 0 }
+        : { x: startFragment?.startX ?? 0, y: startFragment?.startY ?? 0 };
+      const endPoint = tail.reversed
+        ? { x: endFragment?.startX ?? 0, y: endFragment?.startY ?? 0 }
+        : { x: endFragment?.endX ?? 0, y: endFragment?.endY ?? 0 };
+      const closeDistance = Math.hypot(startPoint.x - endPoint.x, startPoint.y - endPoint.y);
+      const allowSupportDominatedAutoClose = !contour.synthesized
+        && contour.styledFragmentCount === 1
+        && contour.supportFragmentCount >= 8
+        && closeDistance <= CHAIN_TOL * 8;
+      const bboxArea = (contour.bbox.maxX - contour.bbox.minX) * (contour.bbox.maxY - contour.bbox.minY);
+      const polyArea = polygonArea(contour.flattened);
+      const rebuilt = buildResolvedContour(
+        styleFragments,
+        contour.fragments.map(ref => ({ ...ref })),
+        contour.styleKey,
+        contour.style,
+        contour.synthesized,
+      );
+      return {
+        styleKey: contour.styleKey,
+        sourceOrder: contour.sourceOrder,
+        fragmentCount: contour.fragmentCount,
+        styledFragmentCount: contour.styledFragmentCount,
+        supportFragmentCount: contour.supportFragmentCount,
+        componentIndexes: contour.fragments.map(ref => styleFragments[ref.fragmentIndex]?.componentIndex ?? -1),
+        bbox: contour.bbox,
+        closeDistance,
+        allowSupportDominatedAutoClose,
+        supportDominatedRejectRatio: bboxArea > 0 ? polyArea / bboxArea : null,
+        rebuildsAsContour: rebuilt !== null,
+        rebuiltSamplePoint: rebuilt?.samplePoint ?? null,
+      };
+    }),
   };
+}
+
+export function __debugBuildLegacyChainsForShape(
+  shape: TVGShape,
+  strokeComps: TVGComponent[] = shape.components.filter(comp =>
+    (comp.componentType === 2 || comp.componentType === 4)
+    && comp.path
+    && comp.path.segments.length > 1,
+  ),
+): {
+  allChainComponents: Array<{
+    allChainIndex: number;
+    componentIndex: number;
+    componentType: number;
+    fillPaintSource: TVGComponent['fillPaintSource'];
+    paintKey: FillStyleKey | null;
+    hasPaint: boolean;
+  }>;
+  groups: Array<{
+    key: string;
+    allChainIndices: number[];
+    componentIndexes: number[];
+    chains: Array<{ componentIndexes: number[]; closed: boolean }>;
+    drawableChains: Array<{
+      componentIndexes: number[];
+      closed: boolean;
+      parent: number;
+      bbox: { minX: number; minY: number; maxX: number; maxY: number };
+      area: number;
+      signedArea: number;
+      samplePoint: { x: number; y: number } | null;
+    }>;
+  }>;
+} {
+  const componentIndexByRef = new Map(shape.components.map((comp, index) => [comp, index]));
+  const chainableFillComps = shape.components.filter(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && comp.path.segments.length > 1
+    && !isDegenerate(comp.path)
+    && (!comp.color || comp.color.a > 0),
+  );
+  const paintedFillComps = chainableFillComps.filter(comp => comp.outerPaint !== null);
+  const supportFillComps = chainableFillComps.filter(comp => comp.outerPaint === null);
+  const boundaryStrokes = strokeComps.filter(comp =>
+    comp.componentType === 2
+    && comp.strokeWidth === null
+    && comp.path
+    && comp.path.segments.length > 1,
+  );
+  const allChainComps = [...paintedFillComps, ...supportFillComps, ...boundaryStrokes];
+  const colorGroups = new Map<string, number[]>();
+  const boundaryIndices: number[] = [];
+  for (let i = 0; i < allChainComps.length; i++) {
+    const key = paintKeyForComponent(allChainComps[i]);
+    if (key) {
+      const group = colorGroups.get(key) ?? [];
+      group.push(i);
+      colorGroups.set(key, group);
+    } else {
+      boundaryIndices.push(i);
+    }
+  }
+
+  const keys = Array.from(colorGroups.keys());
+  const groups = (keys.length <= 1
+    ? [{
+        key: keys[0] ?? '__single__',
+        allChainIndices: allChainComps.map((_, index) => index),
+      }]
+    : keys.map(key => ({
+        key,
+        allChainIndices: [...(colorGroups.get(key) ?? []), ...boundaryIndices],
+      })))
+    .map(group => {
+      const { chains, drawableChains } = buildLegacyChains(allChainComps, group.allChainIndices, 2.0);
+      const { chainGeometries, parent } = analyzeLegacyDrawableChains(drawableChains, allChainComps);
+      const toDebugChain = (chain: LegacyChainLink[]) => ({
+        componentIndexes: chain.map(link => componentIndexByRef.get(allChainComps[link.ci]) ?? -1),
+        closed: Math.abs(chain[0].startX - chain[chain.length - 1].endX) + Math.abs(chain[0].startY - chain[chain.length - 1].endY) < 4,
+      });
+      return {
+        key: group.key,
+        allChainIndices: group.allChainIndices,
+        componentIndexes: group.allChainIndices.map(index => componentIndexByRef.get(allChainComps[index]) ?? -1),
+        chains: chains.map(toDebugChain),
+        drawableChains: drawableChains.map((chain, index) => ({
+          ...toDebugChain(chain),
+          parent: parent[index],
+          bbox: chainGeometries[index].bbox,
+          area: chainGeometries[index].area,
+          signedArea: chainGeometries[index].signedArea,
+          samplePoint: chainGeometries[index].samplePoint,
+        })),
+      };
+    });
+
+  return {
+    allChainComponents: allChainComps.map((comp, allChainIndex) => ({
+      allChainIndex,
+      componentIndex: componentIndexByRef.get(comp) ?? -1,
+      componentType: comp.componentType,
+      fillPaintSource: comp.fillPaintSource,
+      paintKey: paintKeyForComponent(comp),
+      hasPaint: comp.outerPaint !== null,
+    })),
+    groups,
+  };
+}
+
+export function __debugLineFillDecisions(
+  layer: TVGArtLayer,
+): Array<{
+  shapeIndex: number;
+  componentCount: number;
+  fillComponentCount: number;
+  fillPaintKeyCount: number;
+  explicitFillCount: number;
+  inheritedFillCount: number;
+  resolvedContourCount: number;
+  unresolvedChainCount: number;
+  preRenderPriority: number;
+  suppressLargeNearBlack: boolean;
+  suppressSeedCarrier: boolean;
+}> {
+  return layer.shapes.map((shape, shapeIndex) => {
+    const strokeComps = shape.components.filter(comp =>
+      (comp.componentType === 4 || comp.componentType === 2)
+      && comp.path
+      && comp.path.segments.length > 0,
+    );
+    const explicitBuild = buildContoursForShape(collectExplicitFillFragments(shape, layer.type, shapeIndex), false);
+    const fillComps = renderableFillComponents(shape);
+    return {
+      shapeIndex,
+      componentCount: shape.components.length,
+      fillComponentCount: fillComps.length,
+      fillPaintKeyCount: renderableFillPaintKeys(shape).size,
+      explicitFillCount: fillComps.filter(comp => hasExplicitFillStyle(comp)).length,
+      inheritedFillCount: fillComps.filter(comp => comp.fillPaintSource === 'inherited').length,
+      resolvedContourCount: explicitBuild.contours.length,
+      unresolvedChainCount: explicitBuild.unresolvedChains.length,
+      preRenderPriority: preRenderLargeLineFillCarrierPriority(layer, shape, shapeIndex),
+      suppressLargeNearBlack: shouldSuppressLargeNearBlackLineFillShape(layer, shape, shapeIndex, strokeComps, explicitBuild.contours.length),
+      suppressSeedCarrier: shouldSuppressSeedCarrierFillShape(layer, shape),
+    };
+  });
 }
 
 
@@ -4878,8 +5594,24 @@ function renderLayerPass(
   options?: TVGFillRenderOptions,
 ): void {
   const attenuateLowAlphaGuideFills = shouldAttenuateLowAlphaGuideFills(layer);
-  for (let shapeIndex = 0; shapeIndex < layer.shapes.length; shapeIndex++) {
-    const shape = layer.shapes[shapeIndex];
+  const orderedShapes = pass === 'fill' && layer.type === 'line'
+    ? (() => {
+        const entries = layer.shapes.map((shape, shapeIndex) => ({
+          shapeIndex,
+          shape,
+          preRenderPriority: preRenderLargeLineFillCarrierPriority(layer, shape, shapeIndex),
+        }));
+        return [
+          ...entries
+            .filter(entry => entry.preRenderPriority > 0)
+            .sort((a, b) => b.preRenderPriority - a.preRenderPriority || a.shapeIndex - b.shapeIndex),
+          ...entries.filter(entry => entry.preRenderPriority === 0),
+        ];
+      })()
+    : layer.shapes.map((shape, shapeIndex) => ({ shapeIndex, shape }));
+  const sameLayerShapes = orderedShapes.map(entry => entry.shape);
+  for (let renderShapeIndex = 0; renderShapeIndex < orderedShapes.length; renderShapeIndex++) {
+    const { shapeIndex, shape } = orderedShapes[renderShapeIndex];
     const strokeComps = shape.components.filter(c => (c.componentType === 4 || c.componentType === 2) && c.path && c.path.segments.length > 0);
     const lowAlphaGuideFillScale = attenuateLowAlphaGuideFills
       && shape.components.length === 1
@@ -4890,7 +5622,14 @@ function renderLayerPass(
     if (pass === 'fill') {
       const explicitFragments = collectExplicitFillFragments(shape, layer.type, shapeIndex);
       const explicitBuild = buildContoursForShape(explicitFragments, false);
-      if (shouldSuppressLargeNearBlackLineFillShape(layer, shape, strokeComps, explicitBuild.contours.length)) {
+      if (shouldSuppressLargeNearBlackLineFillShape(
+        layer,
+        shape,
+        renderShapeIndex,
+        strokeComps,
+        explicitBuild.contours.length,
+        sameLayerShapes,
+      )) {
         continue;
       }
       if (shouldSuppressSeedCarrierFillShape(layer, shape)) {
@@ -4942,7 +5681,7 @@ function renderLayerPass(
         && explicitBuild.contours.length === 0
         && explicitBuild.unresolvedChains.length > 0;
       const nearBlackSiblingFillBlockers = shouldSubtractNearBlackSiblingFillBlockers
-        ? collectPreviousNearBlackRenderableFillShapes(layer, shapeIndex, shape)
+        ? collectOverlappingNearBlackRenderableFillShapes(layer, shape)
         : [];
       const shouldPreferSiblingBoundaryClip = !options?.skipClipping
         && strokeComps.length === 0
@@ -4988,7 +5727,8 @@ function renderLayerPass(
         && siblingBoundaryMaskShapes.length >= 4
         && explicitBuild.unresolvedChains.every(chain =>
           chain.styledFragmentCount === 1
-          && chain.supportFragmentCount >= 8,
+          && chain.supportFragmentCount >= 8
+          && isContourGeometryClosed(chain)
         );
       if (shouldPreferMaskedRectUnresolvedFill) {
         const rectFillSources = explicitBuild.unresolvedChains
@@ -5008,6 +5748,7 @@ function renderLayerPass(
         && strokeComps.length === 0
         && fillCarrierCount >= 2
         && hasInheritedFillCarriers
+        && explicitBuild.contours.length === 0
         && explicitFillPaintKeys.size <= 1
         && fillPaintKeys.size <= 1
         && !isNearlyBlackSolidPaint(dominantFillPaint);
@@ -5020,6 +5761,16 @@ function renderLayerPass(
         && siblingBoundaryMaskShapes.length === 0
         && fillPaintKeys.size === 1
         && explicitBuild.unresolvedChains.length > 0;
+      const shouldPreferLegacyMixedDominantUnresolvedLineFill =
+        shouldPreferLegacyMixedDominantUnresolvedLineShape(
+          layer,
+          strokeComps,
+          fillCarrierCount,
+          hasInheritedFillCarriers,
+          fillPaintKeys,
+          explicitFillPaintKeys,
+          explicitBuild,
+        );
       const shouldSkipLegacyForPureOpenUnresolved = layer.type === 'line'
         && strokeComps.length === 0
         && siblingBoundaryMaskShapes.length === 0
@@ -5028,11 +5779,13 @@ function renderLayerPass(
         && explicitBuild.unresolvedChains.every(chain =>
           chain.supportFragmentCount === 0
           && !isContourGeometryClosed(chain),
-        );
+        )
+        && (!hasInheritedFillCarriers || fillCarrierCount > 12 || fillPaintKeys.size > 1);
       const shouldPreferLegacy = (
         explicitBuild.unresolvedChains.length > explicitBuild.contours.length
         && explicitBuild.unresolvedChains.length > 0
       )
+        || shouldPreferLegacyMixedDominantUnresolvedLineFill
         || shouldPreferLegacyInheritedFillShape
         || shouldPreferLegacyInheritedOnlyShape
         || shouldPreferLegacyUnresolvedFillOnlyShape;
@@ -5163,6 +5916,41 @@ function renderLayerPass(
         renderStrokeComponent(ctx, layer, shape, comp, defaultStrokeWidth, options?.diagnostics);
       }
     }
+  }
+  if (pass === 'stroke' && layer.textLabels && layer.textLabels.length > 0) {
+    renderTextLabels(ctx, layer.textLabels);
+  }
+}
+
+function renderTextLabels(ctx: CanvasRenderingContext2D, textLabels: TVGTextLabel[]): void {
+  for (const label of textLabels) {
+    const matrixB = label.matrixB ?? 0;
+    const matrixC = label.matrixC ?? 0;
+    const hasOffDiagonalTransform = Math.abs(matrixB) > 0.001 || Math.abs(matrixC) > 0.001;
+    const maxTerm = Math.max(
+      Math.abs(label.scaleX),
+      Math.abs(matrixB),
+      Math.abs(matrixC),
+      Math.abs(label.scaleY),
+    );
+    if (maxTerm < 0.001) continue;
+    ctx.save();
+    // TGTL stores a full 2x2 transform in TVG space. Only the local Y basis
+    // needs flipping for Canvas text's downward Y axis; negating matrixC as
+    // well turns rotated labels into reflections and drops vertical text.
+    ctx.transform(label.scaleX, matrixB, matrixC, -label.scaleY, label.x, label.y);
+    ctx.fillStyle = '#000000';
+    ctx.textAlign = hasOffDiagonalTransform ? 'center' : 'left';
+    ctx.textBaseline = hasOffDiagonalTransform ? 'middle' : 'top';
+    const weight = /black/i.test(label.fontFamily) ? 'bold ' : '';
+    ctx.font = `${weight}${label.fontSize}px ${label.fontFamily}, sans-serif`;
+    const lines = label.text.split(/\r|\n/).filter(line => line.length > 0);
+    const lineHeight = label.fontSize * 1.2;
+    const baseY = hasOffDiagonalTransform ? -((lines.length - 1) * lineHeight) / 2 : 0;
+    lines.forEach((line, index) => {
+      ctx.fillText(line, 0, baseY + index * lineHeight);
+    });
+    ctx.restore();
   }
 }
 

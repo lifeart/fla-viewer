@@ -12,7 +12,7 @@
 <pre id="status">Starting benchmark...</pre>
 <script type="module">
 import JSZip from 'jszip';
-import { parseTVG, resolveExternalPalette } from './src/tvg-parser.ts';
+import { loadBitmapTiles, parseTVG, renderTVGToCanvas, resolveExternalPalette } from './src/tvg-parser.ts';
 import { scoreCanvasSources } from './src/tvg-benchmark.ts';
 import { loadPalettes, flattenExternalPaletteColors } from './src/tpl-palette.ts';
 import { renderTVGWithEmbeddedThumbnailFallback } from './src/tvg-preview.ts';
@@ -59,6 +59,7 @@ async function runBenchmark() {
   const maxShift = Number(params.get('maxShift') || DEFAULT_MAX_SHIFT);
   const backgroundTolerance = Number(params.get('backgroundTolerance') || DEFAULT_BACKGROUND_TOL);
   const searchRadius = Number(params.get('searchRadius') || DEFAULT_SEARCH_RADIUS);
+  const mode = params.get('mode') === 'raw' ? 'raw' : 'preview';
   const status = document.getElementById('status');
 
   const zip = await JSZip.loadAsync(await (await fetch(zipPath)).arrayBuffer());
@@ -93,8 +94,13 @@ async function runBenchmark() {
     const viewport = (element?.fieldChart || 12) * TVG_UNITS_PER_FIELD || 336;
     const reference = await loadImageFromZip(zip, thumbPath);
     if (!reference) continue;
-    const canvas = await renderTVGWithEmbeddedThumbnailFallback(drawing, size, size, viewport, { supersample: 2 }, reference);
+    const canvas = mode === 'raw'
+      ? renderTVGToCanvas(drawing, size, size, viewport, { supersample: 2 })
+      : await renderTVGWithEmbeddedThumbnailFallback(drawing, size, size, viewport, { supersample: 2 }, reference);
     if (!canvas) continue;
+    if (mode === 'raw') {
+      await loadBitmapTiles(canvas, drawing.diagnostics);
+    }
     const bitmapOnly = drawing.bitmapTiles.length > 0 && drawing.layers.every((layer) => layer.shapes.length === 0);
 
     const scoreResult = scoreCanvasSources(reference, canvas, size, {
@@ -109,6 +115,7 @@ async function runBenchmark() {
       element: elementName,
       viewport,
       bitmapOnly,
+      gateScore: scoreResult.alignedScore,
       score: scoreResult.score,
       rawScore: scoreResult.rawScore,
       alignedScore: scoreResult.alignedScore,
@@ -125,28 +132,57 @@ async function runBenchmark() {
 
   const vector = results.filter((entry) => !entry.bitmapOnly);
   const bitmap = results.filter((entry) => entry.bitmapOnly);
-  const average = (items) => items.length ? items.reduce((sum, item) => sum + item.score, 0) / items.length : 0;
+  const averageFinal = (items) => items.length ? items.reduce((sum, item) => sum + item.score, 0) / items.length : 0;
+  const averageRaw = (items) => items.length ? items.reduce((sum, item) => sum + item.rawScore, 0) / items.length : 0;
+  const averageAligned = (items) => items.length ? items.reduce((sum, item) => sum + item.alignedScore, 0) / items.length : 0;
   const averageNormalized = (items) => items.length ? items.reduce((sum, item) => sum + item.normalizedScore, 0) / items.length : 0;
   const errorDiagnostics = results.filter((entry) => entry.diagnostics.events.some((event) => event.severity === 'error')).map((entry) => entry.drawing);
+  const rescued = results.filter((entry) => entry.score > entry.alignedScore + 0.01);
+  const largeRescues = rescued.filter((entry) => entry.score - entry.alignedScore >= 3);
+  const suspiciousRescues = results.filter((entry) => entry.score >= 90 && entry.normalizedScore < 25 && entry.foregroundIou < 25);
 
   const summary = {
     zipPath,
     drawings: results.length,
     metric: {
+      renderMode: mode,
       type: 'rgb-tolerance-aligned-focused-perceptual-structural-mask-macro-rescue',
+      gateScore: 'alignedScore',
+      score: 'rescued inspection score after bounded alignment and rescue heuristics',
+      rawScore: 'fixed-position tolerance score with no alignment search',
+      alignedScore: 'bounded-shift tolerance score after alignment search',
+      normalizedScore: 'foreground-focused aligned score',
       tolerance,
       maxShift,
       backgroundTolerance,
       searchRadius,
     },
-    vectorAverage: average(vector),
-    bitmapAverage: average(bitmap),
-    overallAverage: average(results),
+    finalVectorAverage: averageFinal(vector),
+    finalBitmapAverage: averageFinal(bitmap),
+    finalOverallAverage: averageFinal(results),
+    rawVectorAverage: averageRaw(vector),
+    rawBitmapAverage: averageRaw(bitmap),
+    rawOverallAverage: averageRaw(results),
+    alignedVectorAverage: averageAligned(vector),
+    alignedBitmapAverage: averageAligned(bitmap),
+    alignedOverallAverage: averageAligned(results),
+    vectorAverage: averageAligned(vector),
+    bitmapAverage: averageAligned(bitmap),
+    overallAverage: averageAligned(results),
     normalizedVectorAverage: averageNormalized(vector),
     normalizedBitmapAverage: averageNormalized(bitmap),
     normalizedOverallAverage: averageNormalized(results),
-    minVector: vector.reduce((min, item) => Math.min(min, item.score), Infinity),
-    minBitmap: bitmap.reduce((min, item) => Math.min(min, item.score), Infinity),
+    rescuedDrawings: rescued.length,
+    largeRescueDrawings: largeRescues.length,
+    suspiciousRescueDrawings: suspiciousRescues.length,
+    finalMinVector: vector.reduce((min, item) => Math.min(min, item.score), Infinity),
+    finalMinBitmap: bitmap.reduce((min, item) => Math.min(min, item.score), Infinity),
+    minVector: vector.reduce((min, item) => Math.min(min, item.alignedScore), Infinity),
+    minBitmap: bitmap.reduce((min, item) => Math.min(min, item.alignedScore), Infinity),
+    minAlignedVector: vector.reduce((min, item) => Math.min(min, item.alignedScore), Infinity),
+    minAlignedBitmap: bitmap.reduce((min, item) => Math.min(min, item.alignedScore), Infinity),
+    minRawVector: vector.reduce((min, item) => Math.min(min, item.rawScore), Infinity),
+    minRawBitmap: bitmap.reduce((min, item) => Math.min(min, item.rawScore), Infinity),
     errorDiagnostics,
   };
 
