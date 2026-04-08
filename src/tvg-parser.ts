@@ -66,6 +66,17 @@ export interface TVGTextLabel {
   matrixC?: number;
 }
 
+export interface TVGTextLabelRenderLayout {
+  transform: { a: number; b: number; c: number; d: number; e: number; f: number };
+  textAlign: CanvasTextAlign;
+  textBaseline: CanvasTextBaseline;
+  font: string;
+  lines: string[];
+  lineHeight: number;
+  baseY: number;
+  hasOffDiagonalTransform: boolean;
+}
+
 export interface TVGThicknessControlPoint {
   x: number; // 0..1 relative to interval between this point and the next (fwd) or previous (back)
   y: number; // offset distance from center line
@@ -5924,34 +5935,71 @@ function renderLayerPass(
 
 function renderTextLabels(ctx: CanvasRenderingContext2D, textLabels: TVGTextLabel[]): void {
   for (const label of textLabels) {
-    const matrixB = label.matrixB ?? 0;
-    const matrixC = label.matrixC ?? 0;
-    const hasOffDiagonalTransform = Math.abs(matrixB) > 0.001 || Math.abs(matrixC) > 0.001;
-    const maxTerm = Math.max(
-      Math.abs(label.scaleX),
-      Math.abs(matrixB),
-      Math.abs(matrixC),
-      Math.abs(label.scaleY),
-    );
-    if (maxTerm < 0.001) continue;
+    const layout = computeTextLabelRenderLayout(label);
+    if (!layout) continue;
     ctx.save();
-    // TGTL stores a full 2x2 transform in TVG space. Only the local Y basis
-    // needs flipping for Canvas text's downward Y axis; negating matrixC as
-    // well turns rotated labels into reflections and drops vertical text.
-    ctx.transform(label.scaleX, matrixB, matrixC, -label.scaleY, label.x, label.y);
+    ctx.transform(
+      layout.transform.a,
+      layout.transform.b,
+      layout.transform.c,
+      layout.transform.d,
+      layout.transform.e,
+      layout.transform.f,
+    );
     ctx.fillStyle = '#000000';
-    ctx.textAlign = hasOffDiagonalTransform ? 'center' : 'left';
-    ctx.textBaseline = hasOffDiagonalTransform ? 'middle' : 'top';
-    const weight = /black/i.test(label.fontFamily) ? 'bold ' : '';
-    ctx.font = `${weight}${label.fontSize}px ${label.fontFamily}, sans-serif`;
-    const lines = label.text.split(/\r|\n/).filter(line => line.length > 0);
-    const lineHeight = label.fontSize * 1.2;
-    const baseY = hasOffDiagonalTransform ? -((lines.length - 1) * lineHeight) / 2 : 0;
-    lines.forEach((line, index) => {
-      ctx.fillText(line, 0, baseY + index * lineHeight);
+    ctx.textAlign = layout.textAlign;
+    ctx.textBaseline = layout.textBaseline;
+    ctx.font = layout.font;
+    layout.lines.forEach((line, index) => {
+      ctx.fillText(line, 0, layout.baseY + index * layout.lineHeight);
     });
     ctx.restore();
   }
+}
+
+function computeTextLabelRenderLayout(label: TVGTextLabel): TVGTextLabelRenderLayout | null {
+  const matrixB = label.matrixB ?? 0;
+  const matrixC = label.matrixC ?? 0;
+  const hasOffDiagonalTransform = Math.abs(matrixB) > 0.001 || Math.abs(matrixC) > 0.001;
+  const maxTerm = Math.max(
+    Math.abs(label.scaleX),
+    Math.abs(matrixB),
+    Math.abs(matrixC),
+    Math.abs(label.scaleY),
+  );
+  if (maxTerm < 0.001) return null;
+
+  const lines = label.text.split(/\r|\n/).filter(line => line.length > 0);
+  const lineHeight = label.fontSize * 1.2;
+  const weight = /black/i.test(label.fontFamily) ? 'bold ' : '';
+  return {
+    // TGTL stores a full 2x2 transform in TVG space. Only the local Y basis
+    // needs flipping for Canvas text's downward Y axis; negating matrixC as
+    // well turns rotated labels into reflections and drops vertical text.
+    transform: {
+      a: label.scaleX,
+      b: matrixB,
+      c: matrixC,
+      d: -label.scaleY,
+      e: label.x,
+      f: label.y,
+    },
+    textAlign: hasOffDiagonalTransform
+      ? 'center'
+      : label.scaleX < 0
+        ? 'right'
+        : 'left',
+    textBaseline: hasOffDiagonalTransform ? 'middle' : 'top',
+    font: `${weight}${label.fontSize}px ${label.fontFamily}, sans-serif`,
+    lines,
+    lineHeight,
+    baseY: hasOffDiagonalTransform ? -((lines.length - 1) * lineHeight) / 2 : 0,
+    hasOffDiagonalTransform,
+  };
+}
+
+export function __computeTextLabelRenderLayoutForTests(label: TVGTextLabel): TVGTextLabelRenderLayout | null {
+  return computeTextLabelRenderLayout(label);
 }
 
 interface TVGStrokeSample {

@@ -21,8 +21,10 @@ export interface BenchmarkScoreOptions {
 
 export interface BenchmarkScoreResult {
   score: number;
+  gateScore: number;
   rawScore: number;
   alignedScore: number;
+  croppedAlignedScore: number;
   normalizedScore: number;
   perceptualScore: number;
   structuralScore: number;
@@ -461,10 +463,23 @@ function scorePixelBuffersBase(
     }
   }
 
+  const croppedBounds = unionBounds(
+    referenceBounds,
+    candidateBounds ? shiftBounds(candidateBounds, bestShift.x, bestShift.y) : null,
+    reference.width,
+    reference.height,
+    Math.max(2, resolved.searchRadius + 1),
+  );
+  const croppedAligned = croppedBounds
+    ? scoreShift(reference, candidate, bestShift.x, bestShift.y, resolved, croppedBounds)
+    : { score: bestAlignedScore, foregroundIou: bestIou };
+
   return {
     score: bestScore,
+    gateScore: bestAlignedScore,
     rawScore: raw.score,
     alignedScore: bestAlignedScore,
+    croppedAlignedScore: croppedAligned.score,
     normalizedScore: bestNormalizedScore,
     perceptualScore: bestScore,
     structuralScore: bestScore,
@@ -662,8 +677,17 @@ export function scorePixelBuffers(
     && base.normalizedScore <= 1
     ? 100
     : base.alignedScore;
+  const placementRobustGateScore = (() => {
+    const overlapHealthy = base.foregroundIou >= 70 || base.normalizedScore >= 80;
+    if (!overlapHealthy) return base.alignedScore;
+    return Math.max(
+      base.alignedScore,
+      Math.min(base.croppedAlignedScore, base.alignedScore + 4),
+    );
+  })();
   return {
     ...base,
+    gateScore: placementRobustGateScore,
     score: Math.max(
       base.alignedScore,
       rescuedScore,

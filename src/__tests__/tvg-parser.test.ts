@@ -2,7 +2,7 @@ import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
 import { parsePLT } from '../tpl-palette';
 import type { TVGArtLayer, TVGComponent, TVGDrawing, TVGPath } from '../tvg-parser';
-import { __borrowMissingPencilPathsForTests, parseTVG, renderTVGToCanvas } from '../tvg-parser';
+import { __borrowMissingPencilPathsForTests, __computeTextLabelRenderLayoutForTests, parseTVG, renderTVGToCanvas } from '../tvg-parser';
 
 function createPath(segments: TVGPath['segments'], closed = false): TVGPath {
   return {
@@ -1429,6 +1429,46 @@ describe('tvg rendering', () => {
     expect(normal?.matrixC && Math.abs(normal.matrixC) > 3).toBe(true);
     expect(sad?.matrixB && Math.abs(sad.matrixB) > 3).toBe(true);
     expect(sad?.matrixC && Math.abs(sad.matrixC) > 3).toBe(true);
+  });
+
+  it('uses right alignment for mirrored horizontal TGTL labels', () => {
+    const layout = __computeTextLabelRenderLayoutForTests({
+      text: 'FR',
+      fontFamily: 'Arial',
+      fontSize: 24,
+      x: 100,
+      y: 50,
+      scaleX: -1,
+      scaleY: 1,
+      matrixB: 0,
+      matrixC: 0,
+    });
+
+    expect(layout).not.toBeNull();
+    expect(layout?.textAlign).toBe('right');
+    expect(layout?.textBaseline).toBe('top');
+    expect(layout?.hasOffDiagonalTransform).toBe(false);
+    expect(layout?.transform).toEqual({ a: -1, b: 0, c: 0, d: -1, e: 100, f: 50 });
+  });
+
+  it('keeps off-diagonal TGTL labels centered', () => {
+    const layout = __computeTextLabelRenderLayoutForTests({
+      text: 'NORMAL',
+      fontFamily: 'Arial',
+      fontSize: 24,
+      x: 0,
+      y: 0,
+      scaleX: 0,
+      scaleY: 0,
+      matrixB: 4.8,
+      matrixC: -4.8,
+    });
+
+    expect(layout).not.toBeNull();
+    expect(layout?.textAlign).toBe('center');
+    expect(layout?.textBaseline).toBe('middle');
+    expect(layout?.hasOffDiagonalTransform).toBe(true);
+    expect(Math.abs(layout?.baseY ?? 1)).toBe(0);
   });
 
 });

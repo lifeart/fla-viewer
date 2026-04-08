@@ -44,10 +44,10 @@ function evaluateThresholds(benchmark) {
   const failures = [];
   const { summary, results } = benchmark;
 
-  if (summary.alignedVectorAverage < 96) failures.push(`Aligned vector average ${summary.alignedVectorAverage.toFixed(1)}% is below 96%`);
-  if (summary.alignedBitmapAverage < 90) failures.push(`Aligned bitmap average ${summary.alignedBitmapAverage.toFixed(1)}% is below 90%`);
-  if (Number.isFinite(summary.minAlignedVector) && summary.minAlignedVector < 80) failures.push(`Lowest aligned vector score ${summary.minAlignedVector.toFixed(1)}% is below 80%`);
-  if (Number.isFinite(summary.minAlignedBitmap) && summary.minAlignedBitmap < 75) failures.push(`Lowest aligned bitmap score ${summary.minAlignedBitmap.toFixed(1)}% is below 75%`);
+  if (summary.gateVectorAverage < 96) failures.push(`Gate vector average ${summary.gateVectorAverage.toFixed(1)}% is below 96%`);
+  if (summary.gateBitmapAverage < 90) failures.push(`Gate bitmap average ${summary.gateBitmapAverage.toFixed(1)}% is below 90%`);
+  if (Number.isFinite(summary.minVector) && summary.minVector < 80) failures.push(`Lowest gate vector score ${summary.minVector.toFixed(1)}% is below 80%`);
+  if (Number.isFinite(summary.minBitmap) && summary.minBitmap < 75) failures.push(`Lowest gate bitmap score ${summary.minBitmap.toFixed(1)}% is below 75%`);
   if (summary.errorDiagnostics.length > 0) failures.push(`Drawings with error diagnostics: ${summary.errorDiagnostics.join(', ')}`);
 
   const resultMap = new Map(results.map((result) => [result.drawing, result]));
@@ -57,8 +57,8 @@ function evaluateThresholds(benchmark) {
       failures.push(`Missing benchmark anchor ${drawing}`);
       continue;
     }
-    if (result.alignedScore < minimum) {
-      failures.push(`${drawing} aligned ${result.alignedScore.toFixed(1)}%, below required ${minimum.toFixed(1)}%`);
+    if (result.gateScore < minimum) {
+      failures.push(`${drawing} gate ${result.gateScore.toFixed(1)}%, below required ${minimum.toFixed(1)}%`);
     }
   }
 
@@ -68,23 +68,26 @@ function evaluateThresholds(benchmark) {
 function collectFocusedWarnings(benchmark) {
   const { results } = benchmark;
   return results
-    .filter((result) => result.alignedScore >= 90 && result.normalizedScore <= 10 && result.foregroundIou <= 5)
-    .map((result) => `${result.drawing} final=${result.score.toFixed(1)} aligned=${result.alignedScore.toFixed(1)} raw=${result.rawScore.toFixed(1)} focused=${result.normalizedScore.toFixed(1)} iou=${result.foregroundIou.toFixed(1)}`);
+    .filter((result) => result.gateScore >= 90 && result.normalizedScore <= 10 && result.foregroundIou <= 5)
+    .map((result) => `${result.drawing} final=${result.score.toFixed(1)} gate=${result.gateScore.toFixed(1)} aligned=${result.alignedScore.toFixed(1)} raw=${result.rawScore.toFixed(1)} focused=${result.normalizedScore.toFixed(1)} iou=${result.foregroundIou.toFixed(1)}`);
 }
 
 function collectRescueWarnings(benchmark) {
   const { results } = benchmark;
   return results
-    .filter((result) => result.score - result.alignedScore >= 3)
-    .sort((a, b) => (b.score - b.alignedScore) - (a.score - a.alignedScore))
+    .filter((result) => result.score - result.gateScore >= 3)
+    .sort((a, b) => (b.score - b.gateScore) - (a.score - a.gateScore))
     .slice(0, 20)
-    .map((result) => `${result.drawing} rescued=${result.score.toFixed(1)} gate=${result.alignedScore.toFixed(1)} raw=${result.rawScore.toFixed(1)} focused=${result.normalizedScore.toFixed(1)}`);
+    .map((result) => `${result.drawing} rescued=${result.score.toFixed(1)} gate=${result.gateScore.toFixed(1)} aligned=${result.alignedScore.toFixed(1)} raw=${result.rawScore.toFixed(1)} focused=${result.normalizedScore.toFixed(1)}`);
 }
 
 function printSummary(summary) {
   console.log(`Gate averages: overall=${summary.overallAverage.toFixed(2)} vector=${summary.vectorAverage.toFixed(2)} bitmap=${summary.bitmapAverage.toFixed(2)}`);
   if (typeof summary.alignedOverallAverage === 'number') {
     console.log(`Aligned averages: overall=${summary.alignedOverallAverage.toFixed(2)} vector=${summary.alignedVectorAverage.toFixed(2)} bitmap=${summary.alignedBitmapAverage.toFixed(2)}`);
+  }
+  if (typeof summary.croppedAlignedOverallAverage === 'number') {
+    console.log(`Cropped aligned averages: overall=${summary.croppedAlignedOverallAverage.toFixed(2)} vector=${summary.croppedAlignedVectorAverage.toFixed(2)} bitmap=${summary.croppedAlignedBitmapAverage.toFixed(2)}`);
   }
   if (typeof summary.finalOverallAverage === 'number') {
     console.log(`Rescued averages: overall=${summary.finalOverallAverage.toFixed(2)} vector=${summary.finalVectorAverage.toFixed(2)} bitmap=${summary.finalBitmapAverage.toFixed(2)}`);
@@ -150,9 +153,9 @@ async function main() {
 
     if (rawMode) {
       const worst = [...benchmark.results]
-        .sort((a, b) => a.alignedScore - b.alignedScore || a.rawScore - b.rawScore)
+        .sort((a, b) => a.gateScore - b.gateScore || a.alignedScore - b.alignedScore || a.rawScore - b.rawScore)
         .slice(0, 20)
-        .map((result) => `${result.drawing} final=${result.score.toFixed(2)} aligned=${result.alignedScore.toFixed(2)} raw=${result.rawScore.toFixed(2)}`);
+        .map((result) => `${result.drawing} final=${result.score.toFixed(2)} gate=${result.gateScore.toFixed(2)} aligned=${result.alignedScore.toFixed(2)} raw=${result.rawScore.toFixed(2)}`);
       console.log(`TVG raw benchmark written to ${outputPath}`);
       printSummary(benchmark.summary);
       if (worst.length > 0) {
@@ -199,7 +202,7 @@ async function main() {
       }
     }
     printSummary(benchmark.summary);
-    console.log(`TVG benchmark passed using alignedScore as the gate. Results written to ${outputPath}`);
+    console.log(`TVG benchmark passed using gateScore as the gate. Results written to ${outputPath}`);
   } finally {
     if (browser) await browser.close();
     if (server?.pid) {

@@ -115,10 +115,11 @@ async function runBenchmark() {
       element: elementName,
       viewport,
       bitmapOnly,
-      gateScore: scoreResult.alignedScore,
+      gateScore: scoreResult.gateScore,
       score: scoreResult.score,
       rawScore: scoreResult.rawScore,
       alignedScore: scoreResult.alignedScore,
+      croppedAlignedScore: scoreResult.croppedAlignedScore,
       normalizedScore: scoreResult.normalizedScore,
       perceptualScore: scoreResult.perceptualScore,
       structuralScore: scoreResult.structuralScore,
@@ -133,8 +134,10 @@ async function runBenchmark() {
   const vector = results.filter((entry) => !entry.bitmapOnly);
   const bitmap = results.filter((entry) => entry.bitmapOnly);
   const averageFinal = (items) => items.length ? items.reduce((sum, item) => sum + item.score, 0) / items.length : 0;
+  const averageGate = (items) => items.length ? items.reduce((sum, item) => sum + item.gateScore, 0) / items.length : 0;
   const averageRaw = (items) => items.length ? items.reduce((sum, item) => sum + item.rawScore, 0) / items.length : 0;
   const averageAligned = (items) => items.length ? items.reduce((sum, item) => sum + item.alignedScore, 0) / items.length : 0;
+  const averageCroppedAligned = (items) => items.length ? items.reduce((sum, item) => sum + item.croppedAlignedScore, 0) / items.length : 0;
   const averageNormalized = (items) => items.length ? items.reduce((sum, item) => sum + item.normalizedScore, 0) / items.length : 0;
   const errorDiagnostics = results.filter((entry) => entry.diagnostics.events.some((event) => event.severity === 'error')).map((entry) => entry.drawing);
   const rescued = results.filter((entry) => entry.score > entry.alignedScore + 0.01);
@@ -146,11 +149,12 @@ async function runBenchmark() {
     drawings: results.length,
     metric: {
       renderMode: mode,
-      type: 'rgb-tolerance-aligned-focused-perceptual-structural-mask-macro-rescue',
-      gateScore: 'alignedScore',
+      type: 'rgb-tolerance-aligned-cropped-focused-perceptual-structural-mask-macro-rescue',
+      gateScore: 'crop-aware gate score after bounded alignment',
       score: 'rescued inspection score after bounded alignment and rescue heuristics',
       rawScore: 'fixed-position tolerance score with no alignment search',
       alignedScore: 'bounded-shift tolerance score after alignment search',
+      croppedAlignedScore: 'aligned tolerance score evaluated on the union foreground crop after best shift',
       normalizedScore: 'foreground-focused aligned score',
       tolerance,
       maxShift,
@@ -160,15 +164,21 @@ async function runBenchmark() {
     finalVectorAverage: averageFinal(vector),
     finalBitmapAverage: averageFinal(bitmap),
     finalOverallAverage: averageFinal(results),
+    gateVectorAverage: averageGate(vector),
+    gateBitmapAverage: averageGate(bitmap),
+    gateOverallAverage: averageGate(results),
     rawVectorAverage: averageRaw(vector),
     rawBitmapAverage: averageRaw(bitmap),
     rawOverallAverage: averageRaw(results),
     alignedVectorAverage: averageAligned(vector),
     alignedBitmapAverage: averageAligned(bitmap),
     alignedOverallAverage: averageAligned(results),
-    vectorAverage: averageAligned(vector),
-    bitmapAverage: averageAligned(bitmap),
-    overallAverage: averageAligned(results),
+    croppedAlignedVectorAverage: averageCroppedAligned(vector),
+    croppedAlignedBitmapAverage: averageCroppedAligned(bitmap),
+    croppedAlignedOverallAverage: averageCroppedAligned(results),
+    vectorAverage: averageGate(vector),
+    bitmapAverage: averageGate(bitmap),
+    overallAverage: averageGate(results),
     normalizedVectorAverage: averageNormalized(vector),
     normalizedBitmapAverage: averageNormalized(bitmap),
     normalizedOverallAverage: averageNormalized(results),
@@ -177,10 +187,12 @@ async function runBenchmark() {
     suspiciousRescueDrawings: suspiciousRescues.length,
     finalMinVector: vector.reduce((min, item) => Math.min(min, item.score), Infinity),
     finalMinBitmap: bitmap.reduce((min, item) => Math.min(min, item.score), Infinity),
-    minVector: vector.reduce((min, item) => Math.min(min, item.alignedScore), Infinity),
-    minBitmap: bitmap.reduce((min, item) => Math.min(min, item.alignedScore), Infinity),
+    minVector: vector.reduce((min, item) => Math.min(min, item.gateScore), Infinity),
+    minBitmap: bitmap.reduce((min, item) => Math.min(min, item.gateScore), Infinity),
     minAlignedVector: vector.reduce((min, item) => Math.min(min, item.alignedScore), Infinity),
     minAlignedBitmap: bitmap.reduce((min, item) => Math.min(min, item.alignedScore), Infinity),
+    minCroppedAlignedVector: vector.reduce((min, item) => Math.min(min, item.croppedAlignedScore), Infinity),
+    minCroppedAlignedBitmap: bitmap.reduce((min, item) => Math.min(min, item.croppedAlignedScore), Infinity),
     minRawVector: vector.reduce((min, item) => Math.min(min, item.rawScore), Infinity),
     minRawBitmap: bitmap.reduce((min, item) => Math.min(min, item.rawScore), Infinity),
     errorDiagnostics,

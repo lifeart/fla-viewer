@@ -107,6 +107,31 @@ describe('tvg-benchmark scoring', () => {
     const result = scorePixelBuffers(reference, candidate, { maxShift: 4, searchRadius: 1 });
     expect(result.rawScore).toBeGreaterThan(90);
     expect(result.normalizedScore).toBeLessThan(10);
+    expect(result.gateScore).toBe(result.alignedScore);
+  });
+
+  it('uses a crop-aware gate when overlap is strong but background drift hurts full-canvas alignment', () => {
+    const reference = createBuffer(64, 64);
+    fillRect(reference, 18, 18, 46, 46, [10, 10, 10, 255]);
+
+    const candidate = createBuffer(64, 64);
+    fillRect(candidate, 0, 0, 6, 64, [200, 200, 200, 255]);
+    fillRect(candidate, 58, 0, 64, 64, [200, 200, 200, 255]);
+    fillRect(candidate, 0, 0, 64, 6, [200, 200, 200, 255]);
+    fillRect(candidate, 0, 58, 64, 64, [200, 200, 200, 255]);
+    fillRect(candidate, 18, 18, 46, 46, [10, 10, 10, 255]);
+
+    const result = scorePixelBuffers(reference, candidate, {
+      tolerance: 30,
+      backgroundTolerance: 80,
+      maxShift: 4,
+      searchRadius: 1,
+    });
+
+    expect(result.alignedScore).toBeLessThan(100);
+    expect(result.croppedAlignedScore).toBeGreaterThan(result.alignedScore);
+    expect(result.gateScore).toBeGreaterThan(result.alignedScore);
+    expect(result.gateScore).toBeLessThanOrEqual(result.alignedScore + 4);
   });
 
   it('rescues matched large regions when only tiny interior marks differ', () => {

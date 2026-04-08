@@ -55,7 +55,9 @@ async function main() {
       scores.push({
         n: tn,
         s: scoreResult.score,
+        gate: scoreResult.gateScore,
         aligned: scoreResult.alignedScore,
+        cropped: scoreResult.croppedAlignedScore,
         raw: scoreResult.rawScore,
         focused: scoreResult.normalizedScore,
         bitmap: isBitmap,
@@ -68,19 +70,23 @@ async function main() {
   const bmpScores = scores.filter(x => x.bitmap);
   const avg = scores.reduce((s, x) => s + x.s, 0) / scores.length;
   const vecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.s, 0) / vecScores.length : 0;
+  const gateAvg = scores.reduce((s, x) => s + x.gate, 0) / scores.length;
   const alignedAvg = scores.reduce((s, x) => s + x.aligned, 0) / scores.length;
+  const croppedAvg = scores.reduce((s, x) => s + x.cropped, 0) / scores.length;
   const rawAvg = scores.reduce((s, x) => s + x.raw, 0) / scores.length;
   const focusedAvg = scores.reduce((s, x) => s + x.focused, 0) / scores.length;
+  const gateVecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.gate, 0) / vecScores.length : 0;
   const alignedVecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.aligned, 0) / vecScores.length : 0;
+  const croppedVecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.cropped, 0) / vecScores.length : 0;
   const rawVecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.raw, 0) / vecScores.length : 0;
   const focusedVecAvg = vecScores.length ? vecScores.reduce((s, x) => s + x.focused, 0) / vecScores.length : 0;
   const lines = [
-    `ALL: ${avg.toFixed(1)}% final avg | ${alignedAvg.toFixed(1)}% aligned avg | ${rawAvg.toFixed(1)}% raw avg | ${focusedAvg.toFixed(1)}% focused avg (${scores.length} drawings) | >=98%: ${scores.filter(x => x.s >= 98).length} | >=95%: ${scores.filter(x => x.s >= 95).length} | >=90%: ${scores.filter(x => x.s >= 90).length}`,
-    `VECTOR: ${vecAvg.toFixed(1)}% final avg | ${alignedVecAvg.toFixed(1)}% aligned avg | ${rawVecAvg.toFixed(1)}% raw avg | ${focusedVecAvg.toFixed(1)}% focused avg (${vecScores.length}) | >=98%: ${vecScores.filter(x => x.s >= 98).length} | >=95%: ${vecScores.filter(x => x.s >= 95).length}`,
+    `ALL: ${avg.toFixed(1)}% final avg | ${gateAvg.toFixed(1)}% gate avg | ${alignedAvg.toFixed(1)}% aligned avg | ${croppedAvg.toFixed(1)}% cropped avg | ${rawAvg.toFixed(1)}% raw avg | ${focusedAvg.toFixed(1)}% focused avg (${scores.length} drawings) | >=98% gate: ${scores.filter(x => x.gate >= 98).length} | >=95% gate: ${scores.filter(x => x.gate >= 95).length} | >=90% gate: ${scores.filter(x => x.gate >= 90).length}`,
+    `VECTOR: ${vecAvg.toFixed(1)}% final avg | ${gateVecAvg.toFixed(1)}% gate avg | ${alignedVecAvg.toFixed(1)}% aligned avg | ${croppedVecAvg.toFixed(1)}% cropped avg | ${rawVecAvg.toFixed(1)}% raw avg | ${focusedVecAvg.toFixed(1)}% focused avg (${vecScores.length}) | >=98% gate: ${vecScores.filter(x => x.gate >= 98).length} | >=95% gate: ${vecScores.filter(x => x.gate >= 95).length}`,
     `BITMAP: ${bmpScores.length ? (bmpScores.reduce((s,x) => s + x.s, 0) / bmpScores.length).toFixed(1) : 'N/A'}% final avg (${bmpScores.length})`,
     '',
     'Bottom 15 vectors:',
-    ...vecScores.slice(0, 15).map(x => `  ${x.n}: ${x.s.toFixed(1)}% final | ${x.aligned.toFixed(1)}% aligned | ${x.raw.toFixed(1)}% raw | ${x.focused.toFixed(1)}% focused`),
+    ...vecScores.slice(0, 15).map(x => `  ${x.n}: ${x.s.toFixed(1)}% final | ${x.gate.toFixed(1)}% gate | ${x.aligned.toFixed(1)}% aligned | ${x.cropped.toFixed(1)}% cropped | ${x.raw.toFixed(1)}% raw | ${x.focused.toFixed(1)}% focused`),
   ];
   document.getElementById('out').textContent = lines.join('\n');
   document.title = 'DONE';
