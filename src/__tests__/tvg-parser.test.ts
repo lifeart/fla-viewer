@@ -2,7 +2,14 @@ import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
 import { parsePLT } from '../tpl-palette';
 import type { TVGArtLayer, TVGComponent, TVGDrawing, TVGPath } from '../tvg-parser';
-import { __borrowMissingPencilPathsForTests, __computeTextLabelRenderLayoutForTests, parseTVG, renderTVGToCanvas } from '../tvg-parser';
+import {
+  __borrowMissingPencilPathsForTests,
+  __debugBuildLegacyChainsForShape,
+  __computeTextLabelRenderLayoutForTests,
+  __shouldInsetViewportForLineFillDrawingForTests,
+  parseTVG,
+  renderTVGToCanvas,
+} from '../tvg-parser';
 
 function createPath(segments: TVGPath['segments'], closed = false): TVGPath {
   return {
@@ -764,6 +771,138 @@ describe('tvg rendering', () => {
     const canvas = renderTVGToCanvas(drawing, 120, 120, 120);
     expect(canvas).not.toBeNull();
     expect(countNonWhitePixelsInRect(canvas!, 45, 45, 30, 30)).toBeGreaterThan(300);
+  });
+
+  it('does not inset simple closed line-fill drawings', () => {
+    const orangePaint = { kind: 'solid' as const, rgba: { r: 255, g: 180, b: 63, a: 255 } };
+    const drawing = createDrawing([{
+      type: 'line',
+      shapes: [{
+        shapeType: 2,
+        components: [
+          createComponent({
+            componentType: 0,
+            color: { ...orangePaint.rgba },
+            fillPaintSource: 'explicit',
+            outerPaint: orangePaint,
+            path: createPath([
+              { type: 'M', x: -16, y: -16 },
+              { type: 'L', x: 16, y: -16 },
+              { type: 'L', x: 16, y: 16 },
+              { type: 'L', x: -16, y: 16 },
+              { type: 'L', x: -16, y: -16 },
+            ], true),
+          }),
+          createComponent({
+            componentType: 0,
+            color: { ...orangePaint.rgba },
+            fillPaintSource: 'inherited',
+            outerPaint: orangePaint,
+            path: createPath([
+              { type: 'M', x: -8, y: -8 },
+              { type: 'L', x: 8, y: -8 },
+              { type: 'L', x: 8, y: 8 },
+              { type: 'L', x: -8, y: 8 },
+              { type: 'L', x: -8, y: -8 },
+            ], true),
+          }),
+        ],
+      }],
+    }]);
+
+    expect(__shouldInsetViewportForLineFillDrawingForTests(drawing)).toBe(false);
+  });
+
+  it('insets complex inherited unresolved line-fill carriers', () => {
+    const darkPaint = { kind: 'solid' as const, rgba: { r: 15, g: 46, b: 48, a: 255 } };
+    const bigOpenPoints: Array<[number, number]> = [];
+    for (let x = -40; x <= 40; x += 8) bigOpenPoints.push([x, -40]);
+    for (let y = -32; y <= 40; y += 8) bigOpenPoints.push([40, y]);
+    for (let x = 32; x >= -40; x -= 8) bigOpenPoints.push([x, 40]);
+    for (let y = 32; y >= -16; y -= 8) bigOpenPoints.push([-40, y]);
+    bigOpenPoints.push([-40, -12]);
+
+    const drawing = createDrawing([{
+      type: 'line',
+      shapes: [{
+        shapeType: 2,
+        components: bigOpenPoints.slice(0, -1).map(([x1, y1], index) => {
+          const [x2, y2] = bigOpenPoints[index + 1];
+          return createComponent({
+            componentType: 0,
+            color: { ...darkPaint.rgba },
+            fillPaintSource: index === 0 ? 'explicit' : 'inherited',
+            outerPaint: darkPaint,
+            path: createPath([
+              { type: 'M', x: x1, y: y1 },
+              { type: 'L', x: x2, y: y2 },
+            ]),
+          });
+        }),
+      }],
+    }]);
+
+    expect(__shouldInsetViewportForLineFillDrawingForTests(drawing)).toBe(true);
+  });
+
+  it('treats non-target inherited legacy fills as support-only geometry in mixed groups', () => {
+    const greenPaint = { kind: 'solid' as const, rgba: { r: 22, g: 198, b: 133, a: 255 } };
+    const darkPaint = { kind: 'solid' as const, rgba: { r: 15, g: 46, b: 48, a: 255 } };
+    const shape = {
+      shapeType: 2,
+      components: [
+        createComponent({
+          componentType: 0,
+          color: { ...greenPaint.rgba },
+          fillPaintSource: 'explicit',
+          outerPaint: greenPaint,
+          path: createPath([
+            { type: 'M', x: 0, y: 0 },
+            { type: 'L', x: 10, y: 0 },
+          ]),
+        }),
+        createComponent({
+          componentType: 0,
+          color: { ...greenPaint.rgba },
+          fillPaintSource: 'inherited',
+          outerPaint: greenPaint,
+          path: createPath([
+            { type: 'M', x: 10, y: 0 },
+            { type: 'L', x: 10, y: 10 },
+          ]),
+        }),
+        createComponent({
+          componentType: 0,
+          color: { ...darkPaint.rgba },
+          fillPaintSource: 'explicit',
+          outerPaint: darkPaint,
+          path: createPath([
+            { type: 'M', x: 10, y: 10 },
+            { type: 'L', x: 0, y: 10 },
+          ]),
+        }),
+        createComponent({
+          componentType: 0,
+          color: { ...darkPaint.rgba },
+          fillPaintSource: 'inherited',
+          outerPaint: darkPaint,
+          path: createPath([
+            { type: 'M', x: 0, y: 10 },
+            { type: 'L', x: 0, y: 0 },
+          ]),
+        }),
+      ],
+    };
+
+    const plain = __debugBuildLegacyChainsForShape(shape);
+    expect(plain.allChainComponents.filter(comp => comp.componentIndex === -1)).toHaveLength(0);
+
+    const supportAware = __debugBuildLegacyChainsForShape(shape, [], { supportInheritedCrossPaint: true });
+    expect(supportAware.allChainComponents.filter(comp => comp.componentIndex === -1 && !comp.hasPaint)).toHaveLength(2);
+    expect(supportAware.groups).toHaveLength(2);
+    for (const group of supportAware.groups) {
+      expect(group.componentIndexes.filter(index => index === -1)).toHaveLength(1);
+    }
   });
 
   it('pre-renders large mixed line-layer carriers ahead of overlapping detail fills', () => {

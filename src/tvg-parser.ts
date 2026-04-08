@@ -2924,10 +2924,26 @@ function shouldInsetViewportForLineFillDrawing(drawing: TVGDrawing): boolean {
   if (hasColorLayer) return false;
   return drawing.layers.some((layer) =>
     layer.type === 'line'
-    && layer.shapes.some((shape) =>
-      shape.components.some((comp) => comp.componentType === 0 && !!comp.color && comp.color.a > 0),
-    ),
+    && layer.shapes.some((shape, shapeIndex) => {
+      const strokeComps = shape.components.filter(comp =>
+        (comp.componentType === 2 || comp.componentType === 4)
+        && comp.path
+        && comp.path.segments.length > 0,
+      );
+      if (strokeComps.length > 0) return false;
+      const fillComps = renderableFillComponents(shape);
+      if (fillComps.length < 8) return false;
+      const inheritedFillCount = fillComps.filter(comp => comp.fillPaintSource === 'inherited').length;
+      if (inheritedFillCount < fillComps.length - 2) return false;
+      const explicitBuild = buildContoursForShape(collectExplicitFillFragments(shape, layer.type, shapeIndex), false);
+      return explicitBuild.unresolvedChains.length > 0
+        || preRenderLargeLineFillCarrierPriority(layer, shape, shapeIndex) > 0;
+    }),
   );
+}
+
+export function __shouldInsetViewportForLineFillDrawingForTests(drawing: TVGDrawing): boolean {
+  return shouldInsetViewportForLineFillDrawing(drawing);
 }
 
 function drawImageWithProgressiveDownscale(
@@ -3763,9 +3779,8 @@ function hasSiblingRenderableFillShape(
 }
 
 function collectOverlappingNearBlackRenderableFillShapes(
-  layer: TVGArtLayer,
   currentShape: TVGShape,
-  layerShapes: TVGShape[] = layer.shapes,
+  layerShapes: TVGShape[],
 ): TVGShape[] {
   const currentBounds = computeShapeBounds(currentShape);
   if (!currentBounds) return [];
@@ -4772,11 +4787,74 @@ function renderLegacyChainedFillComponents(
   return true;
 }
 
+interface LegacyFillRenderGroup {
+  key: string;
+  allChainIndices: number[];
+}
+
+function createSupportOnlyLegacyComponent(comp: TVGComponent): TVGComponent {
+  return {
+    ...comp,
+    outerPaint: null,
+  };
+}
+
+function buildLegacyFillRenderGroups(
+  allChainComps: TVGComponent[],
+  options: { supportInheritedCrossPaint?: boolean } = {},
+): LegacyFillRenderGroup[] {
+  const colorGroups = new Map<string, number[]>();
+  const boundaryIndices: number[] = [];
+
+  for (let i = 0; i < allChainComps.length; i++) {
+    const key = paintKeyForComponent(allChainComps[i]);
+    if (key) {
+      const group = colorGroups.get(key) ?? [];
+      group.push(i);
+      colorGroups.set(key, group);
+    } else {
+      boundaryIndices.push(i);
+    }
+  }
+
+  const keys = Array.from(colorGroups.keys());
+  if (keys.length <= 1) {
+    return [{
+      key: keys[0] ?? '__single__',
+      allChainIndices: allChainComps.map((_, index) => index),
+    }];
+  }
+
+  const supportIndicesByKey = new Map<string, number[]>();
+  if (options.supportInheritedCrossPaint) {
+    for (const key of keys) {
+      const supportIndices: number[] = [];
+      for (const comp of allChainComps) {
+        if (paintKeyForComponent(comp) === key) continue;
+        if (comp.fillPaintSource !== 'inherited' || comp.outerPaint === null) continue;
+        allChainComps.push(createSupportOnlyLegacyComponent(comp));
+        supportIndices.push(allChainComps.length - 1);
+      }
+      supportIndicesByKey.set(key, supportIndices);
+    }
+  }
+
+  return keys.map(key => ({
+    key,
+    allChainIndices: [
+      ...(colorGroups.get(key) ?? []),
+      ...boundaryIndices,
+      ...(supportIndicesByKey.get(key) ?? []),
+    ],
+  }));
+}
+
 function renderLegacyExplicitFillShape(
   ctx: CanvasRenderingContext2D,
   shape: TVGShape,
   strokeComps: TVGComponent[],
   alphaScale = 1,
+  options: { supportInheritedCrossPaint?: boolean } = {},
 ): boolean {
   const chainableFillComps = expandLegacyChainComponents(shape.components.filter(comp =>
     (comp.componentType === 0 || comp.componentType === 1)
@@ -4811,40 +4889,18 @@ function renderLegacyExplicitFillShape(
     && comp.path.segments.length > 1,
   ));
   const allChainComps = [...paintedFillComps, ...supportFillComps, ...boundaryStrokes];
-  const colorGroups = new Map<string, number[]>();
-  const boundaryIndices: number[] = [];
-
-  for (let i = 0; i < allChainComps.length; i++) {
-    const comp = allChainComps[i];
-    const key = paintKeyForComponent(comp);
-    if (key) {
-      const group = colorGroups.get(key) ?? [];
-      group.push(i);
-      colorGroups.set(key, group);
-    } else {
-      boundaryIndices.push(i);
-    }
-  }
-
-  const keys = Array.from(colorGroups.keys());
-  if (keys.length === 0) return false;
-  if (keys.length === 1) {
-    return renderLegacyChainedFillComponents(
-      ctx,
-      allChainComps,
-      allChainComps.map((_, index) => index),
-      tolerance,
-      alphaScale,
-    );
+  const groups = buildLegacyFillRenderGroups(allChainComps, options);
+  if (groups.length === 0) return false;
+  if (groups.length === 1) {
+    return renderLegacyChainedFillComponents(ctx, allChainComps, groups[0].allChainIndices, tolerance, alphaScale);
   }
 
   let rendered = false;
-  for (const key of keys) {
-    const groupIndices = [...(colorGroups.get(key) ?? []), ...boundaryIndices];
+  for (const group of groups) {
     rendered = renderLegacyChainedFillComponents(
       ctx,
       allChainComps,
-      groupIndices,
+      group.allChainIndices,
       tolerance,
       alphaScale,
     ) || rendered;
@@ -4858,19 +4914,20 @@ function renderLegacyExplicitFillShapeWithSiblingSubtraction(
   strokeComps: TVGComponent[],
   siblingBlockers: TVGShape[],
   alphaScale = 1,
+  options: { supportInheritedCrossPaint?: boolean } = {},
 ): boolean {
   if (siblingBlockers.length === 0) {
-    return renderLegacyExplicitFillShape(ctx, shape, strokeComps, alphaScale);
+    return renderLegacyExplicitFillShape(ctx, shape, strokeComps, alphaScale, options);
   }
   const canvas = document.createElement('canvas');
   canvas.width = ctx.canvas.width;
   canvas.height = ctx.canvas.height;
   const scratch = canvas.getContext('2d');
   if (!scratch) {
-    return renderLegacyExplicitFillShape(ctx, shape, strokeComps, alphaScale);
+    return renderLegacyExplicitFillShape(ctx, shape, strokeComps, alphaScale, options);
   }
   scratch.setTransform(ctx.getTransform());
-  if (!renderLegacyExplicitFillShape(scratch, shape, strokeComps, alphaScale)) {
+  if (!renderLegacyExplicitFillShape(scratch, shape, strokeComps, alphaScale, options)) {
     return false;
   }
   scratch.globalCompositeOperation = 'destination-out';
@@ -5456,6 +5513,7 @@ export function __debugBuildLegacyChainsForShape(
     && comp.path
     && comp.path.segments.length > 1,
   ),
+  options: { supportInheritedCrossPaint?: boolean } = {},
 ): {
   allChainComponents: Array<{
     allChainIndex: number;
@@ -5498,29 +5556,7 @@ export function __debugBuildLegacyChainsForShape(
     && comp.path.segments.length > 1,
   );
   const allChainComps = [...paintedFillComps, ...supportFillComps, ...boundaryStrokes];
-  const colorGroups = new Map<string, number[]>();
-  const boundaryIndices: number[] = [];
-  for (let i = 0; i < allChainComps.length; i++) {
-    const key = paintKeyForComponent(allChainComps[i]);
-    if (key) {
-      const group = colorGroups.get(key) ?? [];
-      group.push(i);
-      colorGroups.set(key, group);
-    } else {
-      boundaryIndices.push(i);
-    }
-  }
-
-  const keys = Array.from(colorGroups.keys());
-  const groups = (keys.length <= 1
-    ? [{
-        key: keys[0] ?? '__single__',
-        allChainIndices: allChainComps.map((_, index) => index),
-      }]
-    : keys.map(key => ({
-        key,
-        allChainIndices: [...(colorGroups.get(key) ?? []), ...boundaryIndices],
-      })))
+  const groups = buildLegacyFillRenderGroups(allChainComps, options)
     .map(group => {
       const { chains, drawableChains } = buildLegacyChains(allChainComps, group.allChainIndices, 2.0);
       const { chainGeometries, parent } = analyzeLegacyDrawableChains(drawableChains, allChainComps);
@@ -5692,7 +5728,7 @@ function renderLayerPass(
         && explicitBuild.contours.length === 0
         && explicitBuild.unresolvedChains.length > 0;
       const nearBlackSiblingFillBlockers = shouldSubtractNearBlackSiblingFillBlockers
-        ? collectOverlappingNearBlackRenderableFillShapes(layer, shape)
+        ? collectOverlappingNearBlackRenderableFillShapes(shape, sameLayerShapes)
         : [];
       const shouldPreferSiblingBoundaryClip = !options?.skipClipping
         && strokeComps.length === 0
