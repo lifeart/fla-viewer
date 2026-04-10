@@ -6822,7 +6822,6 @@ function renderLayerPass(
       const legacyRenderOptions = preRenderPlan.mode === 'legacy-group'
         && preRenderedLegacyPaintKeys.has(shapeIndex)
         ? {
-            blockedPaintKeys: preRenderedLegacyPaintKeys.get(shapeIndex)!,
             includeNullPaintFillBoundaries: false,
           }
         : {};
