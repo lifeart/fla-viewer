@@ -6110,6 +6110,475 @@ export function __debugLineFillDecisions(
   });
 }
 
+export function __debugAnalyzeLineFillShapeRenderPath(
+  layer: TVGArtLayer,
+  shapeIndex: number,
+  options?: TVGFillRenderOptions,
+): {
+  shapeIndex: number;
+  resolvedContourCount: number;
+  unresolvedChainCount: number;
+  siblingBoundaryMaskCount: number;
+  nearBlackSiblingFillBlockerCount: number;
+  fillCarrierCount: number;
+  fillPaintKeyCount: number;
+  explicitFillPaintKeyCount: number;
+  hasInheritedFillCarriers: boolean;
+  suppressLargeNearBlack: boolean;
+  suppressSeedCarrier: boolean;
+  shouldPreferSiblingBoundaryClip: boolean;
+  shouldPaintSmallUnresolvedDirectly: boolean;
+  shouldPreferMaskedRectUnresolvedFill: boolean;
+  shouldPreferLegacyInheritedFillShape: boolean;
+  shouldPreferLegacyInheritedOnlyShape: boolean;
+  shouldPreferLegacyUnresolvedFillOnlyShape: boolean;
+  shouldPreferLegacyMixedDominantUnresolvedLineFill: boolean;
+  shouldSkipLegacyForPureOpenUnresolved: boolean;
+  shouldPreferLegacy: boolean;
+  shouldClipResolvedContours: boolean;
+  hasLocalClipMask: boolean;
+  expectedPrimaryPath:
+    | 'suppress-large-near-black'
+    | 'suppress-seed-carrier'
+    | 'sibling-boundary-clip'
+    | 'paint-small-unresolved'
+    | 'masked-rect-unresolved'
+    | 'legacy'
+    | 'resolved-contours-clipped'
+    | 'resolved-contours'
+    | 'unresolved-clipped'
+    | 'legacy-after-explicit'
+    | 'boundary-fallback';
+} | null {
+  type LineFillDebugPrimaryPath =
+    | 'suppress-large-near-black'
+    | 'suppress-seed-carrier'
+    | 'sibling-boundary-clip'
+    | 'paint-small-unresolved'
+    | 'masked-rect-unresolved'
+    | 'legacy'
+    | 'resolved-contours-clipped'
+    | 'resolved-contours'
+    | 'unresolved-clipped'
+    | 'legacy-after-explicit'
+    | 'boundary-fallback';
+  const shape = layer.shapes[shapeIndex];
+  if (!shape) return null;
+  const sameLayerShapes = layer.shapes;
+  const strokeComps = shape.components.filter(c => (c.componentType === 4 || c.componentType === 2) && c.path && c.path.segments.length > 0);
+  const explicitBuild = buildContoursForShape(collectExplicitFillFragments(shape, layer.type, shapeIndex), false);
+  const suppressLargeNearBlack = shouldSuppressLargeNearBlackLineFillShape(
+    layer,
+    shape,
+    shapeIndex,
+    strokeComps,
+    explicitBuild.contours.length,
+    sameLayerShapes,
+  );
+  const suppressSeedCarrier = shouldSuppressSeedCarrierFillShape(layer, shape, sameLayerShapes);
+  const siblingBoundaryMaskShapes = options?.skipClipping
+    ? []
+    : collectSiblingBoundaryMaskShapes(options?.allLayers, layer, shape);
+  const fillCarrierCount = shape.components.filter(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && !isDegenerate(comp.path),
+  ).length;
+  const hasInheritedFillCarriers = shape.components.some(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && comp.outerPaint !== null
+    && comp.fillPaintSource === 'inherited',
+  );
+  const fillPaintKeys = new Set(
+    shape.components
+      .filter(comp =>
+        (comp.componentType === 0 || comp.componentType === 1)
+        && comp.path
+        && comp.outerPaint !== null,
+      )
+      .map(comp => paintKeyForComponent(comp))
+      .filter((key): key is FillStyleKey => key !== null),
+  );
+  const explicitFillPaintKeys = new Set(
+    shape.components
+      .filter(comp =>
+        (comp.componentType === 0 || comp.componentType === 1)
+        && comp.path
+        && comp.outerPaint !== null
+        && hasExplicitFillStyle(comp),
+      )
+      .map(comp => paintKeyForComponent(comp))
+      .filter((key): key is FillStyleKey => key !== null),
+  );
+  const dominantFillPaint = shape.components.find(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && comp.outerPaint !== null,
+  )?.outerPaint ?? null;
+  const shouldSubtractNearBlackSiblingFillBlockers = layer.type === 'line'
+    && strokeComps.length === 0
+    && fillPaintKeys.size > 1
+    && explicitBuild.contours.length === 0
+    && explicitBuild.unresolvedChains.length > 0;
+  const nearBlackSiblingFillBlockers = shouldSubtractNearBlackSiblingFillBlockers
+    ? collectOverlappingNearBlackRenderableFillShapes(shape, sameLayerShapes)
+    : [];
+  const shouldPreferSiblingBoundaryClip = !options?.skipClipping
+    && strokeComps.length === 0
+    && fillCarrierCount > 0
+    && fillCarrierCount <= 12
+    && fillPaintKeys.size === 1
+    && explicitBuild.contours.length === 0
+    && siblingBoundaryMaskShapes.length >= 4
+    && dominantFillPaint !== null;
+  const shouldPaintSmallUnresolvedDirectly = strokeComps.length === 0
+    && explicitBuild.contours.length === 0
+    && explicitBuild.unresolvedChains.length > 0
+    && siblingBoundaryMaskShapes.length === 0
+    && explicitBuild.unresolvedChains.every(chain =>
+      chain.supportFragmentCount > 0
+      && chain.styledFragmentCount > 0
+      && chain.fragmentCount <= 4
+      && (chain.bbox.maxX - chain.bbox.minX) <= 900
+      && (chain.bbox.maxY - chain.bbox.minY) <= 900,
+    );
+  const shouldPreferMaskedRectUnresolvedFill = layer.type === 'line'
+    && !options?.skipClipping
+    && strokeComps.length === 0
+    && fillCarrierCount >= 20
+    && explicitBuild.contours.length === 0
+    && explicitBuild.unresolvedChains.length > 0
+    && fillPaintKeys.size >= 2
+    && siblingBoundaryMaskShapes.length >= 4
+    && explicitBuild.unresolvedChains.every(chain =>
+      chain.styledFragmentCount === 1
+      && chain.supportFragmentCount >= 8
+      && isContourGeometryClosed(chain)
+    );
+  const shouldPreferLegacyInheritedFillShape = layer.type === 'line'
+    && strokeComps.length === 0
+    && fillCarrierCount >= 2
+    && hasInheritedFillCarriers
+    && explicitBuild.contours.length === 0
+    && explicitFillPaintKeys.size <= 1
+    && fillPaintKeys.size <= 1
+    && !isNearlyBlackSolidPaint(dominantFillPaint);
+  const shouldPreferLegacyInheritedOnlyShape = strokeComps.length === 0
+    && hasInheritedFillCarriers
+    && explicitFillPaintKeys.size === 0
+    && fillPaintKeys.size === 1
+    && explicitBuild.unresolvedChains.length > 0;
+  const shouldPreferLegacyUnresolvedFillOnlyShape = strokeComps.length === 0
+    && siblingBoundaryMaskShapes.length === 0
+    && fillPaintKeys.size === 1
+    && explicitBuild.unresolvedChains.length > 0;
+  const shouldPreferLegacyMixedDominantUnresolvedLineFill =
+    shouldPreferLegacyMixedDominantUnresolvedLineShape(
+      layer,
+      strokeComps,
+      fillCarrierCount,
+      hasInheritedFillCarriers,
+      fillPaintKeys,
+      explicitFillPaintKeys,
+      explicitBuild,
+    );
+  const shouldSkipLegacyForPureOpenUnresolved = layer.type === 'line'
+    && strokeComps.length === 0
+    && siblingBoundaryMaskShapes.length === 0
+    && explicitBuild.contours.length === 0
+    && explicitBuild.unresolvedChains.length > 0
+    && explicitBuild.unresolvedChains.every(chain =>
+      chain.supportFragmentCount === 0
+      && !isContourGeometryClosed(chain),
+    )
+    && (!hasInheritedFillCarriers || fillCarrierCount > 12 || fillPaintKeys.size > 1);
+  const shouldPreferLegacy = (
+    explicitBuild.unresolvedChains.length > explicitBuild.contours.length
+    && explicitBuild.unresolvedChains.length > 0
+  )
+    || shouldPreferLegacyMixedDominantUnresolvedLineFill
+    || shouldPreferLegacyInheritedFillShape
+    || shouldPreferLegacyInheritedOnlyShape
+    || shouldPreferLegacyUnresolvedFillOnlyShape;
+  const shouldClipResolvedContours = !options?.skipClipping
+    && strokeComps.length === 0
+    && explicitBuild.contours.length > 0
+    && siblingBoundaryMaskShapes.length > 0;
+  const hasLocalClipMask = strokeComps.length > 0 || siblingBoundaryMaskShapes.length > 0;
+
+  let expectedPrimaryPath: LineFillDebugPrimaryPath;
+  if (suppressLargeNearBlack) expectedPrimaryPath = 'suppress-large-near-black';
+  else if (suppressSeedCarrier) expectedPrimaryPath = 'suppress-seed-carrier';
+  else if (shouldPreferSiblingBoundaryClip) expectedPrimaryPath = 'sibling-boundary-clip';
+  else if (shouldPaintSmallUnresolvedDirectly) expectedPrimaryPath = 'paint-small-unresolved';
+  else if (shouldPreferMaskedRectUnresolvedFill) expectedPrimaryPath = 'masked-rect-unresolved';
+  else if (!shouldSkipLegacyForPureOpenUnresolved && (shouldPreferLegacy || explicitBuild.contours.length === 0)) expectedPrimaryPath = 'legacy';
+  else if (shouldClipResolvedContours) expectedPrimaryPath = 'resolved-contours-clipped';
+  else if (explicitBuild.contours.length > 0) expectedPrimaryPath = 'resolved-contours';
+  else if (explicitBuild.unresolvedChains.length > 0 && !options?.skipClipping && hasLocalClipMask) expectedPrimaryPath = 'unresolved-clipped';
+  else if (explicitBuild.unresolvedChains.length > 0 && !shouldSkipLegacyForPureOpenUnresolved) expectedPrimaryPath = 'legacy-after-explicit';
+  else expectedPrimaryPath = 'boundary-fallback';
+
+  return {
+    shapeIndex,
+    resolvedContourCount: explicitBuild.contours.length,
+    unresolvedChainCount: explicitBuild.unresolvedChains.length,
+    siblingBoundaryMaskCount: siblingBoundaryMaskShapes.length,
+    nearBlackSiblingFillBlockerCount: nearBlackSiblingFillBlockers.length,
+    fillCarrierCount,
+    fillPaintKeyCount: fillPaintKeys.size,
+    explicitFillPaintKeyCount: explicitFillPaintKeys.size,
+    hasInheritedFillCarriers,
+    suppressLargeNearBlack,
+    suppressSeedCarrier,
+    shouldPreferSiblingBoundaryClip,
+    shouldPaintSmallUnresolvedDirectly,
+    shouldPreferMaskedRectUnresolvedFill,
+    shouldPreferLegacyInheritedFillShape,
+    shouldPreferLegacyInheritedOnlyShape,
+    shouldPreferLegacyUnresolvedFillOnlyShape,
+    shouldPreferLegacyMixedDominantUnresolvedLineFill,
+    shouldSkipLegacyForPureOpenUnresolved,
+    shouldPreferLegacy,
+    shouldClipResolvedContours,
+    hasLocalClipMask,
+    expectedPrimaryPath,
+  };
+}
+
+export function __debugLineFillRenderStrategy(
+  layer: TVGArtLayer,
+  shapeIndex: number,
+  allLayers?: TVGArtLayer[],
+): {
+  shapeIndex: number;
+  fillCarrierCount: number;
+  fillPaintKeyCount: number;
+  explicitFillPaintKeyCount: number;
+  hasInheritedFillCarriers: boolean;
+  resolvedContourCount: number;
+  unresolvedChainCount: number;
+  siblingBoundaryMaskShapeCount: number;
+  nearBlackSiblingFillBlockerCount: number;
+  unresolvedChains: Array<{
+    styledFragmentCount: number;
+    supportFragmentCount: number;
+    fragmentCount: number;
+    closed: boolean;
+    bbox: { minX: number; minY: number; maxX: number; maxY: number };
+  }>;
+  preRenderPlan: LineFillPreRenderPlan;
+  suppressLargeNearBlack: boolean;
+  suppressSeedCarrier: boolean;
+  shouldPreferSiblingBoundaryClip: boolean;
+  shouldPaintSmallUnresolvedDirectly: boolean;
+  shouldPreferMaskedRectUnresolvedFill: boolean;
+  shouldPreferLegacyInheritedFillShape: boolean;
+  shouldPreferLegacyInheritedOnlyShape: boolean;
+  shouldPreferLegacyUnresolvedFillOnlyShape: boolean;
+  shouldPreferLegacyMixedDominantUnresolvedLineFill: boolean;
+  shouldSkipLegacyForPureOpenUnresolved: boolean;
+  shouldPreferLegacy: boolean;
+  primaryCandidate:
+    | 'suppress-large-near-black'
+    | 'suppress-seed-carrier'
+    | 'sibling-boundary-clip'
+    | 'paint-small-unresolved-directly'
+    | 'masked-rect-unresolved-fill'
+    | 'legacy'
+    | 'resolved-contours-or-fallback';
+} {
+  const shape = layer.shapes[shapeIndex];
+  if (!shape) {
+    throw new Error(`Shape ${shapeIndex} is out of range for layer with ${layer.shapes.length} shapes`);
+  }
+
+  const strokeComps = shape.components.filter(comp =>
+    (comp.componentType === 4 || comp.componentType === 2)
+    && comp.path
+    && comp.path.segments.length > 0,
+  );
+  const explicitBuild = buildContoursForShape(collectExplicitFillFragments(shape, layer.type, shapeIndex), false);
+  const sameLayerShapes = layer.shapes;
+  const siblingBoundaryMaskShapes = collectSiblingBoundaryMaskShapes(allLayers, layer, shape);
+  const fillCarrierCount = shape.components.filter(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && !isDegenerate(comp.path),
+  ).length;
+  const hasInheritedFillCarriers = shape.components.some(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && comp.outerPaint !== null
+    && comp.fillPaintSource === 'inherited',
+  );
+  const fillPaintKeys = new Set(
+    shape.components
+      .filter(comp =>
+        (comp.componentType === 0 || comp.componentType === 1)
+        && comp.path
+        && comp.outerPaint !== null,
+      )
+      .map(comp => paintKeyForComponent(comp))
+      .filter((key): key is FillStyleKey => key !== null),
+  );
+  const explicitFillPaintKeys = new Set(
+    shape.components
+      .filter(comp =>
+        (comp.componentType === 0 || comp.componentType === 1)
+        && comp.path
+        && comp.outerPaint !== null
+        && hasExplicitFillStyle(comp),
+      )
+      .map(comp => paintKeyForComponent(comp))
+      .filter((key): key is FillStyleKey => key !== null),
+  );
+  const dominantFillPaint = shape.components.find(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && comp.outerPaint !== null,
+  )?.outerPaint ?? null;
+  const shouldSubtractNearBlackSiblingFillBlockers = layer.type === 'line'
+    && strokeComps.length === 0
+    && fillPaintKeys.size > 1
+    && explicitBuild.contours.length === 0
+    && explicitBuild.unresolvedChains.length > 0;
+  const nearBlackSiblingFillBlockers = shouldSubtractNearBlackSiblingFillBlockers
+    ? collectOverlappingNearBlackRenderableFillShapes(shape, sameLayerShapes)
+    : [];
+  const shouldPreferSiblingBoundaryClip = strokeComps.length === 0
+    && fillCarrierCount > 0
+    && fillCarrierCount <= 12
+    && fillPaintKeys.size === 1
+    && explicitBuild.contours.length === 0
+    && siblingBoundaryMaskShapes.length >= 4
+    && dominantFillPaint !== null;
+  const shouldPaintSmallUnresolvedDirectly = strokeComps.length === 0
+    && explicitBuild.contours.length === 0
+    && explicitBuild.unresolvedChains.length > 0
+    && siblingBoundaryMaskShapes.length === 0
+    && explicitBuild.unresolvedChains.every(chain =>
+      chain.supportFragmentCount > 0
+      && chain.styledFragmentCount > 0
+      && chain.fragmentCount <= 4
+      && (chain.bbox.maxX - chain.bbox.minX) <= 900
+      && (chain.bbox.maxY - chain.bbox.minY) <= 900,
+    );
+  const shouldPreferMaskedRectUnresolvedFill = layer.type === 'line'
+    && strokeComps.length === 0
+    && fillCarrierCount >= 20
+    && explicitBuild.contours.length === 0
+    && explicitBuild.unresolvedChains.length > 0
+    && fillPaintKeys.size >= 2
+    && siblingBoundaryMaskShapes.length >= 4
+    && explicitBuild.unresolvedChains.every(chain =>
+      chain.styledFragmentCount === 1
+      && chain.supportFragmentCount >= 8
+      && isContourGeometryClosed(chain)
+    );
+  const shouldPreferLegacyInheritedFillShape = layer.type === 'line'
+    && strokeComps.length === 0
+    && fillCarrierCount >= 2
+    && hasInheritedFillCarriers
+    && explicitBuild.contours.length === 0
+    && explicitFillPaintKeys.size <= 1
+    && fillPaintKeys.size <= 1
+    && !isNearlyBlackSolidPaint(dominantFillPaint);
+  const shouldPreferLegacyInheritedOnlyShape = strokeComps.length === 0
+    && hasInheritedFillCarriers
+    && explicitFillPaintKeys.size === 0
+    && fillPaintKeys.size === 1
+    && explicitBuild.unresolvedChains.length > 0;
+  const shouldPreferLegacyUnresolvedFillOnlyShape = strokeComps.length === 0
+    && siblingBoundaryMaskShapes.length === 0
+    && fillPaintKeys.size === 1
+    && explicitBuild.unresolvedChains.length > 0;
+  const shouldPreferLegacyMixedDominantUnresolvedLineFill =
+    shouldPreferLegacyMixedDominantUnresolvedLineShape(
+      layer,
+      strokeComps,
+      fillCarrierCount,
+      hasInheritedFillCarriers,
+      fillPaintKeys,
+      explicitFillPaintKeys,
+      explicitBuild,
+    );
+  const shouldSkipLegacyForPureOpenUnresolved = layer.type === 'line'
+    && strokeComps.length === 0
+    && siblingBoundaryMaskShapes.length === 0
+    && explicitBuild.contours.length === 0
+    && explicitBuild.unresolvedChains.length > 0
+    && explicitBuild.unresolvedChains.every(chain =>
+      chain.supportFragmentCount === 0
+      && !isContourGeometryClosed(chain),
+    )
+    && (!hasInheritedFillCarriers || fillCarrierCount > 12 || fillPaintKeys.size > 1);
+  const shouldPreferLegacy = (
+    explicitBuild.unresolvedChains.length > explicitBuild.contours.length
+    && explicitBuild.unresolvedChains.length > 0
+  )
+    || shouldPreferLegacyMixedDominantUnresolvedLineFill
+    || shouldPreferLegacyInheritedFillShape
+    || shouldPreferLegacyInheritedOnlyShape
+    || shouldPreferLegacyUnresolvedFillOnlyShape;
+  const suppressLargeNearBlack = shouldSuppressLargeNearBlackLineFillShape(
+    layer,
+    shape,
+    shapeIndex,
+    strokeComps,
+    explicitBuild.contours.length,
+    sameLayerShapes,
+  );
+  const suppressSeedCarrier = shouldSuppressSeedCarrierFillShape(layer, shape, sameLayerShapes);
+  const primaryCandidate = suppressLargeNearBlack
+    ? 'suppress-large-near-black'
+    : suppressSeedCarrier
+      ? 'suppress-seed-carrier'
+      : shouldPreferSiblingBoundaryClip
+        ? 'sibling-boundary-clip'
+        : shouldPaintSmallUnresolvedDirectly
+          ? 'paint-small-unresolved-directly'
+          : shouldPreferMaskedRectUnresolvedFill
+            ? 'masked-rect-unresolved-fill'
+            : (!shouldSkipLegacyForPureOpenUnresolved
+                && (shouldPreferLegacy || explicitBuild.contours.length === 0))
+              ? 'legacy'
+              : 'resolved-contours-or-fallback';
+
+  return {
+    shapeIndex,
+    fillCarrierCount,
+    fillPaintKeyCount: fillPaintKeys.size,
+    explicitFillPaintKeyCount: explicitFillPaintKeys.size,
+    hasInheritedFillCarriers,
+    resolvedContourCount: explicitBuild.contours.length,
+    unresolvedChainCount: explicitBuild.unresolvedChains.length,
+    siblingBoundaryMaskShapeCount: siblingBoundaryMaskShapes.length,
+    nearBlackSiblingFillBlockerCount: nearBlackSiblingFillBlockers.length,
+    unresolvedChains: explicitBuild.unresolvedChains.map(chain => ({
+      styledFragmentCount: chain.styledFragmentCount,
+      supportFragmentCount: chain.supportFragmentCount,
+      fragmentCount: chain.fragmentCount,
+      closed: isContourGeometryClosed(chain),
+      bbox: chain.bbox,
+    })),
+    preRenderPlan: planLineFillPreRender(layer, shape, shapeIndex),
+    suppressLargeNearBlack,
+    suppressSeedCarrier,
+    shouldPreferSiblingBoundaryClip,
+    shouldPaintSmallUnresolvedDirectly,
+    shouldPreferMaskedRectUnresolvedFill,
+    shouldPreferLegacyInheritedFillShape,
+    shouldPreferLegacyInheritedOnlyShape,
+    shouldPreferLegacyUnresolvedFillOnlyShape,
+    shouldPreferLegacyMixedDominantUnresolvedLineFill,
+    shouldSkipLegacyForPureOpenUnresolved,
+    shouldPreferLegacy,
+    primaryCandidate,
+  };
+}
+
 
 function renderLayerPass(
   ctx: CanvasRenderingContext2D,

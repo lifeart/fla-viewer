@@ -7,6 +7,7 @@ import {
   __debugBuildContoursForShape,
   __debugBuildLegacyChainsForShape,
   __debugLineFillDecisions,
+  __debugLineFillRenderStrategy,
   __debugTraceLegacyChainSelectionsForShape,
   __computeTextLabelRenderLayoutForTests,
   __shouldInsetViewportForLineFillDrawingForTests,
@@ -1785,6 +1786,36 @@ describe('tvg rendering', () => {
     expect(shape21?.preRenderPriority).toBe(2);
     expect(shape21?.preRenderMode).toBe('legacy-group');
     expect(shape21?.preRenderPaintKey).toBe('solid:15,46,48,255');
+  });
+
+  it('routes color-13 shape21 through legacy after treating component80 as explicit-build support', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/color.101/color-13.tvg')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, flattenExternalPaletteColors(await loadPalettes(zip)));
+    const lineLayer = drawing.layers.find(layer => layer.type === 'line');
+
+    expect(lineLayer).toBeTruthy();
+
+    const contourDebug = __debugBuildContoursForShape(lineLayer!.shapes[21], lineLayer!.type, 21);
+    const component80Fragments = contourDebug.fragments.filter(fragment => fragment.componentIndex === 80);
+    expect(component80Fragments).toHaveLength(1);
+    expect(component80Fragments[0]).toMatchObject({
+      styleKey: null,
+      supportOnly: true,
+    });
+    expect(contourDebug.unresolvedChains).toHaveLength(2);
+    expect(contourDebug.unresolvedChains.every(chain =>
+      chain.styledFragmentCount === 1 && chain.supportFragmentCount >= 40,
+    )).toBe(true);
+
+    const strategy = __debugLineFillRenderStrategy(lineLayer!, 21, drawing.layers);
+    expect(strategy.preRenderPlan.priority).toBe(2);
+    expect(strategy.preRenderPlan.mode).toBe('legacy-group');
+    expect(strategy.primaryCandidate).toBe('legacy');
+    expect(strategy.unresolvedChainCount).toBe(2);
+    expect(strategy.siblingBoundaryMaskShapeCount).toBe(0);
   });
 
   it('uses right alignment for mirrored horizontal TGTL labels', () => {
