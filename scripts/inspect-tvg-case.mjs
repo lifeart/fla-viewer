@@ -51,6 +51,11 @@ try {
       image.src = URL.createObjectURL(thumbBlob);
     });
 
+    const rawRendered = tvg.renderTVGToCanvas(drawing, 160, 160, viewport, { supersample: 2 });
+    if (rawRendered) {
+      await tvg.loadBitmapTiles(rawRendered, drawing.diagnostics);
+    }
+
     const rendered = await preview.renderTVGWithEmbeddedThumbnailFallback(
       drawing,
       160,
@@ -73,12 +78,26 @@ try {
     }
 
     const score = bench.scoreCanvasSources(thumb, rendered, 160);
+    const rawRenderScore = rawRendered
+      ? bench.scoreCanvasSources(thumb, rawRendered, 160)
+      : null;
+    const previewFallbackDelta = rawRenderScore
+      ? {
+          score: score.score - rawRenderScore.score,
+          gateScore: score.gateScore - rawRenderScore.gateScore,
+          rawScore: score.rawScore - rawRenderScore.rawScore,
+          alignedScore: score.alignedScore - rawRenderScore.alignedScore,
+          normalizedScore: score.normalizedScore - rawRenderScore.normalizedScore,
+        }
+      : null;
 
     return {
       elementName,
       drawingName,
       viewport,
       score,
+      rawRenderScore,
+      previewFallbackDelta,
       layerScores: Object.fromEntries(
         Object.entries(layerCanvases).map(([layerType, canvas]) => [
           layerType,
@@ -122,6 +141,8 @@ try {
       drawingName: result.drawingName,
       viewport: result.viewport,
       score: result.score,
+      rawRenderScore: result.rawRenderScore,
+      previewFallbackDelta: result.previewFallbackDelta,
       layerScores: result.layerScores,
       diagnostics: result.diagnostics,
       layerShapeCounts: result.layers.map(layer => ({

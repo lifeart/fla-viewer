@@ -1,14 +1,18 @@
 import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
-import { parsePLT } from '../tpl-palette';
+import { flattenExternalPaletteColors, loadPalettes, parsePLT } from '../tpl-palette';
 import type { TVGArtLayer, TVGComponent, TVGDrawing, TVGPath } from '../tvg-parser';
 import {
   __borrowMissingPencilPathsForTests,
+  __debugBuildContoursForShape,
   __debugBuildLegacyChainsForShape,
+  __debugLineFillDecisions,
+  __debugTraceLegacyChainSelectionsForShape,
   __computeTextLabelRenderLayoutForTests,
   __shouldInsetViewportForLineFillDrawingForTests,
   parseTVG,
   renderTVGToCanvas,
+  resolveExternalPalette,
 } from '../tvg-parser';
 
 function createPath(segments: TVGPath['segments'], closed = false): TVGPath {
@@ -298,6 +302,55 @@ describe('tvg rendering', () => {
     expect(canvas).not.toBeNull();
     const pixel = samplePixel(canvas!, 50, 50);
     expectColorNear(pixel, type1Paint.rgba, 50);
+  });
+
+  it('keeps same-style nested contours as holes instead of repainting them', () => {
+    const ringPaint = { kind: 'solid' as const, rgba: { r: 22, g: 198, b: 133, a: 255 } };
+    const drawing = createDrawing([{
+      type: 'line',
+      shapes: [{
+        shapeType: 2,
+        components: [
+          createComponent({
+            componentType: 0,
+            colorId: 1n,
+            color: { ...ringPaint.rgba },
+            fillPaintSource: 'explicit',
+            outerPaint: ringPaint,
+            path: createPath([
+              { type: 'M', x: -30, y: -30 },
+              { type: 'L', x: 30, y: -30 },
+              { type: 'L', x: 30, y: 30 },
+              { type: 'L', x: -30, y: 30 },
+              { type: 'L', x: -30, y: -30 },
+            ]),
+          }),
+          createComponent({
+            componentType: 0,
+            colorId: 1n,
+            color: { ...ringPaint.rgba },
+            fillPaintSource: 'explicit',
+            outerPaint: ringPaint,
+            path: createPath([
+              { type: 'M', x: -12, y: -12 },
+              { type: 'L', x: -12, y: 12 },
+              { type: 'L', x: 12, y: 12 },
+              { type: 'L', x: 12, y: -12 },
+              { type: 'L', x: -12, y: -12 },
+            ]),
+          }),
+        ],
+      }],
+    }]);
+
+    const contourDebug = __debugBuildContoursForShape(drawing.layers[0].shapes[0], 'line', 0);
+    expect(contourDebug.contours).toHaveLength(2);
+    expect(contourDebug.contours.some(contour => contour.childCount === 1)).toBe(true);
+
+    const canvas = renderTVGToCanvas(drawing, 100, 100, 80);
+    expect(canvas).not.toBeNull();
+    expect(countNonWhitePixels(canvas!)).toBeGreaterThan(200);
+    expect(samplePixel(canvas!, 50, 50)).toEqual({ r: 255, g: 255, b: 255, a: 255 });
   });
 
   it('does not suppress resolved near-black line fills that overlap colored siblings', () => {
@@ -771,6 +824,88 @@ describe('tvg rendering', () => {
     const canvas = renderTVGToCanvas(drawing, 120, 120, 120);
     expect(canvas).not.toBeNull();
     expect(countNonWhitePixelsInRect(canvas!, 45, 45, 30, 30)).toBeGreaterThan(300);
+  });
+
+  it('prefers smoother legacy chain continuation over source-order ties', () => {
+    const darkPaint = { kind: 'solid' as const, rgba: { r: 15, g: 46, b: 48, a: 255 } };
+    const shape = {
+      shapeType: 2,
+      components: [
+        createComponent({
+          componentType: 0,
+          color: { ...darkPaint.rgba },
+          fillPaintSource: 'explicit',
+          outerPaint: darkPaint,
+          path: createPath([
+            { type: 'M', x: 0, y: 0 },
+            { type: 'L', x: 10, y: 0 },
+          ]),
+        }),
+        createComponent({
+          componentType: 0,
+          color: { ...darkPaint.rgba },
+          fillPaintSource: 'inherited',
+          outerPaint: darkPaint,
+          path: createPath([
+            { type: 'M', x: 10, y: 0 },
+            { type: 'L', x: 10, y: 10 },
+          ]),
+        }),
+        createComponent({
+          componentType: 0,
+          color: { ...darkPaint.rgba },
+          fillPaintSource: 'inherited',
+          outerPaint: darkPaint,
+          path: createPath([
+            { type: 'M', x: 10, y: 0 },
+            { type: 'L', x: 20, y: 0 },
+          ]),
+        }),
+        createComponent({
+          componentType: 0,
+          color: { ...darkPaint.rgba },
+          fillPaintSource: 'inherited',
+          outerPaint: darkPaint,
+          path: createPath([
+            { type: 'M', x: 20, y: 0 },
+            { type: 'L', x: 20, y: 10 },
+          ]),
+        }),
+        createComponent({
+          componentType: 0,
+          color: { ...darkPaint.rgba },
+          fillPaintSource: 'inherited',
+          outerPaint: darkPaint,
+          path: createPath([
+            { type: 'M', x: 20, y: 10 },
+            { type: 'L', x: 0, y: 10 },
+          ]),
+        }),
+        createComponent({
+          componentType: 0,
+          color: { ...darkPaint.rgba },
+          fillPaintSource: 'inherited',
+          outerPaint: darkPaint,
+          path: createPath([
+            { type: 'M', x: 0, y: 10 },
+            { type: 'L', x: 0, y: 0 },
+          ]),
+        }),
+      ],
+    };
+
+    const debug = __debugBuildLegacyChainsForShape(shape);
+    const group = debug.groups.find(entry => entry.key.includes('solid:15,46,48,255'));
+    expect(group).toBeTruthy();
+    expect(group!.chains[0].componentIndexes.slice(0, 5)).toEqual([0, 2, 3, 4, 5]);
+
+    const trace = __debugTraceLegacyChainSelectionsForShape(shape);
+    const traceGroup = trace.groups.find(entry => entry.key.includes('solid:15,46,48,255'));
+    expect(traceGroup).toBeTruthy();
+    expect(traceGroup!.picks[0].selectedComponentIndex).toBe(2);
+    expect(traceGroup!.picks[0].candidates.some(candidate =>
+      candidate.componentIndex === 1 && candidate.decision === 'considered',
+    )).toBe(true);
   });
 
   it('does not inset simple closed line-fill drawings', () => {
@@ -1570,6 +1705,39 @@ describe('tvg rendering', () => {
     expect(sad?.matrixC && Math.abs(sad.matrixC) > 3).toBe(true);
   });
 
+  it('recovers malformed CREA-wrapped SIGN footers in the Lipsync sample', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/MC_Lipsync_All/Lipsync_MC_HNDL_1-3.tvg')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+
+    expect(drawing.diagnostics.counts.UNKNOWN_TOP_LEVEL_TAG ?? 0).toBe(0);
+    expect(drawing.diagnostics.counts.SCAN_FORWARD_RECOVERY ?? 0).toBe(0);
+  });
+
+  it('plans smaller legacy-group partial pre-render for the mixed unresolved color-13 carrier', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/color.101/color-13.tvg')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, flattenExternalPaletteColors(await loadPalettes(zip)));
+    const lineLayer = drawing.layers.find(layer => layer.type === 'line');
+
+    expect(lineLayer).toBeTruthy();
+    const decisions = __debugLineFillDecisions(lineLayer!);
+    const shape19 = decisions.find(entry => entry.shapeIndex === 19);
+    const shape21 = decisions.find(entry => entry.shapeIndex === 21);
+
+    expect(shape19).toBeTruthy();
+    expect(shape19?.preRenderPriority).toBe(1);
+    expect(shape19?.preRenderMode).toBe('full');
+
+    expect(shape21).toBeTruthy();
+    expect(shape21?.preRenderPriority).toBe(2);
+    expect(shape21?.preRenderMode).toBe('legacy-group');
+    expect(shape21?.preRenderPaintKey).toBe('solid:15,46,48,255');
+  });
+
   it('uses right alignment for mirrored horizontal TGTL labels', () => {
     const layout = __computeTextLabelRenderLayoutForTests({
       text: 'FR',
@@ -1585,7 +1753,7 @@ describe('tvg rendering', () => {
 
     expect(layout).not.toBeNull();
     expect(layout?.textAlign).toBe('right');
-    expect(layout?.textBaseline).toBe('top');
+    expect(layout?.textBaseline).toBe('alphabetic');
     expect(layout?.hasOffDiagonalTransform).toBe(false);
     expect(layout?.transform).toEqual({ a: -1, b: 0, c: 0, d: -1, e: 100, f: 50 });
   });
@@ -1605,9 +1773,29 @@ describe('tvg rendering', () => {
 
     expect(layout).not.toBeNull();
     expect(layout?.textAlign).toBe('center');
-    expect(layout?.textBaseline).toBe('middle');
+    expect(layout?.textBaseline).toBe('alphabetic');
     expect(layout?.hasOffDiagonalTransform).toBe(true);
     expect(Math.abs(layout?.baseY ?? 1)).toBe(0);
+  });
+
+  it('caps oversized TGTL transform magnitudes while preserving orientation', () => {
+    const layout = __computeTextLabelRenderLayoutForTests({
+      text: 'Head_turn',
+      fontFamily: 'Arial',
+      fontSize: 25,
+      x: 0,
+      y: 0,
+      scaleX: 3.128926960824394,
+      scaleY: 3.128926960824428,
+      matrixB: 0,
+      matrixC: 0,
+    });
+
+    expect(layout).not.toBeNull();
+    expect(layout?.transform.a).toBeCloseTo(1.3, 6);
+    expect(layout?.transform.d).toBeCloseTo(-1.3, 6);
+    expect(layout?.lines).toEqual(['Head turn']);
+    expect(layout?.font).toContain('45px');
   });
 
 });

@@ -413,7 +413,13 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
         } else {
           const len = reader.readU32LE();
           if (len > 0 && len <= reader.remaining) {
-            reader.skip(len);
+            const payloadStart = reader.pos;
+            const recoverableSign = findRecoverableSignatureWithinWindow(reader, payloadStart, payloadStart + len);
+            if (recoverableSign) {
+              reader.pos = recoverableSign.signOffset;
+            } else {
+              reader.skip(len);
+            }
           }
         }
       }
@@ -656,6 +662,43 @@ function readInnerTagLength(reader: BinaryReader): number {
   return -1;
 }
 
+function readInnerTagLengthAt(
+  reader: BinaryReader,
+  pos: number,
+): { len: number; payloadStart: number } | null {
+  const savedPos = reader.pos;
+  try {
+    reader.pos = pos;
+    const len = readInnerTagLength(reader);
+    return len >= 0 ? { len, payloadStart: reader.pos } : null;
+  } catch (_e) {
+    return null;
+  } finally {
+    reader.pos = savedPos;
+  }
+}
+
+function findRecoverableSignatureWithinWindow(
+  reader: BinaryReader,
+  payloadStart: number,
+  payloadEnd: number,
+): { signOffset: number; payloadStart: number; payloadLen: number } | null {
+  let searchPos = payloadStart;
+  while (searchPos >= payloadStart && searchPos < payloadEnd) {
+    const signOffset = reader.findTag4(TAG_SIGN, searchPos);
+    if (signOffset < payloadStart || signOffset >= payloadEnd) return null;
+    const inner = readInnerTagLengthAt(reader, signOffset + 4);
+    if (inner) {
+      const signaturePayloadEnd = inner.payloadStart + inner.len;
+      if (reader.findTag4(TAG_ENDT, signaturePayloadEnd) === signaturePayloadEnd) {
+        return { signOffset, payloadStart: inner.payloadStart, payloadLen: inner.len };
+      }
+    }
+    searchPos = signOffset + 1;
+  }
+  return null;
+}
+
 function readRecoverableInnerTagPayload(
   reader: BinaryReader,
   tag: string,
@@ -703,12 +746,24 @@ function skipSignaturePayload(
   context: TVGDiagnosticEvent['context'],
   offset: number,
 ): void {
+  const payloadStart = reader.pos;
   const len = reader.readU32LE();
   if (len >= 0 && len <= reader.remaining) {
     reader.skip(len);
     return;
   }
 
+  reader.pos = payloadStart;
+  const inner = readInnerTagLengthAt(reader, payloadStart);
+  if (inner) {
+    const signaturePayloadEnd = inner.payloadStart + inner.len;
+    if (reader.findTag4(TAG_ENDT, signaturePayloadEnd) === signaturePayloadEnd) {
+      reader.pos = signaturePayloadEnd;
+      return;
+    }
+  }
+
+  reader.pos = payloadStart;
   const nextEndt = reader.findTag4(TAG_ENDT, reader.pos);
   addDiagnostic(diagnostics, {
     severity: 'warn',
@@ -3825,6 +3880,7 @@ function dominantRenderableFillPaintKey(shape: TVGShape): FillStyleKey | null {
 function shouldSuppressSeedCarrierFillShape(
   layer: TVGArtLayer,
   currentShape: TVGShape,
+  sameLayerShapes: TVGShape[],
 ): boolean {
   if (layer.type !== 'line') return false;
   if (currentShape.components.some(comp =>
@@ -3841,7 +3897,7 @@ function shouldSuppressSeedCarrierFillShape(
   const currentKey = dominantRenderableFillPaintKey(currentShape);
   const currentBounds = computeShapeBounds(currentShape);
   if (!currentKey || !currentBounds) return false;
-  return layer.shapes.some(shape => {
+  return sameLayerShapes.some(shape => {
     if (shape === currentShape) return false;
     const siblingFillComps = renderableFillComponents(shape);
     if (siblingFillComps.length < fillComps.length * 6) return false;
@@ -3887,6 +3943,82 @@ function preRenderLargeLineFillCarrierPriority(
     && chain.supportFragmentCount >= 8
     && chain.fragmentCount >= 20,
   ) ? 2 : 0;
+}
+
+interface LineFillPreRenderPlan {
+  priority: number;
+  mode: 'full' | 'legacy-group';
+  preRenderPaintKey: FillStyleKey | null;
+}
+
+function selectLegacyPreRenderPaintKey(shape: TVGShape): FillStyleKey | null {
+  const chainableFillComps = shape.components.filter(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && comp.path.segments.length > 1
+    && !isDegenerate(comp.path)
+    && (!comp.color || comp.color.a > 0),
+  );
+  const paintedFillComps = chainableFillComps.filter(comp => comp.outerPaint !== null);
+  if (paintedFillComps.length === 0) return null;
+  const supportFillComps = chainableFillComps.filter(comp => comp.outerPaint === null);
+  const allChainComps = [...paintedFillComps, ...supportFillComps];
+  const groups = buildLegacyFillRenderGroups(allChainComps);
+  if (groups.length !== 2) {
+    return dominantRenderableFillPaintKey(shape);
+  }
+  const metrics = groups.map(group => {
+    const { drawableChains } = buildLegacyChains(allChainComps, group.allChainIndices, 2.0);
+    const { chainGeometries } = analyzeLegacyDrawableChains(drawableChains, allChainComps);
+    const totalArea = chainGeometries.reduce((sum, geometry) => sum + geometry.area, 0);
+    const paint = group.allChainIndices
+      .map(index => allChainComps[index].outerPaint)
+      .find((candidate): candidate is TVGPaint => candidate !== null) ?? null;
+    const paintedComponentCount = group.allChainIndices.reduce(
+      (sum, index) => sum + (allChainComps[index].outerPaint !== null ? 1 : 0),
+      0,
+    );
+    return {
+      key: group.key as FillStyleKey,
+      paint,
+      totalArea,
+      paintedComponentCount,
+    };
+  }).sort((a, b) => {
+    if (a.totalArea !== b.totalArea) return a.totalArea - b.totalArea;
+    if (a.paintedComponentCount !== b.paintedComponentCount) {
+      return a.paintedComponentCount - b.paintedComponentCount;
+    }
+    return Number(isDarkSolidPaint(b.paint)) - Number(isDarkSolidPaint(a.paint));
+  });
+  const [smallest, largest] = metrics;
+  if (smallest.totalArea <= largest.totalArea * 0.85) {
+    return smallest.key;
+  }
+  if (isDarkSolidPaint(smallest.paint) && !isDarkSolidPaint(largest.paint)) {
+    return smallest.key;
+  }
+  return dominantRenderableFillPaintKey(shape);
+}
+
+function planLineFillPreRender(
+  layer: TVGArtLayer,
+  shape: TVGShape,
+  shapeIndex: number,
+): LineFillPreRenderPlan {
+  const priority = preRenderLargeLineFillCarrierPriority(layer, shape, shapeIndex);
+  if (priority !== 2) {
+    return {
+      priority,
+      mode: 'full',
+      preRenderPaintKey: null,
+    };
+  }
+  return {
+    priority,
+    mode: 'legacy-group',
+    preRenderPaintKey: selectLegacyPreRenderPaintKey(shape),
+  };
 }
 
 function shouldPreferLegacyMixedDominantUnresolvedLineShape(
@@ -4313,10 +4445,19 @@ function renderContourTree(
 ): LocalFillPaintSource[] {
   const tree = buildContourTree(contours);
   const sources: LocalFillPaintSource[] = [];
+  const shouldPaintContourNode = (index: number) => {
+    const node = tree[index];
+    if (node.parent === null) return true;
+    if ((node.depth % 2) === 0) return true;
+    return !paintsEqual(
+      contours[index].style?.outerPaint ?? null,
+      contours[node.parent].style?.outerPaint ?? null,
+    );
+  };
   const renderNode = (index: number) => {
     const contour = contours[index];
     const paint = contour.style?.outerPaint ?? null;
-    if (paint) {
+    if (paint && shouldPaintContourNode(index)) {
       const compound = new Path2D();
       compound.addPath(contour.path);
       for (const childIndex of tree[index].children) {
@@ -4410,6 +4551,25 @@ interface LegacyChainGeometry {
   samplePoint: { x: number; y: number } | null;
 }
 
+interface LegacyChainCandidateTrace {
+  allChainIndex: number;
+  rank: number;
+  reversed: boolean;
+  prepend: boolean;
+  distance: number;
+  support: number;
+  turn: number;
+  decision: 'used' | 'out_of_tolerance' | 'considered' | 'selected';
+}
+
+interface LegacyChainPickTrace {
+  chainAllChainIndices: number[];
+  selectedAllChainIndex: number | null;
+  selectedReversed: boolean | null;
+  selectedPrepend: boolean | null;
+  candidates: LegacyChainCandidateTrace[];
+}
+
 function polygonSignedArea(points: { x: number; y: number }[]): number {
   if (points.length < 3) return 0;
   let total = 0;
@@ -4463,6 +4623,67 @@ function legacyChainBounds(
   }
   if (!Number.isFinite(minX)) return null;
   return { minX, minY, maxX, maxY };
+}
+
+function legacyNormalizeDirection(x: number, y: number): { x: number; y: number } | null {
+  const length = Math.hypot(x, y);
+  if (length <= 0.0001) return null;
+  return { x: x / length, y: y / length };
+}
+
+function legacyPathDirectionAtStart(path: TVGPath): { x: number; y: number } | null {
+  const start = path.segments[0];
+  for (let i = 1; i < path.segments.length; i++) {
+    const seg = path.segments[i];
+    if (seg.type === 'C') {
+      return legacyNormalizeDirection(seg.c1x - start.x, seg.c1y - start.y)
+        ?? legacyNormalizeDirection(seg.x - start.x, seg.y - start.y);
+    }
+    if (seg.type === 'Q') {
+      return legacyNormalizeDirection(seg.cx - start.x, seg.cy - start.y)
+        ?? legacyNormalizeDirection(seg.x - start.x, seg.y - start.y);
+    }
+    const direction = legacyNormalizeDirection(seg.x - start.x, seg.y - start.y);
+    if (direction) return direction;
+  }
+  return null;
+}
+
+function legacyPathDirectionAtEnd(path: TVGPath): { x: number; y: number } | null {
+  if (path.segments.length < 2) return null;
+  const last = path.segments[path.segments.length - 1];
+  const prev = path.segments[path.segments.length - 2];
+  if (last.type === 'C') {
+    return legacyNormalizeDirection(last.x - last.c2x, last.y - last.c2y)
+      ?? legacyNormalizeDirection(last.x - prev.x, last.y - prev.y);
+  }
+  if (last.type === 'Q') {
+    return legacyNormalizeDirection(last.x - last.cx, last.y - last.cy)
+      ?? legacyNormalizeDirection(last.x - prev.x, last.y - prev.y);
+  }
+  return legacyNormalizeDirection(last.x - prev.x, last.y - prev.y);
+}
+
+function legacyTraversalDirections(
+  path: TVGPath,
+  reversed: boolean,
+): { start: { x: number; y: number } | null; end: { x: number; y: number } | null } {
+  const start = legacyPathDirectionAtStart(path);
+  const end = legacyPathDirectionAtEnd(path);
+  if (!reversed) return { start, end };
+  return {
+    start: end ? { x: -end.x, y: -end.y } : null,
+    end: start ? { x: -start.x, y: -start.y } : null,
+  };
+}
+
+function legacyTurningAngle(
+  from: { x: number; y: number } | null,
+  to: { x: number; y: number } | null,
+): number {
+  if (!from || !to) return Math.PI;
+  const dot = Math.max(-1, Math.min(1, from.x * to.x + from.y * to.y));
+  return Math.acos(dot);
 }
 
 function selectLegacyDrawableChains(
@@ -4524,6 +4745,7 @@ function buildLegacyChains(
   allChainComps: TVGComponent[],
   indices: number[],
   tolerance: number,
+  pickTrace?: LegacyChainPickTrace[],
 ): {
   chains: LegacyChainLink[][];
   drawableChains: LegacyChainLink[][];
@@ -4547,36 +4769,135 @@ function buildLegacyChains(
   ): { infoIndex: number; reversed: boolean; prepend: boolean } | null => {
     const head = chain[0];
     const tail = chain[chain.length - 1];
-    let best: { rank: number; distance: number; support: number; componentIndex: number; infoIndex: number; reversed: boolean; prepend: boolean } | null = null;
+    const headDirections = legacyTraversalDirections(allChainComps[head.ci].path!, head.reversed);
+    const tailDirections = legacyTraversalDirections(allChainComps[tail.ci].path!, tail.reversed);
+    let best: { rank: number; distance: number; support: number; turn: number; componentIndex: number; infoIndex: number; reversed: boolean; prepend: boolean } | null = null;
+    const distanceTieEpsilon = 0.01;
+    const turnTieEpsilon = 0.0001;
+    const traceEntry: LegacyChainPickTrace | null = pickTrace ? {
+      chainAllChainIndices: chain.map(link => link.ci),
+      selectedAllChainIndex: null,
+      selectedReversed: null,
+      selectedPrepend: null,
+      candidates: [],
+    } : null;
     for (let i = 0; i < compInfos.length; i++) {
-      if (used.has(i)) continue;
       const comp = compInfos[i];
+      if (used.has(i)) {
+        traceEntry?.candidates.push({
+          allChainIndex: comp.ci,
+          rank: -1,
+          reversed: false,
+          prepend: false,
+          distance: Number.NaN,
+          support: Number.NaN,
+          turn: Number.NaN,
+          decision: 'used',
+        });
+        continue;
+      }
       const support = (
         (allChainComps[comp.ci].componentType !== 0 && allChainComps[comp.ci].componentType !== 1)
         || allChainComps[comp.ci].outerPaint === null
       ) ? 1 : 0;
+      const forwardDirections = legacyTraversalDirections(allChainComps[comp.ci].path!, false);
+      const reversedDirections = legacyTraversalDirections(allChainComps[comp.ci].path!, true);
       const candidates = [
-        { rank: 0, distance: Math.hypot(comp.startX - tail.endX, comp.startY - tail.endY), reversed: false, prepend: false },
-        { rank: 1, distance: Math.hypot(comp.endX - tail.endX, comp.endY - tail.endY), reversed: true, prepend: false },
-        { rank: 2, distance: Math.hypot(comp.endX - head.startX, comp.endY - head.startY), reversed: false, prepend: true },
-        { rank: 3, distance: Math.hypot(comp.startX - head.startX, comp.startY - head.startY), reversed: true, prepend: true },
+        {
+          rank: 0,
+          distance: Math.hypot(comp.startX - tail.endX, comp.startY - tail.endY),
+          reversed: false,
+          prepend: false,
+          turn: legacyTurningAngle(tailDirections.end, forwardDirections.start),
+        },
+        {
+          rank: 1,
+          distance: Math.hypot(comp.endX - tail.endX, comp.endY - tail.endY),
+          reversed: true,
+          prepend: false,
+          turn: legacyTurningAngle(tailDirections.end, reversedDirections.start),
+        },
+        {
+          rank: 2,
+          distance: Math.hypot(comp.endX - head.startX, comp.endY - head.startY),
+          reversed: false,
+          prepend: true,
+          turn: legacyTurningAngle(forwardDirections.end, headDirections.start),
+        },
+        {
+          rank: 3,
+          distance: Math.hypot(comp.startX - head.startX, comp.startY - head.startY),
+          reversed: true,
+          prepend: true,
+          turn: legacyTurningAngle(reversedDirections.end, headDirections.start),
+        },
       ];
       for (const candidate of candidates) {
-        if (candidate.distance > tolerance) continue;
+        if (candidate.distance > tolerance) {
+          traceEntry?.candidates.push({
+            allChainIndex: comp.ci,
+            rank: candidate.rank,
+            reversed: candidate.reversed,
+            prepend: candidate.prepend,
+            distance: candidate.distance,
+            support,
+            turn: candidate.turn,
+            decision: 'out_of_tolerance',
+          });
+          continue;
+        }
         const scored = {
           ...candidate,
           support,
           componentIndex: comp.ci,
           infoIndex: i,
         };
+        traceEntry?.candidates.push({
+          allChainIndex: comp.ci,
+          rank: candidate.rank,
+          reversed: candidate.reversed,
+          prepend: candidate.prepend,
+          distance: candidate.distance,
+          support,
+          turn: candidate.turn,
+          decision: 'considered',
+        });
         if (!best
           || scored.rank < best.rank
-          || (scored.rank === best.rank && scored.distance < best.distance)
-          || (scored.rank === best.rank && scored.distance === best.distance && scored.support < best.support)
-          || (scored.rank === best.rank && scored.distance === best.distance && scored.support === best.support && scored.componentIndex < best.componentIndex)) {
+          || (scored.rank === best.rank && scored.distance < best.distance - distanceTieEpsilon)
+          || (scored.rank === best.rank && Math.abs(scored.distance - best.distance) <= distanceTieEpsilon && scored.support < best.support)
+          // Prefer the smoother continuation when endpoint matches are effectively tied.
+          || (scored.rank === best.rank
+            && Math.abs(scored.distance - best.distance) <= distanceTieEpsilon
+            && scored.support === best.support
+            && scored.turn < best.turn - turnTieEpsilon)
+          || (scored.rank === best.rank
+            && Math.abs(scored.distance - best.distance) <= distanceTieEpsilon
+            && scored.support === best.support
+            && Math.abs(scored.turn - best.turn) <= turnTieEpsilon
+            && scored.componentIndex < best.componentIndex)) {
           best = scored;
         }
       }
+    }
+    if (traceEntry) {
+      if (best) {
+        traceEntry.selectedAllChainIndex = best.componentIndex;
+        traceEntry.selectedReversed = best.reversed;
+        traceEntry.selectedPrepend = best.prepend;
+        const selected = traceEntry.candidates.find(candidate =>
+          candidate.decision === 'considered'
+          && candidate.allChainIndex === best.componentIndex
+          && candidate.reversed === best.reversed
+          && candidate.prepend === best.prepend
+          && candidate.rank === best.rank
+          && Math.abs(candidate.distance - best.distance) <= distanceTieEpsilon
+        );
+        if (selected) {
+          selected.decision = 'selected';
+        }
+      }
+      pickTrace?.push(traceEntry);
     }
     return best ? { infoIndex: best.infoIndex, reversed: best.reversed, prepend: best.prepend } : null;
   };
@@ -4792,6 +5113,12 @@ interface LegacyFillRenderGroup {
   allChainIndices: number[];
 }
 
+interface LegacyFillRenderOptions {
+  supportInheritedCrossPaint?: boolean;
+  allowedPaintKeys?: Set<FillStyleKey>;
+  blockedPaintKeys?: Set<FillStyleKey>;
+}
+
 function createSupportOnlyLegacyComponent(comp: TVGComponent): TVGComponent {
   return {
     ...comp,
@@ -4801,7 +5128,7 @@ function createSupportOnlyLegacyComponent(comp: TVGComponent): TVGComponent {
 
 function buildLegacyFillRenderGroups(
   allChainComps: TVGComponent[],
-  options: { supportInheritedCrossPaint?: boolean } = {},
+  options: LegacyFillRenderOptions = {},
 ): LegacyFillRenderGroup[] {
   const colorGroups = new Map<string, number[]>();
   const boundaryIndices: number[] = [];
@@ -4819,10 +5146,13 @@ function buildLegacyFillRenderGroups(
 
   const keys = Array.from(colorGroups.keys());
   if (keys.length <= 1) {
-    return [{
+    const singleGroup = {
       key: keys[0] ?? '__single__',
       allChainIndices: allChainComps.map((_, index) => index),
-    }];
+    };
+    if (options.allowedPaintKeys && keys[0] && !options.allowedPaintKeys.has(keys[0])) return [];
+    if (options.blockedPaintKeys && keys[0] && options.blockedPaintKeys.has(keys[0])) return [];
+    return [singleGroup];
   }
 
   const supportIndicesByKey = new Map<string, number[]>();
@@ -4839,14 +5169,19 @@ function buildLegacyFillRenderGroups(
     }
   }
 
-  return keys.map(key => ({
+  return keys
+    .filter(key =>
+      (!options.allowedPaintKeys || options.allowedPaintKeys.has(key))
+      && (!options.blockedPaintKeys || !options.blockedPaintKeys.has(key)),
+    )
+    .map(key => ({
     key,
     allChainIndices: [
       ...(colorGroups.get(key) ?? []),
       ...boundaryIndices,
       ...(supportIndicesByKey.get(key) ?? []),
     ],
-  }));
+    }));
 }
 
 function renderLegacyExplicitFillShape(
@@ -4854,7 +5189,7 @@ function renderLegacyExplicitFillShape(
   shape: TVGShape,
   strokeComps: TVGComponent[],
   alphaScale = 1,
-  options: { supportInheritedCrossPaint?: boolean } = {},
+  options: LegacyFillRenderOptions = {},
 ): boolean {
   const chainableFillComps = expandLegacyChainComponents(shape.components.filter(comp =>
     (comp.componentType === 0 || comp.componentType === 1)
@@ -4914,7 +5249,7 @@ function renderLegacyExplicitFillShapeWithSiblingSubtraction(
   strokeComps: TVGComponent[],
   siblingBlockers: TVGShape[],
   alphaScale = 1,
-  options: { supportInheritedCrossPaint?: boolean } = {},
+  options: LegacyFillRenderOptions = {},
 ): boolean {
   if (siblingBlockers.length === 0) {
     return renderLegacyExplicitFillShape(ctx, shape, strokeComps, alphaScale, options);
@@ -5593,6 +5928,131 @@ export function __debugBuildLegacyChainsForShape(
   };
 }
 
+export function __debugTraceLegacyChainSelectionsForShape(
+  shape: TVGShape,
+  strokeComps: TVGComponent[] = shape.components.filter(comp =>
+    (comp.componentType === 2 || comp.componentType === 4)
+    && comp.path
+    && comp.path.segments.length > 1,
+  ),
+  options: { supportInheritedCrossPaint?: boolean } = {},
+): {
+  allChainComponents: Array<{
+    allChainIndex: number;
+    componentIndex: number;
+    componentType: number;
+    fillPaintSource: TVGComponent['fillPaintSource'];
+    paintKey: FillStyleKey | null;
+    hasPaint: boolean;
+    segmentCount: number;
+    chord: number;
+  }>;
+  groups: Array<{
+    key: string;
+    picks: Array<{
+      chainComponentIndexes: number[];
+      selectedComponentIndex: number | null;
+      selectedAllChainIndex: number | null;
+      selectedReversed: boolean | null;
+      selectedPrepend: boolean | null;
+      candidates: Array<{
+        componentIndex: number;
+        allChainIndex: number;
+        componentType: number;
+        fillPaintSource: TVGComponent['fillPaintSource'];
+        paintKey: FillStyleKey | null;
+        hasPaint: boolean;
+        segmentCount: number;
+        chord: number;
+        rank: number;
+        reversed: boolean;
+        prepend: boolean;
+        distance: number;
+        support: number;
+        turn: number;
+        decision: LegacyChainCandidateTrace['decision'];
+      }>;
+    }>;
+  }>;
+} {
+  const componentIndexByRef = new Map(shape.components.map((comp, index) => [comp, index]));
+  const chainableFillComps = shape.components.filter(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && comp.path.segments.length > 1
+    && !isDegenerate(comp.path)
+    && (!comp.color || comp.color.a > 0),
+  );
+  const paintedFillComps = chainableFillComps.filter(comp => comp.outerPaint !== null);
+  const supportFillComps = chainableFillComps.filter(comp => comp.outerPaint === null);
+  const boundaryStrokes = strokeComps.filter(comp =>
+    comp.componentType === 2
+    && comp.strokeWidth === null
+    && comp.path
+    && comp.path.segments.length > 1,
+  );
+  const allChainComps = [...paintedFillComps, ...supportFillComps, ...boundaryStrokes];
+  const groups = buildLegacyFillRenderGroups(allChainComps, options)
+    .map(group => {
+      const pickTrace: LegacyChainPickTrace[] = [];
+      buildLegacyChains(allChainComps, group.allChainIndices, 2.0, pickTrace);
+      return {
+        key: group.key,
+        picks: pickTrace.map(pick => ({
+          chainComponentIndexes: pick.chainAllChainIndices.map(index => componentIndexByRef.get(allChainComps[index]) ?? -1),
+          selectedComponentIndex: pick.selectedAllChainIndex !== null
+            ? componentIndexByRef.get(allChainComps[pick.selectedAllChainIndex]) ?? -1
+            : null,
+          selectedAllChainIndex: pick.selectedAllChainIndex,
+          selectedReversed: pick.selectedReversed,
+          selectedPrepend: pick.selectedPrepend,
+          candidates: pick.candidates.map(candidate => {
+            const comp = allChainComps[candidate.allChainIndex];
+            const segs = comp.path?.segments ?? [];
+            const first = segs[0];
+            const last = segs[segs.length - 1];
+            return {
+              componentIndex: componentIndexByRef.get(comp) ?? -1,
+              allChainIndex: candidate.allChainIndex,
+              componentType: comp.componentType,
+              fillPaintSource: comp.fillPaintSource,
+              paintKey: paintKeyForComponent(comp),
+              hasPaint: comp.outerPaint !== null,
+              segmentCount: segs.length,
+              chord: first && last ? Math.hypot(last.x - first.x, last.y - first.y) : 0,
+              rank: candidate.rank,
+              reversed: candidate.reversed,
+              prepend: candidate.prepend,
+              distance: candidate.distance,
+              support: candidate.support,
+              turn: candidate.turn,
+              decision: candidate.decision,
+            };
+          }),
+        })),
+      };
+    });
+
+  return {
+    allChainComponents: allChainComps.map((comp, allChainIndex) => {
+      const segs = comp.path?.segments ?? [];
+      const first = segs[0];
+      const last = segs[segs.length - 1];
+      return {
+        allChainIndex,
+        componentIndex: componentIndexByRef.get(comp) ?? -1,
+        componentType: comp.componentType,
+        fillPaintSource: comp.fillPaintSource,
+        paintKey: paintKeyForComponent(comp),
+        hasPaint: comp.outerPaint !== null,
+        segmentCount: segs.length,
+        chord: first && last ? Math.hypot(last.x - first.x, last.y - first.y) : 0,
+      };
+    }),
+    groups,
+  };
+}
+
 export function __debugLineFillDecisions(
   layer: TVGArtLayer,
 ): Array<{
@@ -5605,6 +6065,8 @@ export function __debugLineFillDecisions(
   resolvedContourCount: number;
   unresolvedChainCount: number;
   preRenderPriority: number;
+  preRenderMode: LineFillPreRenderPlan['mode'];
+  preRenderPaintKey: FillStyleKey | null;
   suppressLargeNearBlack: boolean;
   suppressSeedCarrier: boolean;
 }> {
@@ -5616,6 +6078,7 @@ export function __debugLineFillDecisions(
     );
     const explicitBuild = buildContoursForShape(collectExplicitFillFragments(shape, layer.type, shapeIndex), false);
     const fillComps = renderableFillComponents(shape);
+    const preRenderPlan = planLineFillPreRender(layer, shape, shapeIndex);
     return {
       shapeIndex,
       componentCount: shape.components.length,
@@ -5625,9 +6088,11 @@ export function __debugLineFillDecisions(
       inheritedFillCount: fillComps.filter(comp => comp.fillPaintSource === 'inherited').length,
       resolvedContourCount: explicitBuild.contours.length,
       unresolvedChainCount: explicitBuild.unresolvedChains.length,
-      preRenderPriority: preRenderLargeLineFillCarrierPriority(layer, shape, shapeIndex),
+      preRenderPriority: preRenderPlan.priority,
+      preRenderMode: preRenderPlan.mode,
+      preRenderPaintKey: preRenderPlan.preRenderPaintKey,
       suppressLargeNearBlack: shouldSuppressLargeNearBlackLineFillShape(layer, shape, shapeIndex, strokeComps, explicitBuild.contours.length),
-      suppressSeedCarrier: shouldSuppressSeedCarrierFillShape(layer, shape),
+      suppressSeedCarrier: shouldSuppressSeedCarrierFillShape(layer, shape, layer.shapes),
     };
   });
 }
@@ -5646,19 +6111,52 @@ function renderLayerPass(
         const entries = layer.shapes.map((shape, shapeIndex) => ({
           shapeIndex,
           shape,
-          preRenderPriority: preRenderLargeLineFillCarrierPriority(layer, shape, shapeIndex),
+          preRenderPlan: planLineFillPreRender(layer, shape, shapeIndex),
         }));
         return [
           ...entries
-            .filter(entry => entry.preRenderPriority > 0)
-            .sort((a, b) => b.preRenderPriority - a.preRenderPriority || a.shapeIndex - b.shapeIndex),
-          ...entries.filter(entry => entry.preRenderPriority === 0),
+            .filter(entry => entry.preRenderPlan.priority > 0)
+            .sort((a, b) => b.preRenderPlan.priority - a.preRenderPlan.priority || a.shapeIndex - b.shapeIndex),
+          ...entries.filter(entry => entry.preRenderPlan.priority === 0),
         ];
       })()
-    : layer.shapes.map((shape, shapeIndex) => ({ shapeIndex, shape }));
+    : layer.shapes.map((shape, shapeIndex) => ({
+        shapeIndex,
+        shape,
+        preRenderPlan: {
+          priority: 0,
+          mode: 'full' as const,
+          preRenderPaintKey: null,
+        },
+      }));
   const sameLayerShapes = orderedShapes.map(entry => entry.shape);
+  const preRenderedLegacyPaintKeys = new Map<number, Set<FillStyleKey>>();
+  if (pass === 'fill' && layer.type === 'line') {
+    for (const { shapeIndex, shape, preRenderPlan } of orderedShapes) {
+      if (preRenderPlan.mode !== 'legacy-group' || !preRenderPlan.preRenderPaintKey) continue;
+      const strokeComps = shape.components.filter(comp =>
+        (comp.componentType === 4 || comp.componentType === 2)
+        && comp.path
+        && comp.path.segments.length > 0,
+      );
+      const lowAlphaGuideFillScale = attenuateLowAlphaGuideFills
+        && shape.components.length === 1
+        && isLowAlphaSolidFillComponent(shape.components[0])
+        ? 0.7
+        : 1;
+      if (renderLegacyExplicitFillShape(
+        ctx,
+        shape,
+        strokeComps,
+        lowAlphaGuideFillScale,
+        { allowedPaintKeys: new Set([preRenderPlan.preRenderPaintKey]) },
+      )) {
+        preRenderedLegacyPaintKeys.set(shapeIndex, new Set([preRenderPlan.preRenderPaintKey]));
+      }
+    }
+  }
   for (let renderShapeIndex = 0; renderShapeIndex < orderedShapes.length; renderShapeIndex++) {
-    const { shapeIndex, shape } = orderedShapes[renderShapeIndex];
+    const { shapeIndex, shape, preRenderPlan } = orderedShapes[renderShapeIndex];
     const strokeComps = shape.components.filter(c => (c.componentType === 4 || c.componentType === 2) && c.path && c.path.segments.length > 0);
     const lowAlphaGuideFillScale = attenuateLowAlphaGuideFills
       && shape.components.length === 1
@@ -5679,7 +6177,7 @@ function renderLayerPass(
       )) {
         continue;
       }
-      if (shouldSuppressSeedCarrierFillShape(layer, shape)) {
+      if (shouldSuppressSeedCarrierFillShape(layer, shape, sameLayerShapes)) {
         continue;
       }
       const siblingBoundaryMaskShapes = options?.skipClipping
@@ -5836,6 +6334,10 @@ function renderLayerPass(
         || shouldPreferLegacyInheritedFillShape
         || shouldPreferLegacyInheritedOnlyShape
         || shouldPreferLegacyUnresolvedFillOnlyShape;
+      const legacyRenderOptions = preRenderPlan.mode === 'legacy-group'
+        && preRenderedLegacyPaintKeys.has(shapeIndex)
+        ? { blockedPaintKeys: preRenderedLegacyPaintKeys.get(shapeIndex)! }
+        : {};
       if (!shouldSkipLegacyForPureOpenUnresolved
         && (shouldPreferLegacy || explicitBuild.contours.length === 0)
         && renderLegacyExplicitFillShapeWithSiblingSubtraction(
@@ -5844,6 +6346,7 @@ function renderLayerPass(
           strokeComps,
           nearBlackSiblingFillBlockers,
           lowAlphaGuideFillScale,
+          legacyRenderOptions,
         )) {
         continue;
       }
@@ -5889,6 +6392,7 @@ function renderLayerPass(
           strokeComps,
           nearBlackSiblingFillBlockers,
           lowAlphaGuideFillScale,
+          legacyRenderOptions,
         )) {
         renderedExplicit = true;
       }
@@ -5993,6 +6497,37 @@ function renderTextLabels(ctx: CanvasRenderingContext2D, textLabels: TVGTextLabe
   }
 }
 
+const MAX_TGTL_AXIS_SCALE = 1.3;
+const MAX_TGTL_FONT_COMPENSATION = 1.8;
+
+function compressTextLabelAxis(x: number, y: number): { x: number; y: number } {
+  const length = Math.hypot(x, y);
+  if (length <= 0.001) return { x, y };
+  if (length <= MAX_TGTL_AXIS_SCALE) return { x, y };
+  const scale = MAX_TGTL_AXIS_SCALE / length;
+  return { x: x * scale, y: y * scale };
+}
+
+function computeTextLabelFontCompensation(
+  originalXAxis: { x: number; y: number },
+  originalYAxis: { x: number; y: number },
+  cappedXAxis: { x: number; y: number },
+  cappedYAxis: { x: number; y: number },
+): number {
+  const originalMaxAxis = Math.max(
+    Math.hypot(originalXAxis.x, originalXAxis.y),
+    Math.hypot(originalYAxis.x, originalYAxis.y),
+  );
+  const cappedMaxAxis = Math.max(
+    Math.hypot(cappedXAxis.x, cappedXAxis.y),
+    Math.hypot(cappedYAxis.x, cappedYAxis.y),
+  );
+  if (originalMaxAxis <= 0.001 || cappedMaxAxis <= 0.001 || originalMaxAxis <= cappedMaxAxis + 0.001) {
+    return 1;
+  }
+  return MAX_TGTL_FONT_COMPENSATION;
+}
+
 function computeTextLabelRenderLayout(label: TVGTextLabel): TVGTextLabelRenderLayout | null {
   const matrixB = label.matrixB ?? 0;
   const matrixC = label.matrixC ?? 0;
@@ -6005,18 +6540,24 @@ function computeTextLabelRenderLayout(label: TVGTextLabel): TVGTextLabelRenderLa
   );
   if (maxTerm < 0.001) return null;
 
-  const lines = label.text.split(/\r|\n/).filter(line => line.length > 0);
-  const lineHeight = label.fontSize * 1.2;
+  const lines = label.text.replace(/_/g, ' ').split(/\r|\n/).filter(line => line.length > 0);
+  const originalXAxis = { x: label.scaleX, y: matrixB };
+  const originalYAxis = { x: matrixC, y: label.scaleY };
   const weight = /black/i.test(label.fontFamily) ? 'bold ' : '';
+  const xAxis = compressTextLabelAxis(originalXAxis.x, originalXAxis.y);
+  const yAxis = compressTextLabelAxis(originalYAxis.x, originalYAxis.y);
+  const fontCompensation = computeTextLabelFontCompensation(originalXAxis, originalYAxis, xAxis, yAxis);
+  const renderedFontSize = label.fontSize * fontCompensation;
+  const lineHeight = renderedFontSize * 1.2;
   return {
-    // TGTL stores a full 2x2 transform in TVG space. Only the local Y basis
-    // needs flipping for Canvas text's downward Y axis; negating matrixC as
-    // well turns rotated labels into reflections and drops vertical text.
+    // TGTL stores text size separately from the 2x2 orientation matrix, but
+    // some labels carry exaggerated matrix magnitudes. Preserve orientation
+    // and modest scaling, while capping oversized axes.
     transform: {
-      a: label.scaleX,
-      b: matrixB,
-      c: matrixC,
-      d: -label.scaleY,
+      a: xAxis.x,
+      b: xAxis.y,
+      c: yAxis.x,
+      d: -yAxis.y,
       e: label.x,
       f: label.y,
     },
@@ -6025,8 +6566,8 @@ function computeTextLabelRenderLayout(label: TVGTextLabel): TVGTextLabelRenderLa
       : label.scaleX < 0
         ? 'right'
         : 'left',
-    textBaseline: hasOffDiagonalTransform ? 'middle' : 'top',
-    font: `${weight}${label.fontSize}px ${label.fontFamily}, sans-serif`,
+    textBaseline: 'alphabetic',
+    font: `${weight}${renderedFontSize}px ${label.fontFamily}, sans-serif`,
     lines,
     lineHeight,
     baseY: hasOffDiagonalTransform ? -((lines.length - 1) * lineHeight) / 2 : 0,
