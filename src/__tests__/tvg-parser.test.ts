@@ -1785,7 +1785,7 @@ describe('tvg rendering', () => {
     expect(shape21).toBeTruthy();
     expect(shape21?.preRenderPriority).toBe(2);
     expect(shape21?.preRenderMode).toBe('legacy-group');
-    expect(shape21?.preRenderPaintKey).toBe('solid:15,46,48,255');
+    expect(shape21?.preRenderPaintKey).toBe('solid:22,198,133,255');
   });
 
   it('routes color-13 shape21 through legacy after treating component80 as explicit-build support', async () => {

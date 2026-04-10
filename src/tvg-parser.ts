@@ -3961,43 +3961,6 @@ function selectLegacyPreRenderPaintKey(shape: TVGShape): FillStyleKey | null {
   );
   const paintedFillComps = chainableFillComps.filter(comp => comp.outerPaint !== null);
   if (paintedFillComps.length === 0) return null;
-  const supportFillComps = chainableFillComps.filter(comp => comp.outerPaint === null);
-  const allChainComps = [...paintedFillComps, ...supportFillComps];
-  const groups = buildLegacyFillRenderGroups(allChainComps, { includeNullPaintFillBoundaries: false });
-  if (groups.length !== 2) {
-    return dominantRenderableFillPaintKey(shape);
-  }
-  const metrics = groups.map(group => {
-    const { drawableChains } = buildLegacyChains(allChainComps, group.allChainIndices, 2.0);
-    const { chainGeometries } = analyzeLegacyDrawableChains(drawableChains, allChainComps);
-    const totalArea = chainGeometries.reduce((sum, geometry) => sum + geometry.area, 0);
-    const paint = group.allChainIndices
-      .map(index => allChainComps[index].outerPaint)
-      .find((candidate): candidate is TVGPaint => candidate !== null) ?? null;
-    const paintedComponentCount = group.allChainIndices.reduce(
-      (sum, index) => sum + (allChainComps[index].outerPaint !== null ? 1 : 0),
-      0,
-    );
-    return {
-      key: group.key as FillStyleKey,
-      paint,
-      totalArea,
-      paintedComponentCount,
-    };
-  }).sort((a, b) => {
-    if (a.totalArea !== b.totalArea) return a.totalArea - b.totalArea;
-    if (a.paintedComponentCount !== b.paintedComponentCount) {
-      return a.paintedComponentCount - b.paintedComponentCount;
-    }
-    return Number(isDarkSolidPaint(b.paint)) - Number(isDarkSolidPaint(a.paint));
-  });
-  const [smallest, largest] = metrics;
-  if (smallest.totalArea <= largest.totalArea * 0.85) {
-    return smallest.key;
-  }
-  if (isDarkSolidPaint(smallest.paint) && !isDarkSolidPaint(largest.paint)) {
-    return smallest.key;
-  }
   return dominantRenderableFillPaintKey(shape);
 }
 
