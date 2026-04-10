@@ -3963,7 +3963,7 @@ function selectLegacyPreRenderPaintKey(shape: TVGShape): FillStyleKey | null {
   if (paintedFillComps.length === 0) return null;
   const supportFillComps = chainableFillComps.filter(comp => comp.outerPaint === null);
   const allChainComps = [...paintedFillComps, ...supportFillComps];
-  const groups = buildLegacyFillRenderGroups(allChainComps);
+  const groups = buildLegacyFillRenderGroups(allChainComps, { includeNullPaintFillBoundaries: false });
   if (groups.length !== 2) {
     return dominantRenderableFillPaintKey(shape);
   }
@@ -5117,6 +5117,7 @@ interface LegacyFillRenderOptions {
   supportInheritedCrossPaint?: boolean;
   allowedPaintKeys?: Set<FillStyleKey>;
   blockedPaintKeys?: Set<FillStyleKey>;
+  includeNullPaintFillBoundaries?: boolean;
 }
 
 function createSupportOnlyLegacyComponent(comp: TVGComponent): TVGComponent {
@@ -5132,14 +5133,20 @@ function buildLegacyFillRenderGroups(
 ): LegacyFillRenderGroup[] {
   const colorGroups = new Map<string, number[]>();
   const boundaryIndices: number[] = [];
+  const includeNullPaintFillBoundaries = options.includeNullPaintFillBoundaries ?? true;
 
   for (let i = 0; i < allChainComps.length; i++) {
-    const key = paintKeyForComponent(allChainComps[i]);
+    const comp = allChainComps[i];
+    const key = paintKeyForComponent(comp);
     if (key) {
       const group = colorGroups.get(key) ?? [];
       group.push(i);
       colorGroups.set(key, group);
-    } else {
+    } else if (
+      includeNullPaintFillBoundaries
+      || comp.componentType === 2
+      || comp.componentType === 4
+    ) {
       boundaryIndices.push(i);
     }
   }
@@ -5848,7 +5855,10 @@ export function __debugBuildLegacyChainsForShape(
     && comp.path
     && comp.path.segments.length > 1,
   ),
-  options: { supportInheritedCrossPaint?: boolean } = {},
+  options: {
+    supportInheritedCrossPaint?: boolean;
+    includeNullPaintFillBoundaries?: boolean;
+  } = {},
 ): {
   allChainComponents: Array<{
     allChainIndex: number;
@@ -5935,7 +5945,10 @@ export function __debugTraceLegacyChainSelectionsForShape(
     && comp.path
     && comp.path.segments.length > 1,
   ),
-  options: { supportInheritedCrossPaint?: boolean } = {},
+  options: {
+    supportInheritedCrossPaint?: boolean;
+    includeNullPaintFillBoundaries?: boolean;
+  } = {},
 ): {
   allChainComponents: Array<{
     allChainIndex: number;
@@ -6149,7 +6162,10 @@ function renderLayerPass(
         shape,
         strokeComps,
         lowAlphaGuideFillScale,
-        { allowedPaintKeys: new Set([preRenderPlan.preRenderPaintKey]) },
+        {
+          allowedPaintKeys: new Set([preRenderPlan.preRenderPaintKey]),
+          includeNullPaintFillBoundaries: false,
+        },
       )) {
         preRenderedLegacyPaintKeys.set(shapeIndex, new Set([preRenderPlan.preRenderPaintKey]));
       }
@@ -6336,7 +6352,10 @@ function renderLayerPass(
         || shouldPreferLegacyUnresolvedFillOnlyShape;
       const legacyRenderOptions = preRenderPlan.mode === 'legacy-group'
         && preRenderedLegacyPaintKeys.has(shapeIndex)
-        ? { blockedPaintKeys: preRenderedLegacyPaintKeys.get(shapeIndex)! }
+        ? {
+            blockedPaintKeys: preRenderedLegacyPaintKeys.get(shapeIndex)!,
+            includeNullPaintFillBoundaries: false,
+          }
         : {};
       if (!shouldSkipLegacyForPureOpenUnresolved
         && (shouldPreferLegacy || explicitBuild.contours.length === 0)

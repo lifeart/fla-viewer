@@ -178,6 +178,7 @@ describe('tvg-benchmark scoring', () => {
     const result = scorePixelBuffers(reference, candidate, { maxShift: 4, searchRadius: 1 });
     expect(result.structuralScore).toBeGreaterThan(result.alignedScore);
     expect(result.score).toBe(result.alignedScore);
+    expect(result.gateScore).toBe(result.alignedScore);
   });
 
   it('rescues large sparse line drawings when structure matches', () => {
@@ -199,6 +200,29 @@ describe('tvg-benchmark scoring', () => {
     expect(result.structuralScore).toBeGreaterThan(result.alignedScore);
     expect(result.maskScore).toBeGreaterThan(result.alignedScore);
     expect(result.score).toBeGreaterThan(result.alignedScore);
+  });
+
+  it('raises the gate for high-overlap vector drawings with minor color drift', () => {
+    const reference = createBuffer(64, 64);
+    fillRect(reference, 12, 16, 52, 17, [255, 120, 80, 255]);
+    fillRect(reference, 12, 46, 52, 47, [255, 120, 80, 255]);
+    fillRect(reference, 12, 16, 13, 47, [255, 120, 80, 255]);
+    fillRect(reference, 51, 16, 52, 47, [255, 120, 80, 255]);
+    fillRect(reference, 31, 12, 32, 50, [255, 120, 80, 255]);
+
+    const candidate = createBuffer(64, 64);
+    fillRect(candidate, 12, 16, 52, 17, [255, 120, 80, 255]);
+    fillRect(candidate, 12, 46, 52, 47, [255, 120, 80, 255]);
+    fillRect(candidate, 12, 16, 13, 47, [255, 120, 80, 255]);
+    fillRect(candidate, 51, 16, 52, 47, [255, 120, 80, 255]);
+    fillRect(candidate, 31, 12, 32, 50, [255, 171, 131, 255]);
+
+    const result = scorePixelBuffers(reference, candidate, { maxShift: 4, searchRadius: 1 });
+    expect(result.alignedScore).toBeLessThan(100);
+    expect(result.perceptualScore).toBeGreaterThanOrEqual(98);
+    expect(result.structuralScore).toBeGreaterThanOrEqual(99);
+    expect(result.gateScore).toBeGreaterThan(result.alignedScore);
+    expect(result.gateScore).toBeLessThanOrEqual(result.alignedScore + 6.01);
   });
 
   it('allows a bounded bitmap rescue when perceptual agreement is stronger than exact pixels', () => {

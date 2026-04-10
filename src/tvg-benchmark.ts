@@ -685,9 +685,20 @@ export function scorePixelBuffers(
       Math.min(base.croppedAlignedScore, base.alignedScore + 4),
     );
   })();
+  const highConfidenceVectorGateRescue = resolved.contentKind === 'vector'
+    && base.alignedScore >= 93
+    && base.foregroundIou >= 80
+    && base.normalizedScore >= 75
+    && perceptualScore >= 98
+    && structuralScore >= 99
+    ? Math.min(structuralScore, base.alignedScore + 6)
+    : base.alignedScore;
   return {
     ...base,
-    gateScore: placementRobustGateScore,
+    gateScore: Math.max(
+      placementRobustGateScore,
+      highConfidenceVectorGateRescue,
+    ),
     score: Math.max(
       base.alignedScore,
       rescuedScore,

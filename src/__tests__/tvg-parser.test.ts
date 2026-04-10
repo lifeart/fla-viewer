@@ -1040,6 +1040,55 @@ describe('tvg rendering', () => {
     }
   });
 
+  it('does not share null-painted fill carriers across filtered legacy color groups', () => {
+    const greenPaint = { kind: 'solid' as const, rgba: { r: 22, g: 198, b: 133, a: 255 } };
+    const darkPaint = { kind: 'solid' as const, rgba: { r: 15, g: 46, b: 48, a: 255 } };
+    const shape = {
+      shapeType: 2,
+      components: [
+        createComponent({
+          componentType: 0,
+          color: { ...greenPaint.rgba },
+          fillPaintSource: 'explicit',
+          outerPaint: greenPaint,
+          path: createPath([
+            { type: 'M', x: 0, y: 0 },
+            { type: 'L', x: 10, y: 0 },
+          ]),
+        }),
+        createComponent({
+          componentType: 0,
+          path: createPath([
+            { type: 'M', x: 10, y: 0 },
+            { type: 'L', x: 10, y: 10 },
+          ]),
+        }),
+        createComponent({
+          componentType: 0,
+          color: { ...darkPaint.rgba },
+          fillPaintSource: 'explicit',
+          outerPaint: darkPaint,
+          path: createPath([
+            { type: 'M', x: 10, y: 10 },
+            { type: 'L', x: 0, y: 10 },
+          ]),
+        }),
+      ],
+    };
+
+    const shared = __debugBuildLegacyChainsForShape(shape);
+    expect(shared.groups).toHaveLength(2);
+    for (const group of shared.groups) {
+      expect(group.componentIndexes).toContain(1);
+    }
+
+    const filtered = __debugBuildLegacyChainsForShape(shape, [], { includeNullPaintFillBoundaries: false });
+    expect(filtered.groups).toHaveLength(2);
+    for (const group of filtered.groups) {
+      expect(group.componentIndexes).not.toContain(1);
+    }
+  });
+
   it('pre-renders large mixed line-layer carriers ahead of overlapping detail fills', () => {
     const greenPaint = { kind: 'solid' as const, rgba: { r: 22, g: 198, b: 133, a: 255 } };
     const darkPaint = { kind: 'solid' as const, rgba: { r: 15, g: 46, b: 48, a: 255 } };
