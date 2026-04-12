@@ -64,6 +64,8 @@ export interface TVGTextLabel {
   scaleY: number;
   matrixB?: number;
   matrixC?: number;
+  styleToken?: number;
+  color?: { r: number; g: number; b: number; a: number } | null;
 }
 
 export interface TVGTextLabelRenderLayout {
@@ -601,6 +603,7 @@ export function parseTVG(buffer: ArrayBufferLike): TVGDrawing {
     }
   }
 
+  resolveTextLabelPaletteColors(drawing);
 
   return drawing;
 }
@@ -1187,12 +1190,13 @@ function scoreTGTLStringCandidate(value: string): number {
   return value.length + basicAsciiChars * 6 + Math.max(0, latinChars - basicAsciiChars) - cjkChars * 6;
 }
 
-function extractLengthPrefixedUTF16Strings(data: Uint8Array): Array<{ offset: number; value: string }> {
-  const strings: Array<{ offset: number; value: string }> = [];
+function extractLengthPrefixedUTF16Strings(data: Uint8Array): Array<{ offset: number; start: number; value: string }> {
+  const strings: Array<{ offset: number; start: number; value: string }> = [];
   for (let offset = 0; offset <= data.length - 4; offset++) {
     const charLen = data[offset] | (data[offset + 1] << 8);
     if (charLen <= 0 || charLen > 96) continue;
     let best: string | null = null;
+    let bestStart = -1;
     let bestScore = Number.NEGATIVE_INFINITY;
     let bestEnd = -1;
     for (const start of [offset + 2, offset + 4, offset + 6, offset + 8]) {
@@ -1206,18 +1210,27 @@ function extractLengthPrefixedUTF16Strings(data: Uint8Array): Array<{ offset: nu
         const score = scoreTGTLStringCandidate(decoded);
         if (score <= bestScore) continue;
         best = decoded;
+        bestStart = start;
         bestScore = score;
         bestEnd = end;
       }
     }
     if (!best) continue;
     const previous = strings[strings.length - 1];
-    if (!previous || previous.offset !== offset || previous.value !== best) {
-      strings.push({ offset, value: best });
+    if (!previous || previous.offset !== offset || previous.start !== bestStart || previous.value !== best) {
+      strings.push({ offset, start: bestStart, value: best });
     }
     offset = Math.max(offset, bestEnd - 1);
   }
   return strings;
+}
+
+function extractTGTLStyleToken(data: Uint8Array, entry: { start: number } | null | undefined): number | undefined {
+  if (!entry || entry.start < 8) return undefined;
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const fontNameCharCount = view.getUint32(entry.start - 4, true);
+  if (fontNameCharCount <= 0 || fontNameCharCount > 96) return undefined;
+  return view.getUint32(entry.start - 8, true);
 }
 
 function parseTGTLTextLabel(data: Uint8Array): TVGTextLabel | null {
@@ -1226,16 +1239,19 @@ function parseTGTLTextLabel(data: Uint8Array): TVGTextLabel | null {
   const candidates = strings
     .map(entry => ({ ...entry, score: scoreTGTLStringCandidate(entry.value) }))
     .filter(entry => Number.isFinite(entry.score));
-  const text = candidates
+  const textEntry = candidates
     .filter(entry => !/arial/i.test(entry.value))
-    .sort((a, b) => b.score - a.score || b.value.length - a.value.length)[0]?.value;
+    .sort((a, b) => b.score - a.score || b.value.length - a.value.length)[0];
+  const text = textEntry?.value;
   if (!text) return null;
-  const fontFamily = candidates
+  const fontEntry = candidates
     .filter(entry => /arial/i.test(entry.value))
-    .sort((a, b) => b.score - a.score || b.value.length - a.value.length)[0]?.value
-    ?? candidates[1]?.value
-    ?? 'Arial';
+    .sort((a, b) => b.score - a.score || b.value.length - a.value.length)[0]
+    ?? candidates[1]
+    ?? null;
+  const fontFamily = fontEntry?.value ?? 'Arial';
   const normalizedFontFamily = /^rial$/i.test(fontFamily) ? 'Arial' : fontFamily;
+  const styleToken = extractTGTLStyleToken(data, fontEntry);
 
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   let fontSize = 5;
@@ -1280,6 +1296,8 @@ function parseTGTLTextLabel(data: Uint8Array): TVGTextLabel | null {
     scaleY: Number.isFinite(scaleY) ? scaleY : 1,
     matrixB: Number.isFinite(matrixB) ? matrixB : 0,
     matrixC: Number.isFinite(matrixC) ? matrixC : 0,
+    styleToken,
+    color: null,
   };
 }
 
@@ -2565,6 +2583,25 @@ export function resolveExternalPalette(
       }
     }
   }
+  resolveTextLabelPaletteColors(drawing);
+}
+
+function resolveTextLabelPaletteColors(drawing: TVGDrawing): void {
+  const byStyleToken = new Map<number, { r: number; g: number; b: number; a: number }>();
+  for (const entry of drawing.palette) {
+    if (entry.id === 0n) continue;
+    const styleToken = Number((entry.id >> 32n) & 0xffffffffn);
+    if (byStyleToken.has(styleToken)) continue;
+    byStyleToken.set(styleToken, { r: entry.r, g: entry.g, b: entry.b, a: entry.a });
+  }
+
+  for (const layer of drawing.layers) {
+    for (const label of layer.textLabels ?? []) {
+      label.color = label.styleToken !== undefined
+        ? (byStyleToken.get(label.styleToken) ?? null)
+        : null;
+    }
+  }
 }
 
 // ── Canvas Rendering ──
@@ -2821,11 +2858,20 @@ export function renderTVGToCanvas(
 
     const contentExtent = Math.max(maxX - minX, maxY - minY);
     const centerOnOrigin = options?.centerOnOrigin ?? false;
+    const canvasViewportSize = Math.max(1, Math.min(ssWidth, ssHeight));
     if (centerOnOrigin) {
       const originExtent = 2 * Math.max(Math.abs(minX), Math.abs(maxX), Math.abs(minY), Math.abs(maxY));
       viewportSize = Math.max(viewport, contentExtent + 227, originExtent + 100);
     } else {
-      viewportSize = Math.max(viewport, contentExtent + 227);
+      const baseViewportSize = Math.max(viewport, contentExtent + 227);
+      viewportSize = baseViewportSize + computeAdditionalViewportSourcePadding(
+        drawing,
+        defaultBoundaryFillColor,
+        defaultStrokeWidth,
+        baseViewportSize,
+        canvasViewportSize,
+        SS,
+      );
     }
 
     // When centerOnOrigin is set (compositor mode), center on (0,0) so all elements
@@ -2833,8 +2879,7 @@ export function renderTVGToCanvas(
     const centerX = centerOnOrigin ? 0 : (minX + maxX) / 2;
     const centerY = centerOnOrigin ? 0 : (minY + maxY) / 2;
 
-    const viewportInset = !centerOnOrigin && shouldInsetViewportForLineFillDrawing(drawing) ? 8 * SS : 0;
-    const availableViewportSize = Math.max(1, Math.min(ssWidth - viewportInset * 2, ssHeight - viewportInset * 2));
+    const availableViewportSize = canvasViewportSize;
     scale = availableViewportSize / viewportSize;
     offsetX = ssWidth / 2 - centerX * scale;
     offsetY = ssHeight / 2 + centerY * scale;
@@ -2972,6 +3017,75 @@ function snapBitmapBoundsToTileGrid(bounds: TVGBitmapBounds, tileSize: number): 
     maxX: Math.ceil(bounds.maxX / tileSize) * tileSize,
     maxY: Math.ceil(bounds.maxY / tileSize) * tileSize,
   };
+}
+
+function computeBitmapFitPadding(
+  fallbackScanUsed: boolean,
+  hasClipRects: boolean,
+  loadedCount: number,
+  aspectRatio: number,
+): number {
+  if (!fallbackScanUsed) return 4;
+  // Sparse fallback-scanned atlases consistently render slightly too large with the generic
+  // 4px inset. Landscape atlases typically settle at 7px, while squarer/taller atlases
+  // need an extra pixel of frame to avoid a residual 1px drift against the preview.
+  if (hasClipRects && loadedCount < 32) return aspectRatio <= 1.35 ? 8 : 7;
+  if (hasClipRects && loadedCount >= 100) return 7;
+  return 4;
+}
+
+function shouldTrimSparsePortraitFallbackAtlas(
+  fallbackScanUsed: boolean,
+  hasClipRects: boolean,
+  loadedCount: number,
+  aspectRatio: number,
+): boolean {
+  return fallbackScanUsed
+    && hasClipRects
+    && loadedCount < 32
+    && aspectRatio < 1;
+}
+
+function computeAdditionalViewportSourcePadding(
+  drawing: TVGDrawing,
+  defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null,
+  defaultStrokeWidth: number,
+  baseViewportSize: number,
+  canvasViewportSize: number,
+  ss: number,
+): number {
+  const visibleLineShapes: Array<{ layer: TVGArtLayer; shape: TVGShape; shapeIndex: number }> = [];
+  for (const layer of drawing.layers) {
+    for (let shapeIndex = 0; shapeIndex < layer.shapes.length; shapeIndex++) {
+      const shape = layer.shapes[shapeIndex];
+      if (!shapeMayRenderVisibleContent(shape, layer, drawing.layers, defaultBoundaryFillColor, defaultStrokeWidth)) {
+        continue;
+      }
+      if (layer.type !== 'line') return 0;
+      visibleLineShapes.push({ layer, shape, shapeIndex });
+    }
+  }
+
+  if (visibleLineShapes.length === 0) return 0;
+
+  let insetPx = 0;
+  let maxPreRenderPriority = 0;
+  for (const { layer, shape, shapeIndex } of visibleLineShapes) {
+    maxPreRenderPriority = Math.max(
+      maxPreRenderPriority,
+      preRenderLargeLineFillCarrierPriority(layer, shape, shapeIndex),
+    );
+  }
+
+  if (maxPreRenderPriority >= 2) {
+    insetPx = 8 * ss;
+  } else if (shouldInsetViewportForLineFillDrawing(drawing)) {
+    insetPx = 5 * ss;
+  }
+
+  if (insetPx <= 0) return 0;
+  const availableViewportSize = Math.max(1, canvasViewportSize - insetPx * 2);
+  return baseViewportSize * (canvasViewportSize / availableViewportSize - 1);
 }
 
 function shouldInsetViewportForLineFillDrawing(drawing: TVGDrawing): boolean {
@@ -3222,21 +3336,25 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
     dy = height / 2 - (fittedBounds.maxY - centerY) * scale;
   } else {
     const aspectRatio = nativeW / Math.max(nativeH, 1);
-    const padding = fallbackScanUsed && loaded.length >= 100 && aspectRatio <= 1.2
-      ? 7
-      : fallbackScanUsed && loaded.length < 10
-        ? 7
-        : 4;
+    const padding = computeBitmapFitPadding(fallbackScanUsed, hasClipRects, loaded.length, aspectRatio);
     const availW = width - padding * 2;
     const availH = height - padding * 2;
     scale = Math.min(availW / nativeW, availH / nativeH);
     dx = padding + (availW - nativeW * scale) / 2;
     dy = padding + (availH - nativeH * scale) / 2;
+    if (shouldTrimSparsePortraitFallbackAtlas(fallbackScanUsed, hasClipRects, loaded.length, aspectRatio)) {
+      dy += 1;
+    }
   }
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, width, height);
-  drawImageWithProgressiveDownscale(ctx, nativeCanvas, dx, dy, nativeW * scale, nativeH * scale);
+  const targetW = nativeW * scale;
+  let targetH = nativeH * scale;
+  if (shouldTrimSparsePortraitFallbackAtlas(fallbackScanUsed, hasClipRects, loaded.length, nativeW / Math.max(nativeH, 1))) {
+    targetH = Math.max(1, targetH - 2);
+  }
+  drawImageWithProgressiveDownscale(ctx, nativeCanvas, dx, dy, targetW, targetH);
 
   // Clean up
   delete (canvas as any).__bitmapTiles;
@@ -3625,6 +3743,18 @@ function isBoundaryOnlyShape(shape: TVGShape): boolean {
   );
 }
 
+function isSparseBoundaryMarkerShape(shape: TVGShape): boolean {
+  return shape.components.length > 0
+    && shape.components.every(comp =>
+      comp.componentType === 2
+      && comp.strokeWidth === null
+      && !comp.thicknessProfile
+      && comp.tgtiThickness === null
+      && (!comp.path || comp.path.segments.length <= 2),
+    )
+    && shape.components.some(comp => comp.path && comp.path.segments.length === 2);
+}
+
 function isWidthlessBoundaryStroke(comp: TVGComponent): boolean {
   return comp.componentType === 2
     && comp.strokeWidth === null
@@ -3748,6 +3878,64 @@ function collectSiblingBoundaryMaskShapes(
   return matches;
 }
 
+function collectLaterSameLayerBoundaryMaskShapes(
+  layer: TVGArtLayer,
+  currentShape: TVGShape,
+  currentShapeIndex: number,
+): TVGShape[] {
+  const currentBounds = computeShapeBounds(currentShape);
+  if (!currentBounds) return [];
+  const matches: TVGShape[] = [];
+  const seen = new Set<string>();
+  for (let index = currentShapeIndex + 1; index < layer.shapes.length; index++) {
+    const shape = layer.shapes[index];
+    if (!isSparseBoundaryMarkerShape(shape)) continue;
+    if (!boundsIntersect(currentBounds, computeShapeBounds(shape), 0.5)) continue;
+    const signature = boundaryShapeSignature(shape);
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    matches.push(shape);
+  }
+  return matches;
+}
+
+function shouldSuppressResolvedContourWithLaterMarkers(
+  shape: TVGShape,
+  strokeComps: TVGComponent[],
+  explicitBuild: { contours: TVGResolvedContour[]; unresolvedChains: TVGResolvedContour[] },
+  fillPaintKeys: Set<FillStyleKey>,
+  siblingBoundaryMaskShapes: TVGShape[],
+  laterSameLayerBoundaryMaskShapes: TVGShape[],
+  dominantFillPaint: TVGPaint | null,
+): boolean {
+  if (strokeComps.length > 0) return false;
+  if (siblingBoundaryMaskShapes.length > 0) return false;
+  if (explicitBuild.contours.length !== 1 || explicitBuild.unresolvedChains.length !== 0) return false;
+  if (fillPaintKeys.size !== 1) return false;
+  if (laterSameLayerBoundaryMaskShapes.length === 0 || laterSameLayerBoundaryMaskShapes.length > 2) return false;
+  if (isNearlyBlackSolidPaint(dominantFillPaint)) return false;
+
+  const shapeBounds = computeShapeBounds(shape);
+  if (!shapeBounds) return false;
+  const shapeWidth = shapeBounds.maxX - shapeBounds.minX;
+  const shapeHeight = shapeBounds.maxY - shapeBounds.minY;
+  const shapeArea = shapeWidth * shapeHeight;
+  if (shapeArea <= 0) return false;
+
+  let totalMaskArea = 0;
+  for (const maskShape of laterSameLayerBoundaryMaskShapes) {
+    const maskBounds = computeShapeBounds(maskShape);
+    if (!maskBounds) return false;
+    const maskWidth = maskBounds.maxX - maskBounds.minX;
+    const maskHeight = maskBounds.maxY - maskBounds.minY;
+    if (maskWidth <= 0 || maskHeight <= 0) return false;
+    if (maskWidth > shapeWidth * 0.2 || maskHeight > shapeHeight * 0.2) return false;
+    totalMaskArea += maskWidth * maskHeight;
+  }
+
+  return totalMaskArea >= 20 && totalMaskArea <= shapeArea * 0.005;
+}
+
 function shapeHasRenderableFill(shape: TVGShape): boolean {
   return shape.components.some(comp =>
     (comp.componentType === 0 || comp.componentType === 1)
@@ -3842,6 +4030,23 @@ function collectOverlappingNearBlackRenderableFillShapes(
   const blockers: TVGShape[] = [];
   for (const sibling of layerShapes) {
     if (sibling === currentShape) continue;
+    if (!shapeHasOnlyNearBlackRenderableFills(sibling)) continue;
+    if (!boundsIntersect(currentBounds, computeShapeBounds(sibling), 0.5)) continue;
+    blockers.push(sibling);
+  }
+  return blockers;
+}
+
+function collectLaterOverlappingNearBlackRenderableFillShapes(
+  currentShape: TVGShape,
+  currentShapeIndex: number,
+  layerShapes: TVGShape[],
+): TVGShape[] {
+  const currentBounds = computeShapeBounds(currentShape);
+  if (!currentBounds) return [];
+  const blockers: TVGShape[] = [];
+  for (let index = currentShapeIndex + 1; index < layerShapes.length; index++) {
+    const sibling = layerShapes[index];
     if (!shapeHasOnlyNearBlackRenderableFills(sibling)) continue;
     if (!boundsIntersect(currentBounds, computeShapeBounds(sibling), 0.5)) continue;
     blockers.push(sibling);
@@ -3951,36 +4156,16 @@ interface LineFillPreRenderPlan {
   preRenderPaintKey: FillStyleKey | null;
 }
 
-function selectLegacyPreRenderPaintKey(shape: TVGShape): FillStyleKey | null {
-  const chainableFillComps = shape.components.filter(comp =>
-    (comp.componentType === 0 || comp.componentType === 1)
-    && comp.path
-    && comp.path.segments.length > 1
-    && !isDegenerate(comp.path)
-    && (!comp.color || comp.color.a > 0),
-  );
-  const paintedFillComps = chainableFillComps.filter(comp => comp.outerPaint !== null);
-  if (paintedFillComps.length === 0) return null;
-  return dominantRenderableFillPaintKey(shape);
-}
-
 function planLineFillPreRender(
   layer: TVGArtLayer,
   shape: TVGShape,
   shapeIndex: number,
 ): LineFillPreRenderPlan {
   const priority = preRenderLargeLineFillCarrierPriority(layer, shape, shapeIndex);
-  if (priority !== 2) {
-    return {
-      priority,
-      mode: 'full',
-      preRenderPaintKey: null,
-    };
-  }
   return {
     priority,
-    mode: 'legacy-group',
-    preRenderPaintKey: selectLegacyPreRenderPaintKey(shape),
+    mode: 'full',
+    preRenderPaintKey: null,
   };
 }
 
@@ -4094,19 +4279,60 @@ function polygonArea(points: { x: number; y: number }[]): number {
   return Math.abs(area) / 2;
 }
 
+function polygonCentroid(points: { x: number; y: number }[]): { x: number; y: number } | null {
+  if (points.length < 3) return null;
+  let crossSum = 0;
+  let sx = 0;
+  let sy = 0;
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+    const cross = a.x * b.y - b.x * a.y;
+    crossSum += cross;
+    sx += (a.x + b.x) * cross;
+    sy += (a.y + b.y) * cross;
+  }
+  if (Math.abs(crossSum) < 1e-6) return null;
+  return {
+    x: sx / (3 * crossSum),
+    y: sy / (3 * crossSum),
+  };
+}
+
+function searchInteriorPointInBBox(
+  bbox: { minX: number; minY: number; maxX: number; maxY: number },
+  flattened: { x: number; y: number }[],
+): { x: number; y: number } | null {
+  const width = bbox.maxX - bbox.minX;
+  const height = bbox.maxY - bbox.minY;
+  if (width < 0.001 || height < 0.001) return null;
+  const ratios = [0.5, 0.375, 0.625, 0.25, 0.75, 0.125, 0.875];
+  for (const ry of ratios) {
+    for (const rx of ratios) {
+      const candidate = {
+        x: bbox.minX + width * rx,
+        y: bbox.minY + height * ry,
+      };
+      if (pointInPolygon(flattened, candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
 function chooseSamplePoint(
   bbox: { minX: number; minY: number; maxX: number; maxY: number },
   flattened: { x: number; y: number }[],
 ): { x: number; y: number } | null {
   const candidates = [
     { x: (bbox.minX + bbox.maxX) / 2, y: (bbox.minY + bbox.maxY) / 2 },
+    polygonCentroid(flattened),
     averagePoint(flattened),
     averagePoint(flattened.slice(0, Math.max(1, flattened.length - 1))),
-  ];
+  ].filter((candidate): candidate is { x: number; y: number } => candidate !== null);
   for (const candidate of candidates) {
     if (pointInPolygon(flattened, candidate)) return candidate;
   }
-  return null;
+  return searchInteriorPointInBBox(bbox, flattened);
 }
 
 function reversedSegments(segments: TVGSegment[]): TVGSegment[] {
@@ -6551,33 +6777,26 @@ function renderLayerPass(
   options?: TVGFillRenderOptions,
 ): void {
   const attenuateLowAlphaGuideFills = shouldAttenuateLowAlphaGuideFills(layer);
-  const orderedShapes = pass === 'fill' && layer.type === 'line'
-    ? (() => {
-        const entries = layer.shapes.map((shape, shapeIndex) => ({
-          shapeIndex,
-          shape,
-          preRenderPlan: planLineFillPreRender(layer, shape, shapeIndex),
-        }));
-        return [
-          ...entries
-            .filter(entry => entry.preRenderPlan.priority > 0)
-            .sort((a, b) => b.preRenderPlan.priority - a.preRenderPlan.priority || a.shapeIndex - b.shapeIndex),
-          ...entries.filter(entry => entry.preRenderPlan.priority === 0),
-        ];
-      })()
-    : layer.shapes.map((shape, shapeIndex) => ({
-        shapeIndex,
-        shape,
-        preRenderPlan: {
+  const renderEntries = layer.shapes.map((shape, shapeIndex) => ({
+    shapeIndex,
+    shape,
+    preRenderPlan: pass === 'fill' && layer.type === 'line'
+      ? planLineFillPreRender(layer, shape, shapeIndex)
+      : {
           priority: 0,
           mode: 'full' as const,
           preRenderPaintKey: null,
         },
-      }));
-  const sameLayerShapes = orderedShapes.map(entry => entry.shape);
+  }));
+  const preRenderEntries = pass === 'fill' && layer.type === 'line'
+    ? renderEntries
+      .filter(entry => entry.preRenderPlan.priority > 0)
+      .sort((a, b) => b.preRenderPlan.priority - a.preRenderPlan.priority || a.shapeIndex - b.shapeIndex)
+    : [];
+  const sameLayerShapes = layer.shapes;
   const preRenderedLegacyPaintKeys = new Map<number, Set<FillStyleKey>>();
   if (pass === 'fill' && layer.type === 'line') {
-    for (const { shapeIndex, shape, preRenderPlan } of orderedShapes) {
+    for (const { shapeIndex, shape, preRenderPlan } of preRenderEntries) {
       if (preRenderPlan.mode !== 'legacy-group' || !preRenderPlan.preRenderPaintKey) continue;
       const strokeComps = shape.components.filter(comp =>
         (comp.componentType === 4 || comp.componentType === 2)
@@ -6603,8 +6822,8 @@ function renderLayerPass(
       }
     }
   }
-  for (let renderShapeIndex = 0; renderShapeIndex < orderedShapes.length; renderShapeIndex++) {
-    const { shapeIndex, shape, preRenderPlan } = orderedShapes[renderShapeIndex];
+  for (let renderShapeIndex = 0; renderShapeIndex < renderEntries.length; renderShapeIndex++) {
+    const { shapeIndex, shape, preRenderPlan } = renderEntries[renderShapeIndex];
     const strokeComps = shape.components.filter(c => (c.componentType === 4 || c.componentType === 2) && c.path && c.path.segments.length > 0);
     const lowAlphaGuideFillScale = attenuateLowAlphaGuideFills
       && shape.components.length === 1
@@ -6631,6 +6850,9 @@ function renderLayerPass(
       const siblingBoundaryMaskShapes = options?.skipClipping
         ? []
         : collectSiblingBoundaryMaskShapes(options?.allLayers, layer, shape);
+      const laterSameLayerBoundaryMaskShapes = options?.skipClipping
+        ? []
+        : collectLaterSameLayerBoundaryMaskShapes(layer, shape, shapeIndex);
       const fillCarrierCount = shape.components.filter(comp =>
         (comp.componentType === 0 || comp.componentType === 1)
         && comp.path
@@ -6675,6 +6897,17 @@ function renderLayerPass(
         && explicitBuild.unresolvedChains.length > 0;
       const nearBlackSiblingFillBlockers = shouldSubtractNearBlackSiblingFillBlockers
         ? collectOverlappingNearBlackRenderableFillShapes(shape, sameLayerShapes)
+        : [];
+      const laterNearBlackResolvedContourBlockers = shouldSuppressResolvedContourWithLaterMarkers(
+        shape,
+        strokeComps,
+        explicitBuild,
+        fillPaintKeys,
+        siblingBoundaryMaskShapes,
+        laterSameLayerBoundaryMaskShapes,
+        dominantFillPaint,
+      )
+        ? collectLaterOverlappingNearBlackRenderableFillShapes(shape, shapeIndex, layer.shapes)
         : [];
       const shouldPreferSiblingBoundaryClip = !options?.skipClipping
         && strokeComps.length === 0
@@ -6782,10 +7015,11 @@ function renderLayerPass(
         || shouldPreferLegacyInheritedFillShape
         || shouldPreferLegacyInheritedOnlyShape
         || shouldPreferLegacyUnresolvedFillOnlyShape;
+      const preRenderedPaintKeys = preRenderedLegacyPaintKeys.get(shapeIndex);
       const legacyRenderOptions = preRenderPlan.mode === 'legacy-group'
-        && preRenderedLegacyPaintKeys.has(shapeIndex)
+        && preRenderedPaintKeys
         ? {
-            includeNullPaintFillBoundaries: false,
+            blockedPaintKeys: preRenderedPaintKeys,
           }
         : {};
       if (!shouldSkipLegacyForPureOpenUnresolved
@@ -6802,13 +7036,17 @@ function renderLayerPass(
       }
       let renderedExplicit = false;
       if (explicitBuild.contours.length > 0) {
-        const sortedContours = explicitBuild.contours.sort((a, b) => a.sourceOrder - b.sourceOrder);
+        const sortedContours = [...explicitBuild.contours].sort((a, b) => a.sourceOrder - b.sourceOrder);
         const contourFillSources = renderContourTree(sortedContours);
         const shouldClipResolvedContours = !options?.skipClipping
           && strokeComps.length === 0
           && siblingBoundaryMaskShapes.length > 0;
         if (shouldClipResolvedContours
           && clipLocalFillSources(ctx, layer, shape, contourFillSources, defaultStrokeWidth, false, siblingBoundaryMaskShapes)) {
+          renderedExplicit = true;
+        } else if (!options?.skipClipping && laterNearBlackResolvedContourBlockers.length > 0) {
+          // Tiny resolved fills with later sparse boundary markers can be fully buried under
+          // later dark carriers; skipping them avoids colored fringe pixels in the raw render.
           renderedExplicit = true;
         } else {
           for (const source of contourFillSources) {
@@ -6936,7 +7174,9 @@ function renderTextLabels(ctx: CanvasRenderingContext2D, textLabels: TVGTextLabe
       layout.transform.e,
       layout.transform.f,
     );
-    ctx.fillStyle = '#000000';
+    ctx.fillStyle = label.color
+      ? `rgba(${label.color.r},${label.color.g},${label.color.b},${label.color.a / 255})`
+      : '#000000';
     ctx.textAlign = layout.textAlign;
     ctx.textBaseline = layout.textBaseline;
     ctx.font = layout.font;

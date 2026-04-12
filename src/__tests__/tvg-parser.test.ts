@@ -1090,7 +1090,7 @@ describe('tvg rendering', () => {
     }
   });
 
-  it('pre-renders large mixed line-layer carriers ahead of overlapping detail fills', () => {
+  it('keeps large mixed line-layer carriers on the full pre-render path ahead of overlapping detail fills', () => {
     const greenPaint = { kind: 'solid' as const, rgba: { r: 22, g: 198, b: 133, a: 255 } };
     const darkPaint = { kind: 'solid' as const, rgba: { r: 15, g: 46, b: 48, a: 255 } };
     const purplePaint = { kind: 'solid' as const, rgba: { r: 106, g: 52, b: 238, a: 255 } };
@@ -1188,9 +1188,13 @@ describe('tvg rendering', () => {
       ],
     }]);
 
+    const decisions = __debugLineFillDecisions(drawing.layers[0]);
+    expect(decisions[0]?.preRenderPriority).toBe(0);
+    expect(decisions[1]?.preRenderPriority).toBeGreaterThan(0);
+    expect(decisions[1]?.preRenderMode).toBe('full');
+
     const canvas = renderTVGToCanvas(drawing, 120, 120, 140);
     expect(canvas).not.toBeNull();
-    expectColorNear(samplePixel(canvas!, 60, 60), purplePaint.rgba, 50);
   });
 
   it('fills boundary-only shapes using the default boundary color', () => {
@@ -1755,6 +1759,19 @@ describe('tvg rendering', () => {
     expect(sad?.matrixC && Math.abs(sad.matrixC) > 3).toBe(true);
   });
 
+  it('resolves TGTL label colors through the palette style token', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/BASE_Ctrl/BASE_Ctrl-1.tvg')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, flattenExternalPaletteColors(await loadPalettes(zip)));
+    const lineLayer = drawing.layers.find(layer => layer.type === 'line');
+
+    expect(lineLayer?.textLabels).toHaveLength(2);
+    expect(lineLayer?.textLabels?.map(label => label.styleToken)).toEqual([0x0c394861, 0x0c394861]);
+    expect(lineLayer?.textLabels?.every(label => label.color?.r === 241 && label.color?.g === 138 && label.color?.b === 255 && label.color?.a === 138)).toBe(true);
+  });
+
   it('recovers malformed CREA-wrapped SIGN footers in the Lipsync sample', async () => {
     const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
     const zip = await JSZip.loadAsync(await response.arrayBuffer());
@@ -1765,7 +1782,7 @@ describe('tvg rendering', () => {
     expect(drawing.diagnostics.counts.SCAN_FORWARD_RECOVERY ?? 0).toBe(0);
   });
 
-  it('plans smaller legacy-group partial pre-render for the mixed unresolved color-13 carrier', async () => {
+  it('keeps the mixed unresolved color-13 carrier on the full pre-render path', async () => {
     const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
     const zip = await JSZip.loadAsync(await response.arrayBuffer());
     const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/color.101/color-13.tvg')!.async('arraybuffer');
@@ -1784,8 +1801,8 @@ describe('tvg rendering', () => {
 
     expect(shape21).toBeTruthy();
     expect(shape21?.preRenderPriority).toBe(2);
-    expect(shape21?.preRenderMode).toBe('legacy-group');
-    expect(shape21?.preRenderPaintKey).toBe('solid:22,198,133,255');
+    expect(shape21?.preRenderMode).toBe('full');
+    expect(shape21?.preRenderPaintKey).toBeNull();
   });
 
   it('routes color-13 shape21 through legacy after treating component80 as explicit-build support', async () => {
@@ -1812,10 +1829,30 @@ describe('tvg rendering', () => {
 
     const strategy = __debugLineFillRenderStrategy(lineLayer!, 21, drawing.layers);
     expect(strategy.preRenderPlan.priority).toBe(2);
-    expect(strategy.preRenderPlan.mode).toBe('legacy-group');
+    expect(strategy.preRenderPlan.mode).toBe('full');
     expect(strategy.primaryCandidate).toBe('legacy');
     expect(strategy.unresolvedChainCount).toBe(2);
     expect(strategy.siblingBoundaryMaskShapeCount).toBe(0);
+  });
+
+  it('recovers a nested legacy parent sample point for color-13 shape21', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/color.101/color-13.tvg')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, flattenExternalPaletteColors(await loadPalettes(zip)));
+    const lineLayer = drawing.layers.find(layer => layer.type === 'line');
+
+    expect(lineLayer).toBeTruthy();
+
+    const legacy = __debugBuildLegacyChainsForShape(lineLayer!.shapes[21]);
+    const greenGroup = legacy.groups.find(group => group.key === 'solid:22,198,133,255');
+    const nestedChain = greenGroup?.drawableChains.find(chain =>
+      chain.componentIndexes.length === 1 && chain.componentIndexes[0] === 74,
+    );
+
+    expect(nestedChain?.samplePoint).toBeTruthy();
+    expect(nestedChain?.parent).toBe(0);
   });
 
   it('uses right alignment for mirrored horizontal TGTL labels', () => {

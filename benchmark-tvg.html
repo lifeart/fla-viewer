@@ -150,10 +150,11 @@ async function runBenchmark() {
     metric: {
       renderMode: mode,
       type: 'rgb-tolerance-aligned-cropped-focused-perceptual-structural-mask-macro-rescue',
+      authoritativeMetric: 'gateScore',
       gateScore: 'crop-aware gate score after bounded alignment',
       score: 'rescued inspection score after bounded alignment and rescue heuristics',
-      rawScore: 'fixed-position tolerance score with no alignment search',
-      alignedScore: 'bounded-shift tolerance score after alignment search',
+      rawScore: 'diagnostic fixed-position tolerance score with no alignment search',
+      alignedScore: 'diagnostic bounded-shift tolerance score after alignment search',
       croppedAlignedScore: 'aligned tolerance score evaluated on the union foreground crop after best shift',
       normalizedScore: 'foreground-focused aligned score',
       tolerance,
