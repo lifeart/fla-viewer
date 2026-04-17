@@ -2642,6 +2642,88 @@ function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type']
     : ['color', 'line', 'overlay'];
 }
 
+let textBoundsMeasureContext: CanvasRenderingContext2D | null | undefined;
+
+function getTextBoundsMeasureContext(): CanvasRenderingContext2D | null {
+  if (textBoundsMeasureContext !== undefined) return textBoundsMeasureContext;
+  if (typeof document === 'undefined') {
+    textBoundsMeasureContext = null;
+    return textBoundsMeasureContext;
+  }
+  const canvas = document.createElement('canvas');
+  textBoundsMeasureContext = canvas.getContext('2d');
+  return textBoundsMeasureContext;
+}
+
+function transformPoint(
+  transform: { a: number; b: number; c: number; d: number; e: number; f: number },
+  x: number,
+  y: number,
+): { x: number; y: number } {
+  return {
+    x: transform.a * x + transform.c * y + transform.e,
+    y: transform.b * x + transform.d * y + transform.f,
+  };
+}
+
+function collectTextLabelRenderablePoints(label: TVGTextLabel): Array<{ x: number; y: number }> {
+  const layout = computeTextLabelRenderLayout(label);
+  if (!layout || layout.lines.length === 0) return [];
+
+  const ctx = getTextBoundsMeasureContext();
+  const metrics = layout.lines.map((line) => {
+    if (ctx) {
+      ctx.font = layout.font;
+      const measured = ctx.measureText(line);
+      const ascent = measured.actualBoundingBoxAscent
+        || measured.fontBoundingBoxAscent
+        || layout.lineHeight * 0.8;
+      const descent = measured.actualBoundingBoxDescent
+        || measured.fontBoundingBoxDescent
+        || layout.lineHeight * 0.2;
+      return { width: measured.width, ascent, descent };
+    }
+    return {
+      width: line.length * label.fontSize * 0.6,
+      ascent: layout.lineHeight * 0.8,
+      descent: layout.lineHeight * 0.2,
+    };
+  });
+
+  const points: Array<{ x: number; y: number }> = [];
+  layout.lines.forEach((_, index) => {
+    const metric = metrics[index];
+    const y = layout.baseY + index * layout.lineHeight;
+    const lineHeight = metric.ascent + metric.descent;
+    let minX = 0;
+    let maxX = metric.width;
+    if (layout.textAlign === 'right') {
+      minX = -metric.width;
+      maxX = 0;
+    } else if (layout.textAlign === 'center') {
+      minX = -metric.width / 2;
+      maxX = metric.width / 2;
+    }
+    let minY = y - metric.ascent;
+    let maxY = y + metric.descent;
+    if (layout.textBaseline === 'top') {
+      minY = y;
+      maxY = y + lineHeight;
+    } else if (layout.textBaseline === 'middle') {
+      minY = y - lineHeight / 2;
+      maxY = y + lineHeight / 2;
+    }
+    points.push(
+      transformPoint(layout.transform, minX, minY),
+      transformPoint(layout.transform, maxX, minY),
+      transformPoint(layout.transform, minX, maxY),
+      transformPoint(layout.transform, maxX, maxY),
+    );
+  });
+
+  return points;
+}
+
 function shapeMayRenderVisibleContent(
   shape: TVGShape,
   layer: TVGArtLayer,
@@ -2719,6 +2801,9 @@ function collectRenderablePoints(
         }
       }
     }
+    for (const label of layer.textLabels ?? []) {
+      allPoints.push(...collectTextLabelRenderablePoints(label));
+    }
   }
 
   if (allPoints.length > 0) {
@@ -2739,6 +2824,9 @@ function collectRenderablePoints(
           }
         }
       }
+    }
+    for (const label of layer.textLabels ?? []) {
+      allPoints.push(...collectTextLabelRenderablePoints(label));
     }
   }
   return allPoints;
@@ -4668,6 +4756,28 @@ function renderContourTree(
     .sort((a, b) => contours[a.contourIndex].sourceOrder - contours[b.contourIndex].sourceOrder)
     .forEach(node => renderNode(node.contourIndex));
   return sources;
+}
+
+function shouldAllowThinPencilContourFallback(
+  layer: TVGArtLayer,
+  shape: TVGShape,
+  strokeComps: TVGComponent[],
+  pencilComps: TVGComponent[],
+): boolean {
+  const hasOnlyPencils = strokeComps.length > 0 && strokeComps.every(comp => comp.componentType === 4);
+  if (!hasOnlyPencils || pencilComps.length === 0) return false;
+
+  const isPurePencilShape = shape.components.every(comp => comp.componentType === 4);
+  if (!isPurePencilShape) return false;
+
+  if (layer.type === 'line') {
+    return pencilComps.every(comp => !isNearlyBlackSolidPaint(comp.outerPaint))
+      && new Set(pencilComps.map(comp => paintKeyForComponent(comp))).size === 1;
+  }
+
+  if (pencilComps.length > 1) return true;
+  const onlyPencil = pencilComps[0];
+  return !!onlyPencil.path && isPathEffectivelyClosed(onlyPencil.path);
 }
 
 function paintContourTree(
@@ -7114,15 +7224,8 @@ function renderLayerPass(
         && comp.outerPaint.rgba.g >= 30
         && comp.outerPaint.rgba.b >= 30,
       );
-      const hasOnlyPencils = strokeComps.length > 0 && strokeComps.every(comp => comp.componentType === 4);
-      const allowLineLayerPencilContours = layer.type === 'line'
-        && hasOnlyPencils
-        && pencilComps.length === strokeComps.length
-        && shape.components.every(comp => comp.componentType === 4)
-        && pencilComps.every(comp => !isNearlyBlackSolidPaint(comp.outerPaint))
-        && new Set(pencilComps.map(comp => paintKeyForComponent(comp))).size === 1;
-      const allowPencilFallback = layer.type !== 'line' || allowLineLayerPencilContours;
-      if (allowPencilFallback && hasOnlyPencils && pencilComps.length > 0) {
+      const allowPencilFallback = shouldAllowThinPencilContourFallback(layer, shape, strokeComps, pencilComps);
+      if (allowPencilFallback) {
         const counts = new Map<string, { count: number; paint: TVGPaint }>();
         for (const comp of pencilComps) {
           const paint = comp.outerPaint!;
@@ -7188,7 +7291,6 @@ function renderTextLabels(ctx: CanvasRenderingContext2D, textLabels: TVGTextLabe
 }
 
 const MAX_TGTL_AXIS_SCALE = 1.3;
-const MAX_TGTL_FONT_COMPENSATION = 1.8;
 
 function compressTextLabelAxis(x: number, y: number): { x: number; y: number } {
   const length = Math.hypot(x, y);
@@ -7196,26 +7298,6 @@ function compressTextLabelAxis(x: number, y: number): { x: number; y: number } {
   if (length <= MAX_TGTL_AXIS_SCALE) return { x, y };
   const scale = MAX_TGTL_AXIS_SCALE / length;
   return { x: x * scale, y: y * scale };
-}
-
-function computeTextLabelFontCompensation(
-  originalXAxis: { x: number; y: number },
-  originalYAxis: { x: number; y: number },
-  cappedXAxis: { x: number; y: number },
-  cappedYAxis: { x: number; y: number },
-): number {
-  const originalMaxAxis = Math.max(
-    Math.hypot(originalXAxis.x, originalXAxis.y),
-    Math.hypot(originalYAxis.x, originalYAxis.y),
-  );
-  const cappedMaxAxis = Math.max(
-    Math.hypot(cappedXAxis.x, cappedXAxis.y),
-    Math.hypot(cappedYAxis.x, cappedYAxis.y),
-  );
-  if (originalMaxAxis <= 0.001 || cappedMaxAxis <= 0.001 || originalMaxAxis <= cappedMaxAxis + 0.001) {
-    return 1;
-  }
-  return MAX_TGTL_FONT_COMPENSATION;
 }
 
 function computeTextLabelRenderLayout(label: TVGTextLabel): TVGTextLabelRenderLayout | null {
@@ -7236,8 +7318,7 @@ function computeTextLabelRenderLayout(label: TVGTextLabel): TVGTextLabelRenderLa
   const weight = /black/i.test(label.fontFamily) ? 'bold ' : '';
   const xAxis = compressTextLabelAxis(originalXAxis.x, originalXAxis.y);
   const yAxis = compressTextLabelAxis(originalYAxis.x, originalYAxis.y);
-  const fontCompensation = computeTextLabelFontCompensation(originalXAxis, originalYAxis, xAxis, yAxis);
-  const renderedFontSize = label.fontSize * fontCompensation;
+  const renderedFontSize = label.fontSize;
   const lineHeight = renderedFontSize * 1.2;
   return {
     // TGTL stores text size separately from the 2x2 orientation matrix, but

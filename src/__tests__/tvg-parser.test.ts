@@ -414,6 +414,37 @@ describe('tvg rendering', () => {
     expectColorNear(pixel, blackPaint.rgba, 20);
   });
 
+  it('keeps open single-pencil color shapes as strokes instead of contour fills', () => {
+    const orangePaint = { kind: 'solid' as const, rgba: { r: 255, g: 180, b: 63, a: 255 } };
+    const drawing = createDrawing([{
+      type: 'color',
+      shapes: [{
+        shapeType: 2,
+        components: [
+          createComponent({
+            componentType: 4,
+            color: { ...orangePaint.rgba },
+            contourColor: { ...orangePaint.rgba },
+            outerPaint: orangePaint,
+            contourPaint: orangePaint,
+            strokeWidth: 4,
+            path: createPath([
+              { type: 'M', x: -20, y: -20 },
+              { type: 'L', x: 20, y: -20 },
+              { type: 'L', x: 20, y: 20 },
+              { type: 'L', x: -20, y: 20 },
+            ]),
+          }),
+        ],
+      }],
+    }]);
+
+    const canvas = renderTVGToCanvas(drawing, 120, 120, 120);
+    expect(canvas).not.toBeNull();
+    expect(samplePixel(canvas!, 60, 60)).toEqual({ r: 255, g: 255, b: 255, a: 255 });
+    expect(countNonWhitePixels(canvas!)).toBeGreaterThan(0);
+  });
+
   it('renders inherited-only fill shapes through the legacy fallback', () => {
     const inheritedPaint = { kind: 'solid' as const, rgba: { r: 32, g: 188, b: 126, a: 255 } };
     const drawing = createDrawing([{
@@ -1912,7 +1943,7 @@ describe('tvg rendering', () => {
     expect(layout?.transform.a).toBeCloseTo(1.3, 6);
     expect(layout?.transform.d).toBeCloseTo(-1.3, 6);
     expect(layout?.lines).toEqual(['Head turn']);
-    expect(layout?.font).toContain('45px');
+    expect(layout?.font).toContain('25px');
   });
 
 });
