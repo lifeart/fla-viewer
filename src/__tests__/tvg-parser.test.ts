@@ -11,6 +11,7 @@ import {
   __debugTraceLegacyChainSelectionsForShape,
   __computeTextLabelRenderLayoutForTests,
   __shouldInsetViewportForLineFillDrawingForTests,
+  loadBitmapTiles,
   parseTVG,
   renderTVGToCanvas,
   resolveExternalPalette,
@@ -116,6 +117,13 @@ function expectColorNear(
 
 function ascii(text: string): number[] {
   return Array.from(text).map((char) => char.charCodeAt(0));
+}
+
+function canvasToPngBytes(canvas: HTMLCanvasElement): Uint8Array {
+  const dataUrl = canvas.toDataURL('image/png');
+  const encoded = dataUrl.slice(dataUrl.indexOf(',') + 1);
+  const decoded = atob(encoded);
+  return Uint8Array.from(decoded, (char) => char.charCodeAt(0));
 }
 
 function u32le(value: number): number[] {
@@ -246,6 +254,71 @@ describe('tvg rendering', () => {
     expect(canvas).not.toBeNull();
     const pixel = samplePixel(canvas!, 50, 50);
     expectColorNear(pixel, { r: 40, g: 160, b: 90 }, 50);
+  });
+
+  it('crops transparent fallback-atlas gutters before fitting bitmap tiles', async () => {
+    const tileCanvas = document.createElement('canvas');
+    tileCanvas.width = 240;
+    tileCanvas.height = 160;
+    const tileCtx = tileCanvas.getContext('2d')!;
+    tileCtx.clearRect(0, 0, 240, 160);
+    tileCtx.fillStyle = '#ff5533';
+    tileCtx.fillRect(80, 40, 80, 80);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 100;
+    canvas.height = 100;
+    (canvas as any).__bitmapTiles = [{
+      clipX: 0,
+      clipY: 0,
+      clipW: 240,
+      clipH: 160,
+      pngData: canvasToPngBytes(tileCanvas),
+    }];
+    (canvas as any).__bitmapState = {
+      bounds: { minX: 0, minY: 0, maxX: 240, maxY: 160 },
+      viewport: 0,
+      centerOnOrigin: false,
+      diagnostics: { events: [], counts: { BITMAP_FALLBACK_SCAN_USED: 1 } },
+    };
+
+    const loaded = await loadBitmapTiles(canvas, (canvas as any).__bitmapState.diagnostics);
+    expect(loaded).toBe(true);
+    expectColorNear(samplePixel(canvas, 10, 50), { r: 255, g: 85, b: 51 }, 30);
+    expectColorNear(samplePixel(canvas, 90, 50), { r: 255, g: 85, b: 51 }, 30);
+  });
+
+  it('applies framing padding for clipped bitmap atlases without fallback scan', async () => {
+    const tileCanvas = document.createElement('canvas');
+    tileCanvas.width = 60;
+    tileCanvas.height = 40;
+    const tileCtx = tileCanvas.getContext('2d')!;
+    tileCtx.fillStyle = '#33bb66';
+    tileCtx.fillRect(0, 0, 60, 40);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 100;
+    canvas.height = 100;
+    (canvas as any).__bitmapTiles = Array.from({ length: 16 }, (_, index) => ({
+      clipX: (index % 4) * 60,
+      clipY: Math.floor(index / 4) * 40,
+      clipW: 60,
+      clipH: 40,
+      pngData: canvasToPngBytes(tileCanvas),
+    }));
+    (canvas as any).__bitmapState = {
+      bounds: { minX: 0, minY: 0, maxX: 240, maxY: 160 },
+      viewport: 0,
+      centerOnOrigin: false,
+      diagnostics: { events: [], counts: {} },
+    };
+
+    const loaded = await loadBitmapTiles(canvas, (canvas as any).__bitmapState.diagnostics);
+    expect(loaded).toBe(true);
+    expect(samplePixel(canvas, 3, 50).a).toBeLessThanOrEqual(5);
+    expect(samplePixel(canvas, 50, 10).a).toBeLessThanOrEqual(5);
+    expectColorNear(samplePixel(canvas, 10, 50), { r: 51, g: 187, b: 102 }, 20);
+    expectColorNear(samplePixel(canvas, 50, 30), { r: 51, g: 187, b: 102 }, 20);
   });
 
   it('renders explicit type-1 fill carriers like regular fills', () => {
@@ -1256,6 +1329,83 @@ describe('tvg rendering', () => {
     expect(canvas).not.toBeNull();
     const pixel = samplePixel(canvas!, 50, 50);
     expectColorNear(pixel, { r: 32, g: 180, b: 96 });
+  });
+
+  it('does not use sparse boundary markers from sibling layers as clip masks', () => {
+    const fillPaint = { kind: 'solid' as const, rgba: { r: 255, g: 180, b: 63, a: 255 } };
+    const markerPaint = { kind: 'solid' as const, rgba: { r: 0, g: 0, b: 0, a: 255 } };
+    const drawing = createDrawing([
+      {
+        type: 'color',
+        shapes: [{
+          shapeType: 2,
+          components: [
+            createComponent({
+              componentType: 0,
+              color: { ...fillPaint.rgba },
+              fillPaintSource: 'explicit',
+              outerPaint: fillPaint,
+              path: createPath([
+                { type: 'M', x: -40, y: -20 },
+                { type: 'L', x: 40, y: -20 },
+              ]),
+            }),
+            createComponent({
+              componentType: 0,
+              color: { ...fillPaint.rgba },
+              fillPaintSource: 'explicit',
+              outerPaint: fillPaint,
+              path: createPath([
+                { type: 'M', x: 40, y: -20 },
+                { type: 'L', x: 40, y: 20 },
+              ]),
+            }),
+            createComponent({
+              componentType: 0,
+              color: { ...fillPaint.rgba },
+              fillPaintSource: 'explicit',
+              outerPaint: fillPaint,
+              path: createPath([
+                { type: 'M', x: 40, y: 20 },
+                { type: 'L', x: -40, y: 20 },
+              ]),
+            }),
+            createComponent({
+              componentType: 0,
+              color: { ...fillPaint.rgba },
+              fillPaintSource: 'explicit',
+              outerPaint: fillPaint,
+              path: createPath([
+                { type: 'M', x: -40, y: 20 },
+                { type: 'L', x: -40, y: -20 },
+              ]),
+            }),
+          ],
+        }],
+      },
+      {
+        type: 'line',
+        shapes: [{
+          shapeType: 7,
+          components: [
+            createComponent({
+              componentType: 2,
+              color: { ...markerPaint.rgba },
+              outerPaint: markerPaint,
+              path: createPath([
+                { type: 'M', x: -55, y: -28 },
+                { type: 'C', c1x: -62, c1y: -8, c2x: -62, c2y: 8, x: -55, y: 28 },
+              ]),
+            }),
+          ],
+        }],
+      },
+    ]);
+
+    const canvas = renderTVGToCanvas(drawing, 120, 120);
+    expect(canvas).not.toBeNull();
+    expectColorNear(samplePixel(canvas!, 20, 60), fillPaint.rgba, 40);
+    expectColorNear(samplePixel(canvas!, 60, 60), fillPaint.rgba, 40);
   });
 
   it('renders dual-sided strokes with separate outer and inner colors', () => {

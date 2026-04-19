@@ -2760,6 +2760,7 @@ function shapeMayRenderVisibleContent(
 
   if (defaultBoundaryFillColor
     && isBoundaryOnlyShape(shape)
+    && !isSparseBoundaryMarkerShape(shape)
     && !hasSiblingRenderableFillShape(allLayers, layer, shape)) {
     return true;
   }
@@ -3097,6 +3098,57 @@ function computeBitmapBounds(tiles: TVGBitmapTile[]): TVGBitmapBounds | null {
   return { minX, minY, maxX, maxY };
 }
 
+function computeCanvasAlphaBounds(
+  canvas: HTMLCanvasElement,
+  alphaThreshold = 1,
+): TVGBitmapBounds | null {
+  if (canvas.width <= 0 || canvas.height <= 0) return null;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      const alpha = imageData[(y * canvas.width + x) * 4 + 3];
+      if (alpha < alphaThreshold) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x + 1);
+      maxY = Math.max(maxY, y + 1);
+    }
+  }
+  if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) {
+    return null;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+function cropCanvasToBounds(
+  source: HTMLCanvasElement,
+  bounds: TVGBitmapBounds,
+): HTMLCanvasElement {
+  const cropW = Math.max(1, Math.round(bounds.maxX - bounds.minX));
+  const cropH = Math.max(1, Math.round(bounds.maxY - bounds.minY));
+  const canvas = document.createElement('canvas');
+  canvas.width = cropW;
+  canvas.height = cropH;
+  const ctx = canvas.getContext('2d')!;
+  ctx.drawImage(
+    source,
+    Math.round(bounds.minX),
+    Math.round(bounds.minY),
+    cropW,
+    cropH,
+    0,
+    0,
+    cropW,
+    cropH,
+  );
+  return canvas;
+}
+
+const SNAPPED_BITMAP_GUTTER_CROP_INSET = 64;
+
 function snapBitmapBoundsToTileGrid(bounds: TVGBitmapBounds, tileSize: number): TVGBitmapBounds {
   if (tileSize <= 0) return bounds;
   return {
@@ -3113,12 +3165,16 @@ function computeBitmapFitPadding(
   loadedCount: number,
   aspectRatio: number,
 ): number {
+  if (hasClipRects && loadedCount >= 8) {
+    // Clipped atlases consistently match previews better with a real framing inset,
+    // regardless of whether the bitmap bounds came from fallback scanning or exact clips.
+    return aspectRatio <= 1.35 ? 8 : 7;
+  }
   if (!fallbackScanUsed) return 4;
   // Sparse fallback-scanned atlases consistently render slightly too large with the generic
   // 4px inset. Landscape atlases typically settle at 7px, while squarer/taller atlases
   // need an extra pixel of frame to avoid a residual 1px drift against the preview.
-  if (hasClipRects && loadedCount < 32) return aspectRatio <= 1.35 ? 8 : 7;
-  if (hasClipRects && loadedCount >= 100) return 7;
+  if (hasClipRects) return aspectRatio <= 1.35 ? 8 : 7;
   return 4;
 }
 
@@ -3400,13 +3456,40 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
     nativeCtx.drawImage(largest.img, 0, 0);
   }
 
-  const contentExtent = Math.max(fittedBounds.maxX - fittedBounds.minX, fittedBounds.maxY - fittedBounds.minY);
+  let renderCanvas = nativeCanvas;
+  let renderBounds = fittedBounds;
+  if (fallbackScanUsed && hasClipRects) {
+    const visibleBounds = computeCanvasAlphaBounds(nativeCanvas);
+    if (visibleBounds) {
+      const leftInset = visibleBounds.minX;
+      const topInset = visibleBounds.minY;
+      const rightInset = nativeCanvas.width - visibleBounds.maxX;
+      const bottomInset = nativeCanvas.height - visibleBounds.maxY;
+      // Only crop when grid snapping introduced a substantial synthetic frame.
+      // Small fallback gutters often belong to the intended sheet framing and
+      // should be preserved to avoid overscaling the final bitmap.
+      const shouldCropVisibleBounds = Math.max(leftInset, topInset, rightInset, bottomInset) >= SNAPPED_BITMAP_GUTTER_CROP_INSET;
+      if (shouldCropVisibleBounds) {
+        renderCanvas = cropCanvasToBounds(nativeCanvas, visibleBounds);
+        renderBounds = {
+          minX: fittedBounds.minX + visibleBounds.minX,
+          minY: fittedBounds.minY + visibleBounds.minY,
+          maxX: fittedBounds.minX + visibleBounds.maxX,
+          maxY: fittedBounds.minY + visibleBounds.maxY,
+        };
+      }
+    }
+  }
+
+  const renderW = Math.max(1, Math.round(renderBounds.maxX - renderBounds.minX));
+  const renderH = Math.max(1, Math.round(renderBounds.maxY - renderBounds.minY));
+  const contentExtent = Math.max(renderBounds.maxX - renderBounds.minX, renderBounds.maxY - renderBounds.minY);
   const centerOnOrigin = state?.centerOnOrigin ?? false;
   const originExtent = 2 * Math.max(
-    Math.abs(fittedBounds.minX),
-    Math.abs(fittedBounds.maxX),
-    Math.abs(fittedBounds.minY),
-    Math.abs(fittedBounds.maxY),
+    Math.abs(renderBounds.minX),
+    Math.abs(renderBounds.maxX),
+    Math.abs(renderBounds.minY),
+    Math.abs(renderBounds.maxY),
   );
   let scale: number;
   let dx: number;
@@ -3417,19 +3500,19 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
     const viewportSize = centerOnOrigin
       ? Math.max(viewportValue, contentExtent, originExtent)
       : Math.max(viewportValue, contentExtent);
-    const centerX = centerOnOrigin ? 0 : (fittedBounds.minX + fittedBounds.maxX) / 2;
-    const centerY = centerOnOrigin ? 0 : (fittedBounds.minY + fittedBounds.maxY) / 2;
+    const centerX = centerOnOrigin ? 0 : (renderBounds.minX + renderBounds.maxX) / 2;
+    const centerY = centerOnOrigin ? 0 : (renderBounds.minY + renderBounds.maxY) / 2;
     scale = Math.min(width, height) / Math.max(viewportSize, 1);
-    dx = width / 2 - (centerX - fittedBounds.minX) * scale;
-    dy = height / 2 - (fittedBounds.maxY - centerY) * scale;
+    dx = width / 2 - (centerX - renderBounds.minX) * scale;
+    dy = height / 2 - (renderBounds.maxY - centerY) * scale;
   } else {
-    const aspectRatio = nativeW / Math.max(nativeH, 1);
+    const aspectRatio = renderW / Math.max(renderH, 1);
     const padding = computeBitmapFitPadding(fallbackScanUsed, hasClipRects, loaded.length, aspectRatio);
     const availW = width - padding * 2;
     const availH = height - padding * 2;
-    scale = Math.min(availW / nativeW, availH / nativeH);
-    dx = padding + (availW - nativeW * scale) / 2;
-    dy = padding + (availH - nativeH * scale) / 2;
+    scale = Math.min(availW / renderW, availH / renderH);
+    dx = padding + (availW - renderW * scale) / 2;
+    dy = padding + (availH - renderH * scale) / 2;
     if (shouldTrimSparsePortraitFallbackAtlas(fallbackScanUsed, hasClipRects, loaded.length, aspectRatio)) {
       dy += 1;
     }
@@ -3437,12 +3520,12 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, width, height);
-  const targetW = nativeW * scale;
-  let targetH = nativeH * scale;
-  if (shouldTrimSparsePortraitFallbackAtlas(fallbackScanUsed, hasClipRects, loaded.length, nativeW / Math.max(nativeH, 1))) {
+  const targetW = renderW * scale;
+  let targetH = renderH * scale;
+  if (shouldTrimSparsePortraitFallbackAtlas(fallbackScanUsed, hasClipRects, loaded.length, renderW / Math.max(renderH, 1))) {
     targetH = Math.max(1, targetH - 2);
   }
-  drawImageWithProgressiveDownscale(ctx, nativeCanvas, dx, dy, targetW, targetH);
+  drawImageWithProgressiveDownscale(ctx, renderCanvas, dx, dy, targetW, targetH);
 
   // Clean up
   delete (canvas as any).__bitmapTiles;
@@ -3954,7 +4037,7 @@ function collectSiblingBoundaryMaskShapes(
   for (const layer of allLayers) {
     if (layer === currentLayer) continue;
     for (const shape of layer.shapes) {
-      if (!isBoundaryOnlyShape(shape)) continue;
+      if (!isBoundaryOnlyShape(shape) || isSparseBoundaryMarkerShape(shape)) continue;
       if (boundsIntersect(currentBounds, computeShapeBounds(shape), 0.5)) {
         const signature = boundaryShapeSignature(shape);
         if (seen.has(signature)) continue;
@@ -4456,6 +4539,48 @@ function appendSegmentsToPath(path: Path2D, segments: TVGSegment[], reversed: bo
   return false;
 }
 
+function shouldAllowSupportDominatedContourAutoClose(
+  fragments: TVGContourFragment[],
+  refs: Array<{ fragmentIndex: number; reversed: boolean }>,
+  synthesized: boolean,
+  styledFragmentCount: number,
+  supportFragmentCount: number,
+  closeDistance: number,
+  bbox: { minX: number; minY: number; maxX: number; maxY: number },
+  startPoint: { x: number; y: number },
+  endPoint: { x: number; y: number },
+): boolean {
+  if (synthesized || styledFragmentCount !== 1 || supportFragmentCount < 8) {
+    return false;
+  }
+  if (closeDistance <= CHAIN_TOL * 8) {
+    return true;
+  }
+  const supportRatio = supportFragmentCount / Math.max(refs.length, 1);
+  if (supportFragmentCount < 24 || supportRatio < 0.85) {
+    return false;
+  }
+  const diagonal = Math.hypot(bbox.maxX - bbox.minX, bbox.maxY - bbox.minY);
+  if (diagonal <= 0 || closeDistance > Math.min(256, diagonal * 0.3)) {
+    return false;
+  }
+  const head = refs[0];
+  const tail = refs[refs.length - 1];
+  const headTraversal = legacyTraversalDirections(
+    { segments: fragments[head.fragmentIndex].segments, closed: false, tgrvValue: null, directionReversed: null },
+    head.reversed,
+  );
+  const tailTraversal = legacyTraversalDirections(
+    { segments: fragments[tail.fragmentIndex].segments, closed: false, tgrvValue: null, directionReversed: null },
+    tail.reversed,
+  );
+  const closeFromStart = legacyNormalizeDirection(endPoint.x - startPoint.x, endPoint.y - startPoint.y);
+  const closeFromEnd = legacyNormalizeDirection(startPoint.x - endPoint.x, startPoint.y - endPoint.y);
+  const startTurn = legacyTurningAngle(headTraversal.start, closeFromStart);
+  const endTurn = legacyTurningAngle(tailTraversal.end, closeFromEnd);
+  return startTurn <= Math.PI / 3 && endTurn <= Math.PI / 3;
+}
+
 function buildResolvedContour(
   fragments: TVGContourFragment[],
   refs: Array<{ fragmentIndex: number; reversed: boolean }>,
@@ -4491,10 +4616,17 @@ function buildResolvedContour(
   const startPoint = head.reversed ? { x: start.endX, y: start.endY } : { x: start.startX, y: start.startY };
   const endPoint = tail.reversed ? { x: end.startX, y: end.startY } : { x: end.endX, y: end.endY };
   const closeDistance = Math.hypot(startPoint.x - endPoint.x, startPoint.y - endPoint.y);
-  const allowSupportDominatedAutoClose = !synthesized
-    && styledFragmentCount === 1
-    && supportFragmentCount >= 8
-    && closeDistance <= CHAIN_TOL * 8;
+  const allowSupportDominatedAutoClose = shouldAllowSupportDominatedContourAutoClose(
+    fragments,
+    refs,
+    synthesized,
+    styledFragmentCount,
+    supportFragmentCount,
+    closeDistance,
+    bbox,
+    startPoint,
+    endPoint,
+  );
   if (closeDistance > AUTO_CLOSE_TOL && !allowSupportDominatedAutoClose) return null;
   path.closePath();
   flattened = flattenSegments([
@@ -4598,7 +4730,6 @@ function pickBestChainCandidate(
   const tailFragment = fragments[tail.fragmentIndex];
   const headPoint = head.reversed ? { x: headFragment.endX, y: headFragment.endY } : { x: headFragment.startX, y: headFragment.startY };
   const tailPoint = tail.reversed ? { x: tailFragment.startX, y: tailFragment.startY } : { x: tailFragment.endX, y: tailFragment.endY };
-
   let best: { rank: number; distance: number; support: number; componentIndex: number; fragmentIndex: number; reversed: boolean; prepend: boolean } | null = null;
   for (let i = 0; i < fragments.length; i++) {
     if (used.has(i)) continue;
@@ -6116,10 +6247,17 @@ export function __debugBuildContoursForShape(
         ? { x: endFragment?.startX ?? 0, y: endFragment?.startY ?? 0 }
         : { x: endFragment?.endX ?? 0, y: endFragment?.endY ?? 0 };
       const closeDistance = Math.hypot(startPoint.x - endPoint.x, startPoint.y - endPoint.y);
-      const allowSupportDominatedAutoClose = !contour.synthesized
-        && contour.styledFragmentCount === 1
-        && contour.supportFragmentCount >= 8
-        && closeDistance <= CHAIN_TOL * 8;
+      const allowSupportDominatedAutoClose = shouldAllowSupportDominatedContourAutoClose(
+        styleFragments,
+        contour.fragments,
+        contour.synthesized,
+        contour.styledFragmentCount,
+        contour.supportFragmentCount,
+        closeDistance,
+        contour.bbox,
+        startPoint,
+        endPoint,
+      );
       const bboxArea = (contour.bbox.maxX - contour.bbox.minX) * (contour.bbox.maxY - contour.bbox.minY);
       const polyArea = polygonArea(contour.flattened);
       const rebuilt = buildResolvedContour(
@@ -7197,7 +7335,8 @@ function renderLayerPass(
       if (renderedExplicit) continue;
 
       const shouldSuppressBoundaryFillFallback = isBoundaryOnlyShape(shape)
-        && hasSiblingRenderableFillShape(options?.allLayers, layer, shape);
+        && (isSparseBoundaryMarkerShape(shape)
+          || hasSiblingRenderableFillShape(options?.allLayers, layer, shape));
 
       if (options?.defaultBoundaryFillColor && !shouldSuppressBoundaryFillFallback) {
         const boundaryPaint = cloneSolidPaint(options.defaultBoundaryFillColor);
