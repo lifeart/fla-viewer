@@ -1626,6 +1626,7 @@ interface LayerFillPathRef {
 }
 
 const PENCIL_PATH_REF_MAX_SHAPE_DIAGONAL = 130;
+const PENCIL_PATH_REF_MAX_CLOSED_OVERLAY_DIAGONAL = 90;
 const PENCIL_PATH_REF_MIN_SHAPE_OVERLAP = 0.05;
 const PENCIL_PATH_REF_MAX_CENTER_DISTANCE_RATIO = 0.65;
 
@@ -1745,7 +1746,7 @@ function shouldUseForwardPencilPathRef(
 }
 
 function repairForwardPencilPathRefs(layer: TVGArtLayer): void {
-  if (layer.type !== 'line') return;
+  if (layer.type !== 'line' && layer.type !== 'overlay') return;
   const fillRefs = collectLayerFillPathRefs(layer);
   if (fillRefs.length === 0) return;
 
@@ -1754,16 +1755,26 @@ function repairForwardPencilPathRefs(layer: TVGArtLayer): void {
     const pencils = shape.components.filter(comp =>
       comp.componentType === 4 && comp.path && comp.path.segments.length > 0,
     );
-    if (pencils.length === 0 || pencilComponentsFormClosedChain(pencils)) return;
+    if (pencils.length === 0) return;
 
     const currentBounds = componentBounds(pencils);
     if (!currentBounds) return;
+    const isClosedChain = pencilComponentsFormClosedChain(pencils);
+    const isSmallClosedOverlay = layer.type === 'overlay'
+      && isClosedChain
+      && boundsDiagonal(currentBounds) <= PENCIL_PATH_REF_MAX_CLOSED_OVERLAY_DIAGONAL;
+    if (layer.type === 'line' && isClosedChain) return;
+    if (layer.type === 'overlay' && !isSmallClosedOverlay) return;
 
     for (const comp of pencils) {
       if (comp.pathRefHint === null) continue;
       const target = fillRefs[comp.pathRefHint - 1];
       if (!target) continue;
-      if (!shouldUseForwardPencilPathRef(shapeIndex, comp, target, currentBounds)) continue;
+      if (isSmallClosedOverlay) {
+        if (target.shapeIndex !== shapeIndex + 1) continue;
+      } else if (!shouldUseForwardPencilPathRef(shapeIndex, comp, target, currentBounds)) {
+        continue;
+      }
       comp.path = target.comp.path;
     }
   });

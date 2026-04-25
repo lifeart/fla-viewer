@@ -2010,7 +2010,7 @@ describe('tvg rendering', () => {
     expect(layer.shapes[1].components[0].path).toBe(referencedFill);
   });
 
-  it('does not apply forward pencil path references outside line layers', () => {
+  it('does not apply forward pencil path references to open overlay chains', () => {
     const skinPaint = { kind: 'solid' as const, rgba: { r: 250, g: 194, b: 167, a: 255 } };
     const blackPaint = { kind: 'solid' as const, rgba: { r: 0, g: 0, b: 0, a: 255 } };
     const stalePencilPath = createPath([
@@ -2048,6 +2048,50 @@ describe('tvg rendering', () => {
     __repairForwardPencilPathRefsForTests(layer);
 
     expect(layer.shapes[0].components[0].path).toBe(stalePencilPath);
+  });
+
+  it('repairs small closed overlay pencil chains from immediate forward fill references', () => {
+    const skinPaint = { kind: 'solid' as const, rgba: { r: 250, g: 194, b: 167, a: 255 } };
+    const blackPaint = { kind: 'solid' as const, rgba: { r: 0, g: 0, b: 0, a: 255 } };
+    const firstEdge = createPath([
+      { type: 'M', x: 0, y: 0 },
+      { type: 'L', x: 20, y: 0 },
+    ]);
+    const secondEdge = createPath([
+      { type: 'M', x: 20, y: 0 },
+      { type: 'L', x: 10, y: 20 },
+    ]);
+    const thirdEdge = createPath([
+      { type: 'M', x: 10, y: 20 },
+      { type: 'L', x: 0, y: 0 },
+    ]);
+    const referencedFill = createPath([
+      { type: 'M', x: 100, y: 100 },
+      { type: 'C', c1x: 108, c1y: 100, c2x: 108, c2y: 116, x: 116, y: 116 },
+    ]);
+    const layer: TVGArtLayer = {
+      type: 'overlay',
+      shapes: [
+        {
+          shapeType: 5,
+          components: [
+            createComponent({ componentType: 4, outerPaint: blackPaint, strokeWidth: 4, path: firstEdge, pathRefHint: 1 }),
+            createComponent({ componentType: 4, outerPaint: blackPaint, strokeWidth: 4, path: secondEdge }),
+            createComponent({ componentType: 4, outerPaint: blackPaint, strokeWidth: 4, path: thirdEdge }),
+          ],
+        },
+        {
+          shapeType: 1,
+          components: [
+            createComponent({ componentType: 0, outerPaint: skinPaint, path: referencedFill }),
+          ],
+        },
+      ],
+    };
+
+    __repairForwardPencilPathRefsForTests(layer);
+
+    expect(layer.shapes[0].components[0].path).toBe(referencedFill);
   });
 
   it('does not repair closed shapeType-5 pencil chains from path references', () => {
