@@ -1,9 +1,11 @@
 import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
 import { flattenExternalPaletteColors, loadPalettes, parsePLT } from '../tpl-palette';
+import { scoreCanvasSources } from '../tvg-benchmark';
 import type { TVGArtLayer, TVGComponent, TVGDrawing, TVGPath } from '../tvg-parser';
 import {
   __borrowMissingPencilPathsForTests,
+  __decodeTipTypeForTests,
   __debugBuildContoursForShape,
   __debugBuildLegacyChainsForShape,
   __debugLineFillDecisions,
@@ -119,6 +121,19 @@ function ascii(text: string): number[] {
   return Array.from(text).map((char) => char.charCodeAt(0));
 }
 
+async function loadImageFromArrayBuffer(data: ArrayBuffer): Promise<HTMLImageElement> {
+  const blob = new Blob([data], { type: 'image/png' });
+  return await new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(image.src);
+      resolve(image);
+    };
+    image.onerror = reject;
+    image.src = URL.createObjectURL(blob);
+  });
+}
+
 function canvasToPngBytes(canvas: HTMLCanvasElement): Uint8Array {
   const dataUrl = canvas.toDataURL('image/png');
   const encoded = dataUrl.slice(dataUrl.indexOf(',') + 1);
@@ -128,6 +143,24 @@ function canvasToPngBytes(canvas: HTMLCanvasElement): Uint8Array {
 
 function u32le(value: number): number[] {
   return [value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, (value >> 24) & 0xff];
+}
+
+function innerTag(tag: string, payload: number[] | Uint8Array): number[] {
+  const bytes = Array.from(payload);
+  if (bytes.length <= 0xff) {
+    return [...ascii(tag), 0x01, bytes.length, ...bytes];
+  }
+  if (bytes.length <= 0xffff) {
+    return [...ascii(tag), 0x02, bytes.length & 0xff, (bytes.length >> 8) & 0xff, ...bytes];
+  }
+  return [
+    ...ascii(tag),
+    0x07,
+    bytes.length & 0xff,
+    (bytes.length >> 8) & 0xff,
+    (bytes.length >> 16) & 0xff,
+    ...bytes,
+  ];
 }
 
 describe('tpl-palette', () => {
@@ -205,6 +238,12 @@ describe('tpl-palette', () => {
 });
 
 describe('tvg rendering', () => {
+  it('decodes tGTB cap enum values using Harmony tip semantics', () => {
+    expect(__decodeTipTypeForTests(0)).toBe('butt');
+    expect(__decodeTipTypeForTests(1)).toBe('round');
+    expect(__decodeTipTypeForTests(2)).toBe('square');
+  });
+
   it('uses support-only fill fragments to complete an explicitly styled contour', () => {
     const drawing = createDrawing([{
       type: 'line',
@@ -319,6 +358,45 @@ describe('tvg rendering', () => {
     expect(samplePixel(canvas, 50, 10).a).toBeLessThanOrEqual(5);
     expectColorNear(samplePixel(canvas, 10, 50), { r: 51, g: 187, b: 102 }, 20);
     expectColorNear(samplePixel(canvas, 50, 30), { r: 51, g: 187, b: 102 }, 20);
+  });
+
+  it('parses top-level TBBM bitmap tiles with TBBH metadata', () => {
+    const tileCanvas = document.createElement('canvas');
+    tileCanvas.width = 8;
+    tileCanvas.height = 8;
+    const tileCtx = tileCanvas.getContext('2d')!;
+    tileCtx.fillStyle = '#ff3300';
+    tileCtx.fillRect(0, 0, 8, 8);
+
+    const tbbh = innerTag('TBBH', [
+      ...innerTag('TBBD', u32le(32)),
+      ...innerTag('TBBC', [...u32le(-16), ...u32le(-8), ...u32le(32), ...u32le(16)]),
+      ...innerTag('TBBA', [...u32le(-12), ...u32le(-4), ...u32le(8), ...u32le(8)]),
+    ]);
+    const tbbm = innerTag('TBBM', [0x01, ...tbbh, ...canvasToPngBytes(tileCanvas)]);
+    const bytes = Uint8Array.from([
+      ...ascii('OTVGfull'),
+      ...u32le(1009),
+      ...u32le(2),
+      ...u32le(1),
+      ...tbbm,
+    ]);
+
+    const drawing = parseTVG(bytes.buffer);
+    expect(drawing.bitmapTiles).toHaveLength(1);
+    expect(drawing.bitmapTiles[0]).toMatchObject({
+      clipX: -12,
+      clipY: -4,
+      clipW: 8,
+      clipH: 8,
+      cellX: -16,
+      cellY: -8,
+      cellW: 32,
+      cellH: 16,
+      bitmapDepth: 32,
+    });
+    expect(drawing.diagnostics.counts.UNKNOWN_TOP_LEVEL_TAG).toBeUndefined();
+    expect(drawing.diagnostics.counts.BITMAP_FALLBACK_SCAN_USED).toBeUndefined();
   });
 
   it('renders explicit type-1 fill carriers like regular fills', () => {
@@ -573,6 +651,55 @@ describe('tvg rendering', () => {
     expect(canvas).not.toBeNull();
     const pixel = samplePixel(canvas!, 50, 50);
     expectColorNear(pixel, inheritedPaint.rgba, 50);
+  });
+
+  it('keeps same-style nested legacy chains as holes instead of repainting them', () => {
+    const inheritedPaint = { kind: 'solid' as const, rgba: { r: 32, g: 188, b: 126, a: 255 } };
+    const drawing = createDrawing([{
+      type: 'line',
+      shapes: [{
+        shapeType: 2,
+        components: [
+          createComponent({
+            componentType: 0,
+            color: { ...inheritedPaint.rgba },
+            fillPaintSource: 'inherited',
+            outerPaint: inheritedPaint,
+            path: createPath([
+              { type: 'M', x: -30, y: -30 },
+              { type: 'L', x: 30, y: -30 },
+              { type: 'L', x: 30, y: 30 },
+              { type: 'L', x: -30, y: 30 },
+              { type: 'L', x: -30, y: -30 },
+            ]),
+          }),
+          createComponent({
+            componentType: 0,
+            color: { ...inheritedPaint.rgba },
+            fillPaintSource: 'inherited',
+            outerPaint: inheritedPaint,
+            path: createPath([
+              { type: 'M', x: -12, y: -12 },
+              { type: 'L', x: -12, y: 12 },
+              { type: 'L', x: 12, y: 12 },
+              { type: 'L', x: 12, y: -12 },
+              { type: 'L', x: -12, y: -12 },
+            ]),
+          }),
+        ],
+      }],
+    }]);
+
+    const legacy = __debugBuildLegacyChainsForShape(drawing.layers[0].shapes[0]);
+    expect(legacy.groups).toHaveLength(1);
+    expect(legacy.groups[0].drawableChains).toHaveLength(2);
+    expect(legacy.groups[0].drawableChains[0].parent).toBe(-1);
+    expect(legacy.groups[0].drawableChains[1].parent).toBe(0);
+
+    const canvas = renderTVGToCanvas(drawing, 100, 100, 80);
+    expect(canvas).not.toBeNull();
+    expect(countNonWhitePixels(canvas!)).toBeGreaterThan(200);
+    expect(samplePixel(canvas!, 50, 50)).toEqual({ r: 255, g: 255, b: 255, a: 255 });
   });
 
   it('renders default-only fill shapes through the legacy fallback', () => {
@@ -1490,6 +1617,190 @@ describe('tvg rendering', () => {
     expect(samplePixel(autoFitCanvas!, 60, 60).a).toBeGreaterThan(0);
   });
 
+  it('renders chained single-segment widthless type-2 strokes split across shapeType 7 shapes', () => {
+    const blackPaint = { kind: 'solid' as const, rgba: { r: 0, g: 0, b: 0, a: 255 } };
+    const split = createDrawing([{
+      type: 'line',
+      shapes: [
+        {
+          shapeType: 7,
+          components: [
+            createComponent({
+              componentType: 2,
+              outerPaint: blackPaint,
+              color: { ...blackPaint.rgba },
+              path: createPath([
+                { type: 'M', x: -40, y: -20 },
+                { type: 'L', x: 0, y: -20 },
+              ]),
+            }),
+          ],
+        },
+        {
+          shapeType: 7,
+          components: [
+            createComponent({
+              componentType: 2,
+              outerPaint: blackPaint,
+              color: { ...blackPaint.rgba },
+              path: createPath([
+                { type: 'M', x: 0, y: -20 },
+                { type: 'L', x: 20, y: 0 },
+              ]),
+            }),
+          ],
+        },
+        {
+          shapeType: 7,
+          components: [
+            createComponent({
+              componentType: 2,
+              outerPaint: blackPaint,
+              color: { ...blackPaint.rgba },
+              path: createPath([
+                { type: 'M', x: 20, y: 0 },
+                { type: 'L', x: 20, y: 30 },
+              ]),
+            }),
+          ],
+        },
+      ],
+    }]);
+
+    const splitCanvas = renderTVGToCanvas(split, 120, 120, 120);
+    expect(splitCanvas).not.toBeNull();
+    expect(samplePixel(splitCanvas!, 36, 44).a).toBeGreaterThan(0);
+    expect(samplePixel(splitCanvas!, 60, 60).a).toBeGreaterThan(0);
+    expect(samplePixel(splitCanvas!, 68, 78).a).toBeGreaterThan(0);
+  });
+
+  it('does not render widthless boundary carriers when an active color fill owns the same path', () => {
+    const bluePaint = { kind: 'solid' as const, rgba: { r: 60, g: 91, b: 203, a: 255 } };
+    const blackPaint = { kind: 'solid' as const, rgba: { r: 0, g: 0, b: 0, a: 255 } };
+    const drawing = createDrawing([
+      {
+        type: 'color',
+        shapes: [{
+          shapeType: 1,
+          components: [
+            createComponent({
+              componentType: 0,
+              outerPaint: bluePaint,
+              color: { ...bluePaint.rgba },
+              fillPaintSource: 'explicit',
+              path: createPath([
+                { type: 'M', x: -30, y: -30 },
+                { type: 'L', x: 30, y: -30 },
+              ]),
+            }),
+            createComponent({
+              componentType: 0,
+              outerPaint: bluePaint,
+              color: { ...bluePaint.rgba },
+              fillPaintSource: 'inherited',
+              path: createPath([
+                { type: 'M', x: 30, y: -30 },
+                { type: 'L', x: 30, y: 30 },
+              ]),
+            }),
+            createComponent({
+              componentType: 0,
+              outerPaint: bluePaint,
+              color: { ...bluePaint.rgba },
+              fillPaintSource: 'inherited',
+              path: createPath([
+                { type: 'M', x: 30, y: 30 },
+                { type: 'L', x: -30, y: 30 },
+              ]),
+            }),
+            createComponent({
+              componentType: 0,
+              outerPaint: bluePaint,
+              color: { ...bluePaint.rgba },
+              fillPaintSource: 'inherited',
+              path: createPath([
+                { type: 'M', x: -30, y: 30 },
+                { type: 'L', x: -30, y: -30 },
+              ]),
+            }),
+          ],
+        }],
+      },
+      {
+        type: 'line',
+        shapes: [
+          {
+            shapeType: 7,
+            components: [
+              createComponent({
+                componentType: 2,
+                outerPaint: blackPaint,
+                color: { ...blackPaint.rgba },
+                path: createPath([
+                  { type: 'M', x: -30, y: -30 },
+                  { type: 'L', x: 30, y: -30 },
+                ]),
+              }),
+            ],
+          },
+          {
+            shapeType: 7,
+            components: [
+              createComponent({
+                componentType: 2,
+                outerPaint: blackPaint,
+                color: { ...blackPaint.rgba },
+                path: createPath([
+                  { type: 'M', x: 30, y: -30 },
+                  { type: 'L', x: 30, y: 30 },
+                ]),
+              }),
+            ],
+          },
+          {
+            shapeType: 7,
+            components: [
+              createComponent({
+                componentType: 2,
+                outerPaint: blackPaint,
+                color: { ...blackPaint.rgba },
+                path: createPath([
+                  { type: 'M', x: 30, y: 30 },
+                  { type: 'L', x: -30, y: 30 },
+                ]),
+              }),
+            ],
+          },
+          {
+            shapeType: 7,
+            components: [
+              createComponent({
+                componentType: 2,
+                outerPaint: blackPaint,
+                color: { ...blackPaint.rgba },
+                path: createPath([
+                  { type: 'M', x: -30, y: 30 },
+                  { type: 'L', x: -30, y: -30 },
+                ]),
+              }),
+            ],
+          },
+        ],
+      },
+    ]);
+
+    const fullCanvas = renderTVGToCanvas(drawing, 100, 100, 80);
+    const colorOnlyCanvas = renderTVGToCanvas(drawing, 100, 100, 80, { artLayerFilter: 'color' });
+    const lineOnlyCanvas = renderTVGToCanvas(drawing, 100, 100, 80, { artLayerFilter: 'line' });
+
+    expect(fullCanvas).not.toBeNull();
+    expect(colorOnlyCanvas).not.toBeNull();
+    expect(lineOnlyCanvas).not.toBeNull();
+    expectColorNear(samplePixel(fullCanvas!, 50, 50), bluePaint.rgba, 60);
+    expect(scoreCanvasSources(colorOnlyCanvas!, fullCanvas!, 100).rawScore).toBeGreaterThan(99.9);
+    expect(countNonWhitePixels(lineOnlyCanvas!)).toBeGreaterThan(20);
+  });
+
   it('renders widthless type-2 strokes when they accompany a visible stroke with the same paint', () => {
     const blackPaint = { kind: 'solid' as const, rgba: { r: 0, g: 0, b: 0, a: 255 } };
     const drawing = createDrawing([{
@@ -1705,6 +2016,116 @@ describe('tvg rendering', () => {
     expect(edge.a).toBeGreaterThan(0);
   });
 
+  it('preserves contour-painted pencil loop interiors and outer strokes', () => {
+    const outerPaint = { kind: 'solid' as const, rgba: { r: 122, g: 211, b: 235, a: 255 } };
+    const interiorPaint = { kind: 'solid' as const, rgba: { r: 186, g: 217, b: 225, a: 255 } };
+    const drawing = createDrawing([{
+      type: 'line',
+      shapes: [{
+        shapeType: 3,
+        components: [
+          createComponent({
+            componentType: 4,
+            strokeWidth: 4,
+            outerPaint,
+            contourPaint: interiorPaint,
+            path: createPath([
+              { type: 'M', x: -24, y: -24 },
+              { type: 'L', x: 24, y: -24 },
+            ]),
+            fromTipType: 'butt',
+            toTipType: 'butt',
+          }),
+          createComponent({
+            componentType: 4,
+            strokeWidth: 4,
+            outerPaint,
+            path: createPath([
+              { type: 'M', x: 24, y: -24 },
+              { type: 'L', x: 24, y: 24 },
+            ]),
+            fromTipType: 'butt',
+            toTipType: 'butt',
+          }),
+          createComponent({
+            componentType: 4,
+            strokeWidth: 4,
+            outerPaint,
+            path: createPath([
+              { type: 'M', x: 24, y: 24 },
+              { type: 'L', x: -24, y: 24 },
+            ]),
+            fromTipType: 'butt',
+            toTipType: 'butt',
+          }),
+          createComponent({
+            componentType: 4,
+            strokeWidth: 4,
+            outerPaint,
+            path: createPath([
+              { type: 'M', x: -24, y: 24 },
+              { type: 'L', x: -24, y: -24 },
+            ]),
+            fromTipType: 'butt',
+            toTipType: 'butt',
+          }),
+        ],
+      }],
+    }]);
+
+    const canvas = renderTVGToCanvas(drawing, 120, 120, 120);
+    expect(canvas).not.toBeNull();
+    expectColorNear(samplePixel(canvas!, 60, 60), interiorPaint.rgba, 20);
+    expectColorNear(samplePixel(canvas!, 60, 50), outerPaint.rgba, 35);
+  });
+
+  it('synthesizes fills for thin multi-segment pencil loops through legacy chaining', () => {
+    const fillColor = { r: 197, g: 153, b: 132, a: 255 };
+    const paint = { kind: 'solid' as const, rgba: { ...fillColor } };
+    const drawing = createDrawing([{
+      type: 'line',
+      shapes: [{
+        shapeType: 3,
+        components: [
+          createComponent({
+            componentType: 4,
+            strokeWidth: 4,
+            outerPaint: paint,
+            color: { ...fillColor },
+            path: createPath([
+              { type: 'M', x: -24, y: -20 },
+              { type: 'L', x: 24, y: -12 },
+            ]),
+          }),
+          createComponent({
+            componentType: 4,
+            strokeWidth: 4,
+            outerPaint: paint,
+            color: { ...fillColor },
+            path: createPath([
+              { type: 'M', x: 24, y: -12 },
+              { type: 'L', x: 8, y: 24 },
+            ]),
+          }),
+          createComponent({
+            componentType: 4,
+            strokeWidth: 4,
+            outerPaint: paint,
+            color: { ...fillColor },
+            path: createPath([
+              { type: 'M', x: 8, y: 24 },
+              { type: 'L', x: -24, y: -20 },
+            ]),
+          }),
+        ],
+      }],
+    }]);
+
+    const canvas = renderTVGToCanvas(drawing, 120, 120, 120);
+    expect(canvas).not.toBeNull();
+    expectColorNear(samplePixel(canvas!, 60, 56), fillColor, 25);
+  });
+
   it('renders semi-transparent explicit fills instead of dropping them', () => {
     const drawing = createDrawing([{
       type: 'color',
@@ -1807,6 +2228,187 @@ describe('tvg rendering', () => {
     const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
     expect(canvas).not.toBeNull();
     expect(countNonWhitePixels(canvas!)).toBeGreaterThan(200);
+  });
+
+  it('matches the thumbnail for recovered pure-pencil fill-only line shapes', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Shadow_Neck/Shadow_Neck-1.tvg')!.async('arraybuffer');
+    const thumbData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Shadow_Neck/.thumbnails/.Shadow_Neck-1.tvg.png')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    expect(canvas).not.toBeNull();
+    const reference = await loadImageFromArrayBuffer(thumbData);
+    const score = scoreCanvasSources(reference, canvas!, 160);
+    expect(score.rawScore).toBeGreaterThan(99);
+    expect(score.gateScore).toBe(100);
+  });
+
+  it('matches the thumbnail for recovered pure-pencil fill-only color shapes', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Collar/Collar-1.tvg')!.async('arraybuffer');
+    const thumbData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Collar/.thumbnails/.Collar-1.tvg.png')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    expect(canvas).not.toBeNull();
+    const reference = await loadImageFromArrayBuffer(thumbData);
+    const score = scoreCanvasSources(reference, canvas!, 160);
+    expect(score.rawScore).toBeGreaterThan(99);
+    expect(score.gateScore).toBe(100);
+  });
+
+  it('keeps filtered color renders isolated from inactive layer clipping', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Number_Body/Number_Body-1.tvg')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    const filteredCanvas = renderTVGToCanvas(drawing, 160, 160, 336, { artLayerFilter: 'color' });
+    const isolatedCanvas = renderTVGToCanvas(
+      { ...drawing, layers: drawing.layers.filter((layer) => layer.type === 'color') },
+      160,
+      160,
+      336,
+    );
+
+    expect(filteredCanvas).not.toBeNull();
+    expect(isolatedCanvas).not.toBeNull();
+    const score = scoreCanvasSources(isolatedCanvas!, filteredCanvas!, 160);
+    expect(score.rawScore).toBeGreaterThan(99.9);
+    expect(score.gateScore).toBe(100);
+  });
+
+  it('keeps Number_Body widthless line carriers from overpainting the color thumbnail', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Number_Body/Number_Body-1.tvg')!.async('arraybuffer');
+    const thumbData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Number_Body/.thumbnails/.Number_Body-1.tvg.png')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    expect(canvas).not.toBeNull();
+    const reference = await loadImageFromArrayBuffer(thumbData);
+    const score = scoreCanvasSources(reference, canvas!, 160);
+    expect(score.score).toBe(100);
+    expect(score.gateScore).toBe(100);
+  });
+
+  it('keeps underlay mask palette hints from overriding matte fill color', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Line_body/Line_body-1.tvg')!.async('arraybuffer');
+    const thumbData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Line_body/.thumbnails/.Line_body-1.tvg.png')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    const underlayFillColors = drawing.layers[0].shapes[0].components
+      .filter(comp => comp.componentType === 0)
+      .map(comp => comp.color);
+    expect(underlayFillColors.every(color => color?.r === 1 && color.g === 255 && color.b === 0)).toBe(true);
+
+    const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    expect(canvas).not.toBeNull();
+    const reference = await loadImageFromArrayBuffer(thumbData);
+    const score = scoreCanvasSources(reference, canvas!, 160);
+    expect(score.gateScore).toBe(100);
+    expect(score.rawScore).toBeGreaterThan(98);
+  });
+
+  it('uses same-layer underlay boundary strokes as support-only fill closure', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/sole_line_B/sole_line_B-2.tvg')!.async('arraybuffer');
+    const thumbData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/sole_line_B/.thumbnails/.sole_line_B-2.tvg.png')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    expect(canvas).not.toBeNull();
+    const reference = await loadImageFromArrayBuffer(thumbData);
+    const score = scoreCanvasSources(reference, canvas!, 160);
+    expect(score.gateScore).toBe(100);
+    expect(score.rawScore).toBeGreaterThan(99);
+  });
+
+  it('does not export open-only construction guide strokes', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Drawing_1/Drawing_1-1.tvg')!.async('arraybuffer');
+    const thumbData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Drawing_1/.thumbnails/.Drawing_1-1.tvg.png')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    expect(canvas).not.toBeNull();
+    const reference = await loadImageFromArrayBuffer(thumbData);
+    const score = scoreCanvasSources(reference, canvas!, 160);
+    expect(score.gateScore).toBe(100);
+    expect(score.rawScore).toBe(100);
+  });
+
+  it('insets mixed construction guide drawings to match thumbnail framing', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Drawing_1/Drawing_1-3.tvg')!.async('arraybuffer');
+    const thumbData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Drawing_1/.thumbnails/.Drawing_1-3.tvg.png')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    expect(canvas).not.toBeNull();
+    const reference = await loadImageFromArrayBuffer(thumbData);
+    const score = scoreCanvasSources(reference, canvas!, 160);
+    expect(score.gateScore).toBe(100);
+    expect(score.rawScore).toBeGreaterThan(99.5);
+  });
+
+  it('fills closed colored pencil loops instead of rendering only their stroke outlines', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Eyebrow/Eyebrow-1.tvg')!.async('arraybuffer');
+    const thumbData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/Eyebrow/.thumbnails/.Eyebrow-1.tvg.png')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    expect(canvas).not.toBeNull();
+    const reference = await loadImageFromArrayBuffer(thumbData);
+    const score = scoreCanvasSources(reference, canvas!, 160);
+    expect(score.gateScore).toBe(100);
+    expect(score.rawScore).toBeGreaterThan(99);
+  });
+
+  it('fills closed black line loops with the non-utility palette fill color', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/F-Sleeve_bk_F/F-Sleeve_bk_F-1.tvg')!.async('arraybuffer');
+    const thumbData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/F-Sleeve_bk_F/.thumbnails/.F-Sleeve_bk_F-1.tvg.png')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    expect(canvas).not.toBeNull();
+    const reference = await loadImageFromArrayBuffer(thumbData);
+    const score = scoreCanvasSources(reference, canvas!, 160);
+    expect(score.gateScore).toBeGreaterThan(99.5);
+    expect(score.rawScore).toBeGreaterThan(98);
   });
 
   it('renders the recovered blue block from embedded TGCO colors inside long pencil TGSD blocks', async () => {
@@ -1984,6 +2586,16 @@ describe('tvg rendering', () => {
     expect(shape21?.preRenderPriority).toBe(2);
     expect(shape21?.preRenderMode).toBe('full');
     expect(shape21?.preRenderPaintKey).toBeNull();
+  });
+
+  it('resynchronizes padded TTOC chunks before trailing top-level metadata', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/color.101/color-13.tvg')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+
+    expect(drawing.diagnostics.counts.UNKNOWN_TOP_LEVEL_TAG ?? 0).toBe(0);
+    expect(drawing.diagnostics.counts.UNKNOWN_MAIN_DATA_TAG ?? 0).toBe(0);
   });
 
   it('routes color-13 shape21 through legacy after treating component80 as explicit-build support', async () => {
