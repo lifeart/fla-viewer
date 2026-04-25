@@ -6938,7 +6938,10 @@ function selectPurePencilLoopFillPaint(
   defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null | undefined,
   defaultStrokeWidth: number,
 ): { fillPaint: TVGPaint; sourcePaint: TVGPaint } | null {
-  if (strokeComps.length < 3) return null;
+  const isSingleClosedPencilPath = strokeComps.length === 1
+    && strokeComps[0].path?.closed === true
+    && strokeComps[0].path.segments.filter(segment => segment.type !== 'M').length >= 2;
+  if (strokeComps.length < 3 && !isSingleClosedPencilPath) return null;
   if (!shape.components.every(comp => comp.componentType === 4 && !!comp.path && comp.path.segments.length > 0)) {
     return null;
   }
@@ -6968,10 +6971,16 @@ function selectPurePencilLoopFillPaint(
   }
 
   if (isNearlyBlackSolidPaint(sourcePaint)) {
-    if (!defaultBoundaryFillColor) return null;
-    const fillPaint = cloneSolidPaint(defaultBoundaryFillColor);
-    if (isNearlyBlackSolidPaint(fillPaint)) return null;
-    return { fillPaint, sourcePaint: sourcePaint! };
+    if (defaultBoundaryFillColor) {
+      const fillPaint = cloneSolidPaint(defaultBoundaryFillColor);
+      if (!isNearlyBlackSolidPaint(fillPaint)) {
+        return { fillPaint, sourcePaint: sourcePaint! };
+      }
+    }
+    if (isSingleClosedPencilPath) {
+      return { fillPaint: sourcePaint!, sourcePaint: sourcePaint! };
+    }
+    return null;
   }
 
   return { fillPaint: sourcePaint!, sourcePaint: sourcePaint! };

@@ -2206,6 +2206,32 @@ describe('tvg rendering', () => {
     expect(edge.a).toBeGreaterThan(0);
   });
 
+  it('synthesizes fills for thin single-path closed black pencil loops', () => {
+    const blackPaint = { kind: 'solid' as const, rgba: { r: 0, g: 0, b: 0, a: 255 } };
+    const drawing = createDrawing([{
+      type: 'line',
+      shapes: [{
+        shapeType: 3,
+        components: [
+          createComponent({
+            componentType: 4,
+            strokeWidth: 2,
+            outerPaint: blackPaint,
+            path: createPath([
+              { type: 'M', x: -24, y: -8 },
+              { type: 'C', c1x: -12, c1y: 18, c2x: 20, c2y: 18, x: 24, y: 0 },
+              { type: 'C', c1x: 12, c1y: -18, c2x: -18, c2y: -18, x: -24, y: -8 },
+            ], true),
+          }),
+        ],
+      }],
+    }]);
+
+    const canvas = renderTVGToCanvas(drawing, 120, 120, 120);
+    expect(canvas).not.toBeNull();
+    expectColorNear(samplePixel(canvas!, 60, 60), blackPaint.rgba, 20);
+  });
+
   it('preserves contour-painted pencil loop interiors and outer strokes', () => {
     const outerPaint = { kind: 'solid' as const, rgba: { r: 122, g: 211, b: 235, a: 255 } };
     const interiorPaint = { kind: 'solid' as const, rgba: { r: 186, g: 217, b: 225, a: 255 } };

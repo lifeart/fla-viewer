@@ -265,7 +265,7 @@ describe('tvg-benchmark scoring', () => {
     expect(result.alignedScore).toBeGreaterThanOrEqual(95);
     expect(result.maskScore).toBe(100);
     expect(result.gateScore).toBeGreaterThan(result.alignedScore);
-    expect(result.gateScore).toBeGreaterThanOrEqual(99);
+    expect(result.gateScore).toBe(100);
   });
 
   it('allows a bounded bitmap rescue when perceptual agreement is stronger than exact pixels', () => {
