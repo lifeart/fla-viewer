@@ -1576,6 +1576,7 @@ function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type'], diagnost
 
   layer.textLabels = parseTrailingTextLabels(reader);
   borrowMissingPencilPaths(layer);
+  repairForwardPencilPathRefs(layer);
 
   return layer;
 }
@@ -1615,6 +1616,161 @@ function borrowMissingPencilPaths(layer: TVGArtLayer): void {
 
 export function __borrowMissingPencilPathsForTests(layer: TVGArtLayer): void {
   borrowMissingPencilPaths(layer);
+}
+
+interface LayerFillPathRef {
+  shapeIndex: number;
+  componentIndex: number;
+  comp: TVGComponent;
+  bounds: { minX: number; minY: number; maxX: number; maxY: number };
+}
+
+const PENCIL_PATH_REF_MAX_SHAPE_DIAGONAL = 130;
+const PENCIL_PATH_REF_MIN_SHAPE_OVERLAP = 0.05;
+const PENCIL_PATH_REF_MAX_CENTER_DISTANCE_RATIO = 0.65;
+
+function boundsArea(bounds: { minX: number; minY: number; maxX: number; maxY: number }): number {
+  return Math.max(0, bounds.maxX - bounds.minX) * Math.max(0, bounds.maxY - bounds.minY);
+}
+
+function boundsDiagonal(bounds: { minX: number; minY: number; maxX: number; maxY: number }): number {
+  return Math.hypot(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
+}
+
+function boundsCenter(bounds: { minX: number; minY: number; maxX: number; maxY: number }): { x: number; y: number } {
+  return {
+    x: (bounds.minX + bounds.maxX) / 2,
+    y: (bounds.minY + bounds.maxY) / 2,
+  };
+}
+
+function boundsOverlapRatio(
+  a: { minX: number; minY: number; maxX: number; maxY: number },
+  b: { minX: number; minY: number; maxX: number; maxY: number },
+): number {
+  const overlapW = Math.max(0, Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX));
+  const overlapH = Math.max(0, Math.min(a.maxY, b.maxY) - Math.max(a.minY, b.minY));
+  const denominator = Math.max(1, Math.min(boundsArea(a), boundsArea(b)));
+  return (overlapW * overlapH) / denominator;
+}
+
+function componentPathBounds(comp: TVGComponent): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  return comp.path && comp.path.segments.length > 0 ? segmentBounds(comp.path.segments) : null;
+}
+
+function componentBounds(
+  components: TVGComponent[],
+): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const comp of components) {
+    const bounds = componentPathBounds(comp);
+    if (!bounds) continue;
+    minX = Math.min(minX, bounds.minX);
+    minY = Math.min(minY, bounds.minY);
+    maxX = Math.max(maxX, bounds.maxX);
+    maxY = Math.max(maxY, bounds.maxY);
+  }
+  return isFinite(minX) ? { minX, minY, maxX, maxY } : null;
+}
+
+function collectLayerFillPathRefs(layer: TVGArtLayer): LayerFillPathRef[] {
+  const refs: LayerFillPathRef[] = [];
+  layer.shapes.forEach((shape, shapeIndex) => {
+    shape.components.forEach((comp, componentIndex) => {
+      if (comp.componentType !== 0 || !comp.path || comp.path.segments.length === 0) return;
+      const bounds = componentPathBounds(comp);
+      if (!bounds || boundsArea(bounds) <= 0.01) return;
+      refs.push({ shapeIndex, componentIndex, comp, bounds });
+    });
+  });
+  return refs;
+}
+
+function pencilComponentsFormClosedChain(components: TVGComponent[], tolerance = 2): boolean {
+  const endpoints = components
+    .map((comp, index) => {
+      if (comp.componentType !== 4 || !comp.path) return null;
+      const pair = pathEndpointPair(comp.path);
+      if (!pair) return null;
+      return { index, start: pair.start, end: pair.end };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+  if (endpoints.length === 0) return false;
+
+  const used = new Set<number>([0]);
+  const start = endpoints[0].start;
+  let end = endpoints[0].end;
+  while (used.size < endpoints.length) {
+    let nextIndex = -1;
+    let reversed = false;
+    for (let i = 0; i < endpoints.length; i++) {
+      if (used.has(i)) continue;
+      if (pointsNearlyEqual(end, endpoints[i].start, tolerance)) {
+        nextIndex = i;
+        break;
+      }
+      if (pointsNearlyEqual(end, endpoints[i].end, tolerance)) {
+        nextIndex = i;
+        reversed = true;
+        break;
+      }
+    }
+    if (nextIndex < 0) return false;
+    used.add(nextIndex);
+    end = reversed ? endpoints[nextIndex].start : endpoints[nextIndex].end;
+  }
+  return pointsNearlyEqual(start, end, tolerance);
+}
+
+function shouldUseForwardPencilPathRef(
+  shapeIndex: number,
+  comp: TVGComponent,
+  target: LayerFillPathRef,
+  currentBounds: { minX: number; minY: number; maxX: number; maxY: number },
+): boolean {
+  if (target.shapeIndex !== shapeIndex + 1) return false;
+  const targetBounds = target.bounds;
+  const shapeDiagonal = boundsDiagonal(currentBounds);
+  if (shapeDiagonal <= 0 || shapeDiagonal > PENCIL_PATH_REF_MAX_SHAPE_DIAGONAL) return false;
+  if (boundsOverlapRatio(currentBounds, targetBounds) < PENCIL_PATH_REF_MIN_SHAPE_OVERLAP) return false;
+  const compBounds = componentPathBounds(comp);
+  if (!compBounds) return false;
+  const compCenter = boundsCenter(compBounds);
+  const targetCenter = boundsCenter(targetBounds);
+  const centerDistanceRatio = Math.hypot(compCenter.x - targetCenter.x, compCenter.y - targetCenter.y) / shapeDiagonal;
+  return centerDistanceRatio < PENCIL_PATH_REF_MAX_CENTER_DISTANCE_RATIO;
+}
+
+function repairForwardPencilPathRefs(layer: TVGArtLayer): void {
+  if (layer.type !== 'line') return;
+  const fillRefs = collectLayerFillPathRefs(layer);
+  if (fillRefs.length === 0) return;
+
+  layer.shapes.forEach((shape, shapeIndex) => {
+    if (shape.shapeType !== 5) return;
+    const pencils = shape.components.filter(comp =>
+      comp.componentType === 4 && comp.path && comp.path.segments.length > 0,
+    );
+    if (pencils.length === 0 || pencilComponentsFormClosedChain(pencils)) return;
+
+    const currentBounds = componentBounds(pencils);
+    if (!currentBounds) return;
+
+    for (const comp of pencils) {
+      if (comp.pathRefHint === null) continue;
+      const target = fillRefs[comp.pathRefHint - 1];
+      if (!target) continue;
+      if (!shouldUseForwardPencilPathRef(shapeIndex, comp, target, currentBounds)) continue;
+      comp.path = target.comp.path;
+    }
+  });
+}
+
+export function __repairForwardPencilPathRefsForTests(layer: TVGArtLayer): void {
+  repairForwardPencilPathRefs(layer);
 }
 
 function scanToTag(
@@ -3254,6 +3410,8 @@ export function renderTVGToCanvas(
     for (const layer of activeDrawing.layers) {
       if (layer.type !== layerType) continue;
       renderLayerPass(ctx, layer, defaultStrokeWidth, 'stroke', {
+        defaultBoundaryFillColor,
+        skipClipping: options?.skipClipping ?? false,
         diagnostics: activeDrawing.diagnostics,
         allLayers: activeDrawing.layers,
       });

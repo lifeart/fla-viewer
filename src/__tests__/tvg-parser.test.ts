@@ -12,6 +12,7 @@ import {
   __debugLineFillRenderStrategy,
   __debugTraceLegacyChainSelectionsForShape,
   __computeTextLabelRenderLayoutForTests,
+  __repairForwardPencilPathRefsForTests,
   __shouldInsetViewportForLineFillDrawingForTests,
   loadBitmapTiles,
   parseTVG,
@@ -1957,6 +1958,140 @@ describe('tvg rendering', () => {
 
     expect(layer.shapes[1].components[0].path).toBe(paths[4]);
     expect(layer.shapes[1].components[1].path).toBe(paths[1]);
+  });
+
+  it('repairs local shapeType-5 pencil paths from immediate forward fill references on line layers', () => {
+    const skinPaint = { kind: 'solid' as const, rgba: { r: 250, g: 194, b: 167, a: 255 } };
+    const blackPaint = { kind: 'solid' as const, rgba: { r: 0, g: 0, b: 0, a: 255 } };
+    const previousFill = createPath([
+      { type: 'M', x: -80, y: -80 },
+      { type: 'C', c1x: -70, c1y: -80, c2x: -70, c2y: -60, x: -60, y: -60 },
+    ]);
+    const stalePencilPath = createPath([
+      { type: 'M', x: 0, y: 0 },
+      { type: 'C', c1x: 10, c1y: 0, c2x: 10, c2y: 20, x: 20, y: 20 },
+    ]);
+    const referencedFill = createPath([
+      { type: 'M', x: 5, y: 5 },
+      { type: 'C', c1x: 15, c1y: 5, c2x: 15, c2y: 25, x: 25, y: 25 },
+    ]);
+    const layer: TVGArtLayer = {
+      type: 'line',
+      shapes: [
+        {
+          shapeType: 1,
+          components: [
+            createComponent({ componentType: 0, outerPaint: skinPaint, path: previousFill }),
+          ],
+        },
+        {
+          shapeType: 5,
+          components: [
+            createComponent({
+              componentType: 4,
+              outerPaint: blackPaint,
+              strokeWidth: 4,
+              path: stalePencilPath,
+              pathRefHint: 2,
+            }),
+          ],
+        },
+        {
+          shapeType: 1,
+          components: [
+            createComponent({ componentType: 0, outerPaint: skinPaint, path: referencedFill }),
+          ],
+        },
+      ],
+    };
+
+    __repairForwardPencilPathRefsForTests(layer);
+
+    expect(layer.shapes[1].components[0].path).toBe(referencedFill);
+  });
+
+  it('does not apply forward pencil path references outside line layers', () => {
+    const skinPaint = { kind: 'solid' as const, rgba: { r: 250, g: 194, b: 167, a: 255 } };
+    const blackPaint = { kind: 'solid' as const, rgba: { r: 0, g: 0, b: 0, a: 255 } };
+    const stalePencilPath = createPath([
+      { type: 'M', x: 0, y: 0 },
+      { type: 'C', c1x: 10, c1y: 0, c2x: 10, c2y: 20, x: 20, y: 20 },
+    ]);
+    const referencedFill = createPath([
+      { type: 'M', x: 5, y: 5 },
+      { type: 'C', c1x: 15, c1y: 5, c2x: 15, c2y: 25, x: 25, y: 25 },
+    ]);
+    const layer: TVGArtLayer = {
+      type: 'overlay',
+      shapes: [
+        {
+          shapeType: 5,
+          components: [
+            createComponent({
+              componentType: 4,
+              outerPaint: blackPaint,
+              strokeWidth: 4,
+              path: stalePencilPath,
+              pathRefHint: 1,
+            }),
+          ],
+        },
+        {
+          shapeType: 1,
+          components: [
+            createComponent({ componentType: 0, outerPaint: skinPaint, path: referencedFill }),
+          ],
+        },
+      ],
+    };
+
+    __repairForwardPencilPathRefsForTests(layer);
+
+    expect(layer.shapes[0].components[0].path).toBe(stalePencilPath);
+  });
+
+  it('does not repair closed shapeType-5 pencil chains from path references', () => {
+    const skinPaint = { kind: 'solid' as const, rgba: { r: 250, g: 194, b: 167, a: 255 } };
+    const blackPaint = { kind: 'solid' as const, rgba: { r: 0, g: 0, b: 0, a: 255 } };
+    const firstEdge = createPath([
+      { type: 'M', x: 0, y: 0 },
+      { type: 'L', x: 20, y: 0 },
+    ]);
+    const secondEdge = createPath([
+      { type: 'M', x: 20, y: 0 },
+      { type: 'L', x: 10, y: 20 },
+    ]);
+    const thirdEdge = createPath([
+      { type: 'M', x: 10, y: 20 },
+      { type: 'L', x: 0, y: 0 },
+    ]);
+    const referencedFill = createPath([
+      { type: 'M', x: 5, y: 5 },
+      { type: 'C', c1x: 15, c1y: 5, c2x: 15, c2y: 25, x: 25, y: 25 },
+    ]);
+    const layer: TVGArtLayer = {
+      type: 'line',
+      shapes: [
+        {
+          shapeType: 5,
+          components: [
+            createComponent({ componentType: 4, outerPaint: blackPaint, strokeWidth: 4, path: firstEdge, pathRefHint: 1 }),
+            createComponent({ componentType: 4, outerPaint: blackPaint, strokeWidth: 4, path: secondEdge }),
+            createComponent({ componentType: 4, outerPaint: blackPaint, strokeWidth: 4, path: thirdEdge }),
+          ],
+        },
+        {
+          shapeType: 1,
+          components: [
+            createComponent({ componentType: 0, outerPaint: skinPaint, path: referencedFill }),
+          ],
+        },
+      ],
+    };
+
+    __repairForwardPencilPathRefsForTests(layer);
+
+    expect(layer.shapes[0].components[0].path).toBe(firstEdge);
   });
 
   it('does not synthesize fills for thick closed pencil loops on line layers', () => {
