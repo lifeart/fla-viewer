@@ -349,6 +349,7 @@ describe('tvg rendering', () => {
       bounds: { minX: 0, minY: 0, maxX: 240, maxY: 160 },
       viewport: 0,
       centerOnOrigin: false,
+      backgroundComposite: false,
       diagnostics: { events: [], counts: {} },
     };
 
@@ -360,7 +361,7 @@ describe('tvg rendering', () => {
     expectColorNear(samplePixel(canvas, 50, 30), { r: 51, g: 187, b: 102 }, 20);
   });
 
-  it('parses top-level TBBM bitmap tiles with TBBH metadata', () => {
+  it('parses top-level TBBM bitmap tiles with TBBH metadata', async () => {
     const tileCanvas = document.createElement('canvas');
     tileCanvas.width = 8;
     tileCanvas.height = 8;
@@ -397,6 +398,16 @@ describe('tvg rendering', () => {
     });
     expect(drawing.diagnostics.counts.UNKNOWN_TOP_LEVEL_TAG).toBeUndefined();
     expect(drawing.diagnostics.counts.BITMAP_FALLBACK_SCAN_USED).toBeUndefined();
+
+    const canvas = renderTVGToCanvas(drawing, 32, 32);
+    expect(canvas).not.toBeNull();
+    await loadBitmapTiles(canvas!);
+    expect(samplePixel(canvas!, 0, 0)).toEqual({ r: 255, g: 255, b: 255, a: 255 });
+
+    const transparentCanvas = renderTVGToCanvas(drawing, 32, 32, undefined, { skipBackgroundComposite: true });
+    expect(transparentCanvas).not.toBeNull();
+    await loadBitmapTiles(transparentCanvas!);
+    expect(samplePixel(transparentCanvas!, 0, 0).a).toBe(0);
   });
 
   it('renders explicit type-1 fill carriers like regular fills', () => {

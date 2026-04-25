@@ -206,6 +206,7 @@ interface TVGBitmapRenderState {
   bounds: TVGBitmapBounds;
   viewport?: number;
   centerOnOrigin: boolean;
+  backgroundComposite: boolean;
   diagnostics?: TVGDiagnostics;
 }
 
@@ -3642,6 +3643,7 @@ function renderBitmapTVGToCanvas(
     bounds,
     viewport,
     centerOnOrigin: options?.centerOnOrigin ?? false,
+    backgroundComposite: options?.skipBackgroundComposite !== true,
     diagnostics: drawing.diagnostics,
   } as TVGBitmapRenderState;
   return canvas;
@@ -3850,6 +3852,10 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, width, height);
+  if (state?.backgroundComposite ?? true) {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+  }
   const targetW = renderW * scale;
   let targetH = renderH * scale;
   if (shouldTrimSparsePortraitFallbackAtlas(fallbackScanUsed, hasClipRects, loaded.length, renderW / Math.max(renderH, 1))) {
