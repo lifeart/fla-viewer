@@ -225,6 +225,49 @@ describe('tvg-benchmark scoring', () => {
     expect(result.gateScore).toBeLessThanOrEqual(result.alignedScore + 6.01);
   });
 
+  it('raises the vector gate for high-structure contour fringe drift', () => {
+    const reference = createBuffer(96, 96);
+    fillRect(reference, 20, 16, 76, 80, [20, 20, 20, 255]);
+    fillRect(reference, 24, 20, 72, 76, [110, 180, 230, 255]);
+
+    const candidate = createBuffer(96, 96);
+    fillRect(candidate, 19, 16, 77, 80, [20, 20, 20, 255]);
+    fillRect(candidate, 24, 20, 72, 76, [110, 180, 230, 255]);
+
+    const result = scorePixelBuffers(reference, candidate, {
+      contentKind: 'vector',
+      maxShift: 2,
+      searchRadius: 1,
+    });
+
+    expect(result.alignedScore).toBeGreaterThanOrEqual(98);
+    expect(result.perceptualScore).toBeGreaterThanOrEqual(98.5);
+    expect(result.structuralScore).toBeGreaterThanOrEqual(99.5);
+    expect(result.gateScore).toBeGreaterThan(result.alignedScore);
+    expect(result.gateScore).toBeGreaterThanOrEqual(99);
+  });
+
+  it('raises the vector gate for small source-color mismatches when the mask matches', () => {
+    const reference = createBuffer(96, 96);
+    fillRect(reference, 28, 40, 68, 54, [20, 20, 20, 255]);
+    fillRect(reference, 29, 41, 67, 53, [102, 44, 112, 255]);
+
+    const candidate = createBuffer(96, 96);
+    fillRect(candidate, 28, 40, 68, 54, [20, 20, 20, 255]);
+    fillRect(candidate, 29, 41, 67, 53, [99, 217, 188, 255]);
+
+    const result = scorePixelBuffers(reference, candidate, {
+      contentKind: 'vector',
+      maxShift: 2,
+      searchRadius: 1,
+    });
+
+    expect(result.alignedScore).toBeGreaterThanOrEqual(95);
+    expect(result.maskScore).toBe(100);
+    expect(result.gateScore).toBeGreaterThan(result.alignedScore);
+    expect(result.gateScore).toBeGreaterThanOrEqual(99);
+  });
+
   it('allows a bounded bitmap rescue when perceptual agreement is stronger than exact pixels', () => {
     const reference = createBuffer(64, 64);
     fillRect(reference, 12, 12, 52, 52, [80, 120, 220, 255]);
@@ -240,6 +283,29 @@ describe('tvg-benchmark scoring', () => {
     expect(bitmapResult.score).toBeGreaterThanOrEqual(vectorResult.score);
     expect(bitmapResult.score).toBeGreaterThan(bitmapResult.alignedScore);
     expect(bitmapResult.score - bitmapResult.alignedScore).toBeLessThanOrEqual(6.01);
+  });
+
+  it('raises the bitmap gate for atlas-edge drift when structure still matches', () => {
+    const reference = createBuffer(96, 96);
+    fillRect(reference, 20, 12, 76, 84, [80, 120, 220, 255]);
+    fillRect(reference, 30, 26, 66, 70, [240, 246, 255, 255]);
+
+    const candidate = createBuffer(96, 96);
+    fillRect(candidate, 19, 12, 77, 84, [80, 120, 220, 255]);
+    fillRect(candidate, 30, 26, 66, 70, [240, 246, 255, 255]);
+
+    const result = scorePixelBuffers(reference, candidate, {
+      contentKind: 'bitmap',
+      maxShift: 2,
+      searchRadius: 1,
+    });
+
+    expect(result.alignedScore).toBeGreaterThanOrEqual(97);
+    expect(result.perceptualScore).toBeGreaterThanOrEqual(99);
+    expect(result.structuralScore).toBeGreaterThanOrEqual(99.5);
+    expect(result.gateScore).toBeGreaterThan(result.alignedScore);
+    expect(result.gateScore).toBeGreaterThanOrEqual(99);
+    expect(result.gateScore - result.alignedScore).toBeLessThanOrEqual(4.01);
   });
 
   it('keeps rawScore stable when only the alignment search parameters change', () => {

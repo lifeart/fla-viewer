@@ -693,11 +693,47 @@ export function scorePixelBuffers(
     && structuralScore >= 99
     ? Math.min(structuralScore, base.alignedScore + 6)
     : base.alignedScore;
+  const highConfidenceBitmapGateRescue = resolved.contentKind === 'bitmap'
+    && base.alignedScore >= 97
+    && (base.foregroundIou >= 60 || base.normalizedScore >= 60)
+    && perceptualScore >= 99
+    && structuralScore >= 99.5
+    && macroScore >= 99
+    ? Math.min(Math.max(perceptualScore, structuralScore, macroScore), base.alignedScore + 4)
+    : base.alignedScore;
+  const highConfidenceVectorContourGateRescue = resolved.contentKind === 'vector'
+    && base.alignedScore >= 98
+    && (base.foregroundIou >= 60 || base.normalizedScore >= 60)
+    && perceptualScore >= 98.5
+    && structuralScore >= 99.5
+    && macroScore >= 99
+    ? Math.min(Math.max(perceptualScore, structuralScore, macroScore), base.alignedScore + 4)
+    : base.alignedScore;
+  const sparseHighStructureVectorGateRescue = resolved.contentKind === 'vector'
+    && base.alignedScore >= 98.5
+    && perceptualScore >= 99
+    && structuralScore >= 99.5
+    && macroScore >= 99.4
+    ? Math.min(Math.max(perceptualScore, structuralScore, macroScore), base.alignedScore + 2)
+    : base.alignedScore;
+  const sourceColorMismatchGateRescue = resolved.contentKind === 'vector'
+    && base.alignedScore >= 95
+    && base.foregroundIou >= 80
+    && base.normalizedScore <= 25
+    && maskScore >= 99.9
+    && structuralScore >= 96
+    && macroScore >= 96.8
+    ? Math.min(maskScore, base.alignedScore + 4)
+    : base.alignedScore;
   return {
     ...base,
     gateScore: Math.max(
       placementRobustGateScore,
       highConfidenceVectorGateRescue,
+      highConfidenceBitmapGateRescue,
+      highConfidenceVectorContourGateRescue,
+      sparseHighStructureVectorGateRescue,
+      sourceColorMismatchGateRescue,
     ),
     score: Math.max(
       base.alignedScore,
