@@ -3618,7 +3618,7 @@ function computeAdditionalViewportSourcePadding(
   }
 
   if (maxPreRenderPriority >= 2) {
-    insetPx = 8 * ss;
+    insetPx = 5 * ss;
   } else if (shouldInsetViewportForConstructionGuideDrawing(visibleLineShapes)) {
     insetPx = 3.5 * ss;
   } else if (shouldInsetViewportForLineFillDrawing(drawing)) {
