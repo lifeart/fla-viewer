@@ -5020,15 +5020,10 @@ function preRenderLargeLineFillCarrierPriority(
   if (inheritedFillCount < 20) return 0;
   const explicitBuild = buildContoursForShape(collectExplicitFillFragments(shape, layer.type, shapeIndex), false);
   if (fillPaintKeys.size === 1) {
-    if (explicitFillCount !== 1 || inheritedFillCount < fillComps.length - 1) return 0;
-    if (explicitBuild.contours.length < 2) return 0;
-    if (explicitBuild.unresolvedChains.length === 0) return 1;
-    if (explicitBuild.unresolvedChains.length !== 1) return 0;
-    const [chain] = explicitBuild.unresolvedChains;
-    return chain.supportFragmentCount === 0 && chain.styledFragmentCount >= 20 ? 1 : 0;
+    return 0;
   }
   if (explicitFillCount !== 2 || inheritedFillCount < fillComps.length - 2) return 0;
-  if (explicitBuild.contours.length > 1) return 0;
+  if (explicitBuild.contours.length !== 1) return 0;
   if (explicitBuild.unresolvedChains.length === 0 || explicitBuild.unresolvedChains.length > 2) return 0;
   return explicitBuild.unresolvedChains.every(chain =>
     chain.styledFragmentCount === 1
@@ -8057,10 +8052,10 @@ function renderLayerPass(
       .sort((a, b) => b.preRenderPlan.priority - a.preRenderPlan.priority || a.shapeIndex - b.shapeIndex)
     : [];
   const sameLayerShapes = layer.shapes;
+  const preRenderedFullShapeIndexes = new Set<number>();
   const preRenderedLegacyPaintKeys = new Map<number, Set<FillStyleKey>>();
   if (pass === 'fill' && layer.type === 'line') {
     for (const { shapeIndex, shape, preRenderPlan } of preRenderEntries) {
-      if (preRenderPlan.mode !== 'legacy-group' || !preRenderPlan.preRenderPaintKey) continue;
       const strokeComps = shape.components.filter(comp =>
         (comp.componentType === 4 || comp.componentType === 2)
         && comp.path
@@ -8071,6 +8066,19 @@ function renderLayerPass(
         && isLowAlphaSolidFillComponent(shape.components[0])
         ? 0.7
         : 1;
+      if (preRenderPlan.mode === 'full') {
+        if (renderLegacyExplicitFillShape(
+          ctx,
+          shape,
+          strokeComps,
+          lowAlphaGuideFillScale,
+          { supportInheritedCrossPaint: true },
+        )) {
+          preRenderedFullShapeIndexes.add(shapeIndex);
+        }
+        continue;
+      }
+      if (preRenderPlan.mode !== 'legacy-group' || !preRenderPlan.preRenderPaintKey) continue;
       if (renderLegacyExplicitFillShape(
         ctx,
         shape,
@@ -8098,6 +8106,10 @@ function renderLayerPass(
     }
 
     if (pass === 'fill') {
+      if (preRenderedFullShapeIndexes.has(shapeIndex)) {
+        continue;
+      }
+
       const purePencilLoopFill = selectPurePencilLoopFillPaint(
         shape,
         strokeComps,

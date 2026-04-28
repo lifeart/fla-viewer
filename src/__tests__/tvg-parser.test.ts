@@ -1342,7 +1342,7 @@ describe('tvg rendering', () => {
     for (let y = -42; y <= 48; y += 6) greenPoints.push([48, y]);
     for (let x = 42; x >= -48; x -= 6) greenPoints.push([x, 48]);
     for (let y = 42; y >= -12; y -= 6) greenPoints.push([-48, y]);
-    greenPoints.push([-48, -10]);
+    greenPoints.push([-48, -48]);
     const darkPoints: Array<[number, number]> = [];
     for (let x = -52; x <= 52; x += 8) darkPoints.push([x, -52]);
     for (let y = -44; y <= -8; y += 6) darkPoints.push([52, y]);
@@ -2781,7 +2781,7 @@ describe('tvg rendering', () => {
     expect(drawing.diagnostics.counts.SCAN_FORWARD_RECOVERY ?? 0).toBe(0);
   });
 
-  it('keeps the mixed unresolved color-13 carrier on the full pre-render path', async () => {
+  it('keeps unresolved-only color-13 carriers off the full pre-render path', async () => {
     const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
     const zip = await JSZip.loadAsync(await response.arrayBuffer());
     const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/color.101/color-13.tvg')!.async('arraybuffer');
@@ -2795,11 +2795,11 @@ describe('tvg rendering', () => {
     const shape21 = decisions.find(entry => entry.shapeIndex === 21);
 
     expect(shape19).toBeTruthy();
-    expect(shape19?.preRenderPriority).toBe(1);
+    expect(shape19?.preRenderPriority).toBe(0);
     expect(shape19?.preRenderMode).toBe('full');
 
     expect(shape21).toBeTruthy();
-    expect(shape21?.preRenderPriority).toBe(2);
+    expect(shape21?.preRenderPriority).toBe(0);
     expect(shape21?.preRenderMode).toBe('full');
     expect(shape21?.preRenderPaintKey).toBeNull();
   });
@@ -2837,7 +2837,7 @@ describe('tvg rendering', () => {
     )).toBe(true);
 
     const strategy = __debugLineFillRenderStrategy(lineLayer!, 21, drawing.layers);
-    expect(strategy.preRenderPlan.priority).toBe(2);
+    expect(strategy.preRenderPlan.priority).toBe(0);
     expect(strategy.preRenderPlan.mode).toBe('full');
     expect(strategy.primaryCandidate).toBe('legacy');
     expect(strategy.unresolvedChainCount).toBe(2);

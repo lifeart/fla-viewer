@@ -80,6 +80,45 @@ try {
       return canvas.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
     };
 
+    const diffCanvas = document.createElement('canvas');
+    diffCanvas.width = 160 * 3;
+    diffCanvas.height = 160;
+    const diffCtx = diffCanvas.getContext('2d');
+    diffCtx.fillStyle = '#fff';
+    diffCtx.fillRect(0, 0, diffCanvas.width, diffCanvas.height);
+    diffCtx.drawImage(thumbCanvas, 0, 0);
+    diffCtx.drawImage(rendered, 160, 0);
+
+    const refData = thumbCtx.getImageData(0, 0, 160, 160);
+    const renderedData = rendered.getContext('2d').getImageData(0, 0, 160, 160);
+    const diffData = diffCtx.createImageData(160, 160);
+    for (let i = 0; i < refData.data.length; i += 4) {
+      const dr = Math.abs(refData.data[i + 0] - renderedData.data[i + 0]);
+      const dg = Math.abs(refData.data[i + 1] - renderedData.data[i + 1]);
+      const db = Math.abs(refData.data[i + 2] - renderedData.data[i + 2]);
+      const refFg = refData.data[i + 0] < 243 || refData.data[i + 1] < 243 || refData.data[i + 2] < 243 || refData.data[i + 3] < 243;
+      const renderedFg = renderedData.data[i + 0] < 243 || renderedData.data[i + 1] < 243 || renderedData.data[i + 2] < 243 || renderedData.data[i + 3] < 243;
+      if (dr + dg + db <= 30 && refFg === renderedFg) {
+        diffData.data[i + 0] = 255;
+        diffData.data[i + 1] = 255;
+        diffData.data[i + 2] = 255;
+      } else if (refFg && !renderedFg) {
+        diffData.data[i + 0] = 0;
+        diffData.data[i + 1] = 128;
+        diffData.data[i + 2] = 255;
+      } else if (!refFg && renderedFg) {
+        diffData.data[i + 0] = 255;
+        diffData.data[i + 1] = 0;
+        diffData.data[i + 2] = 0;
+      } else {
+        diffData.data[i + 0] = 255;
+        diffData.data[i + 1] = 180;
+        diffData.data[i + 2] = 0;
+      }
+      diffData.data[i + 3] = 255;
+    }
+    diffCtx.putImageData(diffData, 160 * 2, 0);
+
     return {
       viewport,
       score: bench.scoreCanvasSources(thumb, rendered, 160),
@@ -91,6 +130,7 @@ try {
         color: toBase64(layers.color),
         line: toBase64(layers.line),
         overlay: toBase64(layers.overlay),
+        diff: toBase64(diffCanvas),
       },
     };
   }, { elementName, drawingName });
