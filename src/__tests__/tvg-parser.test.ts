@@ -394,6 +394,46 @@ describe('tvg rendering', () => {
     expect(samplePixel(canvas, 50, 9).a).toBeGreaterThan(50);
   });
 
+  it('uses a tighter fit for medium fallback-scanned landscape bitmap atlases', async () => {
+    const tileCanvas = document.createElement('canvas');
+    tileCanvas.width = 15;
+    tileCanvas.height = 20;
+    const tileCtx = tileCanvas.getContext('2d')!;
+    tileCtx.fillStyle = '#33bb66';
+    tileCtx.fillRect(0, 0, 15, 20);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 100;
+    canvas.height = 100;
+    (canvas as any).__bitmapTiles = Array.from({ length: 98 }, (_, index) => {
+      const col = index % 14;
+      const row = Math.floor(index / 14);
+      return {
+        clipX: col * 15,
+        clipY: row * 20,
+        clipW: 15,
+        clipH: 20,
+        cellX: col * 15,
+        cellY: row * 20,
+        cellW: 15,
+        cellH: 20,
+        pngData: canvasToPngBytes(tileCanvas),
+      };
+    });
+    (canvas as any).__bitmapState = {
+      bounds: { minX: 0, minY: 0, maxX: 210, maxY: 140 },
+      viewport: 0,
+      centerOnOrigin: false,
+      backgroundComposite: false,
+      diagnostics: { events: [], counts: { BITMAP_FALLBACK_SCAN_USED: 1 } },
+    };
+
+    const loaded = await loadBitmapTiles(canvas, (canvas as any).__bitmapState.diagnostics);
+    expect(loaded).toBe(true);
+    expect(samplePixel(canvas, 5, 50).a).toBeLessThanOrEqual(5);
+    expect(samplePixel(canvas, 6, 50).a).toBeGreaterThan(50);
+  });
+
   it('parses top-level TBBM bitmap tiles with TBBH metadata', async () => {
     const tileCanvas = document.createElement('canvas');
     tileCanvas.width = 8;
