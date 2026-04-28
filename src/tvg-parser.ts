@@ -3596,6 +3596,12 @@ function computeAdditionalViewportSourcePadding(
   canvasViewportSize: number,
   ss: number,
 ): number {
+  if (shouldInsetViewportForColorGuideGridDrawing(drawing)) {
+    const insetPx = 4 * ss;
+    const availableViewportSize = Math.max(1, canvasViewportSize - insetPx * 2);
+    return baseViewportSize * (canvasViewportSize / availableViewportSize - 1);
+  }
+
   const visibleLineShapes: Array<{ layer: TVGArtLayer; shape: TVGShape; shapeIndex: number }> = [];
   for (const layer of drawing.layers) {
     for (let shapeIndex = 0; shapeIndex < layer.shapes.length; shapeIndex++) {
@@ -3674,6 +3680,52 @@ function shouldInsetViewportForLineFillDrawing(drawing: TVGDrawing): boolean {
         || preRenderLargeLineFillCarrierPriority(layer, shape, shapeIndex) > 0;
     }),
   );
+}
+
+function shouldInsetViewportForColorGuideGridDrawing(drawing: TVGDrawing): boolean {
+  let guideStrokeCount = 0;
+  let fillPanelCount = 0;
+  let labelCount = 0;
+
+  for (const layer of drawing.layers) {
+    labelCount += layer.textLabels?.length ?? 0;
+    if (layer.type !== 'color') continue;
+    for (const shape of layer.shapes) {
+      if (isOpenColorGuideGridShape(shape)) {
+        guideStrokeCount++;
+        continue;
+      }
+      if (isColorGuideFillPanelShape(shape)) {
+        fillPanelCount++;
+      }
+    }
+  }
+
+  return guideStrokeCount >= 16
+    && fillPanelCount >= 2
+    && labelCount >= 4;
+}
+
+function isOpenColorGuideGridShape(shape: TVGShape): boolean {
+  return shape.shapeType === 6
+    && shape.components.length === 1
+    && isColorGuideGridStroke(shape.components[0]);
+}
+
+function isColorGuideGridStroke(comp: TVGComponent): boolean {
+  if (comp.componentType !== 4 || !isStraightAxisPath(comp.path)) return false;
+  if (comp.strokeWidth === null || comp.strokeWidth > 8) return false;
+  if (comp.tgtiThickness === null || comp.tgtiThickness > 0.1) return false;
+  return paintHasVisibleAlpha(comp.outerPaint) && !isDarkSolidPaint(comp.outerPaint);
+}
+
+function isColorGuideFillPanelShape(shape: TVGShape): boolean {
+  if (shape.shapeType !== 4 || shape.components.length !== 1) return false;
+  const comp = shape.components[0];
+  if (comp.componentType !== 0 || !comp.path || !paintHasVisibleAlpha(comp.outerPaint)) return false;
+  const bounds = segmentBounds(comp.path.segments);
+  return (bounds.maxX - bounds.minX) >= 400
+    && (bounds.maxY - bounds.minY) >= 150;
 }
 
 function isConstructionGuidePaint(paint: TVGPaint | null): boolean {
@@ -3755,6 +3807,10 @@ function shapeMayContainRenderablePaint(shape: TVGShape): boolean {
 
 export function __shouldInsetViewportForLineFillDrawingForTests(drawing: TVGDrawing): boolean {
   return shouldInsetViewportForLineFillDrawing(drawing);
+}
+
+export function __shouldInsetViewportForColorGuideGridDrawingForTests(drawing: TVGDrawing): boolean {
+  return shouldInsetViewportForColorGuideGridDrawing(drawing);
 }
 
 function drawImageWithProgressiveDownscale(

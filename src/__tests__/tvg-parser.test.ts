@@ -13,6 +13,7 @@ import {
   __debugTraceLegacyChainSelectionsForShape,
   __computeTextLabelRenderLayoutForTests,
   __repairForwardPencilPathRefsForTests,
+  __shouldInsetViewportForColorGuideGridDrawingForTests,
   __shouldInsetViewportForLineFillDrawingForTests,
   loadBitmapTiles,
   parseTVG,
@@ -1326,6 +1327,66 @@ describe('tvg rendering', () => {
     }]);
 
     expect(__shouldInsetViewportForLineFillDrawingForTests(drawing)).toBe(true);
+  });
+
+  it('insets dense color-art guide grids with panel labels', () => {
+    const guidePaint = { kind: 'solid' as const, rgba: { r: 255, g: 180, b: 63, a: 255 } };
+    const panelPaint = { kind: 'solid' as const, rgba: { r: 240, g: 210, b: 130, a: 255 } };
+    const shapes: TVGArtLayer['shapes'] = [];
+
+    for (let index = 0; index < 16; index++) {
+      const x = index * 40;
+      shapes.push({
+        shapeType: 6,
+        components: [createComponent({
+          componentType: 4,
+          color: { ...guidePaint.rgba },
+          outerPaint: guidePaint,
+          strokeWidth: 5,
+          tgtiThickness: 0.015,
+          path: createPath([
+            { type: 'M', x, y: -200 },
+            { type: 'L', x, y: 300 },
+          ]),
+        })],
+      });
+    }
+    for (let index = 0; index < 2; index++) {
+      const x = index * 520;
+      shapes.push({
+        shapeType: 4,
+        components: [createComponent({
+          componentType: 0,
+          color: { ...panelPaint.rgba },
+          fillPaintSource: 'explicit',
+          outerPaint: panelPaint,
+          path: createPath([
+            { type: 'M', x, y: 0 },
+            { type: 'L', x: x + 480, y: 0 },
+            { type: 'L', x: x + 480, y: 220 },
+            { type: 'L', x, y: 220 },
+            { type: 'L', x, y: 0 },
+          ], true),
+        })],
+      });
+    }
+
+    const drawing = createDrawing([{
+      type: 'color',
+      shapes,
+      textLabels: [],
+    }, {
+      type: 'line',
+      shapes: [],
+      textLabels: [
+        { text: 'A', fontFamily: 'Arial', fontSize: 16, x: 0, y: 0, scaleX: 1, scaleY: 1 },
+        { text: 'B', fontFamily: 'Arial', fontSize: 16, x: 0, y: 0, scaleX: 1, scaleY: 1 },
+        { text: 'C', fontFamily: 'Arial', fontSize: 16, x: 0, y: 0, scaleX: 1, scaleY: 1 },
+        { text: 'D', fontFamily: 'Arial', fontSize: 16, x: 0, y: 0, scaleX: 1, scaleY: 1 },
+      ],
+    }]);
+
+    expect(__shouldInsetViewportForColorGuideGridDrawingForTests(drawing)).toBe(true);
   });
 
   it('treats non-target inherited legacy fills as support-only geometry in mixed groups', () => {
@@ -2883,6 +2944,25 @@ describe('tvg rendering', () => {
 
     expect(drawing.diagnostics.counts.UNKNOWN_TOP_LEVEL_TAG ?? 0).toBe(0);
     expect(drawing.diagnostics.counts.SCAN_FORWARD_RECOVERY ?? 0).toBe(0);
+  });
+
+  it('frames dense Lipsync color guide grids against the source thumbnail', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/MC_Lipsync_All/Lipsync_MC_HNDL_1-3.tvg')!.async('arraybuffer');
+    const thumbData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/MC_Lipsync_All/.thumbnails/.Lipsync_MC_HNDL_1-3.tvg.png')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    expect(__shouldInsetViewportForColorGuideGridDrawingForTests(drawing)).toBe(true);
+
+    const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    expect(canvas).not.toBeNull();
+    const reference = await loadImageFromArrayBuffer(thumbData);
+    const score = scoreCanvasSources(reference, canvas!, 160);
+    expect(score.rawScore).toBeGreaterThan(98);
+    expect(score.candidateBounds).toEqual(score.referenceBounds);
   });
 
   it('keeps unresolved-only color-13 carriers off the full pre-render path', async () => {
