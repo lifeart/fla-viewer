@@ -394,6 +394,38 @@ describe('tvg rendering', () => {
     expect(samplePixel(canvas, 50, 9).a).toBeGreaterThan(50);
   });
 
+  it('uses the portrait fit for non-dense clipped bitmap atlases', async () => {
+    const tileCanvas = document.createElement('canvas');
+    tileCanvas.width = 10;
+    tileCanvas.height = 20;
+    const tileCtx = tileCanvas.getContext('2d')!;
+    tileCtx.fillStyle = '#33bb66';
+    tileCtx.fillRect(0, 0, 10, 20);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 100;
+    canvas.height = 100;
+    (canvas as any).__bitmapTiles = Array.from({ length: 24 }, (_, index) => ({
+      clipX: (index % 4) * 10,
+      clipY: Math.floor(index / 4) * 20,
+      clipW: 10,
+      clipH: 20,
+      pngData: canvasToPngBytes(tileCanvas),
+    }));
+    (canvas as any).__bitmapState = {
+      bounds: { minX: 0, minY: 0, maxX: 40, maxY: 120 },
+      viewport: 0,
+      centerOnOrigin: false,
+      backgroundComposite: false,
+      diagnostics: { events: [], counts: {} },
+    };
+
+    const loaded = await loadBitmapTiles(canvas, (canvas as any).__bitmapState.diagnostics);
+    expect(loaded).toBe(true);
+    expect(samplePixel(canvas, 50, 8).a).toBeLessThanOrEqual(5);
+    expect(samplePixel(canvas, 50, 9).a).toBeGreaterThan(50);
+  });
+
   it('uses a tighter fit for medium fallback-scanned landscape bitmap atlases', async () => {
     const tileCanvas = document.createElement('canvas');
     tileCanvas.width = 15;

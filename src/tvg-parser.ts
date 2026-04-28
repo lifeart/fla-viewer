@@ -3562,7 +3562,7 @@ function computeBitmapFitPadding(
   aspectRatio: number,
 ): number {
   if (hasClipRects && loadedCount >= 8) {
-    if (!fallbackScanUsed && loadedCount >= 256 && aspectRatio < 1) return 9;
+    if (!fallbackScanUsed && aspectRatio < 1) return 9;
     if (fallbackScanUsed && loadedCount >= 32 && loadedCount < 128 && aspectRatio > 1.35) return 6;
     // Clipped atlases consistently match previews better with a real framing inset,
     // regardless of whether the bitmap bounds came from fallback scanning or exact clips.
