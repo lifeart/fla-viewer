@@ -362,6 +362,38 @@ describe('tvg rendering', () => {
     expectColorNear(samplePixel(canvas, 50, 30), { r: 51, g: 187, b: 102 }, 20);
   });
 
+  it('uses a tighter fit for dense portrait clipped bitmap atlases', async () => {
+    const tileCanvas = document.createElement('canvas');
+    tileCanvas.width = 10;
+    tileCanvas.height = 20;
+    const tileCtx = tileCanvas.getContext('2d')!;
+    tileCtx.fillStyle = '#33bb66';
+    tileCtx.fillRect(0, 0, 10, 20);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 100;
+    canvas.height = 100;
+    (canvas as any).__bitmapTiles = Array.from({ length: 256 }, (_, index) => ({
+      clipX: (index % 16) * 10,
+      clipY: Math.floor(index / 16) * 20,
+      clipW: 10,
+      clipH: 20,
+      pngData: canvasToPngBytes(tileCanvas),
+    }));
+    (canvas as any).__bitmapState = {
+      bounds: { minX: 0, minY: 0, maxX: 160, maxY: 320 },
+      viewport: 0,
+      centerOnOrigin: false,
+      backgroundComposite: false,
+      diagnostics: { events: [], counts: {} },
+    };
+
+    const loaded = await loadBitmapTiles(canvas, (canvas as any).__bitmapState.diagnostics);
+    expect(loaded).toBe(true);
+    expect(samplePixel(canvas, 50, 8).a).toBeLessThanOrEqual(5);
+    expect(samplePixel(canvas, 50, 9).a).toBeGreaterThan(50);
+  });
+
   it('parses top-level TBBM bitmap tiles with TBBH metadata', async () => {
     const tileCanvas = document.createElement('canvas');
     tileCanvas.width = 8;
