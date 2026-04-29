@@ -5892,13 +5892,10 @@ function selectLegacyDrawableChains(
 ): { drawableChains: LegacyChainLink[][]; autoCloseChains: Set<LegacyChainLink[]> } {
   const closedChains = chains.filter(chain => isLegacyChainClosed(chain, tolerance));
   const autoCloseChains = new Set<LegacyChainLink[]>();
-  const drawableChainSet = new Set<LegacyChainLink[]>(
-    chains.length > 1 && closedChains.length > 0 ? closedChains : chains,
-  );
+  const drawableChainSet = new Set<LegacyChainLink[]>(closedChains);
 
   const openChains = chains.filter(chain => !isLegacyChainClosed(chain, tolerance));
-  if (chains.length > 1 && closedChains.length > 0 && openChains.length === 1) {
-    const candidate = openChains[0];
+  for (const candidate of openChains) {
     const paintedFillComps = allChainComps.filter(comp =>
       (comp.componentType === 0 || comp.componentType === 1) && comp.outerPaint !== null,
     );
@@ -5920,15 +5917,29 @@ function selectLegacyDrawableChains(
     const allowDominantDarkCarrierGap = isLargeDarkCarrier
       && candidate.length >= Math.ceil(paintedFillComps.length * 0.7)
       && legacyChainEndpointGap(candidate) <= Math.min(1600, diagonal * 0.3);
+    const allowSmallInheritedCarrierGap = closedChains.length === 0
+      && hasOnlyPaintedFillCarriers
+      && paintedFillComps.length >= 3
+      && paintedFillComps.length <= 12
+      && explicitCount === 1
+      && inheritedCount >= paintedFillComps.length - 1
+      && candidate.length >= Math.ceil(paintedFillComps.length * 0.75)
+      && diagonal > 0
+      && legacyChainEndpointGap(candidate) <= Math.min(32, diagonal * 0.25);
 
-    if (hasOnlyPaintedFillCarriers
+    const allowDominantInheritedCarrierGap = chains.length > 1
+      && closedChains.length > 0
+      && openChains.length === 1
+      && hasOnlyPaintedFillCarriers
       && paintedFillComps.length >= 8
       && explicitCount === 1
       && inheritedCount >= paintedFillComps.length - 1
       && candidate.length >= Math.ceil(paintedFillComps.length * 0.5)
       && candidate.length > largestClosedChain * 2
       && diagonal > 0
-      && (legacyChainEndpointGap(candidate) <= gapLimit || allowDominantDarkCarrierGap)) {
+      && (legacyChainEndpointGap(candidate) <= gapLimit || allowDominantDarkCarrierGap);
+
+    if (allowSmallInheritedCarrierGap || allowDominantInheritedCarrierGap) {
       drawableChainSet.add(candidate);
       autoCloseChains.add(candidate);
     }
@@ -6212,7 +6223,9 @@ function renderLegacyChainedFillComponents(
 ): boolean {
   const { chains, drawableChains, autoCloseChains } = buildLegacyChains(allChainComps, indices, tolerance);
   if (chains.length === 0) return false;
-  let activeDrawableChains = drawableChains;
+  let activeDrawableChains = drawableChains.filter(chain =>
+    isLegacyChainClosed(chain, tolerance) || autoCloseChains.has(chain),
+  );
   let activeAutoCloseChains = autoCloseChains;
   if (activeDrawableChains.length === 0) return false;
 
