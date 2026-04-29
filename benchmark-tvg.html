@@ -24,6 +24,7 @@ const DEFAULT_TOL = 50;
 const DEFAULT_MAX_SHIFT = 8;
 const DEFAULT_BACKGROUND_TOL = 12;
 const DEFAULT_SEARCH_RADIUS = 2;
+const STALE_THUMBNAIL_THRESHOLD_MS = 60 * 60 * 1000;
 
 function findFile(zip, filename) {
   if (zip.file(filename)) return filename;
@@ -49,6 +50,37 @@ async function loadImageFromZip(zip, path) {
     img.onerror = () => resolve(null);
     img.src = URL.createObjectURL(blob);
   });
+}
+
+function zipDateIso(zip, path) {
+  const date = zip.files[path]?.date;
+  return date instanceof Date && Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
+function sourceFreshnessFor(zip, drawingPath, thumbnailPath) {
+  const drawingDate = zip.files[drawingPath]?.date;
+  const thumbnailDate = zip.files[thumbnailPath]?.date;
+  const drawingModified = zipDateIso(zip, drawingPath);
+  const thumbnailModified = zipDateIso(zip, thumbnailPath);
+  const thumbnailAgeMs = drawingDate instanceof Date && thumbnailDate instanceof Date
+    ? drawingDate.getTime() - thumbnailDate.getTime()
+    : 0;
+
+  if (thumbnailAgeMs > STALE_THUMBNAIL_THRESHOLD_MS) {
+    return {
+      sourceFreshness: 'thumbnail-older-than-drawing',
+      drawingModified,
+      thumbnailModified,
+      thumbnailAgeHours: thumbnailAgeMs / (60 * 60 * 1000),
+    };
+  }
+
+  return {
+    sourceFreshness: 'same-or-newer-thumbnail',
+    drawingModified,
+    thumbnailModified,
+    thumbnailAgeHours: thumbnailAgeMs / (60 * 60 * 1000),
+  };
 }
 
 async function runBenchmark() {
@@ -115,6 +147,7 @@ async function runBenchmark() {
       element: elementName,
       viewport,
       bitmapOnly,
+      ...sourceFreshnessFor(zip, drawingPath, thumbPath),
       gateScore: scoreResult.gateScore,
       score: scoreResult.score,
       rawScore: scoreResult.rawScore,
@@ -133,6 +166,10 @@ async function runBenchmark() {
 
   const vector = results.filter((entry) => !entry.bitmapOnly);
   const bitmap = results.filter((entry) => entry.bitmapOnly);
+  const sourceFresh = results.filter((entry) => entry.sourceFreshness === 'same-or-newer-thumbnail');
+  const staleThumbnail = results.filter((entry) => entry.sourceFreshness === 'thumbnail-older-than-drawing');
+  const sourceFreshVector = sourceFresh.filter((entry) => !entry.bitmapOnly);
+  const sourceFreshBitmap = sourceFresh.filter((entry) => entry.bitmapOnly);
   const averageFinal = (items) => items.length ? items.reduce((sum, item) => sum + item.score, 0) / items.length : 0;
   const averageGate = (items) => items.length ? items.reduce((sum, item) => sum + item.gateScore, 0) / items.length : 0;
   const averageRaw = (items) => items.length ? items.reduce((sum, item) => sum + item.rawScore, 0) / items.length : 0;
@@ -186,6 +223,13 @@ async function runBenchmark() {
     rescuedDrawings: rescued.length,
     largeRescueDrawings: largeRescues.length,
     suspiciousRescueDrawings: suspiciousRescues.length,
+    staleThumbnailDrawings: staleThumbnail.length,
+    sourceFreshDrawings: sourceFresh.length,
+    sourceFreshRawVectorAverage: averageRaw(sourceFreshVector),
+    sourceFreshRawBitmapAverage: averageRaw(sourceFreshBitmap),
+    sourceFreshRawOverallAverage: averageRaw(sourceFresh),
+    sourceFreshMinRawVector: sourceFreshVector.reduce((min, item) => Math.min(min, item.rawScore), Infinity),
+    sourceFreshMinRawBitmap: sourceFreshBitmap.reduce((min, item) => Math.min(min, item.rawScore), Infinity),
     finalMinVector: vector.reduce((min, item) => Math.min(min, item.score), Infinity),
     finalMinBitmap: bitmap.reduce((min, item) => Math.min(min, item.score), Infinity),
     minVector: vector.reduce((min, item) => Math.min(min, item.gateScore), Infinity),

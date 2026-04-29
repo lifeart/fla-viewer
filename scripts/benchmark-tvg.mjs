@@ -95,6 +95,9 @@ function printSummary(summary) {
   if (typeof summary.rawOverallAverage === 'number') {
     console.log(`Raw averages: overall=${summary.rawOverallAverage.toFixed(2)} vector=${summary.rawVectorAverage.toFixed(2)} bitmap=${summary.rawBitmapAverage.toFixed(2)}`);
   }
+  if (typeof summary.sourceFreshRawOverallAverage === 'number') {
+    console.log(`Source-fresh raw averages: overall=${summary.sourceFreshRawOverallAverage.toFixed(2)} vector=${summary.sourceFreshRawVectorAverage.toFixed(2)} bitmap=${summary.sourceFreshRawBitmapAverage.toFixed(2)}`);
+  }
   if (typeof summary.normalizedOverallAverage === 'number') {
     console.log(`Focused averages: overall=${summary.normalizedOverallAverage.toFixed(2)} vector=${summary.normalizedVectorAverage.toFixed(2)} bitmap=${summary.normalizedBitmapAverage.toFixed(2)}`);
   }
@@ -103,6 +106,9 @@ function printSummary(summary) {
   }
   if (typeof summary.minRawVector === 'number') {
     console.log(`Raw minima: vector=${summary.minRawVector.toFixed(2)} bitmap=${summary.minRawBitmap.toFixed(2)}`);
+  }
+  if (typeof summary.sourceFreshMinRawVector === 'number') {
+    console.log(`Source-fresh raw minima: vector=${summary.sourceFreshMinRawVector.toFixed(2)} bitmap=${summary.sourceFreshMinRawBitmap.toFixed(2)}`);
   }
   if (typeof summary.minVector === 'number') {
     console.log(`Gate minima: vector=${summary.minVector.toFixed(2)} bitmap=${summary.minBitmap.toFixed(2)}`);
@@ -115,6 +121,9 @@ function printSummary(summary) {
   }
   if (typeof summary.suspiciousRescueDrawings === 'number') {
     console.log(`Suspicious rescues: ${summary.suspiciousRescueDrawings}`);
+  }
+  if (typeof summary.staleThumbnailDrawings === 'number') {
+    console.log(`Stale/context thumbnails: ${summary.staleThumbnailDrawings}`);
   }
 }
 
@@ -155,12 +164,26 @@ async function main() {
       const worst = [...benchmark.results]
         .sort((a, b) => a.gateScore - b.gateScore || a.alignedScore - b.alignedScore || a.rawScore - b.rawScore)
         .slice(0, 20)
-        .map((result) => `${result.drawing} final=${result.score.toFixed(2)} gate=${result.gateScore.toFixed(2)} aligned=${result.alignedScore.toFixed(2)} raw=${result.rawScore.toFixed(2)}`);
+        .map((result) => {
+          const source = result.sourceFreshness === 'thumbnail-older-than-drawing'
+            ? ` staleThumb=${result.thumbnailAgeHours.toFixed(1)}h`
+            : '';
+          return `${result.drawing} final=${result.score.toFixed(2)} gate=${result.gateScore.toFixed(2)} aligned=${result.alignedScore.toFixed(2)} raw=${result.rawScore.toFixed(2)}${source}`;
+        });
+      const actionableWorst = [...benchmark.results]
+        .filter((result) => result.sourceFreshness !== 'thumbnail-older-than-drawing')
+        .sort((a, b) => a.rawScore - b.rawScore || a.alignedScore - b.alignedScore)
+        .slice(0, 12)
+        .map((result) => `${result.drawing} aligned=${result.alignedScore.toFixed(2)} raw=${result.rawScore.toFixed(2)} focused=${result.normalizedScore.toFixed(2)} iou=${result.foregroundIou.toFixed(2)}`);
       console.log(`TVG raw benchmark written to ${outputPath}`);
       printSummary(benchmark.summary);
       if (worst.length > 0) {
         console.log('Worst raw matches:');
         for (const line of worst) console.log(`- ${line}`);
+      }
+      if (actionableWorst.length > 0) {
+        console.log('Worst source-fresh raw matches:');
+        for (const line of actionableWorst) console.log(`- ${line}`);
       }
       return;
     }
