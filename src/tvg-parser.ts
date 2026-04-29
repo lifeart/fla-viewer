@@ -5637,14 +5637,17 @@ function renderContourTree(
     if (paint && shouldPaintContourNode(index)) {
       const compound = new Path2D();
       compound.addPath(contour.path);
-      for (const childIndex of tree[index].children) {
+      const subtractingChildren = tree[index].children.filter(childIndex =>
+        shouldSubtractNestedContour(contour, contours[childIndex]),
+      );
+      for (const childIndex of subtractingChildren) {
         compound.addPath(contours[childIndex].path);
       }
       sources.push({
         kind: 'path',
         path: compound,
         paint,
-        fillRule: tree[index].children.length > 0 ? 'evenodd' : 'nonzero',
+        fillRule: subtractingChildren.length > 0 ? 'evenodd' : 'nonzero',
       });
     }
     for (const childIndex of tree[index].children) {
@@ -5656,6 +5659,24 @@ function renderContourTree(
     .sort((a, b) => contours[a.contourIndex].sourceOrder - contours[b.contourIndex].sourceOrder)
     .forEach(node => renderNode(node.contourIndex));
   return sources;
+}
+
+function shouldSubtractNestedContour(parent: TVGResolvedContour, child: TVGResolvedContour): boolean {
+  const parentPaint = parent.style?.outerPaint ?? null;
+  const childPaint = child.style?.outerPaint ?? null;
+  if (!paintsEqual(parentPaint, childPaint)) return true;
+  if (parent.layerType !== 'line') return true;
+  if (parent.fragmentCount < 20 || parent.supportFragmentCount > 0) return true;
+
+  const parentArea = boundsArea(parent.bbox);
+  const childArea = boundsArea(child.bbox);
+  if (parentArea <= 0 || childArea <= 0) return true;
+
+  // Harmony line-art carriers sometimes encode tiny same-paint nested contours as
+  // detail islands inside a large filled contour. Treating every same-paint child
+  // as an even-odd hole punches visible white seams through dense hair/face fills.
+  const isSmallSamePaintDetail = child.fragmentCount <= 12 && childArea / parentArea <= 0.035;
+  return !isSmallSamePaintDetail;
 }
 
 function shouldAllowThinPencilContourFallback(
