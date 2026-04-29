@@ -113,6 +113,13 @@ Current verification after this patch:
 - `npm run build`: passed.
 - `npm run benchmark:tvg:raw`: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.36/98.28/98.79`; source-fresh raw min `83.91`.
 
+Managed local finding: line-fill source inset
+
+- Reducing the line-fill source inset from `5px` to `4px` globally improved many portrait-ish `color.101` drawings but regressed `color-13` from raw `83.91` to `83.42`.
+- A conditional rule keeps the old `5px` inset for near-square line-fill source bounds and uses `4px` for non-square/portrait line-fill drawings.
+- Targeted improvements with this conditional: `color-1` raw `93.11 -> 94.77`, `color-31` raw `94.51 -> 96.11`, `color-3` raw `94.80 -> 96.42`, `color-19` raw `94.99 -> 96.93`, `color-18` raw `95.07 -> 96.75`.
+- Full raw benchmark with the conditional: source-fresh raw average `98.63`, vector raw average `98.34`, source-fresh raw min remains `83.91`.
+
 ## Scientific Loop
 
 Use this loop for every change:

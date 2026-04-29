@@ -3630,12 +3630,38 @@ function computeAdditionalViewportSourcePadding(
   } else if (shouldInsetViewportForConstructionGuideDrawing(visibleLineShapes)) {
     insetPx = 3.5 * ss;
   } else if (shouldInsetViewportForLineFillDrawing(drawing)) {
-    insetPx = 5 * ss;
+    insetPx = shouldUseSquareLineFillSourceInset(visibleLineShapes) ? 5 * ss : 4 * ss;
   }
 
   if (insetPx <= 0) return 0;
   const availableViewportSize = Math.max(1, canvasViewportSize - insetPx * 2);
   return baseViewportSize * (canvasViewportSize / availableViewportSize - 1);
+}
+
+function shouldUseSquareLineFillSourceInset(
+  visibleLineShapes: Array<{ layer: TVGArtLayer; shape: TVGShape; shapeIndex: number }>,
+): boolean {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const { shape } of visibleLineShapes) {
+    const bounds = computeShapeBounds(shape);
+    if (!bounds) continue;
+    minX = Math.min(minX, bounds.minX);
+    minY = Math.min(minY, bounds.minY);
+    maxX = Math.max(maxX, bounds.maxX);
+    maxY = Math.max(maxY, bounds.maxY);
+  }
+  if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) return false;
+
+  const width = Math.max(0, maxX - minX);
+  const height = Math.max(0, maxY - minY);
+  if (width <= 0 || height <= 0) return false;
+  const aspect = width / height;
+  // Square line-fill thumbnails preserve the older, looser source inset; portrait
+  // drawings match the source thumbnails better with the tighter line-fill inset.
+  return aspect >= 0.99 && aspect <= 1.01;
 }
 
 function shouldInsetViewportForConstructionGuideDrawing(
