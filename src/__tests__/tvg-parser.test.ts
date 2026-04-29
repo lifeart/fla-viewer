@@ -870,6 +870,57 @@ describe('tvg rendering', () => {
     expect(samplePixel(canvas!, 50, 50)).toEqual({ r: 255, g: 255, b: 255, a: 255 });
   });
 
+  it('keeps tiny same-style nested legacy details filled inside dense line carriers', () => {
+    const defaultPaint = { kind: 'solid' as const, rgba: { r: 15, g: 46, b: 48, a: 255 } };
+    const points: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i <= 5; i++) points.push({ x: -40 + i * 16, y: -40 });
+    for (let i = 1; i <= 5; i++) points.push({ x: 40, y: -40 + i * 16 });
+    for (let i = 1; i <= 5; i++) points.push({ x: 40 - i * 16, y: 40 });
+    for (let i = 1; i <= 5; i++) points.push({ x: -40, y: 40 - i * 16 });
+
+    const components = points.slice(0, -1).map((point, index) => createComponent({
+      componentType: 0,
+      color: { ...defaultPaint.rgba },
+      fillPaintSource: 'default',
+      outerPaint: defaultPaint,
+      path: createPath([
+        { type: 'M', x: point.x, y: point.y },
+        { type: 'L', x: points[index + 1].x, y: points[index + 1].y },
+      ]),
+    }));
+    components.push(createComponent({
+      componentType: 0,
+      color: { ...defaultPaint.rgba },
+      fillPaintSource: 'default',
+      outerPaint: defaultPaint,
+      path: createPath([
+        { type: 'M', x: -5, y: -5 },
+        { type: 'L', x: -5, y: 5 },
+        { type: 'L', x: 5, y: 5 },
+        { type: 'L', x: 5, y: -5 },
+        { type: 'L', x: -5, y: -5 },
+      ]),
+    }));
+
+    const drawing = createDrawing([{
+      type: 'line',
+      shapes: [{
+        shapeType: 2,
+        components,
+      }],
+    }]);
+
+    const legacy = __debugBuildLegacyChainsForShape(drawing.layers[0].shapes[0]);
+    expect(legacy.groups).toHaveLength(1);
+    expect(legacy.groups[0].drawableChains).toHaveLength(2);
+    expect(legacy.groups[0].drawableChains[0].componentIndexes).toHaveLength(20);
+    expect(legacy.groups[0].drawableChains[1].parent).toBe(0);
+
+    const canvas = renderTVGToCanvas(drawing, 100, 100, 100);
+    expect(canvas).not.toBeNull();
+    expectColorNear(samplePixel(canvas!, 50, 50), defaultPaint.rgba, 50);
+  });
+
   it('renders default-only fill shapes through the legacy fallback', () => {
     const defaultPaint = { kind: 'solid' as const, rgba: { r: 15, g: 46, b: 48, a: 255 } };
     const drawing = createDrawing([{

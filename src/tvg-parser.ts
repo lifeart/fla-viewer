@@ -4146,6 +4146,17 @@ interface TVGFillBuildResult {
   unresolvedChains: TVGResolvedContour[];
 }
 
+interface NestedFillTopology {
+  parentPaint: TVGPaint | null;
+  childPaint: TVGPaint | null;
+  layerType: TVGArtLayer['type'] | null;
+  parentFragmentCount: number;
+  parentSupportFragmentCount: number;
+  parentBBox: { minX: number; minY: number; maxX: number; maxY: number };
+  childFragmentCount: number;
+  childBBox: { minX: number; minY: number; maxX: number; maxY: number };
+}
+
 interface TVGFillRenderOptions {
   defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null;
   skipClipping: boolean;
@@ -5662,20 +5673,31 @@ function renderContourTree(
 }
 
 function shouldSubtractNestedContour(parent: TVGResolvedContour, child: TVGResolvedContour): boolean {
-  const parentPaint = parent.style?.outerPaint ?? null;
-  const childPaint = child.style?.outerPaint ?? null;
-  if (!paintsEqual(parentPaint, childPaint)) return true;
-  if (parent.layerType !== 'line') return true;
-  if (parent.fragmentCount < 20 || parent.supportFragmentCount > 0) return true;
+  return shouldSubtractNestedFill({
+    parentPaint: parent.style?.outerPaint ?? null,
+    childPaint: child.style?.outerPaint ?? null,
+    layerType: parent.layerType,
+    parentFragmentCount: parent.fragmentCount,
+    parentSupportFragmentCount: parent.supportFragmentCount,
+    parentBBox: parent.bbox,
+    childFragmentCount: child.fragmentCount,
+    childBBox: child.bbox,
+  });
+}
 
-  const parentArea = boundsArea(parent.bbox);
-  const childArea = boundsArea(child.bbox);
+function shouldSubtractNestedFill(topology: NestedFillTopology): boolean {
+  if (!paintsEqual(topology.parentPaint, topology.childPaint)) return true;
+  if (topology.layerType !== 'line') return true;
+  if (topology.parentFragmentCount < 20 || topology.parentSupportFragmentCount > 0) return true;
+
+  const parentArea = boundsArea(topology.parentBBox);
+  const childArea = boundsArea(topology.childBBox);
   if (parentArea <= 0 || childArea <= 0) return true;
 
   // Harmony line-art carriers sometimes encode tiny same-paint nested contours as
   // detail islands inside a large filled contour. Treating every same-paint child
   // as an even-odd hole punches visible white seams through dense hair/face fills.
-  const isSmallSamePaintDetail = child.fragmentCount <= 12 && childArea / parentArea <= 0.035;
+  const isSmallSamePaintDetail = topology.childFragmentCount <= 12 && childArea / parentArea <= 0.035;
   return !isSmallSamePaintDetail;
 }
 
@@ -6241,6 +6263,7 @@ function renderLegacyChainedFillComponents(
   indices: number[],
   tolerance: number,
   alphaScale = 1,
+  options: LegacyFillRenderOptions = {},
 ): boolean {
   const { chains, drawableChains, autoCloseChains } = buildLegacyChains(allChainComps, indices, tolerance);
   if (chains.length === 0) return false;
@@ -6310,7 +6333,10 @@ function renderLegacyChainedFillComponents(
     return true;
   }
 
-  const { parent } = analyzeLegacyDrawableChains(activeDrawableChains, allChainComps);
+  const { chainGeometries, parent } = analyzeLegacyDrawableChains(activeDrawableChains, allChainComps);
+  const chainSupportCounts = activeDrawableChains.map(chain =>
+    chain.filter(info => allChainComps[info.ci].outerPaint === null).length,
+  );
   const childrenByParent = new Map<number, number[]>();
   for (let i = 0; i < parent.length; i++) {
     const siblings = childrenByParent.get(parent[i]) ?? [];
@@ -6336,8 +6362,20 @@ function renderLegacyChainedFillComponents(
     if (shouldPaintChainNode(index)) {
       const path = new Path2D();
       addChainToPath(path, activeDrawableChains[index], true);
-      if (children.length > 0) {
-        for (const child of children) {
+      const subtractingChildren = children.filter(child =>
+        shouldSubtractNestedFill({
+          parentPaint: paint,
+          childPaint: paint,
+          layerType: options.layerType ?? null,
+          parentFragmentCount: activeDrawableChains[index].length,
+          parentSupportFragmentCount: chainSupportCounts[index],
+          parentBBox: chainGeometries[index].bbox,
+          childFragmentCount: activeDrawableChains[child].length,
+          childBBox: chainGeometries[child].bbox,
+        }),
+      );
+      if (subtractingChildren.length > 0) {
+        for (const child of subtractingChildren) {
           addChainToPath(path, activeDrawableChains[child], true);
         }
         fillPathWithPaint(ctx, path, scalePaintAlpha(paint, alphaScale), 'evenodd');
@@ -6366,6 +6404,7 @@ interface LegacyFillRenderOptions {
   allowedPaintKeys?: Set<FillStyleKey>;
   blockedPaintKeys?: Set<FillStyleKey>;
   includeNullPaintFillBoundaries?: boolean;
+  layerType?: TVGArtLayer['type'];
 }
 
 function createSupportOnlyLegacyComponent(comp: TVGComponent): TVGComponent {
@@ -6482,7 +6521,7 @@ function renderLegacyExplicitFillShape(
   const groups = buildLegacyFillRenderGroups(allChainComps, options);
   if (groups.length === 0) return false;
   if (groups.length === 1) {
-    return renderLegacyChainedFillComponents(ctx, allChainComps, groups[0].allChainIndices, tolerance, alphaScale);
+    return renderLegacyChainedFillComponents(ctx, allChainComps, groups[0].allChainIndices, tolerance, alphaScale, options);
   }
 
   let rendered = false;
@@ -6493,6 +6532,7 @@ function renderLegacyExplicitFillShape(
       group.allChainIndices,
       tolerance,
       alphaScale,
+      options,
     ) || rendered;
   }
   return rendered;
@@ -8164,7 +8204,7 @@ function renderLayerPass(
           shape,
           strokeComps,
           lowAlphaGuideFillScale,
-          { supportInheritedCrossPaint: true },
+          { supportInheritedCrossPaint: true, layerType: layer.type },
         )) {
           preRenderedFullShapeIndexes.add(shapeIndex);
         }
@@ -8179,6 +8219,7 @@ function renderLayerPass(
         {
           allowedPaintKeys: new Set([preRenderPlan.preRenderPaintKey]),
           includeNullPaintFillBoundaries: false,
+          layerType: layer.type,
         },
       )) {
         preRenderedLegacyPaintKeys.set(shapeIndex, new Set([preRenderPlan.preRenderPaintKey]));
@@ -8403,12 +8444,12 @@ function renderLayerPass(
         || shouldPreferLegacyInheritedOnlyShape
         || shouldPreferLegacyUnresolvedFillOnlyShape;
       const preRenderedPaintKeys = preRenderedLegacyPaintKeys.get(shapeIndex);
-      const legacyRenderOptions = preRenderPlan.mode === 'legacy-group'
-        && preRenderedPaintKeys
-        ? {
-            blockedPaintKeys: preRenderedPaintKeys,
-          }
-        : {};
+      const legacyRenderOptions: LegacyFillRenderOptions = {
+        layerType: layer.type,
+        ...(preRenderPlan.mode === 'legacy-group' && preRenderedPaintKeys
+          ? { blockedPaintKeys: preRenderedPaintKeys }
+          : {}),
+      };
       const legacyStrokeComps = strokeComps.length === 0
         ? collectSameLayerSupportBoundaryStrokes(layer, shape, shapeIndex)
         : strokeComps;
