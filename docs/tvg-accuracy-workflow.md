@@ -10,12 +10,12 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 ## Current State
 
-- Latest verified renderer work: gated dense line-fill ink-density correction.
+- Latest verified renderer work: gated dense line-fill ink-density correction plus embedded dark legacy-chain suppression.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark: overall about `98.45`, vector about `98.36`, bitmap about `98.94`.
+- Current raw benchmark: overall about `98.46`, vector about `98.36`, bitmap about `98.94`.
 - Source-fresh raw average: overall about `98.70`, vector about `98.60`, bitmap about `98.94`.
 - Worst source-fresh vector case: `color.101/color-13`.
-- Worst case scores after dense line-fill ink-density correction: raw `84.328125`, aligned `91.55859375`, normalized/focused about `75.48`, foreground IoU about `83.04`.
+- Worst case scores after embedded dark legacy-chain suppression: raw `84.81640625`, aligned `91.68359375`, normalized/focused about `75.83`, foreground IoU about `83.75`.
 - Worst case bounds: reference `{minX:8,minY:17,maxX:149,maxY:142}`, candidate `{minX:9,minY:9,maxX:150,maxY:143}`.
 - The app fallback path can score 100 by using embedded thumbnails, but raw vector rendering is the target.
 - Local ablation tooling supports raw/aligned sorting, `--skip-only`, grouped component removal via `--group`/`--remove-components-as-group`, and opt-in verbose component metadata via `--details`.
@@ -109,10 +109,10 @@ Managed finding from `Bohr`:
 
 Current verification after this patch:
 
-- `npm test -- src/__tests__/tvg-parser.test.ts`: 81 passed.
+- `npm test -- src/__tests__/tvg-parser.test.ts`: 82 passed.
 - `npm test -- src/__tests__/tvg-benchmark.test.ts`: 17 passed.
 - `npm run build`: passed.
-- `npm run benchmark:tvg:raw`: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.45/98.36/98.94`; source-fresh raw averages overall/vector/bitmap `98.70/98.60/98.94`; source-fresh raw min `84.33`.
+- `npm run benchmark:tvg:raw`: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.46/98.36/98.94`; source-fresh raw averages overall/vector/bitmap `98.70/98.60/98.94`; source-fresh raw min `84.82`.
 
 Managed local finding: line-fill source inset
 
@@ -132,8 +132,10 @@ Managed local finding: `color.101/color-13` shape21 component probes
 
 - Shape21 explicit contour building still resolves `0` contours and leaves `2` unresolved support-dominated chains, so legacy rendering remains active.
 - Relaxing support-dominated auto-close for long chains made `color-13` raw drop to `76.62109375` and broke parser tests that intentionally guard against unsafe bottom-fill behavior. Do not revisit this relaxation without a new source-format signal.
-- Single component removals from shape21 can improve raw slightly, especially components `77..84`, but they remove visible eye/detail structure and reduce or fail to improve aligned/normalized topology. No deletion/suppression rule was accepted.
-- Group removing dark components `75..84` from shape21 produced raw `83.91015625`, aligned `91.3828125`, and worse bounds, so grouped deletion is not a sustainable renderer rule.
+- Single component removals from shape21 can improve raw slightly, especially components `77..84`, but they are misleading because they can break chain rendering while also deleting support geometry.
+- Group removing dark components `75..84` from shape21 produced raw `83.91015625`, aligned `91.3828125`, and worse bounds, so grouped deletion is rejected.
+- Accepted rule: suppress rendering of an embedded dark legacy paint group, without deleting its source components, only when strict topology gates all match: line layer, no strokes, dense mixed-paint fill carriers, no resolved explicit contours, a large non-dark paint group, an embedded dark group of `8..16` components with one explicit seed and inherited continuation, exactly one closed drawable legacy chain, and chain bbox area no more than `10%` of the shape bbox area.
+- This matched the `solid:15,46,48,255` chain in shape21 and improved `color-13` raw `84.328125 -> 84.81640625`, aligned `91.55859375 -> 91.68359375`, normalized `75.4779 -> 75.8329`, and IoU `83.04 -> 83.75`.
 
 Managed local finding: next source-fresh cases after the current baseline
 
@@ -148,6 +150,13 @@ Managed local finding: dense line-fill ink density
 - Applying that correction unconditionally across the 35 lowest source-fresh vector cases is rejected: 20 improved, 15 regressed, with meaningful regressions on non-dense-line-fill drawings such as `Number_Body/Number_Body-2` and `B_Shorts/B_Shorts-1`.
 - Accepted gated rule: apply the correction only when `shouldInsetViewportForLineFillDrawing()` is true, and only for normal full-background renders. Do not apply in layer-filter, compositor/origin-centered, skip-clipping, or matte modes.
 - Full benchmark after the gated rule: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.45/98.36/98.94`; source-fresh raw averages overall/vector/bitmap `98.70/98.60/98.94`; source-fresh raw min `84.33`.
+
+Managed local finding: embedded dark legacy-chain suppression
+
+- `color.101/color-13` shape21 has a small closed dark chain `solid:15,46,48,255` embedded inside a much larger green line-fill shape. Rendering it as an independent legacy paint group adds a lower face/neck protrusion that the source-fresh thumbnail mostly lacks.
+- Removing the chain's source components is rejected because it changes geometry/support and can worsen bounds. Blocking only the dark legacy paint group preserves the source components for analysis while avoiding the extra fill.
+- Accepted rule is deliberately structural, not sample-index based: it looks for dense unresolved mixed-paint line fills with one large non-dark group and a small single-chain embedded dark group with one explicit seed plus inherited continuation.
+- Full benchmark after the rule: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.46/98.36/98.94`; source-fresh raw averages overall/vector/bitmap `98.70/98.60/98.94`; source-fresh raw min `84.82`.
 
 ## Scientific Loop
 

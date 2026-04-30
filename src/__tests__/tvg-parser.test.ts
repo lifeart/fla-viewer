@@ -3112,7 +3112,8 @@ describe('tvg rendering', () => {
     const reference = await loadImageFromArrayBuffer(thumbData);
     const score = scoreCanvasSources(reference, canvas!, 160);
 
-    expect(score.rawScore).toBeGreaterThan(83.2);
+    expect(score.rawScore).toBeGreaterThan(84.6);
+    expect(score.alignedScore).toBeGreaterThan(91.5);
     expect(score.candidateBounds?.maxY).toBeLessThanOrEqual(143);
   });
 

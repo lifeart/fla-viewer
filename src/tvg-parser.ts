@@ -5140,6 +5140,81 @@ function shouldSuppressSeedCarrierFillShape(
   });
 }
 
+const EMBEDDED_DARK_LEGACY_PAINT_THRESHOLD = 64;
+
+function collectEmbeddedDarkLegacyPaintKeysToSuppress(
+  layer: TVGArtLayer,
+  shape: TVGShape,
+  strokeComps: TVGComponent[],
+  explicitBuild: { contours: TVGResolvedContour[]; unresolvedChains: TVGResolvedContour[] },
+  fillCarrierCount: number,
+  fillPaintKeys: Set<FillStyleKey>,
+): Set<FillStyleKey> | null {
+  if (layer.type !== 'line' || strokeComps.length > 0) return null;
+  if (fillCarrierCount < 50 || fillPaintKeys.size < 2) return null;
+  if (explicitBuild.contours.length > 0 || explicitBuild.unresolvedChains.length === 0) return null;
+
+  const shapeBounds = computeShapeBounds(shape);
+  if (!shapeBounds) return null;
+  const shapeArea = (shapeBounds.maxX - shapeBounds.minX) * (shapeBounds.maxY - shapeBounds.minY);
+  if (shapeArea <= 0) return null;
+
+  const chainableFillComps = expandLegacyChainComponents(shape.components.filter(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && comp.path.segments.length > 1
+    && !isDegenerate(comp.path)
+    && (!comp.color || comp.color.a > 0),
+  ));
+  const paintedFillComps = chainableFillComps.filter(comp => comp.outerPaint !== null);
+  const supportFillComps = chainableFillComps.filter(comp => comp.outerPaint === null);
+  const allChainComps = [...paintedFillComps, ...supportFillComps];
+  const componentsByKey = new Map<FillStyleKey, TVGComponent[]>();
+  let largestNonDarkGroupSize = 0;
+  for (const comp of paintedFillComps) {
+    const key = paintKeyForComponent(comp);
+    if (!key || !comp.outerPaint) continue;
+    const group = componentsByKey.get(key) ?? [];
+    group.push(comp);
+    componentsByKey.set(key, group);
+    if (!isDarkSolidPaint(comp.outerPaint, EMBEDDED_DARK_LEGACY_PAINT_THRESHOLD)) {
+      largestNonDarkGroupSize = Math.max(largestNonDarkGroupSize, group.length);
+    }
+  }
+  if (largestNonDarkGroupSize < 40) return null;
+
+  const suppressed = new Set<FillStyleKey>();
+  const groups = buildLegacyFillRenderGroups(allChainComps, {
+    includeNullPaintFillBoundaries: true,
+  });
+
+  for (const [key, components] of componentsByKey) {
+    const paint = components.find(comp => comp.outerPaint)?.outerPaint ?? null;
+    if (!isDarkSolidPaint(paint, EMBEDDED_DARK_LEGACY_PAINT_THRESHOLD)) continue;
+    if (components.length < 8 || components.length > 16) continue;
+
+    const explicitCount = components.filter(comp => hasExplicitFillStyle(comp)).length;
+    const inheritedCount = components.filter(comp => comp.fillPaintSource === 'inherited').length;
+    if (explicitCount !== 1 || inheritedCount < components.length - 1) continue;
+
+    const group = groups.find(candidate => candidate.key === key);
+    if (!group) continue;
+    const { drawableChains } = buildLegacyChains(allChainComps, group.allChainIndices, 2.0);
+    if (drawableChains.length !== 1 || !isLegacyChainClosed(drawableChains[0], 2.0)) continue;
+
+    const chainComponents = new Set(drawableChains[0].map(link => allChainComps[link.ci]));
+    if (chainComponents.size !== components.length || !components.every(comp => chainComponents.has(comp))) continue;
+
+    const { chainGeometries } = analyzeLegacyDrawableChains(drawableChains, allChainComps);
+    const chainArea = chainGeometries[0]?.area ?? Infinity;
+    if (chainArea <= 0 || chainArea > shapeArea * 0.1) continue;
+
+    suppressed.add(key);
+  }
+
+  return suppressed.size > 0 ? suppressed : null;
+}
+
 function preRenderLargeLineFillCarrierPriority(
   layer: TVGArtLayer,
   shape: TVGShape,
@@ -8516,11 +8591,21 @@ function renderLayerPass(
         || shouldPreferLegacyInheritedOnlyShape
         || shouldPreferLegacyUnresolvedFillOnlyShape;
       const preRenderedPaintKeys = preRenderedLegacyPaintKeys.get(shapeIndex);
+      const embeddedDarkPaintKeys = collectEmbeddedDarkLegacyPaintKeysToSuppress(
+        layer,
+        shape,
+        strokeComps,
+        explicitBuild,
+        fillCarrierCount,
+        fillPaintKeys,
+      );
+      const blockedPaintKeys = new Set<FillStyleKey>([
+        ...(preRenderPlan.mode === 'legacy-group' && preRenderedPaintKeys ? preRenderedPaintKeys : []),
+        ...(embeddedDarkPaintKeys ?? []),
+      ]);
       const legacyRenderOptions: LegacyFillRenderOptions = {
         layerType: layer.type,
-        ...(preRenderPlan.mode === 'legacy-group' && preRenderedPaintKeys
-          ? { blockedPaintKeys: preRenderedPaintKeys }
-          : {}),
+        ...(blockedPaintKeys.size > 0 ? { blockedPaintKeys } : {}),
       };
       const legacyStrokeComps = strokeComps.length === 0
         ? collectSameLayerSupportBoundaryStrokes(layer, shape, shapeIndex)
