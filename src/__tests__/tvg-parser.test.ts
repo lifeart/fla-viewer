@@ -5,6 +5,7 @@ import { scoreCanvasSources } from '../tvg-benchmark';
 import type { TVGArtLayer, TVGComponent, TVGDrawing, TVGPath } from '../tvg-parser';
 import {
   __borrowMissingPencilPathsForTests,
+  __computeBitmapFitPaddingForTests,
   __decodeTipTypeForTests,
   __debugBuildContoursForShape,
   __debugBuildLegacyChainsForShape,
@@ -361,6 +362,13 @@ describe('tvg rendering', () => {
     expect(samplePixel(canvas, 50, 10).a).toBeLessThanOrEqual(5);
     expectColorNear(samplePixel(canvas, 10, 50), { r: 51, g: 187, b: 102 }, 20);
     expectColorNear(samplePixel(canvas, 50, 30), { r: 51, g: 187, b: 102 }, 20);
+  });
+
+  it('uses a half-pixel fit inset for moderately wide clipped bitmap atlases', () => {
+    expect(__computeBitmapFitPaddingForTests(false, true, 8, 1.47)).toBe(7.5);
+    expect(__computeBitmapFitPaddingForTests(false, true, 8, 2.01)).toBe(7);
+    expect(__computeBitmapFitPaddingForTests(true, true, 98, 1.5)).toBe(6);
+    expect(__computeBitmapFitPaddingForTests(false, true, 8, 0.75)).toBe(9);
   });
 
   it('uses a tighter fit for dense portrait clipped bitmap atlases', async () => {

@@ -108,10 +108,10 @@ Managed finding from `Bohr`:
 
 Current verification after this patch:
 
-- `npm test -- src/__tests__/tvg-parser.test.ts`: 80 passed.
+- `npm test -- src/__tests__/tvg-parser.test.ts`: 81 passed.
 - `npm test -- src/__tests__/tvg-benchmark.test.ts`: 17 passed.
 - `npm run build`: passed.
-- `npm run benchmark:tvg:raw`: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.36/98.28/98.79`; source-fresh raw min `83.91`.
+- `npm run benchmark:tvg:raw`: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.44/98.34/98.94`; source-fresh raw average `98.68`; source-fresh raw min `83.91`.
 
 Managed local finding: line-fill source inset
 
@@ -119,6 +119,13 @@ Managed local finding: line-fill source inset
 - A conditional rule keeps the old `5px` inset for near-square line-fill source bounds and uses `4px` for non-square/portrait line-fill drawings.
 - Targeted improvements with this conditional: `color-1` raw `93.11 -> 94.77`, `color-31` raw `94.51 -> 96.11`, `color-3` raw `94.80 -> 96.42`, `color-19` raw `94.99 -> 96.93`, `color-18` raw `95.07 -> 96.75`.
 - Full raw benchmark with the conditional: source-fresh raw average `98.63`, vector raw average `98.34`, source-fresh raw min remains `83.91`.
+
+Managed local finding: bitmap atlas aspect-band fit
+
+- `4bf5/4bf5-1` is bitmap-only: no vector layers, eight clipped tiles, clip aspect about `1.47`, cell aspect `2.0`, baseline raw `96.98`.
+- A fractional `7.5px` fit inset improves `4bf5/4bf5-1` raw to `97.89`, but applying it to all landscape clipped atlases regresses wider bitmap atlases: `3255/3255-1` and `7f81/7f81-1`.
+- Accepted narrow rule: use `7.5px` only for non-fallback clipped atlases with at least eight tiles and aspect in `(1.35, 1.6)`. Keep wider clipped atlases on `7px`.
+- Recheck cases after the conditional rule: `3255/3255-1` raw `97.07`, `7f81/7f81-1` raw `97.18`, `Drawing_2/Drawing_2-1` raw `97.28`, `color.101/color-13` raw `83.91`, `color.101/color-21` raw `95.39`.
 
 ## Scientific Loop
 

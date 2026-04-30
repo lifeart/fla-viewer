@@ -3564,6 +3564,7 @@ function computeBitmapFitPadding(
   if (hasClipRects && loadedCount >= 8) {
     if (!fallbackScanUsed && aspectRatio < 1) return 9;
     if (fallbackScanUsed && loadedCount >= 32 && loadedCount < 128 && aspectRatio > 1.35) return 6;
+    if (!fallbackScanUsed && aspectRatio > 1.35 && aspectRatio < 1.6) return 7.5;
     // Clipped atlases consistently match previews better with a real framing inset,
     // regardless of whether the bitmap bounds came from fallback scanning or exact clips.
     return aspectRatio <= 1.35 ? 8 : 7;
@@ -3574,6 +3575,15 @@ function computeBitmapFitPadding(
   // need an extra pixel of frame to avoid a residual 1px drift against the preview.
   if (hasClipRects) return aspectRatio <= 1.35 ? 8 : 7;
   return 4;
+}
+
+export function __computeBitmapFitPaddingForTests(
+  fallbackScanUsed: boolean,
+  hasClipRects: boolean,
+  loadedCount: number,
+  aspectRatio: number,
+): number {
+  return computeBitmapFitPadding(fallbackScanUsed, hasClipRects, loadedCount, aspectRatio);
 }
 
 function shouldTrimSparsePortraitFallbackAtlas(
