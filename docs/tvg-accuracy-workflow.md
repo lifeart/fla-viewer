@@ -10,12 +10,12 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 ## Current State
 
-- Latest verified renderer work: gated dense line-fill ink-density correction plus embedded dark legacy-chain suppression.
+- Latest verified renderer work: gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, and a narrow same-paint detail threshold expansion.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
 - Current raw benchmark: overall about `98.46`, vector about `98.36`, bitmap about `98.94`.
-- Source-fresh raw average: overall about `98.70`, vector about `98.60`, bitmap about `98.94`.
+- Source-fresh raw average: overall about `98.71`, vector about `98.61`, bitmap about `98.94`.
 - Worst source-fresh vector case: `color.101/color-13`.
-- Worst case scores after embedded dark legacy-chain suppression: raw `84.81640625`, aligned `91.68359375`, normalized/focused about `75.83`, foreground IoU about `83.75`.
+- Worst case scores after the same-paint detail threshold expansion: raw `85.2265625`, aligned `91.765625`, normalized/focused about `76.46`, foreground IoU about `84.58`.
 - Worst case bounds: reference `{minX:8,minY:17,maxX:149,maxY:142}`, candidate `{minX:9,minY:9,maxX:150,maxY:143}`.
 - The app fallback path can score 100 by using embedded thumbnails, but raw vector rendering is the target.
 - Local ablation tooling supports raw/aligned sorting, `--skip-only`, grouped component removal via `--group`/`--remove-components-as-group`, and opt-in verbose component metadata via `--details`.
@@ -104,7 +104,7 @@ Managed finding from `Bohr`:
 
 - In-memory patch applying the resolved same-paint small-detail policy to legacy child chains changed `color.101/color-13` raw from `83.6953125` to `83.9140625`.
 - The same patch reduced aligned score from `91.77734375` to `91.54296875` and normalized score from about `75.53` to about `75.03`; bounds and IoU were unchanged.
-- Topology: shape21 green parent chain has 40 components; small same-paint children by current threshold are chains `2`, `3`, `4`, `6`, and `7`; larger child chains `1` and `5` remain holes.
+- Topology before the threshold expansion: shape21 green parent chain has 40 components; small same-paint children by the original `0.035` area-ratio threshold were chains `2`, `3`, `4`, `6`, and `7`; larger child chains `1` and `5` remained holes.
 - Manager decision: implemented as a shared topology predicate used by resolved contour trees and legacy chains, guarded by line-layer dense-parent topology. Targeted parser tests, benchmark tests, build, and raw benchmark pass. This is still not the root-cause fix and should not distract from shape19, which is the top-bound overfill source.
 
 Current verification after this patch:
@@ -112,7 +112,7 @@ Current verification after this patch:
 - `npm test -- src/__tests__/tvg-parser.test.ts`: 82 passed.
 - `npm test -- src/__tests__/tvg-benchmark.test.ts`: 17 passed.
 - `npm run build`: passed.
-- `npm run benchmark:tvg:raw`: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.46/98.36/98.94`; source-fresh raw averages overall/vector/bitmap `98.70/98.60/98.94`; source-fresh raw min `84.82`.
+- `npm run benchmark:tvg:raw`: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.46/98.36/98.94`; source-fresh raw averages overall/vector/bitmap `98.71/98.61/98.94`; source-fresh raw min `85.23`.
 
 Managed local finding: line-fill source inset
 
@@ -136,6 +136,8 @@ Managed local finding: `color.101/color-13` shape21 component probes
 - Group removing dark components `75..84` from shape21 produced raw `83.91015625`, aligned `91.3828125`, and worse bounds, so grouped deletion is rejected.
 - Accepted rule: suppress rendering of an embedded dark legacy paint group, without deleting its source components, only when strict topology gates all match: line layer, no strokes, dense mixed-paint fill carriers, no resolved explicit contours, a large non-dark paint group, an embedded dark group of `8..16` components with one explicit seed and inherited continuation, exactly one closed drawable legacy chain, and chain bbox area no more than `10%` of the shape bbox area.
 - This matched the `solid:15,46,48,255` chain in shape21 and improved `color-13` raw `84.328125 -> 84.81640625`, aligned `91.55859375 -> 91.68359375`, normalized `75.4779 -> 75.8329`, and IoU `83.04 -> 83.75`.
+- Accepted follow-up rule: increase the same-paint detail child area-ratio cutoff from `0.035` to `0.0375`, with the existing line-layer, same-paint, parent-fragment, and child-fragment gates unchanged. This admits shape21 green child chain `40..49` as an internal detail island while still leaving the much larger child chain `57..72` as a hole.
+- The threshold expansion improved `color-13` raw `84.81640625 -> 85.2265625`, aligned `91.68359375 -> 91.765625`, normalized `75.8329 -> 76.4628`, and IoU `83.75 -> 84.58`.
 
 Managed local finding: next source-fresh cases after the current baseline
 
@@ -157,6 +159,13 @@ Managed local finding: embedded dark legacy-chain suppression
 - Removing the chain's source components is rejected because it changes geometry/support and can worsen bounds. Blocking only the dark legacy paint group preserves the source components for analysis while avoiding the extra fill.
 - Accepted rule is deliberately structural, not sample-index based: it looks for dense unresolved mixed-paint line fills with one large non-dark group and a small single-chain embedded dark group with one explicit seed plus inherited continuation.
 - Full benchmark after the rule: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.46/98.36/98.94`; source-fresh raw averages overall/vector/bitmap `98.70/98.60/98.94`; source-fresh raw min `84.82`.
+
+Managed local finding: same-paint detail threshold expansion
+
+- Current evidence shows one useful same-paint legacy child hole just outside the old threshold: shape21 green child chain `40..49` has `10` components and bbox-area ratio about `3.66%`, while the old cutoff was `3.5%`.
+- Breaking any component in chain `40..49` produced the same score delta, indicating the renderer was over-subtracting the child as a hole. Group deletion is not the desired rule; the sustainable behavior is to classify this same-paint child as an internal detail island.
+- Raising only the area-ratio cutoff to `3.75%` keeps the fragment-count cap at `12` and does not admit the larger green child chain `57..72`, whose raw-only improvement came with aligned/normalized regression.
+- Full benchmark after the threshold expansion: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.46/98.36/98.94`; source-fresh raw averages overall/vector/bitmap `98.71/98.61/98.94`; source-fresh raw min `85.23`.
 
 ## Scientific Loop
 

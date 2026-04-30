@@ -4243,6 +4243,9 @@ interface LocalFillPaintSource {
   fillRule?: CanvasFillRule;
 }
 
+const SAME_PAINT_DETAIL_MAX_FRAGMENTS = 12;
+const SAME_PAINT_DETAIL_MAX_AREA_RATIO = 0.0375;
+
 const UTILITY_NAMES = new Set([
   'line', 'mask', 'invis', 'handles', 'invisible', 'shadow',
   'controller', 'eye_lid_ctrl', 'null', 'transparent',
@@ -5844,7 +5847,8 @@ function shouldSubtractNestedFill(topology: NestedFillTopology): boolean {
   // Harmony line-art carriers sometimes encode tiny same-paint nested contours as
   // detail islands inside a large filled contour. Treating every same-paint child
   // as an even-odd hole punches visible white seams through dense hair/face fills.
-  const isSmallSamePaintDetail = topology.childFragmentCount <= 12 && childArea / parentArea <= 0.035;
+  const isSmallSamePaintDetail = topology.childFragmentCount <= SAME_PAINT_DETAIL_MAX_FRAGMENTS
+    && childArea / parentArea <= SAME_PAINT_DETAIL_MAX_AREA_RATIO;
   return !isSmallSamePaintDetail;
 }
 
