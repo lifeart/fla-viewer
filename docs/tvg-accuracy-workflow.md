@@ -10,14 +10,15 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 ## Current State
 
-- Latest committed renderer work: `5593485 Handle dense TVG same-paint contour details`.
+- Latest committed renderer work: `06e6bb3 Tune bitmap atlas fit for moderate landscape TVGs`.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark: overall about `98.36`, vector about `98.28`, bitmap about `98.79`.
-- Source-fresh raw averages: overall about `98.54`, vector about `98.43`, bitmap about `98.79`.
+- Current raw benchmark: overall about `98.44`, vector about `98.34`, bitmap about `98.94`.
+- Source-fresh raw average: overall about `98.68`.
 - Worst source-fresh vector case: `color.101/color-13`.
 - Worst case scores after shared legacy nested-fill predicate: raw `83.9140625`, aligned `91.54296875`, normalized/focused about `75.03`, foreground IoU about `83.02`.
 - Worst case bounds: reference `{minX:8,minY:17,maxX:149,maxY:142}`, candidate `{minX:9,minY:9,maxX:150,maxY:143}`.
 - The app fallback path can score 100 by using embedded thumbnails, but raw vector rendering is the target.
+- Local tooling work after this commit: ablation scripts now support raw/aligned sorting, `--skip-only`, grouped component removal via `--group`/`--remove-components-as-group`, and opt-in verbose component metadata via `--details`.
 
 ## Known Findings
 
@@ -79,7 +80,7 @@ Managed finding from `Euclid`:
 Managed finding from `Peirce`:
 
 - The next source-fresh failures after `color-13` are a different class: `color-1`, `color-31`, `color-3`, `color-19`, and `color-18` have high aligned scores and good masks, with candidate line art too light/thin at edges.
-- Scores checked: `color-1` raw `93.1133`, `color-31` raw `94.5078`, `color-3` raw `94.8008`, `color-19` raw `94.9883`, `color-18` raw `95.0664`.
+- Scores checked before the line-fill inset patch: `color-1` raw `93.1133`, `color-31` raw `94.5078`, `color-3` raw `94.8008`, `color-19` raw `94.9883`, `color-18` raw `95.0664`.
 - For exported `color-1`, `color-31`, and `color-3`, reference-only foreground pixels outnumber candidate-only pixels by hundreds, while candidate overlap RGB is about `+48..+56` brighter than reference.
 - Supersample `3` or `4` improves raw by roughly `+0.4..+0.85` on these cases, but can hurt aligned/normalized, so globally raising supersample is not a sufficient rule.
 - Manager decision: investigate a gated near-black line-layer coverage/downsample correction. Do not apply a global antialias or thickening change.
@@ -94,9 +95,9 @@ Managed finding from `Peirce`:
 - Green group: several closed drawable child chains inside one large parent.
 - Near-black group: one closed chain.
 
-Open question:
+Resolved and open questions:
 
-- Whether same-paint nested legacy chains should use the same hole/detail policy as resolved contours.
+- Same-paint nested legacy chains now use the shared small-detail policy used by resolved contours, guarded by dense line-layer topology.
 - Whether mixed-paint support fragments should help resolve shape 21 into contour topology rather than relying on legacy paint groups.
 
 Managed finding from `Bohr`:
@@ -126,6 +127,19 @@ Managed local finding: bitmap atlas aspect-band fit
 - A fractional `7.5px` fit inset improves `4bf5/4bf5-1` raw to `97.89`, but applying it to all landscape clipped atlases regresses wider bitmap atlases: `3255/3255-1` and `7f81/7f81-1`.
 - Accepted narrow rule: use `7.5px` only for non-fallback clipped atlases with at least eight tiles and aspect in `(1.35, 1.6)`. Keep wider clipped atlases on `7px`.
 - Recheck cases after the conditional rule: `3255/3255-1` raw `97.07`, `7f81/7f81-1` raw `97.18`, `Drawing_2/Drawing_2-1` raw `97.28`, `color.101/color-13` raw `83.91`, `color.101/color-21` raw `95.39`.
+
+Managed local finding: `color.101/color-13` shape21 component probes
+
+- Shape21 explicit contour building still resolves `0` contours and leaves `2` unresolved support-dominated chains, so legacy rendering remains active.
+- Relaxing support-dominated auto-close for long chains made `color-13` raw drop to `76.62109375` and broke parser tests that intentionally guard against unsafe bottom-fill behavior. Do not revisit this relaxation without a new source-format signal.
+- Single component removals from shape21 can improve raw slightly, especially components `77..84`, but they remove visible eye/detail structure and reduce or fail to improve aligned/normalized topology. No deletion/suppression rule was accepted.
+- Group removing dark components `75..84` from shape21 produced raw `83.91015625`, aligned `91.3828125`, and worse bounds, so grouped deletion is not a sustainable renderer rule.
+
+Managed local finding: next source-fresh cases after the current baseline
+
+- `color.101/color-1` baseline after line-fill inset work: raw `94.765625`, aligned `97.70703125`, normalized `94.69467832910978`, IoU `99.01904684051337`, bounds match exactly.
+- `color.101/color-21` baseline: raw `95.39453125`, aligned `98.69140625`, normalized `94.46308724832215`, IoU `97.33407904548844`.
+- Shape/component ablations for `color-1` and `color-21` showed no obvious single deletion or isolated topology fix. Treat these as distributed coverage/antialias/edge-shape problems unless a better source-format signal appears.
 
 ## Scientific Loop
 
@@ -157,6 +171,9 @@ node scripts/rank-tvg-shapes-by-diff.mjs color.101 color-13 line 20
 node scripts/rank-tvg-shapes-by-recovery.mjs color.101 color-13 line 20
 node scripts/inspect-tvg-case.mjs color.101 color-13 --summary
 node scripts/scan-tvg-shapes.mjs color.101 color-13 line
+node scripts/ablate-tvg-shapes.mjs color.101 color-13 --layer line --sort raw-desc --skip-only
+node scripts/ablate-tvg-components.mjs color.101 color-13 --layer line --shape 21 --sort raw-desc --skip-only
+node scripts/ablate-tvg-components.mjs color.101 color-13 --layer line --shape 21 --components 75,76,77,78,79,80,81,82,83,84 --group
 npm test -- src/__tests__/tvg-parser.test.ts
 npm test -- src/__tests__/tvg-benchmark.test.ts
 npm run build
@@ -180,18 +197,20 @@ Image exports to compare manually:
 - Avoid long benchmark sweeps inside subagents; reserve `npm run benchmark:tvg:raw` for local verification after a candidate patch.
 - Do not paste large image data or long JSON into chat. Save images under `/tmp` and report paths plus score deltas.
 - Prefer existing scripts over ad hoc browser probes. If an ad hoc probe becomes useful twice, convert it into a small script.
+- Keep ablation output compact by default; pass `--details` only when component metadata is needed.
 - Reuse or close terminal sessions. Kill stuck Vitest/Puppeteer processes before launching more probes.
 - Keep the working tree clean between experiments. Revert failed experiments immediately with `apply_patch`.
 
 ## Next Hypotheses
 
-1. Same-paint nested contour classification needs a topology rule richer than child area ratio. Candidate signals: signed area direction, child depth, bbox vertical position inside parent, child fragment count, and whether child is a long closed loop versus a tiny island.
-2. Shape 21 legacy same-paint children may need the same hole/detail policy used by resolved contour trees.
+1. The next broad improvement candidate is Toon Boom-compatible coverage for opaque near-black line-layer edges. Test with post-processing probes before changing renderer code.
+2. Same-paint nested contour classification may still need a topology rule richer than child area ratio. Candidate signals: signed area direction, child depth, bbox vertical position inside parent, child fragment count, and whether child is a long closed loop versus a tiny island.
 3. Shape19 parent contour/component pruning is rejected for now: the contour is explicit, closed, zero-gap, and non-support. Revisit only if a new source-format field explains hidden/alternate contour state.
 4. Hidden/source-context state for `color-13` is rejected for now: no actionable metadata or unparsed shape-side field was found.
 5. Fixed-transform per-shape probes should be used before changing global viewport/padding.
 6. If visual evidence suggests the thumbnail was produced from a stale source, classify it as stale only with file timestamp and alternate-source evidence.
-7. The next broad improvement candidate is Toon Boom-compatible coverage for opaque near-black line-layer edges. Test with post-processing probes before changing renderer code.
+7. Shape21 mixed-paint support fragments may need to help resolve contour topology rather than falling back to legacy paint groups.
+8. Prefer grouped ablation before code changes when a candidate fix affects a cluster of components; single-component wins are often misleading for nested line art.
 
 ## Subagent Template
 

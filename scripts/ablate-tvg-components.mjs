@@ -6,6 +6,9 @@ let shapeIndex = null;
 let limit = 20;
 let sortMode = 'remove-desc';
 let componentIndexes = null;
+let skipOnly = false;
+let groupRemoval = false;
+let includeDetails = false;
 const positional = [];
 
 for (let i = 0; i < args.length; i++) {
@@ -23,6 +26,12 @@ for (let i = 0; i < args.length; i++) {
       .split(',')
       .map(value => Number.parseInt(value, 10))
       .filter(value => Number.isFinite(value));
+  } else if (arg === '--skip-only') {
+    skipOnly = true;
+  } else if (arg === '--group' || arg === '--remove-components-as-group') {
+    groupRemoval = true;
+  } else if (arg === '--details' || arg === '--component-details') {
+    includeDetails = true;
   } else {
     positional.push(arg);
   }
@@ -31,7 +40,7 @@ for (let i = 0; i < args.length; i++) {
 const [elementName, drawingName] = positional;
 
 if (!elementName || !drawingName || !layerType || shapeIndex === null || Number.isNaN(shapeIndex)) {
-  console.error('Usage: node scripts/ablate-tvg-components.mjs <elementName> <drawingName> --layer underlay|color|line|overlay --shape N [--components 1,2,3] [--limit N] [--sort remove-desc|remove-asc|only-desc]');
+  console.error('Usage: node scripts/ablate-tvg-components.mjs <elementName> <drawingName> --layer underlay|color|line|overlay --shape N [--components 1,2,3] [--limit N] [--sort remove-desc|remove-asc|raw-desc|raw-asc|aligned-desc|aligned-asc|only-desc] [--skip-only] [--group] [--details]');
   process.exit(1);
 }
 
@@ -42,7 +51,7 @@ try {
   page.setDefaultNavigationTimeout(0);
   await page.goto('http://127.0.0.1:4175/', { waitUntil: 'domcontentloaded' });
 
-  const result = await page.evaluate(async ({ elementName, drawingName, layerType, shapeIndex, componentIndexes, limit, sortMode }) => {
+  const result = await page.evaluate(async ({ elementName, drawingName, layerType, shapeIndex, componentIndexes, limit, sortMode, skipOnly, groupRemoval, includeDetails }) => {
     const JSZipMod = await import('/node_modules/.vite/deps/jszip.js');
     const tvg = await import('/src/tvg-parser.ts');
     const pal = await import('/src/tpl-palette.ts');
@@ -101,8 +110,11 @@ try {
     const indexes = componentIndexes && componentIndexes.length > 0
       ? componentIndexes.filter(index => index >= 0 && index < targetShape.components.length)
       : Array.from({ length: targetShape.components.length }, (_, index) => index);
+    const indexGroups = groupRemoval ? [indexes] : indexes.map(index => [index]);
 
-    for (const componentIndex of indexes) {
+    for (const componentGroup of indexGroups) {
+      if (componentGroup.length === 0) continue;
+      const removedIndexes = new Set(componentGroup);
       const removed = {
         ...drawing,
         layers: drawing.layers.map((layer, li) =>
@@ -111,7 +123,7 @@ try {
                 ...layer,
                 shapes: layer.shapes.map((shape, si) =>
                   si === shapeIndex
-                    ? { ...shape, components: shape.components.filter((_, ci) => ci !== componentIndex) }
+                    ? { ...shape, components: shape.components.filter((_, ci) => !removedIndexes.has(ci)) }
                     : { ...shape },
                 ),
               }
@@ -122,28 +134,51 @@ try {
       if (removedCanvas) await tvg.loadBitmapTiles(removedCanvas, removed.diagnostics);
       const removedScore = bench.scoreCanvasSources(thumb, ensureCanvas(removedCanvas), 160);
 
-      const only = {
-        ...drawing,
-        layers: drawing.layers.map((layer, li) =>
-          li === targetLayerIndex
-            ? {
+      let onlyScore = null;
+      if (!skipOnly) {
+        const only = {
+          ...drawing,
+          layers: drawing.layers.map((layer, li) =>
+            li === targetLayerIndex
+              ? {
                 ...layer,
                 shapes: layer.shapes.map((shape, si) =>
                   si === shapeIndex
-                    ? { ...shape, components: [shape.components[componentIndex]] }
+                    ? { ...shape, components: shape.components.filter((_, ci) => removedIndexes.has(ci)) }
                     : { ...shape, components: [] },
                 ),
               }
-            : { ...layer, shapes: [] },
-        ),
-      };
-      const onlyCanvas = tvg.renderTVGToCanvas(only, 160, 160, viewport, { supersample: 2 });
-      if (onlyCanvas) await tvg.loadBitmapTiles(onlyCanvas, only.diagnostics);
-      const onlyScore = bench.scoreCanvasSources(thumb, ensureCanvas(onlyCanvas), 160);
+              : { ...layer, shapes: [] },
+          ),
+        };
+        const onlyCanvas = tvg.renderTVGToCanvas(only, 160, 160, viewport, { supersample: 2 });
+        if (onlyCanvas) await tvg.loadBitmapTiles(onlyCanvas, only.diagnostics);
+        onlyScore = bench.scoreCanvasSources(thumb, ensureCanvas(onlyCanvas), 160);
+      }
 
-      const component = targetShape.components[componentIndex];
+      const componentIndex = componentGroup.length === 1 ? componentGroup[0] : null;
+      const component = targetShape.components[componentGroup[0]];
+      const componentSummaries = includeDetails
+        ? componentGroup.map(index => {
+            const entry = targetShape.components[index];
+            return {
+              componentIndex: index,
+              componentType: entry.componentType,
+              fillPaintSource: entry.fillPaintSource,
+              color: entry.color,
+              outerPaint: entry.outerPaint,
+              insideColor: entry.insideColor,
+              strokeWidth: entry.strokeWidth,
+              pathSegments: entry.path?.segments.length ?? 0,
+              closed: entry.path?.closed ?? false,
+            };
+          })
+        : null;
       cases.push({
         componentIndex,
+        componentIndexes: componentGroup,
+        componentCount: componentGroup.length,
+        ...(componentSummaries ? { components: componentSummaries } : {}),
         componentType: component.componentType,
         fillPaintSource: component.fillPaintSource,
         color: component.color,
@@ -159,28 +194,38 @@ try {
         removeRawScore: removedScore.rawScore,
         removeRawDelta: removedScore.rawScore - baseScore.rawScore,
         removeNormalizedDelta: removedScore.normalizedScore - baseScore.normalizedScore,
-        onlyScore: onlyScore.score,
-        onlyAlignedScore: onlyScore.alignedScore,
-        onlyRawScore: onlyScore.rawScore,
-        onlyNormalizedScore: onlyScore.normalizedScore,
+        onlyScore: onlyScore?.score ?? null,
+        onlyAlignedScore: onlyScore?.alignedScore ?? null,
+        onlyRawScore: onlyScore?.rawScore ?? null,
+        onlyNormalizedScore: onlyScore?.normalizedScore ?? null,
       });
     }
 
     cases.sort((a, b) => {
-      if (sortMode === 'remove-asc') {
+      if (sortMode === 'raw-desc') {
+        if (b.removeRawDelta !== a.removeRawDelta) return b.removeRawDelta - a.removeRawDelta;
+      } else if (sortMode === 'raw-asc') {
+        if (a.removeRawDelta !== b.removeRawDelta) return a.removeRawDelta - b.removeRawDelta;
+      } else if (sortMode === 'aligned-desc') {
+        if (b.removeAlignedDelta !== a.removeAlignedDelta) return b.removeAlignedDelta - a.removeAlignedDelta;
+      } else if (sortMode === 'aligned-asc') {
+        if (a.removeAlignedDelta !== b.removeAlignedDelta) return a.removeAlignedDelta - b.removeAlignedDelta;
+      } else if (sortMode === 'remove-asc') {
         if (a.removeDelta !== b.removeDelta) return a.removeDelta - b.removeDelta;
       } else if (sortMode === 'only-desc') {
-        if (b.onlyNormalizedScore !== a.onlyNormalizedScore) return b.onlyNormalizedScore - a.onlyNormalizedScore;
+        if ((b.onlyNormalizedScore ?? -Infinity) !== (a.onlyNormalizedScore ?? -Infinity)) {
+          return (b.onlyNormalizedScore ?? -Infinity) - (a.onlyNormalizedScore ?? -Infinity);
+        }
       } else if (b.removeDelta !== a.removeDelta) {
         return b.removeDelta - a.removeDelta;
       }
-      if (sortMode !== 'only-desc' && b.onlyNormalizedScore !== a.onlyNormalizedScore) {
-        return b.onlyNormalizedScore - a.onlyNormalizedScore;
+      if (sortMode !== 'only-desc' && (b.onlyNormalizedScore ?? -Infinity) !== (a.onlyNormalizedScore ?? -Infinity)) {
+        return (b.onlyNormalizedScore ?? -Infinity) - (a.onlyNormalizedScore ?? -Infinity);
       }
       if (sortMode === 'only-desc' && b.removeDelta !== a.removeDelta) {
         return b.removeDelta - a.removeDelta;
       }
-      return a.componentIndex - b.componentIndex;
+      return (a.componentIndex ?? a.componentIndexes[0]) - (b.componentIndex ?? b.componentIndexes[0]);
     });
 
     return {
@@ -190,11 +235,14 @@ try {
       shapeIndex,
       viewport,
       sortMode,
+      skipOnly,
+      groupRemoval,
+      includeDetails,
       baseScore,
       cases: cases.slice(0, limit),
       totalCases: cases.length,
     };
-  }, { elementName, drawingName, layerType, shapeIndex, componentIndexes, limit, sortMode });
+  }, { elementName, drawingName, layerType, shapeIndex, componentIndexes, limit, sortMode, skipOnly, groupRemoval, includeDetails });
 
   console.log(JSON.stringify(result, null, 2));
 } finally {

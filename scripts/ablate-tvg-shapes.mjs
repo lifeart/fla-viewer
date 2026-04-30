@@ -5,6 +5,7 @@ let layerType = null;
 let limit = 20;
 let sortMode = 'remove-desc';
 let targetShapeIndex = null;
+let skipOnly = false;
 const positional = [];
 
 for (let i = 0; i < args.length; i++) {
@@ -17,6 +18,8 @@ for (let i = 0; i < args.length; i++) {
     sortMode = args[++i] ?? 'remove-desc';
   } else if (arg === '--shape') {
     targetShapeIndex = Number.parseInt(args[++i] ?? '-1', 10);
+  } else if (arg === '--skip-only') {
+    skipOnly = true;
   } else {
     positional.push(arg);
   }
@@ -25,7 +28,7 @@ for (let i = 0; i < args.length; i++) {
 const [elementName, drawingName] = positional;
 
 if (!elementName || !drawingName) {
-  console.error('Usage: node scripts/ablate-tvg-shapes.mjs <elementName> <drawingName> [--layer underlay|color|line|overlay] [--shape index] [--limit N] [--sort remove-desc|remove-asc|only-desc]');
+  console.error('Usage: node scripts/ablate-tvg-shapes.mjs <elementName> <drawingName> [--layer underlay|color|line|overlay] [--shape index] [--limit N] [--sort remove-desc|remove-asc|raw-desc|raw-asc|aligned-desc|aligned-asc|only-desc] [--skip-only]');
   process.exit(1);
 }
 
@@ -36,7 +39,7 @@ try {
   page.setDefaultNavigationTimeout(0);
   await page.goto('http://127.0.0.1:4175/', { waitUntil: 'domcontentloaded' });
 
-  const result = await page.evaluate(async ({ elementName, drawingName, layerType, targetShapeIndex, limit, sortMode }) => {
+  const result = await page.evaluate(async ({ elementName, drawingName, layerType, targetShapeIndex, limit, sortMode, skipOnly }) => {
     const JSZipMod = await import('/node_modules/.vite/deps/jszip.js');
     const tvg = await import('/src/tvg-parser.ts');
     const pal = await import('/src/tpl-palette.ts');
@@ -108,15 +111,15 @@ try {
     const scoredBaseCanvas = ensureCanvas(baseCanvas);
     const baseScore = bench.scoreCanvasSources(thumb, scoredBaseCanvas, 160);
 
-      const targetLayers = drawing.layers
+    const targetLayers = drawing.layers
       .map((layer, index) => ({ layer, index }))
       .filter(entry => !layerType || entry.layer.type === layerType);
 
-      const cases = [];
-      for (const { layer, index: layerIndex } of targetLayers) {
-        for (let shapeIndex = 0; shapeIndex < layer.shapes.length; shapeIndex++) {
-          if (targetShapeIndex !== null && shapeIndex !== targetShapeIndex) continue;
-          const removed = {
+    const cases = [];
+    for (const { layer, index: layerIndex } of targetLayers) {
+      for (let shapeIndex = 0; shapeIndex < layer.shapes.length; shapeIndex++) {
+        if (targetShapeIndex !== null && shapeIndex !== targetShapeIndex) continue;
+        const removed = {
           ...drawing,
           layers: drawing.layers.map((entry, li) =>
             li === layerIndex
@@ -129,18 +132,22 @@ try {
         const scoredRemovedCanvas = ensureCanvas(removedCanvas);
         const removedScore = bench.scoreCanvasSources(thumb, scoredRemovedCanvas, 160);
 
-        const onlyShape = {
-          ...drawing,
-          layers: drawing.layers.map((entry, li) =>
-            li === layerIndex
-              ? { ...entry, shapes: [entry.shapes[shapeIndex]] }
-              : { ...entry, shapes: [] },
-          ),
-        };
-        const onlyCanvas = tvg.renderTVGToCanvas(onlyShape, 160, 160, viewport, { supersample: 2 });
-        if (onlyCanvas) await tvg.loadBitmapTiles(onlyCanvas, onlyShape.diagnostics);
-        const scoredOnlyCanvas = ensureCanvas(onlyCanvas);
-        const onlyScore = bench.scoreCanvasSources(thumb, scoredOnlyCanvas, 160);
+        let scoredOnlyCanvas = null;
+        let onlyScore = null;
+        if (!skipOnly) {
+          const onlyShape = {
+            ...drawing,
+            layers: drawing.layers.map((entry, li) =>
+              li === layerIndex
+                ? { ...entry, shapes: [entry.shapes[shapeIndex]] }
+                : { ...entry, shapes: [] },
+            ),
+          };
+          const onlyCanvas = tvg.renderTVGToCanvas(onlyShape, 160, 160, viewport, { supersample: 2 });
+          if (onlyCanvas) await tvg.loadBitmapTiles(onlyCanvas, onlyShape.diagnostics);
+          scoredOnlyCanvas = ensureCanvas(onlyCanvas);
+          onlyScore = bench.scoreCanvasSources(thumb, scoredOnlyCanvas, 160);
+        }
 
         cases.push({
           layerType: layer.type,
@@ -149,41 +156,58 @@ try {
           componentCount: layer.shapes[shapeIndex].components.length,
           removeScore: removedScore.score,
           removeDelta: removedScore.score - baseScore.score,
-          onlyScore: onlyScore.score,
-          onlyNormalizedScore: onlyScore.normalizedScore,
-          onlyBounds: foregroundBounds(scoredOnlyCanvas),
+          removeRawScore: removedScore.rawScore,
+          removeRawDelta: removedScore.rawScore - baseScore.rawScore,
+          removeAlignedScore: removedScore.alignedScore,
+          removeAlignedDelta: removedScore.alignedScore - baseScore.alignedScore,
+          removeNormalizedScore: removedScore.normalizedScore,
+          removeNormalizedDelta: removedScore.normalizedScore - baseScore.normalizedScore,
+          onlyScore: onlyScore?.score ?? null,
+          onlyNormalizedScore: onlyScore?.normalizedScore ?? null,
+          onlyBounds: scoredOnlyCanvas ? foregroundBounds(scoredOnlyCanvas) : null,
         });
       }
     }
 
     cases.sort((a, b) => {
-      if (sortMode === 'remove-asc') {
+      if (sortMode === 'raw-desc') {
+        if (b.removeRawDelta !== a.removeRawDelta) return b.removeRawDelta - a.removeRawDelta;
+      } else if (sortMode === 'raw-asc') {
+        if (a.removeRawDelta !== b.removeRawDelta) return a.removeRawDelta - b.removeRawDelta;
+      } else if (sortMode === 'aligned-desc') {
+        if (b.removeAlignedDelta !== a.removeAlignedDelta) return b.removeAlignedDelta - a.removeAlignedDelta;
+      } else if (sortMode === 'aligned-asc') {
+        if (a.removeAlignedDelta !== b.removeAlignedDelta) return a.removeAlignedDelta - b.removeAlignedDelta;
+      } else if (sortMode === 'remove-asc') {
         if (a.removeDelta !== b.removeDelta) return a.removeDelta - b.removeDelta;
       } else if (sortMode === 'only-desc') {
-        if (b.onlyNormalizedScore !== a.onlyNormalizedScore) return b.onlyNormalizedScore - a.onlyNormalizedScore;
+        if ((b.onlyNormalizedScore ?? -Infinity) !== (a.onlyNormalizedScore ?? -Infinity)) {
+          return (b.onlyNormalizedScore ?? -Infinity) - (a.onlyNormalizedScore ?? -Infinity);
+        }
       } else if (b.removeDelta !== a.removeDelta) {
         return b.removeDelta - a.removeDelta;
       }
-      if (sortMode !== 'only-desc' && b.onlyNormalizedScore !== a.onlyNormalizedScore) {
-        return b.onlyNormalizedScore - a.onlyNormalizedScore;
+      if (sortMode !== 'only-desc' && (b.onlyNormalizedScore ?? -Infinity) !== (a.onlyNormalizedScore ?? -Infinity)) {
+        return (b.onlyNormalizedScore ?? -Infinity) - (a.onlyNormalizedScore ?? -Infinity);
       }
       if (sortMode === 'only-desc' && b.removeDelta !== a.removeDelta) {
         return b.removeDelta - a.removeDelta;
       }
-      return b.onlyNormalizedScore - a.onlyNormalizedScore;
+      return a.shapeIndex - b.shapeIndex;
     });
 
-      return {
-        elementName,
-        drawingName,
-        viewport,
-        sortMode,
-        targetShapeIndex,
-        baseScore,
-        cases: cases.slice(0, limit),
-        totalCases: cases.length,
-      };
-  }, { elementName, drawingName, layerType, targetShapeIndex, limit, sortMode });
+    return {
+      elementName,
+      drawingName,
+      viewport,
+      sortMode,
+      targetShapeIndex,
+      skipOnly,
+      baseScore,
+      cases: cases.slice(0, limit),
+      totalCases: cases.length,
+    };
+  }, { elementName, drawingName, layerType, targetShapeIndex, limit, sortMode, skipOnly });
 
   console.log(JSON.stringify(result, null, 2));
 } finally {
