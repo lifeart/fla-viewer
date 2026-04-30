@@ -10,15 +10,15 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 ## Current State
 
-- Latest committed renderer work: `06e6bb3 Tune bitmap atlas fit for moderate landscape TVGs`.
+- Latest verified renderer work: gated dense line-fill ink-density correction.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark: overall about `98.44`, vector about `98.34`, bitmap about `98.94`.
-- Source-fresh raw average: overall about `98.68`.
+- Current raw benchmark: overall about `98.45`, vector about `98.36`, bitmap about `98.94`.
+- Source-fresh raw average: overall about `98.70`, vector about `98.60`, bitmap about `98.94`.
 - Worst source-fresh vector case: `color.101/color-13`.
-- Worst case scores after shared legacy nested-fill predicate: raw `83.9140625`, aligned `91.54296875`, normalized/focused about `75.03`, foreground IoU about `83.02`.
+- Worst case scores after dense line-fill ink-density correction: raw `84.328125`, aligned `91.55859375`, normalized/focused about `75.48`, foreground IoU about `83.04`.
 - Worst case bounds: reference `{minX:8,minY:17,maxX:149,maxY:142}`, candidate `{minX:9,minY:9,maxX:150,maxY:143}`.
 - The app fallback path can score 100 by using embedded thumbnails, but raw vector rendering is the target.
-- Local tooling work after this commit: ablation scripts now support raw/aligned sorting, `--skip-only`, grouped component removal via `--group`/`--remove-components-as-group`, and opt-in verbose component metadata via `--details`.
+- Local ablation tooling supports raw/aligned sorting, `--skip-only`, grouped component removal via `--group`/`--remove-components-as-group`, and opt-in verbose component metadata via `--details`.
 
 ## Known Findings
 
@@ -112,7 +112,7 @@ Current verification after this patch:
 - `npm test -- src/__tests__/tvg-parser.test.ts`: 81 passed.
 - `npm test -- src/__tests__/tvg-benchmark.test.ts`: 17 passed.
 - `npm run build`: passed.
-- `npm run benchmark:tvg:raw`: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.44/98.34/98.94`; source-fresh raw average `98.68`; source-fresh raw min `83.91`.
+- `npm run benchmark:tvg:raw`: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.45/98.36/98.94`; source-fresh raw averages overall/vector/bitmap `98.70/98.60/98.94`; source-fresh raw min `84.33`.
 
 Managed local finding: line-fill source inset
 
@@ -137,9 +137,17 @@ Managed local finding: `color.101/color-13` shape21 component probes
 
 Managed local finding: next source-fresh cases after the current baseline
 
-- `color.101/color-1` baseline after line-fill inset work: raw `94.765625`, aligned `97.70703125`, normalized `94.69467832910978`, IoU `99.01904684051337`, bounds match exactly.
-- `color.101/color-21` baseline: raw `95.39453125`, aligned `98.69140625`, normalized `94.46308724832215`, IoU `97.33407904548844`.
+- `color.101/color-1` baseline after dense line-fill ink correction: raw `95.29296875`, aligned `98.0625`, normalized `95.43039319872476`, IoU `99.03539605983815`, bounds match exactly.
+- `color.101/color-21` baseline after dense line-fill ink correction: raw `95.625`, aligned `98.734375`, normalized `94.57494407158836`, IoU `97.3434004474273`.
 - Shape/component ablations for `color-1` and `color-21` showed no obvious single deletion or isolated topology fix. Treat these as distributed coverage/antialias/edge-shape problems unless a better source-format signal appears.
+
+Managed local finding: dense line-fill ink density
+
+- Supersampling alone is not a safe renderer rule: SS3/SS4 improved raw on some `color.101` cases but regressed aligned/normalized and hurt other follow-up drawings.
+- A post-render `-12` RGB ink-density correction for pixels with luma `<= 248` improved the first seven `color.101` source-fresh cases in raw score.
+- Applying that correction unconditionally across the 35 lowest source-fresh vector cases is rejected: 20 improved, 15 regressed, with meaningful regressions on non-dense-line-fill drawings such as `Number_Body/Number_Body-2` and `B_Shorts/B_Shorts-1`.
+- Accepted gated rule: apply the correction only when `shouldInsetViewportForLineFillDrawing()` is true, and only for normal full-background renders. Do not apply in layer-filter, compositor/origin-centered, skip-clipping, or matte modes.
+- Full benchmark after the gated rule: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.45/98.36/98.94`; source-fresh raw averages overall/vector/bitmap `98.70/98.60/98.94`; source-fresh raw min `84.33`.
 
 ## Scientific Loop
 
@@ -203,7 +211,7 @@ Image exports to compare manually:
 
 ## Next Hypotheses
 
-1. The next broad improvement candidate is Toon Boom-compatible coverage for opaque near-black line-layer edges. Test with post-processing probes before changing renderer code.
+1. The next broad improvement candidate is `color.101/color-13` silhouette/topology. The ink-density correction helped raw, but the top-bound overfill remains.
 2. Same-paint nested contour classification may still need a topology rule richer than child area ratio. Candidate signals: signed area direction, child depth, bbox vertical position inside parent, child fragment count, and whether child is a long closed loop versus a tiny island.
 3. Shape19 parent contour/component pruning is rejected for now: the contour is explicit, closed, zero-gap, and non-support. Revisit only if a new source-format field explains hidden/alternate contour state.
 4. Hidden/source-context state for `color-13` is rejected for now: no actionable metadata or unparsed shape-side field was found.

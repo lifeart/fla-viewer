@@ -2984,6 +2984,9 @@ export interface TVGRenderOptions {
   skipBackgroundComposite?: boolean;
 }
 
+const DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT = 248;
+const DENSE_LINE_FILL_INK_DENSITY_SUBTRACT = 12;
+
 function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type'][] {
   const includeUnderlay = options?.includeUnderlay ?? true;
   const artLayerFilter = options?.artLayerFilter;
@@ -2993,6 +2996,31 @@ function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type']
   return includeUnderlay
     ? ['underlay', 'color', 'line', 'overlay']
     : ['color', 'line', 'overlay'];
+}
+
+function shouldApplyDenseLineFillInkDensityAdjustment(
+  drawing: TVGDrawing,
+  options?: TVGRenderOptions,
+): boolean {
+  if (options?.skipBackgroundComposite || options?.skipClipping || options?.centerOnOrigin) return false;
+  if (options?.artLayerFilter && options.artLayerFilter !== 'all') return false;
+  return shouldInsetViewportForLineFillDrawing(drawing);
+}
+
+function applyDenseLineFillInkDensityAdjustment(canvas: HTMLCanvasElement): void {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = image.data;
+  for (let index = 0; index < data.length; index += 4) {
+    const luma = 0.2126 * data[index] + 0.7152 * data[index + 1] + 0.0722 * data[index + 2];
+    if (luma > DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT) continue;
+    data[index] = Math.max(0, data[index] - DENSE_LINE_FILL_INK_DENSITY_SUBTRACT);
+    data[index + 1] = Math.max(0, data[index + 1] - DENSE_LINE_FILL_INK_DENSITY_SUBTRACT);
+    data[index + 2] = Math.max(0, data[index + 2] - DENSE_LINE_FILL_INK_DENSITY_SUBTRACT);
+  }
+  ctx.putImageData(image, 0, 0);
 }
 
 function filterDrawingToActiveLayerTypes(
@@ -3439,6 +3467,8 @@ export function renderTVGToCanvas(
     ctx.restore();
   }
 
+  const shouldApplyInkDensity = shouldApplyDenseLineFillInkDensityAdjustment(renderDrawing, options);
+
   // Downsample from SS resolution to output resolution
   if (SS > 1) {
     const outCanvas = document.createElement('canvas');
@@ -3448,9 +3478,15 @@ export function renderTVGToCanvas(
     outCtx.imageSmoothingEnabled = true;
     outCtx.imageSmoothingQuality = 'high';
     outCtx.drawImage(canvas, 0, 0, width, height);
+    if (shouldApplyInkDensity) {
+      applyDenseLineFillInkDensityAdjustment(outCanvas);
+    }
     return outCanvas;
   }
 
+  if (shouldApplyInkDensity) {
+    applyDenseLineFillInkDensityAdjustment(canvas);
+  }
   return canvas;
 }
 

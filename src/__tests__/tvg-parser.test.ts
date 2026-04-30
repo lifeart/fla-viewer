@@ -3116,6 +3116,26 @@ describe('tvg rendering', () => {
     expect(score.candidateBounds?.maxY).toBeLessThanOrEqual(143);
   });
 
+  it('matches dense line-fill thumbnail ink density for color.101 portraits', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/color.101/color-1.tvg')!.async('arraybuffer');
+    const thumbData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/color.101/.thumbnails/.color-1.tvg.png')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    expect(__shouldInsetViewportForLineFillDrawingForTests(drawing)).toBe(true);
+
+    const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    expect(canvas).not.toBeNull();
+    const reference = await loadImageFromArrayBuffer(thumbData);
+    const score = scoreCanvasSources(reference, canvas!, 160);
+
+    expect(score.rawScore).toBeGreaterThan(95.2);
+    expect(score.alignedScore).toBeGreaterThan(97.9);
+  });
+
   it('resynchronizes padded TTOC chunks before trailing top-level metadata', async () => {
     const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
     const zip = await JSZip.loadAsync(await response.arrayBuffer());
