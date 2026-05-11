@@ -2985,7 +2985,7 @@ export interface TVGRenderOptions {
 }
 
 const DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT = 248;
-const DENSE_LINE_FILL_INK_DENSITY_SUBTRACT = 12;
+const DENSE_LINE_FILL_INK_DENSITY_SUBTRACT = 16;
 
 function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type'][] {
   const includeUnderlay = options?.includeUnderlay ?? true;

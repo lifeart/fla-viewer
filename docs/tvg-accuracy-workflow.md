@@ -10,12 +10,12 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 ## Current State
 
-- Latest verified renderer work: gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, and a narrow same-paint detail threshold expansion.
+- Latest verified renderer work: tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, and a narrow same-paint detail threshold expansion.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark: overall about `98.46`, vector about `98.36`, bitmap about `98.94`.
-- Source-fresh raw average: overall about `98.71`, vector about `98.61`, bitmap about `98.94`.
+- Current raw benchmark: overall about `98.46`, vector about `98.37`, bitmap about `98.94`.
+- Source-fresh raw average: overall about `98.72`, vector about `98.62`, bitmap about `98.94`.
 - Worst source-fresh vector case: `color.101/color-13`.
-- Worst case scores after the same-paint detail threshold expansion: raw `85.2265625`, aligned `91.765625`, normalized/focused about `76.46`, foreground IoU about `84.58`.
+- Worst case scores after the dense ink-density retune: raw `85.24609375`, aligned `91.77734375`, normalized/focused about `76.50`, foreground IoU about `84.58`.
 - Worst case bounds: reference `{minX:8,minY:17,maxX:149,maxY:142}`, candidate `{minX:9,minY:9,maxX:150,maxY:143}`.
 - The app fallback path can score 100 by using embedded thumbnails, but raw vector rendering is the target.
 - Local ablation tooling supports raw/aligned sorting, `--skip-only`, grouped component removal via `--group`/`--remove-components-as-group`, and opt-in verbose component metadata via `--details`.
@@ -141,17 +141,18 @@ Managed local finding: `color.101/color-13` shape21 component probes
 
 Managed local finding: next source-fresh cases after the current baseline
 
-- `color.101/color-1` baseline after dense line-fill ink correction: raw `95.29296875`, aligned `98.0625`, normalized `95.43039319872476`, IoU `99.03539605983815`, bounds match exactly.
+- `color.101/color-1` baseline after dense line-fill ink retune: raw `95.53515625`, aligned `98.1484375`, normalized `95.6184`, IoU `99.0354`, bounds match exactly.
 - `color.101/color-21` baseline after dense line-fill ink correction: raw `95.625`, aligned `98.734375`, normalized `94.57494407158836`, IoU `97.3434004474273`.
 - Shape/component ablations for `color-1` and `color-21` showed no obvious single deletion or isolated topology fix. Treat these as distributed coverage/antialias/edge-shape problems unless a better source-format signal appears.
 
 Managed local finding: dense line-fill ink density
 
 - Supersampling alone is not a safe renderer rule: SS3/SS4 improved raw on some `color.101` cases but regressed aligned/normalized and hurt other follow-up drawings.
-- A post-render `-12` RGB ink-density correction for pixels with luma `<= 248` improved the first seven `color.101` source-fresh cases in raw score.
+- A post-render RGB ink-density correction for pixels with luma `<= 248` improved the first seven `color.101` source-fresh cases in raw score.
 - Applying that correction unconditionally across the 35 lowest source-fresh vector cases is rejected: 20 improved, 15 regressed, with meaningful regressions on non-dense-line-fill drawings such as `Number_Body/Number_Body-2` and `B_Shorts/B_Shorts-1`.
 - Accepted gated rule: apply the correction only when `shouldInsetViewportForLineFillDrawing()` is true, and only for normal full-background renders. Do not apply in layer-filter, compositor/origin-centered, skip-clipping, or matte modes.
-- Full benchmark after the gated rule: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.45/98.36/98.94`; source-fresh raw averages overall/vector/bitmap `98.70/98.60/98.94`; source-fresh raw min `84.33`.
+- Accepted retune: increase the gated correction from `-12` to `-16` RGB. This improves 8 fresh `color.101` cases, with one tiny raw regression on `color-31` (`-0.0078125`) while its aligned/focused scores improve.
+- Full benchmark after the `-16` retune: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.46/98.37/98.94`; source-fresh raw averages overall/vector/bitmap `98.72/98.62/98.94`; source-fresh raw min `85.25`.
 
 Managed local finding: embedded dark legacy-chain suppression
 
@@ -166,6 +167,12 @@ Managed local finding: same-paint detail threshold expansion
 - Breaking any component in chain `40..49` produced the same score delta, indicating the renderer was over-subtracting the child as a hole. Group deletion is not the desired rule; the sustainable behavior is to classify this same-paint child as an internal detail island.
 - Raising only the area-ratio cutoff to `3.75%` keeps the fragment-count cap at `12` and does not admit the larger green child chain `57..72`, whose raw-only improvement came with aligned/normalized regression.
 - Full benchmark after the threshold expansion: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.46/98.36/98.94`; source-fresh raw averages overall/vector/bitmap `98.71/98.61/98.94`; source-fresh raw min `85.23`.
+
+Managed local rejected experiment: line-layer dark-last fill ordering
+
+- Sorting line-layer fills so dark solid paint groups render after non-dark groups improved `color.101/color-13` raw `85.2265625 -> 85.546875`, but aligned dropped `91.765625 -> 91.6796875` and normalized dropped `76.4628 -> 76.2805`.
+- Full benchmark diff changed only four drawings, but one fresh drawing regressed materially: `Switch.1004/Switch-1` raw `98.23046875 -> 98.01953125`.
+- Manager decision: reject broad color-priority render ordering. Revisit only with a source-format z-order signal or a localized occlusion rule that does not regress `Switch.1004/Switch-1`.
 
 ## Scientific Loop
 
