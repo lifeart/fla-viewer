@@ -12,10 +12,10 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 - Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, and a narrow same-paint detail threshold expansion.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark: overall about `98.47`, vector about `98.38`, bitmap about `98.94`.
-- Source-fresh raw average: overall about `98.74`, vector about `98.65`, bitmap about `98.94`.
+- Current raw benchmark: overall about `98.48`, vector about `98.39`, bitmap about `98.94`.
+- Source-fresh raw average: overall about `98.75`, vector about `98.66`, bitmap about `98.94`.
 - Worst source-fresh vector case: `color.101/color-13`.
-- Worst case scores after the dense ink-density retune: raw `85.24609375`, aligned `91.77734375`, normalized/focused about `76.50`, foreground IoU about `84.58`.
+- Worst case scores after the dense ink-density retune: raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
 - Worst case bounds: reference `{minX:8,minY:17,maxX:149,maxY:142}`, candidate `{minX:9,minY:9,maxX:150,maxY:143}`.
 - The app fallback path can score 100 by using embedded thumbnails, but raw vector rendering is the target.
 - Local ablation tooling supports raw/aligned sorting, `--skip-only`, grouped component removal via `--group`/`--remove-components-as-group`, and opt-in verbose component metadata via `--details`.
@@ -161,6 +161,9 @@ Managed local finding: dense line-fill ink density
 - Accepted gated rule: apply the correction only when `shouldInsetViewportForLineFillDrawing()` is true, and only for normal full-background renders. Do not apply in layer-filter, compositor/origin-centered, skip-clipping, or matte modes.
 - Accepted retune: increase the gated correction from `-12` to `-16` RGB. This improves 8 fresh `color.101` cases, with one tiny raw regression on `color-31` (`-0.0078125`) while its aligned/focused scores improve.
 - Full benchmark after the `-16` retune: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.46/98.37/98.94`; source-fresh raw averages overall/vector/bitmap `98.72/98.62/98.94`; source-fresh raw min `85.25`.
+- Accepted follow-up retune: lower the luma cutoff from `248` to `220` and increase subtraction from `16` to `32`. The stronger correction only affects darker ink pixels, changed nine `color.101` drawings in the full benchmark, improved six, and had no non-`color.101` movement.
+- Full benchmark after the `220/32` retune: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.48/98.39/98.94`; source-fresh raw averages overall/vector/bitmap `98.75/98.66/98.94`; source-fresh raw min `85.45`.
+- Notable source-fresh deltas from the previous `248/16` correction: `color-1` raw `+0.375`, `color-13` raw `+0.19921875`, `color-19` raw `+0.1640625`, `color-31` raw `+0.1640625`, `color-3` raw `+0.08203125`, and `color-18` raw `+0.07421875`; small accepted regressions were `color-23` raw `-0.0546875`, `color-21` raw `-0.0234375`, and `color-15` raw `-0.0078125`.
 
 Managed local finding: embedded dark legacy-chain suppression
 
