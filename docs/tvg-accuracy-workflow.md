@@ -10,10 +10,10 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 ## Current State
 
-- Latest verified renderer work: tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, and a narrow same-paint detail threshold expansion.
+- Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, and a narrow same-paint detail threshold expansion.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark: overall about `98.46`, vector about `98.37`, bitmap about `98.94`.
-- Source-fresh raw average: overall about `98.72`, vector about `98.62`, bitmap about `98.94`.
+- Current raw benchmark: overall about `98.47`, vector about `98.38`, bitmap about `98.94`.
+- Source-fresh raw average: overall about `98.74`, vector about `98.65`, bitmap about `98.94`.
 - Worst source-fresh vector case: `color.101/color-13`.
 - Worst case scores after the dense ink-density retune: raw `85.24609375`, aligned `91.77734375`, normalized/focused about `76.50`, foreground IoU about `84.58`.
 - Worst case bounds: reference `{minX:8,minY:17,maxX:149,maxY:142}`, candidate `{minX:9,minY:9,maxX:150,maxY:143}`.
@@ -143,7 +143,15 @@ Managed local finding: next source-fresh cases after the current baseline
 
 - `color.101/color-1` baseline after dense line-fill ink retune: raw `95.53515625`, aligned `98.1484375`, normalized `95.6184`, IoU `99.0354`, bounds match exactly.
 - `color.101/color-21` baseline after dense line-fill ink correction: raw `95.625`, aligned `98.734375`, normalized `94.57494407158836`, IoU `97.3434004474273`.
-- Shape/component ablations for `color-1` and `color-21` showed no obvious single deletion or isolated topology fix. Treat these as distributed coverage/antialias/edge-shape problems unless a better source-format signal appears.
+- Shape/component ablations for `color-1` and `color-21` showed no obvious single deletion or isolated topology fix at that point. Later marker-focused probing showed `color-21` shape129 was a structural false-positive for the resolved-contour suppression heuristic, not paint to delete.
+
+Managed local finding: later sparse-marker resolved-contour suppression
+
+- The old heuristic skipped an entire resolved non-black contour when a tiny later same-layer sparse boundary marker overlapped it and later near-black fill shapes also overlapped. This was intended to avoid colored fringe pixels, but it used weak evidence and could hide legitimate fills.
+- `color.101/color-21` minimal reproduction: rendering line shapes `3,13,15` shows the yellow eye fill; adding sparse marker shape129 (`3,13,15,129`) suppresses that yellow fill and reveals dark green/black blockers. Shape129 itself is only two tiny widthless boundary marks and is not meaningful visible paint.
+- Broad sparse-marker paint suppression is rejected: marker ablations were mixed and can regress other drawings. The correct fix is to stop using later sparse markers as evidence to skip already-resolved contours.
+- Removing the later-marker suppression changed only five benchmark drawings by `element/drawing`, all source-fresh `color.101` improvements: `color-31` raw `+1.03515625`, `color-3` raw `+0.4296875`, `color-21` raw `+0.28125`, `color-23` raw `+0.26171875`, and `color-19` raw `+0.078125`.
+- Full benchmark after removal: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.47/98.38/98.94`; source-fresh raw averages overall/vector/bitmap `98.74/98.65/98.94`; source-fresh raw min `85.25`.
 
 Managed local finding: dense line-fill ink density
 

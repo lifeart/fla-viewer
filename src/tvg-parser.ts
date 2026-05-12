@@ -4843,27 +4843,6 @@ function collectSiblingBoundaryMaskShapes(
   return matches;
 }
 
-function collectLaterSameLayerBoundaryMaskShapes(
-  layer: TVGArtLayer,
-  currentShape: TVGShape,
-  currentShapeIndex: number,
-): TVGShape[] {
-  const currentBounds = computeShapeBounds(currentShape);
-  if (!currentBounds) return [];
-  const matches: TVGShape[] = [];
-  const seen = new Set<string>();
-  for (let index = currentShapeIndex + 1; index < layer.shapes.length; index++) {
-    const shape = layer.shapes[index];
-    if (!isSparseBoundaryMarkerShape(shape)) continue;
-    if (!boundsIntersect(currentBounds, computeShapeBounds(shape), 0.5)) continue;
-    const signature = boundaryShapeSignature(shape);
-    if (seen.has(signature)) continue;
-    seen.add(signature);
-    matches.push(shape);
-  }
-  return matches;
-}
-
 function countSharedBoundaryEndpoints(a: TVGShape, b: TVGShape, tolerance = 2.0): number {
   const aEndpoints: Array<Pick<TVGSegment, 'x' | 'y'>> = [];
   const bEndpoints: Array<Pick<TVGSegment, 'x' | 'y'>> = [];
@@ -4928,43 +4907,6 @@ function boundaryShapeSupportsSameLayerUnderlayFill(
     if (!boundsIntersect(boundaryBounds, computeShapeBounds(candidate), 2.0)) return false;
     return countSharedBoundaryEndpoints(candidate, boundaryShape) >= 2;
   });
-}
-
-function shouldSuppressResolvedContourWithLaterMarkers(
-  shape: TVGShape,
-  strokeComps: TVGComponent[],
-  explicitBuild: { contours: TVGResolvedContour[]; unresolvedChains: TVGResolvedContour[] },
-  fillPaintKeys: Set<FillStyleKey>,
-  siblingBoundaryMaskShapes: TVGShape[],
-  laterSameLayerBoundaryMaskShapes: TVGShape[],
-  dominantFillPaint: TVGPaint | null,
-): boolean {
-  if (strokeComps.length > 0) return false;
-  if (siblingBoundaryMaskShapes.length > 0) return false;
-  if (explicitBuild.contours.length !== 1 || explicitBuild.unresolvedChains.length !== 0) return false;
-  if (fillPaintKeys.size !== 1) return false;
-  if (laterSameLayerBoundaryMaskShapes.length === 0 || laterSameLayerBoundaryMaskShapes.length > 2) return false;
-  if (isNearlyBlackSolidPaint(dominantFillPaint)) return false;
-
-  const shapeBounds = computeShapeBounds(shape);
-  if (!shapeBounds) return false;
-  const shapeWidth = shapeBounds.maxX - shapeBounds.minX;
-  const shapeHeight = shapeBounds.maxY - shapeBounds.minY;
-  const shapeArea = shapeWidth * shapeHeight;
-  if (shapeArea <= 0) return false;
-
-  let totalMaskArea = 0;
-  for (const maskShape of laterSameLayerBoundaryMaskShapes) {
-    const maskBounds = computeShapeBounds(maskShape);
-    if (!maskBounds) return false;
-    const maskWidth = maskBounds.maxX - maskBounds.minX;
-    const maskHeight = maskBounds.maxY - maskBounds.minY;
-    if (maskWidth <= 0 || maskHeight <= 0) return false;
-    if (maskWidth > shapeWidth * 0.2 || maskHeight > shapeHeight * 0.2) return false;
-    totalMaskArea += maskWidth * maskHeight;
-  }
-
-  return totalMaskArea >= 20 && totalMaskArea <= shapeArea * 0.005;
 }
 
 function shapeHasRenderableFill(shape: TVGShape): boolean {
@@ -5061,23 +5003,6 @@ function collectOverlappingNearBlackRenderableFillShapes(
   const blockers: TVGShape[] = [];
   for (const sibling of layerShapes) {
     if (sibling === currentShape) continue;
-    if (!shapeHasOnlyNearBlackRenderableFills(sibling)) continue;
-    if (!boundsIntersect(currentBounds, computeShapeBounds(sibling), 0.5)) continue;
-    blockers.push(sibling);
-  }
-  return blockers;
-}
-
-function collectLaterOverlappingNearBlackRenderableFillShapes(
-  currentShape: TVGShape,
-  currentShapeIndex: number,
-  layerShapes: TVGShape[],
-): TVGShape[] {
-  const currentBounds = computeShapeBounds(currentShape);
-  if (!currentBounds) return [];
-  const blockers: TVGShape[] = [];
-  for (let index = currentShapeIndex + 1; index < layerShapes.length; index++) {
-    const sibling = layerShapes[index];
     if (!shapeHasOnlyNearBlackRenderableFills(sibling)) continue;
     if (!boundsIntersect(currentBounds, computeShapeBounds(sibling), 0.5)) continue;
     blockers.push(sibling);
@@ -8429,9 +8354,6 @@ function renderLayerPass(
       const siblingBoundaryMaskShapes = options?.skipClipping
         ? []
         : collectSiblingBoundaryMaskShapes(options?.allLayers, layer, shape);
-      const laterSameLayerBoundaryMaskShapes = options?.skipClipping
-        ? []
-        : collectLaterSameLayerBoundaryMaskShapes(layer, shape, shapeIndex);
       const fillCarrierCount = shape.components.filter(comp =>
         (comp.componentType === 0 || comp.componentType === 1)
         && comp.path
@@ -8476,17 +8398,6 @@ function renderLayerPass(
         && explicitBuild.unresolvedChains.length > 0;
       const nearBlackSiblingFillBlockers = shouldSubtractNearBlackSiblingFillBlockers
         ? collectOverlappingNearBlackRenderableFillShapes(shape, sameLayerShapes)
-        : [];
-      const laterNearBlackResolvedContourBlockers = shouldSuppressResolvedContourWithLaterMarkers(
-        shape,
-        strokeComps,
-        explicitBuild,
-        fillPaintKeys,
-        siblingBoundaryMaskShapes,
-        laterSameLayerBoundaryMaskShapes,
-        dominantFillPaint,
-      )
-        ? collectLaterOverlappingNearBlackRenderableFillShapes(shape, shapeIndex, layer.shapes)
         : [];
       const shouldPreferSiblingBoundaryClip = !options?.skipClipping
         && strokeComps.length === 0
@@ -8635,10 +8546,6 @@ function renderLayerPass(
           && siblingBoundaryMaskShapes.length > 0;
         if (shouldClipResolvedContours
           && clipLocalFillSources(ctx, layer, shape, contourFillSources, defaultStrokeWidth, false, siblingBoundaryMaskShapes)) {
-          renderedExplicit = true;
-        } else if (!options?.skipClipping && laterNearBlackResolvedContourBlockers.length > 0) {
-          // Tiny resolved fills with later sparse boundary markers can be fully buried under
-          // later dark carriers; skipping them avoids colored fringe pixels in the raw render.
           renderedExplicit = true;
         } else {
           for (const source of contourFillSources) {
