@@ -2987,7 +2987,8 @@ export interface TVGRenderOptions {
 const DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT = 220;
 const DENSE_LINE_FILL_INK_DENSITY_SUBTRACT = 32;
 const DENSE_LINE_FILL_TONE_PIVOT = 96;
-const DENSE_LINE_FILL_TONE_CONTRAST = 0.94;
+const DENSE_LINE_FILL_TONE_CONTRAST = 0.9024;
+const DENSE_LINE_FILL_TONE_OFFSET = -4;
 const DENSE_LINE_FILL_BACKGROUND_TOLERANCE = 12;
 const DENSE_LINE_FILL_EDGE_ALPHA_SCALE = 1.1;
 const DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS = 900;
@@ -3038,13 +3039,19 @@ function applyDenseLineFillInkDensityAdjustment(canvas: HTMLCanvasElement): void
     // foreground contrast than Canvas downsampling: dark ink is softened while
     // pale antialias/detail pixels move back toward the ink body.
     data[index] = Math.max(0, Math.min(255, Math.round(
-      DENSE_LINE_FILL_TONE_PIVOT + DENSE_LINE_FILL_TONE_CONTRAST * (data[index] - DENSE_LINE_FILL_TONE_PIVOT),
+      DENSE_LINE_FILL_TONE_PIVOT
+        + DENSE_LINE_FILL_TONE_CONTRAST * (data[index] - DENSE_LINE_FILL_TONE_PIVOT)
+        + DENSE_LINE_FILL_TONE_OFFSET,
     )));
     data[index + 1] = Math.max(0, Math.min(255, Math.round(
-      DENSE_LINE_FILL_TONE_PIVOT + DENSE_LINE_FILL_TONE_CONTRAST * (data[index + 1] - DENSE_LINE_FILL_TONE_PIVOT),
+      DENSE_LINE_FILL_TONE_PIVOT
+        + DENSE_LINE_FILL_TONE_CONTRAST * (data[index + 1] - DENSE_LINE_FILL_TONE_PIVOT)
+        + DENSE_LINE_FILL_TONE_OFFSET,
     )));
     data[index + 2] = Math.max(0, Math.min(255, Math.round(
-      DENSE_LINE_FILL_TONE_PIVOT + DENSE_LINE_FILL_TONE_CONTRAST * (data[index + 2] - DENSE_LINE_FILL_TONE_PIVOT),
+      DENSE_LINE_FILL_TONE_PIVOT
+        + DENSE_LINE_FILL_TONE_CONTRAST * (data[index + 2] - DENSE_LINE_FILL_TONE_PIVOT)
+        + DENSE_LINE_FILL_TONE_OFFSET,
     )));
   }
   ctx.putImageData(image, 0, 0);

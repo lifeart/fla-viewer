@@ -273,6 +273,7 @@ Image exports to compare manually:
 7. Shape21 mixed-paint support fragments may need to help resolve contour topology rather than falling back to legacy paint groups.
 8. Prefer grouped ablation before code changes when a candidate fix affects a cluster of components; single-component wins are often misleading for nested line art.
 9. Out-of-view unresolved line-fill carriers can pollute viewport bounds even when they draw no pixels. Keep this as a framing-only rule: exclude only pure open unresolved chains that have no drawable legacy chain and are large offstage outliers. A broad "zero-pixel shape" exclusion regresses `color.101/color-18`, `color-15`, `color-31`, and `color-19`.
+10. Dense line-fill tone changes must be swept across the `color.101` cluster, not tuned on one portrait. The accepted tone compression keeps `color-21` at the source-fresh floor while improving `color-1`, `color-3`, `color-15`, `color-19`, `color-23`, and `color-31`; broad brightness-only shifts were rejected.
 
 ## Subagent Template
 
