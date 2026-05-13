@@ -12,9 +12,9 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 - Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, narrow same-paint detail threshold expansion, dense line-fill edge/coverage/tone passes, and clipped bitmap atlas fit bands.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark after clipped bitmap atlas fit bands: overall `98.52`, vector `98.41`, bitmap `99.09`.
+- Current raw benchmark after clipped bitmap atlas fit bands and doubled dense shadow lift: overall `98.53`, vector `98.41`, bitmap `99.09`.
 - Source-fresh raw average after alternate-source filtering, dense line-fill correction, and bitmap fit bands: overall `98.96`, vector `98.90`, bitmap `99.09`.
-- Current source-fresh raw minimum is `color.101/color-21` at `96.97`; source-fresh bitmap minimum is `Agata_Head_Angles.87/Agata_Head_Angles-1` at raw `97.46`.
+- Current source-fresh raw minimum is `color.101/color-21` at `97.04`; source-fresh bitmap minimum is `Agata_Head_Angles.87/Agata_Head_Angles-1` at raw `97.46`.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
 - Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
 - The sibling `elements/color/color-13.tvg` scores raw `95.578125`, aligned `97.2421875`, normalized about `92.55`, IoU about `95.34` against the `color.101` thumbnail.
@@ -237,8 +237,10 @@ Managed local finding: dense line-fill interior shadow lift
 
 - Residual buckets for dense portraits consistently showed fully opaque interior pixels too dark after the existing ink-density/tone curve, while fractional edge pixels needed separate handling.
 - The accepted pass uses the pre-white alpha mask and only adjusts pixels whose source alpha is `255` and whose post-composite luma is `<=96`.
-- Accepted lift is RGB `+4,+20,+20`, matching the dominant near-black/green residual direction without re-lightening antialias edges.
+- Accepted lift is RGB `+8,+40,+40`, matching the dominant near-black/green residual direction without re-lightening antialias edges.
 - Targeted dense-cluster deltas after high-edge tone: `color-21 +0.1172`, `color-18 +0.0352`, `color-3 +0.0078`, `color-15 +0.0117`, `color-1 +0.0234`, `color-19 +0.0156`, `color-31 +0.0977`, `color-23 +0.0508`.
+- Doubling the lift from `+4,+20,+20` improved checked source-fresh cluster cases without local regressions: `color-21` raw `96.97 -> 97.04`, `color-18` `97.06 -> 97.07`, `color-3` `97.32 -> 97.34`, `color-15` `97.33 -> 97.33`, `color-1` `97.37 -> 97.38`, `color-19` `97.53 -> 97.55`, and `color-31` `97.62 -> 97.78`.
+- Full raw benchmark after the doubled lift: raw averages overall/vector/bitmap `98.53/98.41/99.09`; source-fresh raw averages overall/vector/bitmap `98.96/98.90/99.09`; source-fresh raw minima vector/bitmap `97.04/97.46`.
 - Additional guards checked unchanged at targeted precision: `Number_Body-2`, `B_Shorts-1`, `Switch-1`, and `Drawing_2-1`.
 
 ## Scientific Loop
