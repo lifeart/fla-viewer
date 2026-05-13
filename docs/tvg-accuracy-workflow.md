@@ -13,7 +13,7 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 - Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, and a narrow same-paint detail threshold expansion.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
 - Current raw benchmark: overall about `98.48`, vector about `98.39`, bitmap about `98.94`.
-- Source-fresh raw average: overall about `98.75`, vector about `98.66`, bitmap about `98.94`.
+- Source-fresh raw average after alternate-source filtering and dense line-fill tone correction: overall about `98.88`, vector about `98.86`, bitmap about `98.94`.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
 - Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
 - The sibling `elements/color/color-13.tvg` scores raw `95.578125`, aligned `97.2421875`, normalized about `92.55`, IoU about `95.34` against the `color.101` thumbnail.
@@ -165,6 +165,9 @@ Managed local finding: dense line-fill ink density
 - Accepted follow-up retune: lower the luma cutoff from `248` to `220` and increase subtraction from `16` to `32`. The stronger correction only affects darker ink pixels, changed nine `color.101` drawings in the full benchmark, improved six, and had no non-`color.101` movement.
 - Full benchmark after the `220/32` retune: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.48/98.39/98.94`; source-fresh raw averages overall/vector/bitmap `98.75/98.66/98.94`; source-fresh raw min `85.45`.
 - Notable source-fresh deltas from the previous `248/16` correction: `color-1` raw `+0.375`, `color-13` raw `+0.19921875`, `color-19` raw `+0.1640625`, `color-31` raw `+0.1640625`, `color-3` raw `+0.08203125`, and `color-18` raw `+0.07421875`; small accepted regressions were `color-23` raw `-0.0546875`, `color-21` raw `-0.0234375`, and `color-15` raw `-0.0078125`.
+- Accepted follow-up tone curve: after the dark-ink density correction, apply a mild foreground contrast compression around pivot `96` with factor `0.94`, gated by the same dense line-fill predicate. This reflects the observed Toon Boom thumbnail tone curve: dark/mid ink was too dark after matching density, while pale antialias/detail pixels were too light.
+- Targeted `color.101` source-fresh deltas from this tone curve were all positive: `color-1` raw `95.9102 -> 95.9844`, `color-21` `95.9141 -> 95.9219`, `color-18` `97.0234 -> 97.0547`, `color-3` `97.1563 -> 97.2461`, `color-15` `97.2813 -> 97.3008`, `color-19` `97.3711 -> 97.4141`, `color-31` `97.3828 -> 97.4180`, and `color-23` `98.7031 -> 98.7500`.
+- Full benchmark after the tone curve: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.48/98.39/98.94`; source-fresh raw averages overall/vector/bitmap `98.88/98.86/98.94`; source-fresh raw min `95.92`.
 
 Managed local finding: alternate-source thumbnail detection
 

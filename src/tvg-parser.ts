@@ -2986,6 +2986,9 @@ export interface TVGRenderOptions {
 
 const DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT = 220;
 const DENSE_LINE_FILL_INK_DENSITY_SUBTRACT = 32;
+const DENSE_LINE_FILL_TONE_PIVOT = 96;
+const DENSE_LINE_FILL_TONE_CONTRAST = 0.94;
+const DENSE_LINE_FILL_BACKGROUND_TOLERANCE = 12;
 
 function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type'][] {
   const includeUnderlay = options?.includeUnderlay ?? true;
@@ -3015,10 +3018,30 @@ function applyDenseLineFillInkDensityAdjustment(canvas: HTMLCanvasElement): void
   const data = image.data;
   for (let index = 0; index < data.length; index += 4) {
     const luma = 0.2126 * data[index] + 0.7152 * data[index + 1] + 0.0722 * data[index + 2];
-    if (luma > DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT) continue;
-    data[index] = Math.max(0, data[index] - DENSE_LINE_FILL_INK_DENSITY_SUBTRACT);
-    data[index + 1] = Math.max(0, data[index + 1] - DENSE_LINE_FILL_INK_DENSITY_SUBTRACT);
-    data[index + 2] = Math.max(0, data[index + 2] - DENSE_LINE_FILL_INK_DENSITY_SUBTRACT);
+    const isForeground = Math.abs(data[index] - 255) > DENSE_LINE_FILL_BACKGROUND_TOLERANCE
+      || Math.abs(data[index + 1] - 255) > DENSE_LINE_FILL_BACKGROUND_TOLERANCE
+      || Math.abs(data[index + 2] - 255) > DENSE_LINE_FILL_BACKGROUND_TOLERANCE
+      || data[index + 3] < 255 - DENSE_LINE_FILL_BACKGROUND_TOLERANCE;
+    if (!isForeground) continue;
+
+    if (luma <= DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT) {
+      data[index] = Math.max(0, data[index] - DENSE_LINE_FILL_INK_DENSITY_SUBTRACT);
+      data[index + 1] = Math.max(0, data[index + 1] - DENSE_LINE_FILL_INK_DENSITY_SUBTRACT);
+      data[index + 2] = Math.max(0, data[index + 2] - DENSE_LINE_FILL_INK_DENSITY_SUBTRACT);
+    }
+
+    // Toon Boom thumbnails for dense line-fill drawings have slightly flatter
+    // foreground contrast than Canvas downsampling: dark ink is softened while
+    // pale antialias/detail pixels move back toward the ink body.
+    data[index] = Math.max(0, Math.min(255, Math.round(
+      DENSE_LINE_FILL_TONE_PIVOT + DENSE_LINE_FILL_TONE_CONTRAST * (data[index] - DENSE_LINE_FILL_TONE_PIVOT),
+    )));
+    data[index + 1] = Math.max(0, Math.min(255, Math.round(
+      DENSE_LINE_FILL_TONE_PIVOT + DENSE_LINE_FILL_TONE_CONTRAST * (data[index + 1] - DENSE_LINE_FILL_TONE_PIVOT),
+    )));
+    data[index + 2] = Math.max(0, Math.min(255, Math.round(
+      DENSE_LINE_FILL_TONE_PIVOT + DENSE_LINE_FILL_TONE_CONTRAST * (data[index + 2] - DENSE_LINE_FILL_TONE_PIVOT),
+    )));
   }
   ctx.putImageData(image, 0, 0);
 }
