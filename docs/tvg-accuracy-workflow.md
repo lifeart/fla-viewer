@@ -12,9 +12,9 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 - Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, and a narrow same-paint detail threshold expansion.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark after low-edge exterior expansion and high-edge tone: overall `98.50`, vector `98.41`, bitmap `98.94`.
-- Source-fresh raw average after alternate-source filtering and dense line-fill tone/edge/coverage correction: overall `98.91`, vector `98.89`, bitmap `98.94`.
-- Current source-fresh raw minimum is `color.101/color-21` at `96.86`; `color.101/color-1` improved to raw `97.34`.
+- Current raw benchmark after low-edge exterior expansion, high-edge tone, and interior shadow lift: overall `98.50`, vector `98.41`, bitmap `98.94`.
+- Source-fresh raw average after alternate-source filtering and dense line-fill tone/edge/coverage correction: overall `98.91`, vector `98.90`, bitmap `98.94`.
+- Current source-fresh raw minimum is `color.101/color-21` at `96.97`; `color.101/color-1` improved to raw `97.37`.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
 - Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
 - The sibling `elements/color/color-13.tvg` scores raw `95.578125`, aligned `97.2421875`, normalized about `92.55`, IoU about `95.34` against the `color.101` thumbnail.
@@ -226,6 +226,14 @@ Managed local finding: high-edge dense line-fill edge tone
 - Renderer-path sweep: subtract `8` gave `color-1` raw `96.7305`; subtract `16` gave `97.0859`; subtract `24` gave `97.2930`; subtract `32` peaked at `97.3438`; subtract `48` regressed to `97.0391`.
 - Accepted subtract `32`: `color-1` raw `96.2227 -> 97.3438`, aligned `98.6797 -> 98.8555`, focused `96.7629 -> 97.2785`, IoU `99.0190 -> 99.1010`.
 - Dense-cluster guard remained unchanged for `color-21`, `color-3`, `color-31`, `color-19`, `color-18`, `color-15`, and `color-23`. Additional guards checked unchanged at targeted precision: `Number_Body-2`, `B_Shorts-1`, `Switch-1`, and `Drawing_2-1`.
+
+Managed local finding: dense line-fill interior shadow lift
+
+- Residual buckets for dense portraits consistently showed fully opaque interior pixels too dark after the existing ink-density/tone curve, while fractional edge pixels needed separate handling.
+- The accepted pass uses the pre-white alpha mask and only adjusts pixels whose source alpha is `255` and whose post-composite luma is `<=96`.
+- Accepted lift is RGB `+4,+20,+20`, matching the dominant near-black/green residual direction without re-lightening antialias edges.
+- Targeted dense-cluster deltas after high-edge tone: `color-21 +0.1172`, `color-18 +0.0352`, `color-3 +0.0078`, `color-15 +0.0117`, `color-1 +0.0234`, `color-19 +0.0156`, `color-31 +0.0977`, `color-23 +0.0508`.
+- Additional guards checked unchanged at targeted precision: `Number_Body-2`, `B_Shorts-1`, `Switch-1`, and `Drawing_2-1`.
 
 ## Scientific Loop
 

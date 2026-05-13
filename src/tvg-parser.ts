@@ -2996,6 +2996,8 @@ const DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS = 900;
 const DENSE_LINE_FILL_EDGE_EXPANSION_MAX_FRACTIONAL_ALPHA_PIXELS = 1000;
 const DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS = 1500;
 const DENSE_LINE_FILL_EDGE_TONE_SUBTRACT = 32;
+const DENSE_LINE_FILL_INTERIOR_SHADOW_LUMA_LIMIT = 96;
+const DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT = { r: 4, g: 20, b: 20 };
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_SIZE = 1500;
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_DISTANCE = 2500;
 
@@ -3229,6 +3231,36 @@ function applyDenseLineFillEdgeToneAdjustment(
     data[index] = Math.max(0, data[index] - DENSE_LINE_FILL_EDGE_TONE_SUBTRACT);
     data[index + 1] = Math.max(0, data[index + 1] - DENSE_LINE_FILL_EDGE_TONE_SUBTRACT);
     data[index + 2] = Math.max(0, data[index + 2] - DENSE_LINE_FILL_EDGE_TONE_SUBTRACT);
+  }
+  ctx.putImageData(image, 0, 0);
+}
+
+function applyDenseLineFillInteriorShadowToneAdjustment(
+  canvas: HTMLCanvasElement,
+  alphaMask: Uint8ClampedArray | null,
+): void {
+  if (!alphaMask) return;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = image.data;
+  for (let index = 0; index < data.length; index += 4) {
+    if (alphaMask[index + 3] !== 255) continue;
+
+    const luma = 0.2126 * data[index] + 0.7152 * data[index + 1] + 0.0722 * data[index + 2];
+    if (luma > DENSE_LINE_FILL_INTERIOR_SHADOW_LUMA_LIMIT) continue;
+
+    const isForeground = Math.abs(data[index] - 255) > DENSE_LINE_FILL_BACKGROUND_TOLERANCE
+      || Math.abs(data[index + 1] - 255) > DENSE_LINE_FILL_BACKGROUND_TOLERANCE
+      || Math.abs(data[index + 2] - 255) > DENSE_LINE_FILL_BACKGROUND_TOLERANCE
+      || data[index + 3] < 255 - DENSE_LINE_FILL_BACKGROUND_TOLERANCE;
+    if (!isForeground) continue;
+
+    data[index] = Math.min(255, data[index] + DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT.r);
+    data[index + 1] = Math.min(255, data[index + 1] + DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT.g);
+    data[index + 2] = Math.min(255, data[index + 2] + DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT.b);
   }
   ctx.putImageData(image, 0, 0);
 }
@@ -3721,11 +3753,11 @@ export function renderTVGToCanvas(
 
   const shouldApplyDenseLineFillAdjustment = shouldApplyDenseLineFillInkDensityAdjustment(renderDrawing, options);
   let denseLineFillOutputAlphaMask: Uint8ClampedArray | null = null;
+  let shouldApplyDenseLineFillEdgeTone = false;
   if (shouldApplyDenseLineFillAdjustment) {
     const outputFractionalAlphaPixels = applyDenseLineFillEdgeCoverageAdjustment(canvas, width, height);
-    if (outputFractionalAlphaPixels >= DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS) {
-      denseLineFillOutputAlphaMask = createOutputAlphaMask(canvas, width, height);
-    }
+    denseLineFillOutputAlphaMask = createOutputAlphaMask(canvas, width, height);
+    shouldApplyDenseLineFillEdgeTone = outputFractionalAlphaPixels >= DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS;
   }
 
   // Pre-composite against white background (skip for matte/compositor sources)
@@ -3749,14 +3781,20 @@ export function renderTVGToCanvas(
     outCtx.drawImage(canvas, 0, 0, width, height);
     if (shouldApplyDenseLineFillAdjustment) {
       applyDenseLineFillInkDensityAdjustment(outCanvas);
-      applyDenseLineFillEdgeToneAdjustment(outCanvas, denseLineFillOutputAlphaMask);
+      applyDenseLineFillInteriorShadowToneAdjustment(outCanvas, denseLineFillOutputAlphaMask);
+      if (shouldApplyDenseLineFillEdgeTone) {
+        applyDenseLineFillEdgeToneAdjustment(outCanvas, denseLineFillOutputAlphaMask);
+      }
     }
     return outCanvas;
   }
 
   if (shouldApplyDenseLineFillAdjustment) {
     applyDenseLineFillInkDensityAdjustment(canvas);
-    applyDenseLineFillEdgeToneAdjustment(canvas, denseLineFillOutputAlphaMask);
+    applyDenseLineFillInteriorShadowToneAdjustment(canvas, denseLineFillOutputAlphaMask);
+    if (shouldApplyDenseLineFillEdgeTone) {
+      applyDenseLineFillEdgeToneAdjustment(canvas, denseLineFillOutputAlphaMask);
+    }
   }
   return canvas;
 }
