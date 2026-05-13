@@ -13,7 +13,7 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 - Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, and a narrow same-paint detail threshold expansion.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
 - Current raw benchmark: overall about `98.48`, vector about `98.39`, bitmap about `98.94`.
-- Source-fresh raw average after alternate-source filtering and dense line-fill tone correction: overall about `98.88`, vector about `98.86`, bitmap about `98.94`.
+- Source-fresh raw average after alternate-source filtering and dense line-fill tone/edge correction: overall about `98.88`, vector about `98.86`, bitmap about `98.94`.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
 - Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
 - The sibling `elements/color/color-13.tvg` scores raw `95.578125`, aligned `97.2421875`, normalized about `92.55`, IoU about `95.34` against the `color.101` thumbnail.
@@ -168,6 +168,10 @@ Managed local finding: dense line-fill ink density
 - Accepted follow-up tone curve: after the dark-ink density correction, apply a mild foreground contrast compression around pivot `96` with factor `0.94`, gated by the same dense line-fill predicate. This reflects the observed Toon Boom thumbnail tone curve: dark/mid ink was too dark after matching density, while pale antialias/detail pixels were too light.
 - Targeted `color.101` source-fresh deltas from this tone curve were all positive: `color-1` raw `95.9102 -> 95.9844`, `color-21` `95.9141 -> 95.9219`, `color-18` `97.0234 -> 97.0547`, `color-3` `97.1563 -> 97.2461`, `color-15` `97.2813 -> 97.3008`, `color-19` `97.3711 -> 97.4141`, `color-31` `97.3828 -> 97.4180`, and `color-23` `98.7031 -> 98.7500`.
 - Full benchmark after the tone curve: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.48/98.39/98.94`; source-fresh raw averages overall/vector/bitmap `98.88/98.86/98.94`; source-fresh raw min `95.92`.
+- Accepted follow-up edge-coverage correction: before white pre-composite, boost only fractional alpha by `1.1x`, still gated by dense line-fill detection and only when the downsampled transparent render has at least `900` fractional-alpha pixels. This targets dense antialias coverage without changing sparse drawings.
+- Fractional-alpha guard evidence at `160x160`: `color-1` `1615`, `color-21` `910`, `color-3` `1247`, `color-19` `1214`, `color-31` `1147`; skipped sparse/neutral cases include `color-23` `601`, `color-15` `800`, `color-18` `898`, and `Drawing_2-1` `419`.
+- Targeted post-tone deltas from the alpha boost: `color-1` raw `95.9844 -> 96.0391`, `color-21` `95.9219 -> 95.9688`, `color-3` `97.2461 -> 97.2656`, `color-19` `97.4141 -> 97.5000`, and `color-31` `97.4180 -> 97.4961`; skipped cases stayed unchanged.
+- Full benchmark after the edge correction: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.48/98.39/98.94`; source-fresh raw averages overall/vector/bitmap `98.88/98.86/98.94`; source-fresh raw min `95.97`.
 
 Managed local finding: alternate-source thumbnail detection
 

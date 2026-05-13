@@ -2989,6 +2989,8 @@ const DENSE_LINE_FILL_INK_DENSITY_SUBTRACT = 32;
 const DENSE_LINE_FILL_TONE_PIVOT = 96;
 const DENSE_LINE_FILL_TONE_CONTRAST = 0.94;
 const DENSE_LINE_FILL_BACKGROUND_TOLERANCE = 12;
+const DENSE_LINE_FILL_EDGE_ALPHA_SCALE = 1.1;
+const DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS = 900;
 
 function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type'][] {
   const includeUnderlay = options?.includeUnderlay ?? true;
@@ -3042,6 +3044,58 @@ function applyDenseLineFillInkDensityAdjustment(canvas: HTMLCanvasElement): void
     data[index + 2] = Math.max(0, Math.min(255, Math.round(
       DENSE_LINE_FILL_TONE_PIVOT + DENSE_LINE_FILL_TONE_CONTRAST * (data[index + 2] - DENSE_LINE_FILL_TONE_PIVOT),
     )));
+  }
+  ctx.putImageData(image, 0, 0);
+}
+
+function countFractionalAlphaPixels(canvas: HTMLCanvasElement): number {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return 0;
+
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  let count = 0;
+  for (let index = 3; index < data.length; index += 4) {
+    if (data[index] > 0 && data[index] < 255) count++;
+  }
+  return count;
+}
+
+function hasDenseLineFillEdgeCoverageBudget(
+  canvas: HTMLCanvasElement,
+  outputWidth: number,
+  outputHeight: number,
+): boolean {
+  if (canvas.width === outputWidth && canvas.height === outputHeight) {
+    return countFractionalAlphaPixels(canvas) >= DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS;
+  }
+
+  const alphaCanvas = document.createElement('canvas');
+  alphaCanvas.width = outputWidth;
+  alphaCanvas.height = outputHeight;
+  const alphaCtx = alphaCanvas.getContext('2d');
+  if (!alphaCtx) return false;
+  alphaCtx.imageSmoothingEnabled = true;
+  alphaCtx.imageSmoothingQuality = 'high';
+  alphaCtx.drawImage(canvas, 0, 0, outputWidth, outputHeight);
+  return countFractionalAlphaPixels(alphaCanvas) >= DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS;
+}
+
+function applyDenseLineFillEdgeCoverageAdjustment(
+  canvas: HTMLCanvasElement,
+  outputWidth: number,
+  outputHeight: number,
+): void {
+  if (!hasDenseLineFillEdgeCoverageBudget(canvas, outputWidth, outputHeight)) return;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = image.data;
+  for (let index = 3; index < data.length; index += 4) {
+    const alpha = data[index];
+    if (alpha <= 0 || alpha >= 255) continue;
+    data[index] = Math.min(255, Math.round(alpha * DENSE_LINE_FILL_EDGE_ALPHA_SCALE));
   }
   ctx.putImageData(image, 0, 0);
 }
@@ -3480,6 +3534,11 @@ export function renderTVGToCanvas(
     }
   }
 
+  const shouldApplyDenseLineFillAdjustment = shouldApplyDenseLineFillInkDensityAdjustment(renderDrawing, options);
+  if (shouldApplyDenseLineFillAdjustment) {
+    applyDenseLineFillEdgeCoverageAdjustment(canvas, width, height);
+  }
+
   // Pre-composite against white background (skip for matte/compositor sources)
   if (!options?.skipBackgroundComposite) {
     ctx.save();
@@ -3490,8 +3549,6 @@ export function renderTVGToCanvas(
     ctx.restore();
   }
 
-  const shouldApplyInkDensity = shouldApplyDenseLineFillInkDensityAdjustment(renderDrawing, options);
-
   // Downsample from SS resolution to output resolution
   if (SS > 1) {
     const outCanvas = document.createElement('canvas');
@@ -3501,13 +3558,13 @@ export function renderTVGToCanvas(
     outCtx.imageSmoothingEnabled = true;
     outCtx.imageSmoothingQuality = 'high';
     outCtx.drawImage(canvas, 0, 0, width, height);
-    if (shouldApplyInkDensity) {
+    if (shouldApplyDenseLineFillAdjustment) {
       applyDenseLineFillInkDensityAdjustment(outCanvas);
     }
     return outCanvas;
   }
 
-  if (shouldApplyInkDensity) {
+  if (shouldApplyDenseLineFillAdjustment) {
     applyDenseLineFillInkDensityAdjustment(canvas);
   }
   return canvas;
