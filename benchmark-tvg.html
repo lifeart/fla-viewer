@@ -25,6 +25,11 @@ const DEFAULT_MAX_SHIFT = 8;
 const DEFAULT_BACKGROUND_TOL = 12;
 const DEFAULT_SEARCH_RADIUS = 2;
 const STALE_THUMBNAIL_THRESHOLD_MS = 60 * 60 * 1000;
+const ALTERNATE_SOURCE_CHECK_RAW_MAX = 96;
+const ALTERNATE_SOURCE_CHECK_FOCUSED_MAX = 30;
+const ALTERNATE_SOURCE_MIN_RAW = 92;
+const ALTERNATE_SOURCE_MIN_ALIGNED = 95;
+const ALTERNATE_SOURCE_MIN_RAW_DELTA = 6;
 
 function findFile(zip, filename) {
   if (zip.file(filename)) return filename;
@@ -83,6 +88,72 @@ function sourceFreshnessFor(zip, drawingPath, thumbnailPath) {
   };
 }
 
+function collectAlternateDrawingPaths(zip, drawingPath) {
+  const filename = drawingPath.split('/').pop();
+  if (!filename?.endsWith('.tvg')) return [];
+
+  const elementsMarker = '/elements/';
+  const elementsIndex = drawingPath.indexOf(elementsMarker);
+  if (elementsIndex < 0) return [];
+
+  const elementsRoot = drawingPath.slice(0, elementsIndex + elementsMarker.length);
+  const sameNameSuffix = `/${filename}`;
+  const candidates = [];
+
+  zip.forEach((path, file) => {
+    if (file.dir) return;
+    if (path === drawingPath) return;
+    if (!path.startsWith(elementsRoot)) return;
+    if (!path.endsWith(sameNameSuffix)) return;
+    if (path.includes('/.thumbnails/') || path.includes('/palette-library/')) return;
+    candidates.push(path);
+  });
+
+  const backupPath = `${drawingPath}~`;
+  if (zip.file(backupPath)) candidates.push(backupPath);
+
+  return candidates;
+}
+
+async function findAlternateSourceMatch(zip, drawingPath, reference, viewport, size, externalColors, currentScore, scoreOptions) {
+  const shouldCheck = currentScore.rawScore < ALTERNATE_SOURCE_CHECK_RAW_MAX
+    || (currentScore.normalizedScore < ALTERNATE_SOURCE_CHECK_FOCUSED_MAX
+      && currentScore.foregroundIou < ALTERNATE_SOURCE_CHECK_FOCUSED_MAX);
+  if (!shouldCheck) return null;
+
+  let best = null;
+  for (const candidatePath of collectAlternateDrawingPaths(zip, drawingPath)) {
+    const candidateFile = zip.file(candidatePath);
+    if (!candidateFile) continue;
+
+    const candidateDrawing = parseTVG(await candidateFile.async('arraybuffer'));
+    if (externalColors.length > 0) resolveExternalPalette(candidateDrawing, externalColors);
+
+    const candidateCanvas = renderTVGToCanvas(candidateDrawing, size, size, viewport, { supersample: 2 });
+    if (!candidateCanvas) continue;
+    await loadBitmapTiles(candidateCanvas, candidateDrawing.diagnostics);
+
+    const candidateScore = scoreCanvasSources(reference, candidateCanvas, size, scoreOptions);
+    if (!best || candidateScore.rawScore > best.rawScore) {
+      best = {
+        path: candidatePath,
+        rawScore: candidateScore.rawScore,
+        alignedScore: candidateScore.alignedScore,
+        normalizedScore: candidateScore.normalizedScore,
+        foregroundIou: candidateScore.foregroundIou,
+      };
+    }
+  }
+
+  if (!best) return null;
+  const rawDelta = best.rawScore - currentScore.rawScore;
+  if (rawDelta < ALTERNATE_SOURCE_MIN_RAW_DELTA) return null;
+  if (best.rawScore < ALTERNATE_SOURCE_MIN_RAW) return null;
+  if (best.alignedScore < ALTERNATE_SOURCE_MIN_ALIGNED) return null;
+
+  return { ...best, rawDelta };
+}
+
 async function runBenchmark() {
   const params = new URLSearchParams(location.search);
   const zipPath = params.get('zip') || DEFAULT_ZIP;
@@ -135,19 +206,37 @@ async function runBenchmark() {
     }
     const bitmapOnly = drawing.bitmapTiles.length > 0 && drawing.layers.every((layer) => layer.shapes.length === 0);
 
-    const scoreResult = scoreCanvasSources(reference, canvas, size, {
+    const scoreOptions = {
       tolerance,
       maxShift,
       backgroundTolerance,
       searchRadius,
       contentKind: bitmapOnly ? 'bitmap' : 'vector',
-    });
+    };
+    const scoreResult = scoreCanvasSources(reference, canvas, size, scoreOptions);
+    const timestampFreshness = sourceFreshnessFor(zip, drawingPath, thumbPath);
+    const alternateSource = timestampFreshness.sourceFreshness === 'same-or-newer-thumbnail'
+      ? await findAlternateSourceMatch(zip, drawingPath, reference, viewport, size, externalColors, scoreResult, scoreOptions)
+      : null;
+    const freshness = alternateSource
+      ? {
+          ...timestampFreshness,
+          sourceFreshness: 'thumbnail-matches-alternate-drawing',
+          alternateSourcePath: alternateSource.path,
+          alternateRawScore: alternateSource.rawScore,
+          alternateAlignedScore: alternateSource.alignedScore,
+          alternateNormalizedScore: alternateSource.normalizedScore,
+          alternateForegroundIou: alternateSource.foregroundIou,
+          alternateRawDelta: alternateSource.rawDelta,
+        }
+      : timestampFreshness;
+
     results.push({
       drawing: thumbName,
       element: elementName,
       viewport,
       bitmapOnly,
-      ...sourceFreshnessFor(zip, drawingPath, thumbPath),
+      ...freshness,
       gateScore: scoreResult.gateScore,
       score: scoreResult.score,
       rawScore: scoreResult.rawScore,
@@ -167,7 +256,8 @@ async function runBenchmark() {
   const vector = results.filter((entry) => !entry.bitmapOnly);
   const bitmap = results.filter((entry) => entry.bitmapOnly);
   const sourceFresh = results.filter((entry) => entry.sourceFreshness === 'same-or-newer-thumbnail');
-  const staleThumbnail = results.filter((entry) => entry.sourceFreshness === 'thumbnail-older-than-drawing');
+  const staleThumbnail = results.filter((entry) => entry.sourceFreshness !== 'same-or-newer-thumbnail');
+  const alternateSourceThumbnail = results.filter((entry) => entry.sourceFreshness === 'thumbnail-matches-alternate-drawing');
   const sourceFreshVector = sourceFresh.filter((entry) => !entry.bitmapOnly);
   const sourceFreshBitmap = sourceFresh.filter((entry) => entry.bitmapOnly);
   const averageFinal = (items) => items.length ? items.reduce((sum, item) => sum + item.score, 0) / items.length : 0;
@@ -224,6 +314,7 @@ async function runBenchmark() {
     largeRescueDrawings: largeRescues.length,
     suspiciousRescueDrawings: suspiciousRescues.length,
     staleThumbnailDrawings: staleThumbnail.length,
+    alternateSourceThumbnailDrawings: alternateSourceThumbnail.length,
     sourceFreshDrawings: sourceFresh.length,
     sourceFreshRawVectorAverage: averageRaw(sourceFreshVector),
     sourceFreshRawBitmapAverage: averageRaw(sourceFreshBitmap),

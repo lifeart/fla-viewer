@@ -14,9 +14,10 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 - Main benchmark command: `npm run benchmark:tvg:raw`.
 - Current raw benchmark: overall about `98.48`, vector about `98.39`, bitmap about `98.94`.
 - Source-fresh raw average: overall about `98.75`, vector about `98.66`, bitmap about `98.94`.
-- Worst source-fresh vector case: `color.101/color-13`.
-- Worst case scores after the dense ink-density retune: raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
-- Worst case bounds: reference `{minX:8,minY:17,maxX:149,maxY:142}`, candidate `{minX:9,minY:9,maxX:150,maxY:143}`.
+- `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
+- Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
+- The sibling `elements/color/color-13.tvg` scores raw `95.578125`, aligned `97.2421875`, normalized about `92.55`, IoU about `95.34` against the `color.101` thumbnail.
+- The mismatch is therefore classified as `thumbnail-matches-alternate-drawing` in the raw benchmark when the alternate raw score is at least `6` points better and meets high raw/aligned floors.
 - The app fallback path can score 100 by using embedded thumbnails, but raw vector rendering is the target.
 - Local ablation tooling supports raw/aligned sorting, `--skip-only`, grouped component removal via `--group`/`--remove-components-as-group`, and opt-in verbose component metadata via `--details`.
 
@@ -164,6 +165,15 @@ Managed local finding: dense line-fill ink density
 - Accepted follow-up retune: lower the luma cutoff from `248` to `220` and increase subtraction from `16` to `32`. The stronger correction only affects darker ink pixels, changed nine `color.101` drawings in the full benchmark, improved six, and had no non-`color.101` movement.
 - Full benchmark after the `220/32` retune: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages overall/vector/bitmap `98.48/98.39/98.94`; source-fresh raw averages overall/vector/bitmap `98.75/98.66/98.94`; source-fresh raw min `85.45`.
 - Notable source-fresh deltas from the previous `248/16` correction: `color-1` raw `+0.375`, `color-13` raw `+0.19921875`, `color-19` raw `+0.1640625`, `color-31` raw `+0.1640625`, `color-3` raw `+0.08203125`, and `color-18` raw `+0.07421875`; small accepted regressions were `color-23` raw `-0.0546875`, `color-21` raw `-0.0234375`, and `color-15` raw `-0.0078125`.
+
+Managed local finding: alternate-source thumbnail detection
+
+- `color.101/color-13` visually differs too much for an antialiasing or placement fix: the candidate rendered from `elements/color.101/color-13.tvg` has different hair/ear silhouette and bounds `{minX:9,minY:9,maxX:150,maxY:143}` versus reference `{minX:8,minY:17,maxX:149,maxY:142}`.
+- Archive evidence found a sibling same-name drawing: `elements/color/color-13.tvg` scores raw `95.578125`, aligned `97.2421875`, normalized `92.5475`, and IoU `95.3422` against the `color.101` thumbnail, while the actual `color.101` drawing scores raw `85.4453125`.
+- The `color.101/color-13.tvg~` backup scores worse than the active source (`84.47265625` raw), so the thumbnail most likely belongs to the sibling `color` element, not to the current `color.101` TVG or its backup.
+- A scan of other low/suspicious source-fresh cases found no comparable alternate-source win: `Drawing_2-1` backup improved only `+0.2305`, `color-21` sibling improved only `+0.0625`, and `color-1` sibling regressed.
+- Accepted benchmark rule: only classify `thumbnail-matches-alternate-drawing` when a sibling or backup same-name TVG beats the active drawing by at least `6` raw points and the alternate also scores raw `>=92` and aligned `>=95`.
+- This is not a renderer shortcut. It prevents stale/copied thumbnails from driving topology hacks against the wrong source while preserving them in the full raw results with alternate-source diagnostics.
 
 Managed local finding: embedded dark legacy-chain suppression
 

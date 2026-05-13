@@ -167,11 +167,13 @@ async function main() {
         .map((result) => {
           const source = result.sourceFreshness === 'thumbnail-older-than-drawing'
             ? ` staleThumb=${result.thumbnailAgeHours.toFixed(1)}h`
-            : '';
+            : result.sourceFreshness === 'thumbnail-matches-alternate-drawing'
+              ? ` alternate=${result.alternateSourcePath} altRaw=${result.alternateRawScore.toFixed(2)}`
+              : '';
           return `${result.drawing} final=${result.score.toFixed(2)} gate=${result.gateScore.toFixed(2)} aligned=${result.alignedScore.toFixed(2)} raw=${result.rawScore.toFixed(2)}${source}`;
         });
       const actionableWorst = [...benchmark.results]
-        .filter((result) => result.sourceFreshness !== 'thumbnail-older-than-drawing')
+        .filter((result) => result.sourceFreshness === 'same-or-newer-thumbnail')
         .sort((a, b) => a.rawScore - b.rawScore || a.alignedScore - b.alignedScore)
         .slice(0, 12)
         .map((result) => `${result.drawing} aligned=${result.alignedScore.toFixed(2)} raw=${result.rawScore.toFixed(2)} focused=${result.normalizedScore.toFixed(2)} iou=${result.foregroundIou.toFixed(2)}`);
