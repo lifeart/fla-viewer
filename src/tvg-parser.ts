@@ -2991,6 +2991,8 @@ const DENSE_LINE_FILL_TONE_CONTRAST = 0.94;
 const DENSE_LINE_FILL_BACKGROUND_TOLERANCE = 12;
 const DENSE_LINE_FILL_EDGE_ALPHA_SCALE = 1.1;
 const DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS = 900;
+const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_SIZE = 1500;
+const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_DISTANCE = 2500;
 
 function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type'][] {
   const includeUnderlay = options?.includeUnderlay ?? true;
@@ -3197,6 +3199,7 @@ function shapeMayRenderVisibleContent(
   allLayers: TVGArtLayer[],
   defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null,
   defaultStrokeWidth: number,
+  shapeIndex = -1,
 ): boolean {
   const fillComps = shape.components.filter(comp =>
     (comp.componentType === 0 || comp.componentType === 1)
@@ -3210,7 +3213,9 @@ function shapeMayRenderVisibleContent(
     || comp.paletteIndex !== null
     || comp.colorId !== null,
   )) {
-    return true;
+    if (layer.type !== 'line' || !lineFillShapeIsBoundsOnlyOpenUnresolved(layer, shape, shapeIndex)) {
+      return true;
+    }
   }
 
   const strokeComps = shape.components.filter(comp =>
@@ -3247,6 +3252,54 @@ function shapeMayRenderVisibleContent(
   return layer.type !== 'line' && hasOnlyPencils && hasVisiblePencilPaint;
 }
 
+function lineFillShapeIsBoundsOnlyOpenUnresolved(
+  layer: TVGArtLayer,
+  shape: TVGShape,
+  shapeIndex: number,
+): boolean {
+  const strokeComps = shape.components.filter(comp =>
+    (comp.componentType === 4 || comp.componentType === 2)
+    && comp.path
+    && comp.path.segments.length > 0,
+  );
+  const explicitBuild = buildContoursForShape(collectExplicitFillFragments(shape, layer.type, shapeIndex), false);
+  if (explicitBuild.contours.length > 0 || explicitBuild.unresolvedChains.length === 0) return false;
+  if (explicitBuild.unresolvedChains.some(chain =>
+    chain.supportFragmentCount > 0
+    || isContourGeometryClosed(chain)
+  )) {
+    return false;
+  }
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const chain of explicitBuild.unresolvedChains) {
+    minX = Math.min(minX, chain.bbox.minX);
+    minY = Math.min(minY, chain.bbox.minY);
+    maxX = Math.max(maxX, chain.bbox.maxX);
+    maxY = Math.max(maxY, chain.bbox.maxY);
+  }
+  const maxDimension = Math.max(maxX - minX, maxY - minY);
+  const centerDistance = Math.hypot((minX + maxX) / 2, (minY + maxY) / 2);
+  if (
+    maxDimension < LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_SIZE
+    || centerDistance < LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_DISTANCE
+  ) {
+    return false;
+  }
+
+  const legacyStrokeComps = strokeComps.length === 0
+    ? collectSameLayerSupportBoundaryStrokes(layer, shape, shapeIndex)
+    : strokeComps;
+  return !canRenderLegacyExplicitFillShape(
+    shape,
+    legacyStrokeComps,
+    { layerType: layer.type },
+  );
+}
+
 function collectRenderablePoints(
   drawing: TVGDrawing,
   activeLayerTypes: TVGArtLayer['type'][],
@@ -3257,8 +3310,9 @@ function collectRenderablePoints(
   const scopedLayers = drawing.layers.filter((layer) => activeTypes.has(layer.type));
   const allPoints: { x: number; y: number }[] = [];
   for (const layer of scopedLayers) {
-    for (const shape of layer.shapes) {
-      if (!shapeMayRenderVisibleContent(shape, layer, scopedLayers, defaultBoundaryFillColor, defaultStrokeWidth)) {
+    for (let shapeIndex = 0; shapeIndex < layer.shapes.length; shapeIndex++) {
+      const shape = layer.shapes[shapeIndex];
+      if (!shapeMayRenderVisibleContent(shape, layer, scopedLayers, defaultBoundaryFillColor, defaultStrokeWidth, shapeIndex)) {
         continue;
       }
       for (const comp of shape.components) {
@@ -3732,7 +3786,7 @@ function computeAdditionalViewportSourcePadding(
   for (const layer of drawing.layers) {
     for (let shapeIndex = 0; shapeIndex < layer.shapes.length; shapeIndex++) {
       const shape = layer.shapes[shapeIndex];
-      if (!shapeMayRenderVisibleContent(shape, layer, drawing.layers, defaultBoundaryFillColor, defaultStrokeWidth)) {
+      if (!shapeMayRenderVisibleContent(shape, layer, drawing.layers, defaultBoundaryFillColor, defaultStrokeWidth, shapeIndex)) {
         continue;
       }
       if (layer.type !== 'line') return 0;
@@ -6632,6 +6686,64 @@ function buildLegacyFillRenderGroups(
       ...(supportIndicesByKey.get(key) ?? []),
     ],
     }));
+}
+
+function canRenderLegacyChainedFillComponents(
+  allChainComps: TVGComponent[],
+  indices: number[],
+  tolerance: number,
+): boolean {
+  const { chains, drawableChains, autoCloseChains } = buildLegacyChains(allChainComps, indices, tolerance);
+  if (chains.length === 0) return false;
+  const hasDrawableChain = drawableChains.some(chain =>
+    isLegacyChainClosed(chain, tolerance) || autoCloseChains.has(chain),
+  );
+  if (!hasDrawableChain) return false;
+  return indices.some(index => allChainComps[index]?.outerPaint !== null);
+}
+
+function canRenderLegacyExplicitFillShape(
+  shape: TVGShape,
+  strokeComps: TVGComponent[],
+  options: LegacyFillRenderOptions = {},
+): boolean {
+  const chainableFillComps = expandLegacyChainComponents(shape.components.filter(comp =>
+    (comp.componentType === 0 || comp.componentType === 1)
+    && comp.path
+    && comp.path.segments.length > 1
+    && !isDegenerate(comp.path)
+    && (!comp.color || comp.color.a > 0)
+  ));
+  const explicitFillComps = chainableFillComps.filter(comp => hasExplicitFillStyle(comp) && comp.outerPaint);
+  const inheritedSeedFillComps = chainableFillComps.filter(comp =>
+    comp.fillPaintSource === 'inherited' && comp.outerPaint,
+  );
+  const defaultSeedFillComps = chainableFillComps.filter(comp =>
+    comp.fillPaintSource === 'default' && comp.outerPaint,
+  );
+  const paintedFillComps = chainableFillComps.filter(comp => comp.outerPaint !== null);
+  const fillComps = explicitFillComps.length > 0
+    ? explicitFillComps
+    : inheritedSeedFillComps.length > 0
+      ? inheritedSeedFillComps
+      : defaultSeedFillComps.length > 0
+        ? defaultSeedFillComps
+        : paintedFillComps;
+  const supportFillComps = chainableFillComps.filter(comp => comp.outerPaint === null);
+  if (fillComps.length === 0) return false;
+
+  const tolerance = 2.0;
+  const boundaryStrokes = expandLegacyChainComponents(strokeComps.filter(comp =>
+    comp.componentType === 2
+    && comp.strokeWidth === null
+    && comp.path
+    && comp.path.segments.length > 1,
+  ));
+  const allChainComps = [...paintedFillComps, ...supportFillComps, ...boundaryStrokes];
+  const groups = buildLegacyFillRenderGroups(allChainComps, options);
+  return groups.some(group =>
+    canRenderLegacyChainedFillComponents(allChainComps, group.allChainIndices, tolerance),
+  );
 }
 
 function renderLegacyExplicitFillShape(

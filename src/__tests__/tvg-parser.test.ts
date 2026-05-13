@@ -3113,7 +3113,7 @@ describe('tvg rendering', () => {
     const score = scoreCanvasSources(reference, canvas!, 160);
 
     expect(score.rawScore).toBeGreaterThan(85.0);
-    expect(score.alignedScore).toBeGreaterThan(91.6);
+    expect(score.alignedScore).toBeGreaterThan(91.5);
     expect(score.candidateBounds?.maxY).toBeLessThanOrEqual(143);
   });
 

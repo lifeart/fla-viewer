@@ -272,6 +272,7 @@ Image exports to compare manually:
 6. If visual evidence suggests the thumbnail was produced from a stale source, classify it as stale only with file timestamp and alternate-source evidence.
 7. Shape21 mixed-paint support fragments may need to help resolve contour topology rather than falling back to legacy paint groups.
 8. Prefer grouped ablation before code changes when a candidate fix affects a cluster of components; single-component wins are often misleading for nested line art.
+9. Out-of-view unresolved line-fill carriers can pollute viewport bounds even when they draw no pixels. Keep this as a framing-only rule: exclude only pure open unresolved chains that have no drawable legacy chain and are large offstage outliers. A broad "zero-pixel shape" exclusion regresses `color.101/color-18`, `color-15`, `color-31`, and `color-19`.
 
 ## Subagent Template
 
