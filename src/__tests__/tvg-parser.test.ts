@@ -366,8 +366,13 @@ describe('tvg rendering', () => {
 
   it('uses a half-pixel fit inset for moderately wide clipped bitmap atlases', () => {
     expect(__computeBitmapFitPaddingForTests(false, true, 8, 1.47)).toBe(7.5);
-    expect(__computeBitmapFitPaddingForTests(false, true, 8, 2.01)).toBe(7);
-    expect(__computeBitmapFitPaddingForTests(true, true, 98, 1.5)).toBe(6);
+    expect(__computeBitmapFitPaddingForTests(false, true, 8, 1.93)).toBe(7);
+    expect(__computeBitmapFitPaddingForTests(false, true, 8, 2.01)).toBe(6.5);
+    expect(__computeBitmapFitPaddingForTests(false, true, 12, 2.1)).toBe(7);
+    expect(__computeBitmapFitPaddingForTests(false, true, 12, 2.38)).toBe(6.5);
+    expect(__computeBitmapFitPaddingForTests(false, true, 24, 1.33)).toBe(7.5);
+    expect(__computeBitmapFitPaddingForTests(false, true, 16, 1.21)).toBe(8);
+    expect(__computeBitmapFitPaddingForTests(true, true, 98, 1.5)).toBe(5.5);
     expect(__computeBitmapFitPaddingForTests(false, true, 8, 0.75)).toBe(9);
   });
 

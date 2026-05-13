@@ -10,11 +10,11 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 ## Current State
 
-- Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, and a narrow same-paint detail threshold expansion.
+- Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, narrow same-paint detail threshold expansion, dense line-fill edge/coverage/tone passes, and clipped bitmap atlas fit bands.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark after low-edge exterior expansion, high-edge tone, and interior shadow lift: overall `98.50`, vector `98.41`, bitmap `98.94`.
-- Source-fresh raw average after alternate-source filtering and dense line-fill tone/edge/coverage correction: overall `98.91`, vector `98.90`, bitmap `98.94`.
-- Current source-fresh raw minimum is `color.101/color-21` at `96.97`; `color.101/color-1` improved to raw `97.37`.
+- Current raw benchmark after clipped bitmap atlas fit bands: overall `98.52`, vector `98.41`, bitmap `99.09`.
+- Source-fresh raw average after alternate-source filtering, dense line-fill correction, and bitmap fit bands: overall `98.96`, vector `98.90`, bitmap `99.09`.
+- Current source-fresh raw minimum is `color.101/color-21` at `96.97`; source-fresh bitmap minimum is `Agata_Head_Angles.87/Agata_Head_Angles-1` at raw `97.46`.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
 - Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
 - The sibling `elements/color/color-13.tvg` scores raw `95.578125`, aligned `97.2421875`, normalized about `92.55`, IoU about `95.34` against the `color.101` thumbnail.
@@ -23,6 +23,7 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 - Local ablation tooling supports raw/aligned sorting, `--skip-only`, grouped component removal via `--group`/`--remove-components-as-group`, and opt-in verbose component metadata via `--details`.
 - `scripts/analyze-tvg-residuals.mjs` is the preferred compact diagnostic for dense line-fill residuals. It reports raw/aligned/focused/IoU, foreground-only counts, edge/interior residual buckets, luma buckets, and alpha summaries for reference-only/candidate-only pixels.
 - `scripts/score-tvg-tone-variants.mjs` probes dense line-fill post-composite tone variants across a drawing set and reports per-drawing raw deltas. Use it before changing dense tone constants.
+- `scripts/score-bitmap-fit-variants.mjs` probes bitmap-only fit padding variants and reports tile count/aspect metadata. Use it before changing bitmap atlas padding bands.
 
 ## Known Findings
 
@@ -129,8 +130,13 @@ Managed local finding: bitmap atlas aspect-band fit
 
 - `4bf5/4bf5-1` is bitmap-only: no vector layers, eight clipped tiles, clip aspect about `1.47`, cell aspect `2.0`, baseline raw `96.98`.
 - A fractional `7.5px` fit inset improves `4bf5/4bf5-1` raw to `97.89`, but applying it to all landscape clipped atlases regresses wider bitmap atlases: `3255/3255-1` and `7f81/7f81-1`.
-- Accepted narrow rule: use `7.5px` only for non-fallback clipped atlases with at least eight tiles and aspect in `(1.35, 1.6)`. Keep wider clipped atlases on `7px`.
-- Recheck cases after the conditional rule: `3255/3255-1` raw `97.07`, `7f81/7f81-1` raw `97.18`, `Drawing_2/Drawing_2-1` raw `97.28`, `color.101/color-13` raw `83.91`, `color.101/color-21` raw `95.39`.
+- Accepted fit-band rules after the all source-fresh bitmap sweep:
+- Non-fallback clipped atlases with `8` tiles and aspect `>=2.0` use `6.5px`; `8`-tile aspect around `1.93` stays on `7px`.
+- Non-fallback clipped atlases with `12` tiles and aspect `>=2.3` use `6.5px`; `12`-tile aspect around `2.1` stays on `7px`.
+- Non-fallback clipped atlases with aspect in `(1.35, 1.6)` or `(1.25, 1.35]` use `7.5px`.
+- Fallback-scanned clipped atlases with `32..127` tiles and aspect `>1.35` use `5.5px`.
+- Targeted improvements from these rules: `3255/3255-1` raw `97.07 -> 97.64`, `7f81/7f81-1` `97.18 -> 98.33`, `6172/6172-1` `99.08 -> 99.97`, `1388/1388-1` `99.84 -> 99.92`, `cc62/cc62-1` `98.25 -> 98.64`, and `Agata_Special_Poses_Vik/Agata_Special_Poses_Vik-1` `98.28 -> 99.24`.
+- Full raw benchmark after the fit bands: raw averages overall/vector/bitmap `98.52/98.41/99.09`; source-fresh raw averages overall/vector/bitmap `98.96/98.90/99.09`; source-fresh bitmap min `97.46`.
 
 Managed local finding: `color.101/color-13` shape21 component probes
 
