@@ -3151,8 +3151,9 @@ describe('tvg rendering', () => {
     const reference = await loadImageFromArrayBuffer(thumbData);
     const score = scoreCanvasSources(reference, canvas!, 160);
 
-    expect(score.rawScore).toBeGreaterThan(95.8);
-    expect(score.alignedScore).toBeGreaterThan(98.9);
+    expect(score.rawScore).toBeGreaterThan(96.0);
+    expect(score.alignedScore).toBeGreaterThan(99.0);
+    expect(score.foregroundIou).toBeGreaterThan(97.4);
   });
 
   it('resynchronizes padded TTOC chunks before trailing top-level metadata', async () => {

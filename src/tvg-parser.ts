@@ -2991,7 +2991,9 @@ const DENSE_LINE_FILL_TONE_CONTRAST = 0.9024;
 const DENSE_LINE_FILL_TONE_OFFSET = -4;
 const DENSE_LINE_FILL_BACKGROUND_TOLERANCE = 12;
 const DENSE_LINE_FILL_EDGE_ALPHA_SCALE = 1.1;
+const DENSE_LINE_FILL_EXTERIOR_EDGE_EXPANSION_SCALE = 0.9;
 const DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS = 900;
+const DENSE_LINE_FILL_EDGE_EXPANSION_MAX_FRACTIONAL_ALPHA_PIXELS = 1000;
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_SIZE = 1500;
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_DISTANCE = 2500;
 
@@ -3069,24 +3071,24 @@ function countFractionalAlphaPixels(canvas: HTMLCanvasElement): number {
   return count;
 }
 
-function hasDenseLineFillEdgeCoverageBudget(
+function countDenseLineFillOutputFractionalAlphaPixels(
   canvas: HTMLCanvasElement,
   outputWidth: number,
   outputHeight: number,
-): boolean {
+): number {
   if (canvas.width === outputWidth && canvas.height === outputHeight) {
-    return countFractionalAlphaPixels(canvas) >= DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS;
+    return countFractionalAlphaPixels(canvas);
   }
 
   const alphaCanvas = document.createElement('canvas');
   alphaCanvas.width = outputWidth;
   alphaCanvas.height = outputHeight;
   const alphaCtx = alphaCanvas.getContext('2d');
-  if (!alphaCtx) return false;
+  if (!alphaCtx) return 0;
   alphaCtx.imageSmoothingEnabled = true;
   alphaCtx.imageSmoothingQuality = 'high';
   alphaCtx.drawImage(canvas, 0, 0, outputWidth, outputHeight);
-  return countFractionalAlphaPixels(alphaCanvas) >= DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS;
+  return countFractionalAlphaPixels(alphaCanvas);
 }
 
 function applyDenseLineFillEdgeCoverageAdjustment(
@@ -3094,7 +3096,8 @@ function applyDenseLineFillEdgeCoverageAdjustment(
   outputWidth: number,
   outputHeight: number,
 ): void {
-  if (!hasDenseLineFillEdgeCoverageBudget(canvas, outputWidth, outputHeight)) return;
+  const outputFractionalAlphaPixels = countDenseLineFillOutputFractionalAlphaPixels(canvas, outputWidth, outputHeight);
+  if (outputFractionalAlphaPixels < DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS) return;
 
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -3106,7 +3109,88 @@ function applyDenseLineFillEdgeCoverageAdjustment(
     if (alpha <= 0 || alpha >= 255) continue;
     data[index] = Math.min(255, Math.round(alpha * DENSE_LINE_FILL_EDGE_ALPHA_SCALE));
   }
+
+  if (outputFractionalAlphaPixels <= DENSE_LINE_FILL_EDGE_EXPANSION_MAX_FRACTIONAL_ALPHA_PIXELS) {
+    expandDenseLineFillExteriorCoverage(data, canvas.width, canvas.height);
+  }
   ctx.putImageData(image, 0, 0);
+}
+
+function expandDenseLineFillExteriorCoverage(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+): void {
+  // Grow only the flood-filled exterior alpha fringe. Interior transparent holes
+  // are left untouched so this behaves like thumbnail antialias coverage, not
+  // a morphology operation that changes contour topology.
+  const pixelCount = width * height;
+  const exterior = new Uint8Array(pixelCount);
+  const queue = new Uint32Array(pixelCount);
+  let head = 0;
+  let tail = 0;
+
+  const enqueueExterior = (x: number, y: number): void => {
+    if (x < 0 || x >= width || y < 0 || y >= height) return;
+    const pixelIndex = y * width + x;
+    if (exterior[pixelIndex] !== 0 || data[pixelIndex * 4 + 3] !== 0) return;
+    exterior[pixelIndex] = 1;
+    queue[tail++] = pixelIndex;
+  };
+
+  for (let x = 0; x < width; x++) {
+    enqueueExterior(x, 0);
+    enqueueExterior(x, height - 1);
+  }
+  for (let y = 1; y < height - 1; y++) {
+    enqueueExterior(0, y);
+    enqueueExterior(width - 1, y);
+  }
+
+  while (head < tail) {
+    const pixelIndex = queue[head++];
+    const x = pixelIndex % width;
+    const y = Math.floor(pixelIndex / width);
+    enqueueExterior(x - 1, y);
+    enqueueExterior(x + 1, y);
+    enqueueExterior(x, y - 1);
+    enqueueExterior(x, y + 1);
+  }
+
+  const source = new Uint8ClampedArray(data);
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const pixelIndex = y * width + x;
+      const index = pixelIndex * 4;
+      if (exterior[pixelIndex] === 0 || source[index + 3] !== 0) continue;
+
+      let alphaSum = 0;
+      let redSum = 0;
+      let greenSum = 0;
+      let blueSum = 0;
+      let neighborCount = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const neighborIndex = ((y + dy) * width + x + dx) * 4;
+          const neighborAlpha = source[neighborIndex + 3];
+          if (neighborAlpha === 0) continue;
+          neighborCount += 1;
+          alphaSum += neighborAlpha;
+          redSum += source[neighborIndex] * neighborAlpha;
+          greenSum += source[neighborIndex + 1] * neighborAlpha;
+          blueSum += source[neighborIndex + 2] * neighborAlpha;
+        }
+      }
+      if (alphaSum === 0 || neighborCount === 0) continue;
+
+      const alpha = Math.round(Math.min(255, (alphaSum / neighborCount) * DENSE_LINE_FILL_EXTERIOR_EDGE_EXPANSION_SCALE));
+      data[index] = Math.round(redSum / alphaSum);
+      data[index + 1] = Math.round(greenSum / alphaSum);
+      data[index + 2] = Math.round(blueSum / alphaSum);
+      data[index + 3] = alpha;
+    }
+  }
 }
 
 function filterDrawingToActiveLayerTypes(

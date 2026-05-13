@@ -12,14 +12,16 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 - Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, and a narrow same-paint detail threshold expansion.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark: overall about `98.48`, vector about `98.39`, bitmap about `98.94`.
-- Source-fresh raw average after alternate-source filtering and dense line-fill tone/edge correction: overall about `98.88`, vector about `98.86`, bitmap about `98.94`.
+- Current raw benchmark after low-edge exterior expansion: overall `98.49`, vector `98.40`, bitmap `98.94`.
+- Source-fresh raw average after alternate-source filtering and dense line-fill tone/edge/coverage correction: overall `98.90`, vector `98.88`, bitmap `98.94`.
+- Current source-fresh raw minimum is `color.101/color-1` at `96.22`; `color.101/color-21` improved to raw `96.86`.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
 - Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
 - The sibling `elements/color/color-13.tvg` scores raw `95.578125`, aligned `97.2421875`, normalized about `92.55`, IoU about `95.34` against the `color.101` thumbnail.
 - The mismatch is therefore classified as `thumbnail-matches-alternate-drawing` in the raw benchmark when the alternate raw score is at least `6` points better and meets high raw/aligned floors.
 - The app fallback path can score 100 by using embedded thumbnails, but raw vector rendering is the target.
 - Local ablation tooling supports raw/aligned sorting, `--skip-only`, grouped component removal via `--group`/`--remove-components-as-group`, and opt-in verbose component metadata via `--details`.
+- `scripts/analyze-tvg-residuals.mjs` is the preferred compact diagnostic for dense line-fill residuals. It reports raw/aligned/focused/IoU, foreground-only counts, edge/interior residual buckets, luma buckets, and alpha summaries for reference-only/candidate-only pixels.
 
 ## Known Findings
 
@@ -202,6 +204,17 @@ Managed local rejected experiment: line-layer dark-last fill ordering
 - Full benchmark diff changed only four drawings, but one fresh drawing regressed materially: `Switch.1004/Switch-1` raw `98.23046875 -> 98.01953125`.
 - Manager decision: reject broad color-priority render ordering. Revisit only with a source-format z-order signal or a localized occlusion rule that does not regress `Switch.1004/Switch-1`.
 
+Managed local finding: low-edge dense line-fill exterior coverage
+
+- Residual analysis for `color.101/color-21` showed raw `96.0000`, aligned `99.0469`, focused `95.6384`, IoU `97.5955`, with reference bounds one pixel lower than candidate bounds.
+- `color-21` had `242` reference-only pixels but only `16` candidate-only pixels. Alpha diagnostics showed `239/242` reference-only pixels had zero candidate alpha, so stronger fractional-alpha scaling could not recover them.
+- Global/local tone transforms were rejected as the primary fix: the best simple tone oracle only reached about `+0.14` raw, while localized bottom/silhouette replacement had much larger headroom.
+- Shape deletion ablation was rejected: best single-shape deletion was only about `+0.16` raw and did not explain the missing silhouette coverage.
+- Implemented a tightly gated exterior-only alpha expansion inside the dense line-fill edge adjustment. It reuses the existing fractional-alpha gate and only expands when the downsampled fractional-alpha budget is low (`900..1000` pixels), which applied to `color-21` and skipped higher-edge portraits plus sparse cases.
+- The expansion flood-fills transparent pixels from the canvas edge and grows only that exterior fringe. Interior holes are not expanded, so the rule models antialias coverage rather than contour topology.
+- Targeted result with expansion scale `0.9`: `color-21` raw `96.0000 -> 96.8555`, aligned `99.0469 -> 99.1211`, focused `95.6384 -> 96.6322`, IoU `97.5955 -> 98.4591`.
+- Dense-cluster guard remained unchanged for `color-1`, `color-3`, `color-31`, `color-19`, `color-18`, `color-15`, and `color-23`. Additional guards checked unchanged at targeted precision: `Number_Body-2`, `B_Shorts-1`, `Switch-1`, and `Drawing_2-1`.
+
 ## Scientific Loop
 
 Use this loop for every change:
@@ -231,6 +244,7 @@ node scripts/export-tvg-case-images.mjs color.101 color-13 /tmp/tvg-color13-curr
 node scripts/rank-tvg-shapes-by-diff.mjs color.101 color-13 line 20
 node scripts/rank-tvg-shapes-by-recovery.mjs color.101 color-13 line 20
 node scripts/inspect-tvg-case.mjs color.101 color-13 --summary
+node scripts/analyze-tvg-residuals.mjs color.101 color-21,color-1
 node scripts/scan-tvg-shapes.mjs color.101 color-13 line
 node scripts/ablate-tvg-shapes.mjs color.101 color-13 --layer line --sort raw-desc --skip-only
 node scripts/ablate-tvg-components.mjs color.101 color-13 --layer line --shape 21 --sort raw-desc --skip-only
