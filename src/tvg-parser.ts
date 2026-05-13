@@ -2994,6 +2994,8 @@ const DENSE_LINE_FILL_EDGE_ALPHA_SCALE = 1.1;
 const DENSE_LINE_FILL_EXTERIOR_EDGE_EXPANSION_SCALE = 0.9;
 const DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS = 900;
 const DENSE_LINE_FILL_EDGE_EXPANSION_MAX_FRACTIONAL_ALPHA_PIXELS = 1000;
+const DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS = 1500;
+const DENSE_LINE_FILL_EDGE_TONE_SUBTRACT = 32;
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_SIZE = 1500;
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_DISTANCE = 2500;
 
@@ -3095,12 +3097,12 @@ function applyDenseLineFillEdgeCoverageAdjustment(
   canvas: HTMLCanvasElement,
   outputWidth: number,
   outputHeight: number,
-): void {
+): number {
   const outputFractionalAlphaPixels = countDenseLineFillOutputFractionalAlphaPixels(canvas, outputWidth, outputHeight);
-  if (outputFractionalAlphaPixels < DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS) return;
+  if (outputFractionalAlphaPixels < DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS) return outputFractionalAlphaPixels;
 
   const ctx = canvas.getContext('2d');
-  if (!ctx) return;
+  if (!ctx) return outputFractionalAlphaPixels;
 
   const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const data = image.data;
@@ -3114,6 +3116,7 @@ function applyDenseLineFillEdgeCoverageAdjustment(
     expandDenseLineFillExteriorCoverage(data, canvas.width, canvas.height);
   }
   ctx.putImageData(image, 0, 0);
+  return outputFractionalAlphaPixels;
 }
 
 function expandDenseLineFillExteriorCoverage(
@@ -3191,6 +3194,43 @@ function expandDenseLineFillExteriorCoverage(
       data[index + 3] = alpha;
     }
   }
+}
+
+function createOutputAlphaMask(
+  canvas: HTMLCanvasElement,
+  outputWidth: number,
+  outputHeight: number,
+): Uint8ClampedArray | null {
+  const alphaCanvas = document.createElement('canvas');
+  alphaCanvas.width = outputWidth;
+  alphaCanvas.height = outputHeight;
+  const alphaCtx = alphaCanvas.getContext('2d');
+  if (!alphaCtx) return null;
+  alphaCtx.imageSmoothingEnabled = true;
+  alphaCtx.imageSmoothingQuality = 'high';
+  alphaCtx.drawImage(canvas, 0, 0, outputWidth, outputHeight);
+  return alphaCtx.getImageData(0, 0, outputWidth, outputHeight).data;
+}
+
+function applyDenseLineFillEdgeToneAdjustment(
+  canvas: HTMLCanvasElement,
+  alphaMask: Uint8ClampedArray | null,
+): void {
+  if (!alphaMask) return;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = image.data;
+  for (let index = 0; index < data.length; index += 4) {
+    const alpha = alphaMask[index + 3];
+    if (alpha <= 0 || alpha >= 255) continue;
+    data[index] = Math.max(0, data[index] - DENSE_LINE_FILL_EDGE_TONE_SUBTRACT);
+    data[index + 1] = Math.max(0, data[index + 1] - DENSE_LINE_FILL_EDGE_TONE_SUBTRACT);
+    data[index + 2] = Math.max(0, data[index + 2] - DENSE_LINE_FILL_EDGE_TONE_SUBTRACT);
+  }
+  ctx.putImageData(image, 0, 0);
 }
 
 function filterDrawingToActiveLayerTypes(
@@ -3680,8 +3720,12 @@ export function renderTVGToCanvas(
   }
 
   const shouldApplyDenseLineFillAdjustment = shouldApplyDenseLineFillInkDensityAdjustment(renderDrawing, options);
+  let denseLineFillOutputAlphaMask: Uint8ClampedArray | null = null;
   if (shouldApplyDenseLineFillAdjustment) {
-    applyDenseLineFillEdgeCoverageAdjustment(canvas, width, height);
+    const outputFractionalAlphaPixels = applyDenseLineFillEdgeCoverageAdjustment(canvas, width, height);
+    if (outputFractionalAlphaPixels >= DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS) {
+      denseLineFillOutputAlphaMask = createOutputAlphaMask(canvas, width, height);
+    }
   }
 
   // Pre-composite against white background (skip for matte/compositor sources)
@@ -3705,12 +3749,14 @@ export function renderTVGToCanvas(
     outCtx.drawImage(canvas, 0, 0, width, height);
     if (shouldApplyDenseLineFillAdjustment) {
       applyDenseLineFillInkDensityAdjustment(outCanvas);
+      applyDenseLineFillEdgeToneAdjustment(outCanvas, denseLineFillOutputAlphaMask);
     }
     return outCanvas;
   }
 
   if (shouldApplyDenseLineFillAdjustment) {
     applyDenseLineFillInkDensityAdjustment(canvas);
+    applyDenseLineFillEdgeToneAdjustment(canvas, denseLineFillOutputAlphaMask);
   }
   return canvas;
 }

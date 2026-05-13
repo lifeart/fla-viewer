@@ -12,9 +12,9 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 - Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, and a narrow same-paint detail threshold expansion.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark after low-edge exterior expansion: overall `98.49`, vector `98.40`, bitmap `98.94`.
-- Source-fresh raw average after alternate-source filtering and dense line-fill tone/edge/coverage correction: overall `98.90`, vector `98.88`, bitmap `98.94`.
-- Current source-fresh raw minimum is `color.101/color-1` at `96.22`; `color.101/color-21` improved to raw `96.86`.
+- Current raw benchmark after low-edge exterior expansion and high-edge tone: overall `98.50`, vector `98.41`, bitmap `98.94`.
+- Source-fresh raw average after alternate-source filtering and dense line-fill tone/edge/coverage correction: overall `98.91`, vector `98.89`, bitmap `98.94`.
+- Current source-fresh raw minimum is `color.101/color-21` at `96.86`; `color.101/color-1` improved to raw `97.34`.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
 - Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
 - The sibling `elements/color/color-13.tvg` scores raw `95.578125`, aligned `97.2421875`, normalized about `92.55`, IoU about `95.34` against the `color.101` thumbnail.
@@ -22,6 +22,7 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 - The app fallback path can score 100 by using embedded thumbnails, but raw vector rendering is the target.
 - Local ablation tooling supports raw/aligned sorting, `--skip-only`, grouped component removal via `--group`/`--remove-components-as-group`, and opt-in verbose component metadata via `--details`.
 - `scripts/analyze-tvg-residuals.mjs` is the preferred compact diagnostic for dense line-fill residuals. It reports raw/aligned/focused/IoU, foreground-only counts, edge/interior residual buckets, luma buckets, and alpha summaries for reference-only/candidate-only pixels.
+- `scripts/score-tvg-tone-variants.mjs` probes dense line-fill post-composite tone variants across a drawing set and reports per-drawing raw deltas. Use it before changing dense tone constants.
 
 ## Known Findings
 
@@ -215,6 +216,17 @@ Managed local finding: low-edge dense line-fill exterior coverage
 - Targeted result with expansion scale `0.9`: `color-21` raw `96.0000 -> 96.8555`, aligned `99.0469 -> 99.1211`, focused `95.6384 -> 96.6322`, IoU `97.5955 -> 98.4591`.
 - Dense-cluster guard remained unchanged for `color-1`, `color-3`, `color-31`, `color-19`, `color-18`, `color-15`, and `color-23`. Additional guards checked unchanged at targeted precision: `Number_Body-2`, `B_Shorts-1`, `Switch-1`, and `Drawing_2-1`.
 
+Managed local finding: high-edge dense line-fill edge tone
+
+- After exterior expansion, `color.101/color-1` became the source-fresh floor: raw `96.2227`, aligned `98.6797`, focused `96.7629`, IoU `99.0190`, exact candidate/reference bounds.
+- Residual buckets showed the remaining error was overlap tone, not topology: reference-only `90`, candidate-only `30`, both-foreground `12113`.
+- Edge pixels were too light: mean edge RGB delta `+26.28,+24.68,+23.43`; interior pixels were too dark: mean interior RGB delta `-13.57,-31.43,-29.53`.
+- Broad edge darkening was rejected because it regressed lower-edge-count portraits (`color-3`, `color-18`, `color-15`, `color-23`).
+- Implemented post-composite edge tone only when the dense line-fill output has a high fractional-alpha budget (`>=1500` pixels). The pass uses the pre-white alpha mask after edge coverage and darkens only final pixels whose source alpha is fractional.
+- Renderer-path sweep: subtract `8` gave `color-1` raw `96.7305`; subtract `16` gave `97.0859`; subtract `24` gave `97.2930`; subtract `32` peaked at `97.3438`; subtract `48` regressed to `97.0391`.
+- Accepted subtract `32`: `color-1` raw `96.2227 -> 97.3438`, aligned `98.6797 -> 98.8555`, focused `96.7629 -> 97.2785`, IoU `99.0190 -> 99.1010`.
+- Dense-cluster guard remained unchanged for `color-21`, `color-3`, `color-31`, `color-19`, `color-18`, `color-15`, and `color-23`. Additional guards checked unchanged at targeted precision: `Number_Body-2`, `B_Shorts-1`, `Switch-1`, and `Drawing_2-1`.
+
 ## Scientific Loop
 
 Use this loop for every change:
@@ -245,6 +257,7 @@ node scripts/rank-tvg-shapes-by-diff.mjs color.101 color-13 line 20
 node scripts/rank-tvg-shapes-by-recovery.mjs color.101 color-13 line 20
 node scripts/inspect-tvg-case.mjs color.101 color-13 --summary
 node scripts/analyze-tvg-residuals.mjs color.101 color-21,color-1
+node scripts/score-tvg-tone-variants.mjs color.101 color-1,color-21,color-3,color-31,color-19,color-18,color-15,color-23
 node scripts/scan-tvg-shapes.mjs color.101 color-13 line
 node scripts/ablate-tvg-shapes.mjs color.101 color-13 --layer line --sort raw-desc --skip-only
 node scripts/ablate-tvg-components.mjs color.101 color-13 --layer line --shape 21 --sort raw-desc --skip-only
