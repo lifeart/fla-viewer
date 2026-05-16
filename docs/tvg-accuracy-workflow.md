@@ -12,10 +12,10 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 - Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, narrow same-paint detail threshold expansion, dense line-fill edge/coverage/tone passes, and clipped bitmap atlas fit bands.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark after clipped bitmap atlas fit bands, doubled dense shadow lift, and benchmark trust classification: overall `98.53`, vector `98.41`, bitmap `99.09`.
-- Source-fresh raw average before trust classification remains overall `98.96`, vector `98.90`, bitmap `99.09`.
-- Trusted source-fresh raw average excludes stale, alternate-source, suspicious sparse-overlap, and noisy low-foreground thumbnails: overall `98.99`, vector `98.94`, bitmap `99.09`.
-- Current trusted source-fresh raw minimum is `color.101/color-21` at `97.04`; trusted source-fresh bitmap minimum is `Agata_Head_Angles.87/Agata_Head_Angles-1` at raw `97.46`.
+- Current raw benchmark after clipped bitmap atlas fit bands, portrait bitmap fit retune, doubled dense shadow lift, and benchmark trust classification: overall `98.54`, vector `98.41`, bitmap `99.17`.
+- Source-fresh raw average before trust classification remains overall `98.98`, vector `98.90`, bitmap `99.17`.
+- Trusted source-fresh raw average excludes stale, alternate-source, suspicious sparse-overlap, and noisy low-foreground thumbnails: overall `99.02`, vector `98.94`, bitmap `99.17`.
+- Current trusted source-fresh raw minimum is `color.101/color-21` at `97.04`; trusted source-fresh bitmap minimum is now `3255/3255-1` at raw `97.64`.
 - Current benchmark classes: `92` trusted, `4` suspicious sparse-overlap, `4` noisy low-foreground, `1` alternate-source, and `79` stale-thumbnail cases.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
 - Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
@@ -141,9 +141,10 @@ Managed local finding: bitmap atlas aspect-band fit
 - Non-fallback clipped atlases with `8` tiles and aspect `>=2.0` use `6.5px`; `8`-tile aspect around `1.93` stays on `7px`.
 - Non-fallback clipped atlases with `12` tiles and aspect `>=2.3` use `6.5px`; `12`-tile aspect around `2.1` stays on `7px`.
 - Non-fallback clipped atlases with aspect in `(1.35, 1.6)` or `(1.25, 1.35]` use `7.5px`.
+- Non-fallback clipped portrait atlases with aspect `<1` use `8.5px`. The intermediate `8.5px` band is important: `9px` underfills tall sheets, while `8px` overfills horizontally.
 - Fallback-scanned clipped atlases with `32..127` tiles and aspect `>1.35` use `5.5px`.
-- Targeted improvements from these rules: `3255/3255-1` raw `97.07 -> 97.64`, `7f81/7f81-1` `97.18 -> 98.33`, `6172/6172-1` `99.08 -> 99.97`, `1388/1388-1` `99.84 -> 99.92`, `cc62/cc62-1` `98.25 -> 98.64`, and `Agata_Special_Poses_Vik/Agata_Special_Poses_Vik-1` `98.28 -> 99.24`.
-- Full raw benchmark after the fit bands: raw averages overall/vector/bitmap `98.52/98.41/99.09`; source-fresh raw averages overall/vector/bitmap `98.96/98.90/99.09`; source-fresh bitmap min `97.46`.
+- Targeted improvements from these rules: `3255/3255-1` raw `97.07 -> 97.64`, `7f81/7f81-1` `97.18 -> 98.33`, `6172/6172-1` `99.08 -> 99.97`, `1388/1388-1` `99.84 -> 99.92`, `cc62/cc62-1` `98.25 -> 98.64`, `Agata_Special_Poses_Vik/Agata_Special_Poses_Vik-1` `98.28 -> 99.24`, `Agata_Head_Angles.87/Agata_Head_Angles-1` `97.46 -> 99.45`, and `Screenshot_2022/Screenshot_2022-1` `99.18 -> 99.68`.
+- Full raw benchmark after the current fit bands: raw averages overall/vector/bitmap `98.54/98.41/99.17`; source-fresh raw averages overall/vector/bitmap `98.98/98.90/99.17`; source-fresh bitmap min `97.64`.
 
 Managed local finding: `color.101/color-13` shape21 component probes
 
@@ -263,12 +264,13 @@ Managed local rejected experiment: exterior edge expansion retune
 - Increasing the same scale to `1.1` regressed `color-21` raw to `96.94`.
 - Manager decision: keep expansion scale at `0.9`; the coverage lever is exhausted for the current floor.
 
-Managed local bitmap finding: resampling and fit are currently exhausted
+Managed local bitmap finding: resampling is currently exhausted
 
-- `Agata_Head_Angles.87/Agata_Head_Angles-1` remains the trusted bitmap floor at raw `97.46`, aligned `97.60`, focused `66.44`, IoU `71.27`.
-- Fit padding variants are rejected for this case: current portrait clipped-atlas padding `9` is best, while padding `7.5` drops raw to `94.24` and padding `4.5` drops raw to `83.28`.
+- `Agata_Head_Angles.87/Agata_Head_Angles-1` was the trusted bitmap floor at raw `97.46`, aligned `97.60`, focused `66.44`, IoU `71.27` before the portrait padding retune.
+- The first fit sweep missed intermediate `8` and `8.5` padding. Adding those variants showed `8.5` improved `Agata_Head_Angles.87/Agata_Head_Angles-1` to raw `99.45`, while `8` and `7.5` overfilled and regressed.
+- Trusted bitmap sweep evidence: applying `8.5` globally would regress `27` landscape-ish atlases, but the rule is safe when restricted to non-fallback clipped portrait atlases (`aspectRatio < 1`). It improves the two matching trusted portrait cases: `Agata_Head_Angles.87/Agata_Head_Angles-1` and `Screenshot_2022/Screenshot_2022-1`.
 - Resampling variants are also rejected as renderer changes: `current-progressive-high`, `progressive-medium`, and `progressive-low` tie at raw `97.46`; direct, two-step, and pixelated variants all regress the bitmap floor. For nearby `3255/3255-1` and `4bf5/4bf5-1`, current progressive high-quality downscale is also best or tied.
-- Manager decision: do not change bitmap fit or smoothing yet. Use `scripts/score-bitmap-resample-variants.mjs` for future corpus-wide resampling work before touching renderer defaults.
+- Manager decision: keep progressive high-quality resampling; fit, not smoothing, fixed the portrait bitmap floor.
 
 ## Scientific Loop
 

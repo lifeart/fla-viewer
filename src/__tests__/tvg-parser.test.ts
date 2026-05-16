@@ -373,7 +373,7 @@ describe('tvg rendering', () => {
     expect(__computeBitmapFitPaddingForTests(false, true, 24, 1.33)).toBe(7.5);
     expect(__computeBitmapFitPaddingForTests(false, true, 16, 1.21)).toBe(8);
     expect(__computeBitmapFitPaddingForTests(true, true, 98, 1.5)).toBe(5.5);
-    expect(__computeBitmapFitPaddingForTests(false, true, 8, 0.75)).toBe(9);
+    expect(__computeBitmapFitPaddingForTests(false, true, 8, 0.75)).toBe(8.5);
   });
 
   it('uses a tighter fit for dense portrait clipped bitmap atlases', async () => {

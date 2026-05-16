@@ -220,8 +220,8 @@ try {
     };
 
     const bitmapFitPadding = (fallbackScanUsed, hasClipRects, loadedCount, aspectRatio) => {
-      if (hasClipRects && loadedCount >= 8) {
-        if (!fallbackScanUsed && aspectRatio < 1) return 9;
+  if (hasClipRects && loadedCount >= 8) {
+        if (!fallbackScanUsed && aspectRatio < 1) return 8.5;
         if (fallbackScanUsed && loadedCount >= 32 && loadedCount < 128 && aspectRatio > 1.35) return 5.5;
         if (!fallbackScanUsed && loadedCount === 8 && aspectRatio >= 2) return 6.5;
         if (!fallbackScanUsed && loadedCount === 12 && aspectRatio >= 2.3) return 6.5;
@@ -250,6 +250,8 @@ try {
       { name: 'padding-6.5', padding: () => 6.5 },
       { name: 'padding-7', padding: () => 7 },
       { name: 'padding-7.5', padding: () => 7.5 },
+      { name: 'padding-8', padding: () => 8 },
+      { name: 'padding-8.5', padding: () => 8.5 },
       {
         name: 'wide8-padding-6',
         padding: (meta) => (

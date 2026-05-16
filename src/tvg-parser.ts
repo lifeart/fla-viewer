@@ -3907,7 +3907,7 @@ function computeBitmapFitPadding(
   aspectRatio: number,
 ): number {
   if (hasClipRects && loadedCount >= 8) {
-    if (!fallbackScanUsed && aspectRatio < 1) return 9;
+    if (!fallbackScanUsed && aspectRatio < 1) return 8.5;
     if (fallbackScanUsed && loadedCount >= 32 && loadedCount < 128 && aspectRatio > 1.35) return 5.5;
     if (!fallbackScanUsed && loadedCount === 8 && aspectRatio >= 2) return 6.5;
     if (!fallbackScanUsed && loadedCount === 12 && aspectRatio >= 2.3) return 6.5;
