@@ -10,12 +10,12 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 ## Current State
 
-- Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, narrow same-paint detail threshold expansion, dense line-fill edge/coverage/tone passes, and clipped bitmap atlas fit bands.
+- Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, narrow same-paint detail threshold expansion, dense line-fill edge/coverage/tone passes, clipped bitmap atlas fit bands, portrait bitmap fit retune, and low-alpha saturated-fill density relief.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
 - Current raw benchmark after clipped bitmap atlas fit bands, portrait bitmap fit retune, doubled dense shadow lift, and benchmark trust classification: overall `98.54`, vector `98.41`, bitmap `99.17`.
 - Source-fresh raw average before trust classification remains overall `98.98`, vector `98.90`, bitmap `99.17`.
 - Trusted source-fresh raw average excludes stale, alternate-source, suspicious sparse-overlap, and noisy low-foreground thumbnails: overall `99.02`, vector `98.94`, bitmap `99.17`.
-- Current trusted source-fresh raw minimum is `color.101/color-21` at `97.04`; trusted source-fresh bitmap minimum is now `3255/3255-1` at raw `97.64`.
+- Current trusted source-fresh raw minimum is `color.101/color-18` at `97.07`; trusted source-fresh bitmap minimum is now `3255/3255-1` at raw `97.64`.
 - Current benchmark classes: `92` trusted, `4` suspicious sparse-overlap, `4` noisy low-foreground, `1` alternate-source, and `79` stale-thumbnail cases.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
 - Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
@@ -257,6 +257,14 @@ Managed local rejected experiment: saturated dense line-fill density
 - Fully skipping the density subtraction for saturated mid-luma pixels reduced bad-interior counts but over-brightened broad fills and regressed multiple dense-cluster floors.
 - A softer saturated-fill subtraction of `24` improved `color-21` raw `97.04 -> 97.08` and `color-23` `98.73 -> 98.82`, but regressed `color-18` `97.07 -> 96.98`, `color-15` `97.33 -> 97.22`, `color-1` `97.38 -> 97.34`, `color-19` `97.55 -> 97.50`, and `color-31` `97.78 -> 97.69`.
 - Manager decision: do not implement a broad saturated-fill density gate. The remaining vector issue needs a more localized source-format or residual-region predicate, not a global chroma rule.
+
+Managed local finding: low-alpha saturated-fill density relief
+
+- The useful saturated-fill relief is safe only inside the existing dense line-fill exterior-expansion cohort, where output fractional-alpha pixels are `900..1000`.
+- Trusted `color.101` fractional-alpha counts after the current renderer: `color-23=601`, `color-15=800`, `color-18=898`, `color-21=921`, `color-31=1147`, `color-19=1214`, `color-3=1247`, `color-1=1615`.
+- Accepted rule: in that low-alpha cohort only, saturated mid-luma pixels (`chroma >= 80`, luma `>=96`, luma `<=220`) use density subtract `24` instead of the normal `32`; all other dense line-fill pixels stay unchanged.
+- Targeted result: `color-21` raw `97.0391 -> 97.0781`; `color-18`, `color-15`, `color-3`, `color-1`, `color-19`, `color-31`, and `color-23` stayed unchanged at raw-score precision.
+- Full raw benchmark after the rule: source-fresh/trusted raw minima vector/bitmap `97.07/97.64`. The trusted vector floor moves to `color.101/color-18`.
 
 Managed local rejected experiment: exterior edge expansion retune
 

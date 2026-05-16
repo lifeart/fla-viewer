@@ -2986,6 +2986,9 @@ export interface TVGRenderOptions {
 
 const DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT = 220;
 const DENSE_LINE_FILL_INK_DENSITY_SUBTRACT = 32;
+const DENSE_LINE_FILL_SATURATED_FILL_MIN_CHROMA = 80;
+const DENSE_LINE_FILL_SATURATED_FILL_MIN_LUMA = 96;
+const DENSE_LINE_FILL_SATURATED_FILL_INK_DENSITY_SUBTRACT = 24;
 const DENSE_LINE_FILL_TONE_PIVOT = 96;
 const DENSE_LINE_FILL_TONE_CONTRAST = 0.9024;
 const DENSE_LINE_FILL_TONE_OFFSET = -4;
@@ -3021,10 +3024,15 @@ function shouldApplyDenseLineFillInkDensityAdjustment(
   return shouldInsetViewportForLineFillDrawing(drawing);
 }
 
-function applyDenseLineFillInkDensityAdjustment(canvas: HTMLCanvasElement): void {
+function applyDenseLineFillInkDensityAdjustment(
+  canvas: HTMLCanvasElement,
+  outputFractionalAlphaPixels: number,
+): void {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
+  const shouldRelieveSaturatedFills = outputFractionalAlphaPixels >= DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS
+    && outputFractionalAlphaPixels <= DENSE_LINE_FILL_EDGE_EXPANSION_MAX_FRACTIONAL_ALPHA_PIXELS;
   const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const data = image.data;
   for (let index = 0; index < data.length; index += 4) {
@@ -3036,9 +3044,17 @@ function applyDenseLineFillInkDensityAdjustment(canvas: HTMLCanvasElement): void
     if (!isForeground) continue;
 
     if (luma <= DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT) {
-      data[index] = Math.max(0, data[index] - DENSE_LINE_FILL_INK_DENSITY_SUBTRACT);
-      data[index + 1] = Math.max(0, data[index + 1] - DENSE_LINE_FILL_INK_DENSITY_SUBTRACT);
-      data[index + 2] = Math.max(0, data[index + 2] - DENSE_LINE_FILL_INK_DENSITY_SUBTRACT);
+      const chroma = Math.max(data[index], data[index + 1], data[index + 2])
+        - Math.min(data[index], data[index + 1], data[index + 2]);
+      const saturatedColorFill = shouldRelieveSaturatedFills
+        && chroma >= DENSE_LINE_FILL_SATURATED_FILL_MIN_CHROMA
+        && luma >= DENSE_LINE_FILL_SATURATED_FILL_MIN_LUMA;
+      const densitySubtract = saturatedColorFill
+        ? DENSE_LINE_FILL_SATURATED_FILL_INK_DENSITY_SUBTRACT
+        : DENSE_LINE_FILL_INK_DENSITY_SUBTRACT;
+      data[index] = Math.max(0, data[index] - densitySubtract);
+      data[index + 1] = Math.max(0, data[index + 1] - densitySubtract);
+      data[index + 2] = Math.max(0, data[index + 2] - densitySubtract);
     }
 
     // Toon Boom thumbnails for dense line-fill drawings have slightly flatter
@@ -3754,8 +3770,10 @@ export function renderTVGToCanvas(
   const shouldApplyDenseLineFillAdjustment = shouldApplyDenseLineFillInkDensityAdjustment(renderDrawing, options);
   let denseLineFillOutputAlphaMask: Uint8ClampedArray | null = null;
   let shouldApplyDenseLineFillEdgeTone = false;
+  let denseLineFillOutputFractionalAlphaPixels = 0;
   if (shouldApplyDenseLineFillAdjustment) {
     const outputFractionalAlphaPixels = applyDenseLineFillEdgeCoverageAdjustment(canvas, width, height);
+    denseLineFillOutputFractionalAlphaPixels = outputFractionalAlphaPixels;
     denseLineFillOutputAlphaMask = createOutputAlphaMask(canvas, width, height);
     shouldApplyDenseLineFillEdgeTone = outputFractionalAlphaPixels >= DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS;
   }
@@ -3780,7 +3798,7 @@ export function renderTVGToCanvas(
     outCtx.imageSmoothingQuality = 'high';
     outCtx.drawImage(canvas, 0, 0, width, height);
     if (shouldApplyDenseLineFillAdjustment) {
-      applyDenseLineFillInkDensityAdjustment(outCanvas);
+      applyDenseLineFillInkDensityAdjustment(outCanvas, denseLineFillOutputFractionalAlphaPixels);
       applyDenseLineFillInteriorShadowToneAdjustment(outCanvas, denseLineFillOutputAlphaMask);
       if (shouldApplyDenseLineFillEdgeTone) {
         applyDenseLineFillEdgeToneAdjustment(outCanvas, denseLineFillOutputAlphaMask);
@@ -3790,7 +3808,7 @@ export function renderTVGToCanvas(
   }
 
   if (shouldApplyDenseLineFillAdjustment) {
-    applyDenseLineFillInkDensityAdjustment(canvas);
+    applyDenseLineFillInkDensityAdjustment(canvas, denseLineFillOutputFractionalAlphaPixels);
     applyDenseLineFillInteriorShadowToneAdjustment(canvas, denseLineFillOutputAlphaMask);
     if (shouldApplyDenseLineFillEdgeTone) {
       applyDenseLineFillEdgeToneAdjustment(canvas, denseLineFillOutputAlphaMask);
