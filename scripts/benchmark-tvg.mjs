@@ -16,6 +16,7 @@ const BASELINE_FLOORS = {
   'Lipsync_MC_HNDL_1-3': 72.4,
   'color-13': 47.3,
 };
+const MAX_SUSPICIOUS_SPARSE_OVERLAP = 4;
 
 async function waitForServer(url, timeoutMs = 30000) {
   const start = Date.now();
@@ -49,6 +50,9 @@ function evaluateThresholds(benchmark) {
   if (Number.isFinite(summary.minVector) && summary.minVector < 80) failures.push(`Lowest gate vector score ${summary.minVector.toFixed(1)}% is below 80%`);
   if (Number.isFinite(summary.minBitmap) && summary.minBitmap < 75) failures.push(`Lowest gate bitmap score ${summary.minBitmap.toFixed(1)}% is below 75%`);
   if (summary.errorDiagnostics.length > 0) failures.push(`Drawings with error diagnostics: ${summary.errorDiagnostics.join(', ')}`);
+  if ((summary.suspiciousSparseOverlapDrawings ?? 0) > MAX_SUSPICIOUS_SPARSE_OVERLAP) {
+    failures.push(`Suspicious sparse-overlap drawings ${summary.suspiciousSparseOverlapDrawings} exceeds expected ${MAX_SUSPICIOUS_SPARSE_OVERLAP}`);
+  }
 
   const resultMap = new Map(results.map((result) => [result.drawing, result]));
   for (const [drawing, minimum] of Object.entries(BASELINE_FLOORS)) {
@@ -98,6 +102,9 @@ function printSummary(summary) {
   if (typeof summary.sourceFreshRawOverallAverage === 'number') {
     console.log(`Source-fresh raw averages: overall=${summary.sourceFreshRawOverallAverage.toFixed(2)} vector=${summary.sourceFreshRawVectorAverage.toFixed(2)} bitmap=${summary.sourceFreshRawBitmapAverage.toFixed(2)}`);
   }
+  if (typeof summary.trustedSourceFreshRawOverallAverage === 'number') {
+    console.log(`Trusted source-fresh raw averages: overall=${summary.trustedSourceFreshRawOverallAverage.toFixed(2)} vector=${summary.trustedSourceFreshRawVectorAverage.toFixed(2)} bitmap=${summary.trustedSourceFreshRawBitmapAverage.toFixed(2)}`);
+  }
   if (typeof summary.normalizedOverallAverage === 'number') {
     console.log(`Focused averages: overall=${summary.normalizedOverallAverage.toFixed(2)} vector=${summary.normalizedVectorAverage.toFixed(2)} bitmap=${summary.normalizedBitmapAverage.toFixed(2)}`);
   }
@@ -109,6 +116,9 @@ function printSummary(summary) {
   }
   if (typeof summary.sourceFreshMinRawVector === 'number') {
     console.log(`Source-fresh raw minima: vector=${summary.sourceFreshMinRawVector.toFixed(2)} bitmap=${summary.sourceFreshMinRawBitmap.toFixed(2)}`);
+  }
+  if (typeof summary.trustedSourceFreshMinRawVector === 'number') {
+    console.log(`Trusted source-fresh raw minima: vector=${summary.trustedSourceFreshMinRawVector.toFixed(2)} bitmap=${summary.trustedSourceFreshMinRawBitmap.toFixed(2)}`);
   }
   if (typeof summary.minVector === 'number') {
     console.log(`Gate minima: vector=${summary.minVector.toFixed(2)} bitmap=${summary.minBitmap.toFixed(2)}`);
@@ -124,6 +134,10 @@ function printSummary(summary) {
   }
   if (typeof summary.staleThumbnailDrawings === 'number') {
     console.log(`Stale/context thumbnails: ${summary.staleThumbnailDrawings}`);
+  }
+  if (summary.benchmarkClassCounts) {
+    const counts = summary.benchmarkClassCounts;
+    console.log(`Benchmark classes: trusted=${counts.trusted ?? 0} suspicious=${counts['suspicious-sparse-overlap'] ?? 0} noisy=${counts['noisy-low-foreground'] ?? 0} alternate=${counts['alternate-source'] ?? 0} stale=${counts['stale-thumbnail'] ?? 0}`);
   }
 }
 
@@ -170,13 +184,24 @@ async function main() {
             : result.sourceFreshness === 'thumbnail-matches-alternate-drawing'
               ? ` alternate=${result.alternateSourcePath} altRaw=${result.alternateRawScore.toFixed(2)}`
               : '';
-          return `${result.drawing} final=${result.score.toFixed(2)} gate=${result.gateScore.toFixed(2)} aligned=${result.alignedScore.toFixed(2)} raw=${result.rawScore.toFixed(2)}${source}`;
+          const benchmarkClass = result.benchmarkClass && result.benchmarkClass !== 'trusted'
+            ? ` class=${result.benchmarkClass}`
+            : '';
+          return `${result.drawing} final=${result.score.toFixed(2)} gate=${result.gateScore.toFixed(2)} aligned=${result.alignedScore.toFixed(2)} raw=${result.rawScore.toFixed(2)}${source}${benchmarkClass}`;
         });
       const actionableWorst = [...benchmark.results]
-        .filter((result) => result.sourceFreshness === 'same-or-newer-thumbnail')
+        .filter((result) => result.benchmarkClass === 'trusted')
         .sort((a, b) => a.rawScore - b.rawScore || a.alignedScore - b.alignedScore)
         .slice(0, 12)
         .map((result) => `${result.drawing} aligned=${result.alignedScore.toFixed(2)} raw=${result.rawScore.toFixed(2)} focused=${result.normalizedScore.toFixed(2)} iou=${result.foregroundIou.toFixed(2)}`);
+      const suspicious = benchmark.results
+        .filter((result) => result.benchmarkClass === 'suspicious-sparse-overlap')
+        .sort((a, b) => a.rawScore - b.rawScore)
+        .map((result) => `${result.drawing} raw=${result.rawScore.toFixed(2)} focused=${result.normalizedScore.toFixed(2)} iou=${result.foregroundIou.toFixed(2)}`);
+      const noisy = benchmark.results
+        .filter((result) => result.benchmarkClass === 'noisy-low-foreground')
+        .sort((a, b) => a.rawScore - b.rawScore)
+        .map((result) => `${result.drawing} raw=${result.rawScore.toFixed(2)} focused=${result.normalizedScore.toFixed(2)} iou=${result.foregroundIou.toFixed(2)}`);
       console.log(`TVG raw benchmark written to ${outputPath}`);
       printSummary(benchmark.summary);
       if (worst.length > 0) {
@@ -184,8 +209,20 @@ async function main() {
         for (const line of worst) console.log(`- ${line}`);
       }
       if (actionableWorst.length > 0) {
-        console.log('Worst source-fresh raw matches:');
+        console.log('Worst trusted source-fresh raw matches:');
         for (const line of actionableWorst) console.log(`- ${line}`);
+      }
+      if (suspicious.length > 0) {
+        console.log('Suspicious sparse-overlap cases:');
+        for (const line of suspicious) console.log(`- ${line}`);
+      }
+      if (noisy.length > 0) {
+        console.log('Noisy low-foreground cases:');
+        for (const line of noisy) console.log(`- ${line}`);
+      }
+      if ((benchmark.summary.suspiciousSparseOverlapDrawings ?? 0) > MAX_SUSPICIOUS_SPARSE_OVERLAP) {
+        console.error(`Suspicious sparse-overlap drawings ${benchmark.summary.suspiciousSparseOverlapDrawings} exceeds expected ${MAX_SUSPICIOUS_SPARSE_OVERLAP}`);
+        process.exitCode = 1;
       }
       return;
     }

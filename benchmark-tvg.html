@@ -30,6 +30,12 @@ const ALTERNATE_SOURCE_CHECK_FOCUSED_MAX = 30;
 const ALTERNATE_SOURCE_MIN_RAW = 92;
 const ALTERNATE_SOURCE_MIN_ALIGNED = 95;
 const ALTERNATE_SOURCE_MIN_RAW_DELTA = 6;
+const SUSPICIOUS_SPARSE_RAW_MIN = 97;
+const SUSPICIOUS_SPARSE_GATE_MIN = 98;
+const SUSPICIOUS_SPARSE_OVERLAP_MAX = 30;
+const NOISY_LOW_FOREGROUND_RAW_MIN = 98;
+const NOISY_LOW_FOREGROUND_GATE_MIN = 99;
+const NOISY_LOW_FOREGROUND_OVERLAP_MAX = 50;
 
 function findFile(zip, filename) {
   if (zip.file(filename)) return filename;
@@ -85,6 +91,49 @@ function sourceFreshnessFor(zip, drawingPath, thumbnailPath) {
     drawingModified,
     thumbnailModified,
     thumbnailAgeHours: thumbnailAgeMs / (60 * 60 * 1000),
+  };
+}
+
+function classifyBenchmarkCase(sourceFreshness, scoreResult) {
+  if (sourceFreshness === 'thumbnail-older-than-drawing') {
+    return {
+      benchmarkClass: 'stale-thumbnail',
+      benchmarkClassReason: 'thumbnail file timestamp is older than the TVG source',
+    };
+  }
+
+  if (sourceFreshness === 'thumbnail-matches-alternate-drawing') {
+    return {
+      benchmarkClass: 'alternate-source',
+      benchmarkClassReason: 'thumbnail matches a sibling or backup TVG better than the active source',
+    };
+  }
+
+  const sparseLowOverlap = scoreResult.rawScore >= SUSPICIOUS_SPARSE_RAW_MIN
+    && scoreResult.gateScore >= SUSPICIOUS_SPARSE_GATE_MIN
+    && scoreResult.normalizedScore < SUSPICIOUS_SPARSE_OVERLAP_MAX
+    && scoreResult.foregroundIou < SUSPICIOUS_SPARSE_OVERLAP_MAX;
+  if (sparseLowOverlap) {
+    return {
+      benchmarkClass: 'suspicious-sparse-overlap',
+      benchmarkClassReason: 'high canvas score but foreground-focused overlap is too low to trust as a renderer floor',
+    };
+  }
+
+  const noisyLowForeground = scoreResult.rawScore >= NOISY_LOW_FOREGROUND_RAW_MIN
+    && scoreResult.gateScore >= NOISY_LOW_FOREGROUND_GATE_MIN
+    && scoreResult.normalizedScore < NOISY_LOW_FOREGROUND_OVERLAP_MAX
+    && scoreResult.foregroundIou < NOISY_LOW_FOREGROUND_OVERLAP_MAX;
+  if (noisyLowForeground) {
+    return {
+      benchmarkClass: 'noisy-low-foreground',
+      benchmarkClassReason: 'small sparse foreground makes focused overlap unstable; inspect separately from renderer floors',
+    };
+  }
+
+  return {
+    benchmarkClass: 'trusted',
+    benchmarkClassReason: 'timestamp-fresh thumbnail with usable foreground agreement',
   };
 }
 
@@ -230,6 +279,7 @@ async function runBenchmark() {
           alternateRawDelta: alternateSource.rawDelta,
         }
       : timestampFreshness;
+    const benchmarkClassification = classifyBenchmarkCase(freshness.sourceFreshness, scoreResult);
 
     results.push({
       drawing: thumbName,
@@ -237,6 +287,7 @@ async function runBenchmark() {
       viewport,
       bitmapOnly,
       ...freshness,
+      ...benchmarkClassification,
       gateScore: scoreResult.gateScore,
       score: scoreResult.score,
       rawScore: scoreResult.rawScore,
@@ -256,10 +307,13 @@ async function runBenchmark() {
   const vector = results.filter((entry) => !entry.bitmapOnly);
   const bitmap = results.filter((entry) => entry.bitmapOnly);
   const sourceFresh = results.filter((entry) => entry.sourceFreshness === 'same-or-newer-thumbnail');
+  const trustedSourceFresh = results.filter((entry) => entry.benchmarkClass === 'trusted');
   const staleThumbnail = results.filter((entry) => entry.sourceFreshness !== 'same-or-newer-thumbnail');
   const alternateSourceThumbnail = results.filter((entry) => entry.sourceFreshness === 'thumbnail-matches-alternate-drawing');
   const sourceFreshVector = sourceFresh.filter((entry) => !entry.bitmapOnly);
   const sourceFreshBitmap = sourceFresh.filter((entry) => entry.bitmapOnly);
+  const trustedSourceFreshVector = trustedSourceFresh.filter((entry) => !entry.bitmapOnly);
+  const trustedSourceFreshBitmap = trustedSourceFresh.filter((entry) => entry.bitmapOnly);
   const averageFinal = (items) => items.length ? items.reduce((sum, item) => sum + item.score, 0) / items.length : 0;
   const averageGate = (items) => items.length ? items.reduce((sum, item) => sum + item.gateScore, 0) / items.length : 0;
   const averageRaw = (items) => items.length ? items.reduce((sum, item) => sum + item.rawScore, 0) / items.length : 0;
@@ -270,6 +324,10 @@ async function runBenchmark() {
   const rescued = results.filter((entry) => entry.score > entry.alignedScore + 0.01);
   const largeRescues = rescued.filter((entry) => entry.score - entry.alignedScore >= 3);
   const suspiciousRescues = results.filter((entry) => entry.score >= 90 && entry.normalizedScore < 25 && entry.foregroundIou < 25);
+  const benchmarkClassCounts = results.reduce((counts, entry) => {
+    counts[entry.benchmarkClass] = (counts[entry.benchmarkClass] || 0) + 1;
+    return counts;
+  }, {});
 
   const summary = {
     zipPath,
@@ -316,11 +374,20 @@ async function runBenchmark() {
     staleThumbnailDrawings: staleThumbnail.length,
     alternateSourceThumbnailDrawings: alternateSourceThumbnail.length,
     sourceFreshDrawings: sourceFresh.length,
+    trustedSourceFreshDrawings: trustedSourceFresh.length,
+    suspiciousSparseOverlapDrawings: benchmarkClassCounts['suspicious-sparse-overlap'] || 0,
+    noisyLowForegroundDrawings: benchmarkClassCounts['noisy-low-foreground'] || 0,
+    benchmarkClassCounts,
     sourceFreshRawVectorAverage: averageRaw(sourceFreshVector),
     sourceFreshRawBitmapAverage: averageRaw(sourceFreshBitmap),
     sourceFreshRawOverallAverage: averageRaw(sourceFresh),
+    trustedSourceFreshRawVectorAverage: averageRaw(trustedSourceFreshVector),
+    trustedSourceFreshRawBitmapAverage: averageRaw(trustedSourceFreshBitmap),
+    trustedSourceFreshRawOverallAverage: averageRaw(trustedSourceFresh),
     sourceFreshMinRawVector: sourceFreshVector.reduce((min, item) => Math.min(min, item.rawScore), Infinity),
     sourceFreshMinRawBitmap: sourceFreshBitmap.reduce((min, item) => Math.min(min, item.rawScore), Infinity),
+    trustedSourceFreshMinRawVector: trustedSourceFreshVector.reduce((min, item) => Math.min(min, item.rawScore), Infinity),
+    trustedSourceFreshMinRawBitmap: trustedSourceFreshBitmap.reduce((min, item) => Math.min(min, item.rawScore), Infinity),
     finalMinVector: vector.reduce((min, item) => Math.min(min, item.score), Infinity),
     finalMinBitmap: bitmap.reduce((min, item) => Math.min(min, item.score), Infinity),
     minVector: vector.reduce((min, item) => Math.min(min, item.gateScore), Infinity),

@@ -12,9 +12,11 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 - Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, narrow same-paint detail threshold expansion, dense line-fill edge/coverage/tone passes, and clipped bitmap atlas fit bands.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark after clipped bitmap atlas fit bands and doubled dense shadow lift: overall `98.53`, vector `98.41`, bitmap `99.09`.
-- Source-fresh raw average after alternate-source filtering, dense line-fill correction, and bitmap fit bands: overall `98.96`, vector `98.90`, bitmap `99.09`.
-- Current source-fresh raw minimum is `color.101/color-21` at `97.04`; source-fresh bitmap minimum is `Agata_Head_Angles.87/Agata_Head_Angles-1` at raw `97.46`.
+- Current raw benchmark after clipped bitmap atlas fit bands, doubled dense shadow lift, and benchmark trust classification: overall `98.53`, vector `98.41`, bitmap `99.09`.
+- Source-fresh raw average before trust classification remains overall `98.96`, vector `98.90`, bitmap `99.09`.
+- Trusted source-fresh raw average excludes stale, alternate-source, suspicious sparse-overlap, and noisy low-foreground thumbnails: overall `98.99`, vector `98.94`, bitmap `99.09`.
+- Current trusted source-fresh raw minimum is `color.101/color-21` at `97.04`; trusted source-fresh bitmap minimum is `Agata_Head_Angles.87/Agata_Head_Angles-1` at raw `97.46`.
+- Current benchmark classes: `92` trusted, `4` suspicious sparse-overlap, `4` noisy low-foreground, `1` alternate-source, and `79` stale-thumbnail cases.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
 - Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
 - The sibling `elements/color/color-13.tvg` scores raw `95.578125`, aligned `97.2421875`, normalized about `92.55`, IoU about `95.34` against the `color.101` thumbnail.
@@ -24,10 +26,14 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 - `scripts/analyze-tvg-residuals.mjs` is the preferred compact diagnostic for dense line-fill residuals. It reports raw/aligned/focused/IoU, foreground-only counts, edge/interior residual buckets, luma buckets, and alpha summaries for reference-only/candidate-only pixels.
 - `scripts/score-tvg-tone-variants.mjs` probes dense line-fill post-composite tone variants across a drawing set and reports per-drawing raw deltas. Use it before changing dense tone constants.
 - `scripts/score-bitmap-fit-variants.mjs` probes bitmap-only fit padding variants and reports tile count/aspect metadata. Use it before changing bitmap atlas padding bands.
+- `benchmark-tvg.html` emits `benchmarkClass` for every result. The CLI uses `trusted` cases for actionable renderer floors, while still printing `suspicious-sparse-overlap` and `noisy-low-foreground` buckets so sparse-thumbnail failures are visible.
 
 ## Known Findings
 
 - `benchmark-tvg.html` should not return to exact pixel equality as the gate. The current scoring path uses `scoreCanvasSources` from `src/tvg-benchmark.ts`, including tolerance, bounded alignment, crop/focus/perceptual/structural/mask/macro signals. Raw equality is diagnostic.
+- Benchmark trust classification is separate from rendering. `suspicious-sparse-overlap` catches high raw/gate scores with foreground-focused overlap and IoU below `30`; `noisy-low-foreground` catches high raw/gate scores with overlap below `50`. These cases stay in JSON and console output, but trusted source-fresh floors exclude them so sparse white background agreement does not drive parser or renderer hacks.
+- Current suspicious sparse-overlap cases are `Drawing_2/Drawing_2-1`, `Drawing_2/Drawing_2-2`, `Drawing_3/Drawing_3-2`, and `sole_line_B/sole_line_B-1`. Treat them as benchmark/thumbnail trust cases unless a source-format signal explains the mismatch.
+- Current noisy low-foreground cases are `F_3_symbol/F_3_symbol-1`, `F_3_symbol/F_3_symbol-2`, `Cheek_Emotion_F-/Cheek_Emotion_F-_000`, and `HNDL-Eye/HNDL-Eye-1`. They are not actionable floors until the foreground signal is less ambiguous.
 - Metadata/layer parsing is probably not the remaining issue for `color.101/color-13`. Only the `line` layer has non-empty parsed content, with 137 shapes.
 - Shape order is probably not the issue. Reordering shape 19/20/21 variants produced effectively zero useful delta.
 - Viewport argument is not the controlling factor for `color.101/color-13`; several viewport values produced identical rendered bounds because the renderer expands to content extent plus source padding.
