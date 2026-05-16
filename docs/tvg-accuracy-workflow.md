@@ -257,6 +257,12 @@ Managed local rejected experiment: saturated dense line-fill density
 - A softer saturated-fill subtraction of `24` improved `color-21` raw `97.04 -> 97.08` and `color-23` `98.73 -> 98.82`, but regressed `color-18` `97.07 -> 96.98`, `color-15` `97.33 -> 97.22`, `color-1` `97.38 -> 97.34`, `color-19` `97.55 -> 97.50`, and `color-31` `97.78 -> 97.69`.
 - Manager decision: do not implement a broad saturated-fill density gate. The remaining vector issue needs a more localized source-format or residual-region predicate, not a global chroma rule.
 
+Managed local rejected experiment: exterior edge expansion retune
+
+- Increasing dense line-fill exterior edge expansion from `0.9` to `1.0` gave only a tiny `color-21` raw gain (`97.04 -> 97.05`) while slightly worsening focused/IoU and increasing candidate-only pixels.
+- Increasing the same scale to `1.1` regressed `color-21` raw to `96.94`.
+- Manager decision: keep expansion scale at `0.9`; the coverage lever is exhausted for the current floor.
+
 Managed local bitmap finding: resampling and fit are currently exhausted
 
 - `Agata_Head_Angles.87/Agata_Head_Angles-1` remains the trusted bitmap floor at raw `97.46`, aligned `97.60`, focused `66.44`, IoU `71.27`.
