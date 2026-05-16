@@ -26,6 +26,7 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 - `scripts/analyze-tvg-residuals.mjs` is the preferred compact diagnostic for dense line-fill residuals. It reports raw/aligned/focused/IoU, foreground-only counts, edge/interior residual buckets, luma buckets, and alpha summaries for reference-only/candidate-only pixels.
 - `scripts/score-tvg-tone-variants.mjs` probes dense line-fill post-composite tone variants across a drawing set and reports per-drawing raw deltas. Use it before changing dense tone constants.
 - `scripts/score-bitmap-fit-variants.mjs` probes bitmap-only fit padding variants and reports tile count/aspect metadata. Use it before changing bitmap atlas padding bands.
+- `scripts/score-bitmap-resample-variants.mjs` probes bitmap-only resampling modes while preserving the current fit geometry. Use it before changing bitmap smoothing/downscale behavior.
 - `benchmark-tvg.html` emits `benchmarkClass` for every result. The CLI uses `trusted` cases for actionable renderer floors, while still printing `suspicious-sparse-overlap` and `noisy-low-foreground` buckets so sparse-thumbnail failures are visible.
 
 ## Known Findings
@@ -248,6 +249,20 @@ Managed local finding: dense line-fill interior shadow lift
 - Doubling the lift from `+4,+20,+20` improved checked source-fresh cluster cases without local regressions: `color-21` raw `96.97 -> 97.04`, `color-18` `97.06 -> 97.07`, `color-3` `97.32 -> 97.34`, `color-15` `97.33 -> 97.33`, `color-1` `97.37 -> 97.38`, `color-19` `97.53 -> 97.55`, and `color-31` `97.62 -> 97.78`.
 - Full raw benchmark after the doubled lift: raw averages overall/vector/bitmap `98.53/98.41/99.09`; source-fresh raw averages overall/vector/bitmap `98.96/98.90/99.09`; source-fresh raw minima vector/bitmap `97.04/97.46`.
 - Additional guards checked unchanged at targeted precision: `Number_Body-2`, `B_Shorts-1`, `Switch-1`, and `Drawing_2-1`.
+
+Managed local rejected experiment: saturated dense line-fill density
+
+- Residuals for `color.101/color-21` and `color.101/color-18` showed saturated green interior fills were too dark after the dense ink-density pass, suggesting the `-32` density subtraction might be treating color fills as neutral ink.
+- Fully skipping the density subtraction for saturated mid-luma pixels reduced bad-interior counts but over-brightened broad fills and regressed multiple dense-cluster floors.
+- A softer saturated-fill subtraction of `24` improved `color-21` raw `97.04 -> 97.08` and `color-23` `98.73 -> 98.82`, but regressed `color-18` `97.07 -> 96.98`, `color-15` `97.33 -> 97.22`, `color-1` `97.38 -> 97.34`, `color-19` `97.55 -> 97.50`, and `color-31` `97.78 -> 97.69`.
+- Manager decision: do not implement a broad saturated-fill density gate. The remaining vector issue needs a more localized source-format or residual-region predicate, not a global chroma rule.
+
+Managed local bitmap finding: resampling and fit are currently exhausted
+
+- `Agata_Head_Angles.87/Agata_Head_Angles-1` remains the trusted bitmap floor at raw `97.46`, aligned `97.60`, focused `66.44`, IoU `71.27`.
+- Fit padding variants are rejected for this case: current portrait clipped-atlas padding `9` is best, while padding `7.5` drops raw to `94.24` and padding `4.5` drops raw to `83.28`.
+- Resampling variants are also rejected as renderer changes: `current-progressive-high`, `progressive-medium`, and `progressive-low` tie at raw `97.46`; direct, two-step, and pixelated variants all regress the bitmap floor. For nearby `3255/3255-1` and `4bf5/4bf5-1`, current progressive high-quality downscale is also best or tied.
+- Manager decision: do not change bitmap fit or smoothing yet. Use `scripts/score-bitmap-resample-variants.mjs` for future corpus-wide resampling work before touching renderer defaults.
 
 ## Scientific Loop
 
