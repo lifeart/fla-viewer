@@ -4084,6 +4084,36 @@ function shouldInsetViewportForLineFillDrawing(drawing: TVGDrawing): boolean {
   );
 }
 
+function isLineFillBaseCarrierShape(shape: TVGShape): boolean {
+  const strokeComps = shape.components.filter(comp =>
+    (comp.componentType === 2 || comp.componentType === 4)
+    && comp.path
+    && comp.path.segments.length > 0,
+  );
+  if (strokeComps.length > 0) return false;
+
+  const fillComps = renderableFillComponents(shape);
+  if (fillComps.length < 8) return false;
+  const fillPaintKeys = new Set(
+    fillComps
+      .map(comp => paintKeyForComponent(comp))
+      .filter((key): key is FillStyleKey => key !== null),
+  );
+  if (fillPaintKeys.size !== 1) return false;
+
+  const inheritedFillCount = fillComps.filter(comp => comp.fillPaintSource === 'inherited').length;
+  return inheritedFillCount >= fillComps.length - 2;
+}
+
+function shouldUseLineFillBaseCarrierOrdering(
+  layer: TVGArtLayer,
+  allLayers: TVGArtLayer[] | undefined,
+): boolean {
+  if (layer.type !== 'line' || layer.shapes.length < LINE_FILL_BASE_ORDER_MIN_SHAPES) return false;
+  if (allLayers?.some(entry => entry.type === 'color' && entry.shapes.length > 0)) return false;
+  return layer.shapes.filter(isLineFillBaseCarrierShape).length >= LINE_FILL_BASE_ORDER_MIN_CARRIERS;
+}
+
 function shouldInsetViewportForColorGuideGridDrawing(drawing: TVGDrawing): boolean {
   let guideStrokeCount = 0;
   let fillPanelCount = 0;
@@ -4575,6 +4605,8 @@ interface LocalFillPaintSource {
 
 const SAME_PAINT_DETAIL_MAX_FRAGMENTS = 12;
 const SAME_PAINT_DETAIL_MAX_AREA_RATIO = 0.0375;
+const LINE_FILL_BASE_ORDER_MIN_SHAPES = 8;
+const LINE_FILL_BASE_ORDER_MIN_CARRIERS = 2;
 
 const UTILITY_NAMES = new Set([
   'line', 'mask', 'invis', 'handles', 'invisible', 'shadow',
@@ -8642,6 +8674,13 @@ function renderLayerPass(
           preRenderPaintKey: null,
         },
   }));
+  if (pass === 'fill' && shouldUseLineFillBaseCarrierOrdering(layer, options?.allLayers)) {
+    renderEntries.sort((a, b) => {
+      const aOrder = isLineFillBaseCarrierShape(a.shape) ? 0 : 1;
+      const bOrder = isLineFillBaseCarrierShape(b.shape) ? 0 : 1;
+      return aOrder - bOrder || a.shapeIndex - b.shapeIndex;
+    });
+  }
   const preRenderEntries = pass === 'fill' && layer.type === 'line'
     ? renderEntries
       .filter(entry => entry.preRenderPlan.priority > 0)
@@ -8729,7 +8768,7 @@ function renderLayerPass(
       if (shouldSuppressLargeNearBlackLineFillShape(
         layer,
         shape,
-        renderShapeIndex,
+        shapeIndex,
         strokeComps,
         explicitBuild.contours.length,
         sameLayerShapes,
