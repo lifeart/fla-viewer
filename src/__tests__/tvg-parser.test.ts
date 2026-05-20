@@ -2815,7 +2815,11 @@ describe('tvg rendering', () => {
     expect(underlayFillColors.every(color => color?.r === 1 && color.g === 255 && color.b === 0)).toBe(true);
 
     const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    const includeUnderlayCanvas = renderTVGToCanvas(drawing, 160, 160, 336, { includeUnderlay: true });
     expect(canvas).not.toBeNull();
+    expect(includeUnderlayCanvas).not.toBeNull();
+    const includeUnderlayScore = scoreCanvasSources(canvas!, includeUnderlayCanvas!, 160);
+    expect(includeUnderlayScore.rawScore).toBeGreaterThan(99.9);
     const reference = await loadImageFromArrayBuffer(thumbData);
     const score = scoreCanvasSources(reference, canvas!, 160);
     expect(score.gateScore).toBe(100);
@@ -2919,6 +2923,38 @@ describe('tvg rendering', () => {
     const bottom = samplePixel(canvas!, 80, 94);
     expectColorNear(top, { r: 250, g: 194, b: 167 }, 30);
     expectColorNear(bottom, { r: 60, g: 91, b: 203 }, 35);
+  });
+
+  it('filters stroke-only underlay construction guides from clean line-fill thumbnails', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/B_Shadow_LoLeg/B_Shadow_LoLeg-1.tvg')!.async('arraybuffer');
+    const thumbData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/B_Shadow_LoLeg/.thumbnails/.B_Shadow_LoLeg-1.tvg.png')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    const defaultCanvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    const includeUnderlayCanvas = renderTVGToCanvas(drawing, 160, 160, 336, { includeUnderlay: true });
+    const noUnderlayCanvas = renderTVGToCanvas(
+      { ...drawing, layers: drawing.layers.filter(layer => layer.type !== 'underlay') },
+      160,
+      160,
+      336,
+    );
+
+    expect(defaultCanvas).not.toBeNull();
+    expect(includeUnderlayCanvas).not.toBeNull();
+    expect(noUnderlayCanvas).not.toBeNull();
+
+    const noUnderlayEquivalence = scoreCanvasSources(defaultCanvas!, noUnderlayCanvas!, 160);
+    expect(noUnderlayEquivalence.rawScore).toBeGreaterThan(99.9);
+
+    const reference = await loadImageFromArrayBuffer(thumbData);
+    const defaultScore = scoreCanvasSources(reference, defaultCanvas!, 160);
+    const includeUnderlayScore = scoreCanvasSources(reference, includeUnderlayCanvas!, 160);
+    expect(defaultScore.rawScore).toBeGreaterThan(98);
+    expect(defaultScore.rawScore).toBeGreaterThan(includeUnderlayScore.rawScore + 0.3);
   });
 
   it('keeps zero-scale trailing text labels hidden', () => {

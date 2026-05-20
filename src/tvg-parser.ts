@@ -3290,6 +3290,36 @@ function filterDrawingToActiveLayerTypes(
   return layers.length === drawing.layers.length ? drawing : { ...drawing, layers };
 }
 
+function isStrokeOnlyUnderlayLayer(layer: TVGArtLayer): boolean {
+  return layer.type === 'underlay'
+    && layer.shapes.length > 0
+    && layer.shapes.every(shape =>
+      shape.components.length > 0
+      && shape.components.every(comp =>
+        (comp.componentType === 2 || comp.componentType === 4)
+        && comp.path
+        && comp.path.segments.length > 0,
+      ),
+    );
+}
+
+function filterStrokeOnlyUnderlayLayersForCleanThumbnail(
+  drawing: TVGDrawing,
+  options?: TVGRenderOptions,
+): TVGDrawing {
+  if (options?.includeUnderlay === true || options?.artLayerFilter || options?.centerOnOrigin || options?.skipBackgroundComposite) {
+    return drawing;
+  }
+  if (drawing.layers.some(layer => layer.type === 'color' && layer.shapes.length > 0)) return drawing;
+  const hasRenderableLineFill = drawing.layers.some(layer =>
+    layer.type === 'line' && layer.shapes.some(shapeHasRenderableFill),
+  );
+  if (!hasRenderableLineFill) return drawing;
+
+  const layers = drawing.layers.filter(layer => !isStrokeOnlyUnderlayLayer(layer));
+  return layers.length === drawing.layers.length ? drawing : { ...drawing, layers };
+}
+
 let textBoundsMeasureContext: CanvasRenderingContext2D | null | undefined;
 
 function getTextBoundsMeasureContext(): CanvasRenderingContext2D | null {
@@ -3606,7 +3636,10 @@ export function renderTVGToCanvas(
   const ssWidth = width * SS;
   const ssHeight = height * SS;
   const layerTypes = getActiveArtLayerTypes(options);
-  const activeDrawing = filterDrawingToActiveLayerTypes(renderDrawing, layerTypes);
+  const activeDrawing = filterStrokeOnlyUnderlayLayersForCleanThumbnail(
+    filterDrawingToActiveLayerTypes(renderDrawing, layerTypes),
+    options,
+  );
 
   let defaultBoundaryFillColor: { r: number; g: number; b: number; a: number } | null = null;
   for (const entry of renderDrawing.palette) {
