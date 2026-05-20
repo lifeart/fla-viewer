@@ -4138,6 +4138,25 @@ function isLineFillBaseCarrierShape(shape: TVGShape): boolean {
   return inheritedFillCount >= fillComps.length - 2;
 }
 
+function lineFillBaseCarrierBoundsArea(shape: TVGShape): number {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const comp of renderableFillComponents(shape)) {
+    const bounds = componentPathBounds(comp);
+    if (!bounds) continue;
+    minX = Math.min(minX, bounds.minX);
+    minY = Math.min(minY, bounds.minY);
+    maxX = Math.max(maxX, bounds.maxX);
+    maxY = Math.max(maxY, bounds.maxY);
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return 0;
+  }
+  return Math.max(0, maxX - minX) * Math.max(0, maxY - minY);
+}
+
 function shouldUseLineFillBaseCarrierOrdering(
   layer: TVGArtLayer,
   allLayers: TVGArtLayer[] | undefined,
@@ -8708,10 +8727,16 @@ function renderLayerPass(
         },
   }));
   if (pass === 'fill' && shouldUseLineFillBaseCarrierOrdering(layer, options?.allLayers)) {
+    const canOrderBaseCarriersByCoverage = renderEntries.every(entry => entry.preRenderPlan.priority === 0);
     renderEntries.sort((a, b) => {
       const aOrder = isLineFillBaseCarrierShape(a.shape) ? 0 : 1;
       const bOrder = isLineFillBaseCarrierShape(b.shape) ? 0 : 1;
-      return aOrder - bOrder || a.shapeIndex - b.shapeIndex;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      if (aOrder === 0 && canOrderBaseCarriersByCoverage) {
+        return lineFillBaseCarrierBoundsArea(b.shape) - lineFillBaseCarrierBoundsArea(a.shape)
+          || a.shapeIndex - b.shapeIndex;
+      }
+      return a.shapeIndex - b.shapeIndex;
     });
   }
   const preRenderEntries = pass === 'fill' && layer.type === 'line'
