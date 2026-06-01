@@ -3277,6 +3277,49 @@ describe('tvg rendering', () => {
     }
   });
 
+  it('uses a content-fit viewport floor for tiny vector cutouts', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+
+    const scoreCase = async (elementName: string, drawingName: string) => {
+      const base = `CH_Anna_rig_football_suit_V001_V07/elements/${elementName}`;
+      const tvgData = await zip.file(`${base}/${drawingName}.tvg`)!.async('arraybuffer');
+      const thumbData = await zip.file(`${base}/.thumbnails/.${drawingName}.tvg.png`)!.async('arraybuffer');
+      const drawing = parseTVG(tvgData);
+      resolveExternalPalette(drawing, externalColors);
+
+      const canvas = renderTVGToCanvas(drawing, 160, 160, 336, { supersample: 2 });
+      expect(canvas).not.toBeNull();
+      const reference = await loadImageFromArrayBuffer(thumbData);
+      return scoreCanvasSources(reference, canvas!, 160);
+    };
+
+    const positiveCases = [
+      { elementName: 'F-Line_LoArm_F.910', drawingName: 'F-Watch_Base-1', minRaw: 99.1 },
+      { elementName: 'F-Line_LoArm_F.910', drawingName: 'F-Watch_Base-2', minRaw: 99.0 },
+      { elementName: 'F-Sleeve_bk_F', drawingName: 'F-Sleeve_bk_F-1', minRaw: 99.0 },
+    ];
+
+    for (const testCase of positiveCases) {
+      const score = await scoreCase(testCase.elementName, testCase.drawingName);
+      expect(score.rawScore).toBeGreaterThan(testCase.minRaw);
+      expect(score.alignedScore).toBeGreaterThan(99.9);
+    }
+
+    const guardCases = [
+      { elementName: 'B_Shadow_LoLeg', drawingName: 'B_Shadow_LoLeg-1', minRaw: 98.0 },
+      { elementName: 'B_Shorts', drawingName: 'B_Shorts-1', minRaw: 98.2 },
+      { elementName: 'Eye', drawingName: 'Eye-1', minRaw: 98.3 },
+      { elementName: 'Foot_B.6', drawingName: 'Foot_B-1', minRaw: 98.4 },
+    ];
+
+    for (const testCase of guardCases) {
+      const score = await scoreCase(testCase.elementName, testCase.drawingName);
+      expect(score.rawScore, `${testCase.elementName}/${testCase.drawingName}`).toBeGreaterThan(testCase.minRaw);
+    }
+  });
+
   it('orders broad dense line-fill carriers before smaller inherited detail carriers', async () => {
     const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
     const zip = await JSZip.loadAsync(await response.arrayBuffer());

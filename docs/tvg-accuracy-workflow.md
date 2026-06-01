@@ -10,16 +10,16 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 ## Current State
 
-- Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, narrow same-paint detail threshold expansion, dense line-fill edge/coverage/tone passes, clipped bitmap atlas fit bands, portrait bitmap fit retune, and low-alpha saturated-fill density relief.
+- Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, narrow same-paint detail threshold expansion, dense line-fill edge/coverage/tone passes, clipped bitmap atlas fit bands, portrait bitmap fit retune, low-alpha saturated-fill density relief, compact multi-art cutout padding, and tiny vector content-fit viewport floors.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark after clipped bitmap atlas fit bands, portrait bitmap fit retune, doubled dense shadow lift, and benchmark trust classification: overall `98.54`, vector `98.41`, bitmap `99.17`.
-- Source-fresh raw average before trust classification remains overall `98.98`, vector `98.90`, bitmap `99.17`.
-- Trusted source-fresh raw average excludes stale, alternate-source, suspicious sparse-overlap, and noisy low-foreground thumbnails: overall `99.02`, vector `98.94`, bitmap `99.17`.
-- Current trusted source-fresh raw minimum is `color.101/color-18` at `97.07`; trusted source-fresh bitmap minimum is now `3255/3255-1` at raw `97.64`.
+- Current raw benchmark after compact cutout padding and tiny vector viewport floors: overall `98.66`, vector `98.55`, bitmap `99.20`.
+- Source-fresh raw average before trust classification is overall `99.18`, vector `99.18`, bitmap `99.20`.
+- Trusted source-fresh raw average excludes stale, alternate-source, suspicious sparse-overlap, and noisy low-foreground thumbnails: overall `99.24`, vector `99.26`, bitmap `99.20`.
+- Current trusted source-fresh raw minimum is `color.101/color-21` at `97.32`; trusted source-fresh bitmap minimum is `3255/3255-1` at raw `97.80`.
 - Current benchmark classes: `92` trusted, `4` suspicious sparse-overlap, `4` noisy low-foreground, `1` alternate-source, and `79` stale-thumbnail cases.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
 - Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
-- The sibling `elements/color/color-13.tvg` scores raw `95.578125`, aligned `97.2421875`, normalized about `92.55`, IoU about `95.34` against the `color.101` thumbnail.
+- The sibling `elements/color/color-13.tvg` scores raw about `96.07` against the `color.101` thumbnail in the current raw benchmark and remains the accepted alternate-source explanation.
 - The mismatch is therefore classified as `thumbnail-matches-alternate-drawing` in the raw benchmark when the alternate raw score is at least `6` points better and meets high raw/aligned floors.
 - The app fallback path can score 100 by using embedded thumbnails, but raw vector rendering is the target.
 - Local ablation tooling supports raw/aligned sorting, `--skip-only`, grouped component removal via `--group`/`--remove-components-as-group`, and opt-in verbose component metadata via `--details`.
@@ -222,6 +222,15 @@ Managed local finding: compact multi-art cutout viewport padding
 - Accepted rule: use `220` content padding only for default full renders of compact multi-art cutouts with visible underlay and color art, at most five shapes, at most 48 components, and underlay source extent `<=220` with aspect `0.75..1.0`. Preserve the existing `227` padding for dense line-only portraits, layer-filter/matte/origin-centered renders, and larger drawings.
 - Targeted result: `F_Lacing/F_Lacing-1` raw `97.7852 -> 99.9922`, aligned `99.6250 -> 100`, focused `93.4763 -> 99.5471`; `F_Boot_top/F_Boot_top-1` raw `97.8672 -> 99.8789`, aligned `99.6953 -> 99.9883`, focused `95.1799 -> 99.1500`. Guard cases excluded by the underlay extent cap: `F_Boot_bttm/F_Boot_bttm-1_no_OL` stays raw `99.6797` and `B_Shorts/B_Shorts-1` stays raw `98.3594`; dense `color.101` guard cases returned to their previous scores.
 - Full raw benchmark after the compact gate: raw averages overall/vector/bitmap `98.62/98.50/99.20`; source-fresh raw averages `99.13/99.09/99.20`; trusted source-fresh raw averages `99.17/99.16/99.20`; trusted source-fresh minima remain vector/bitmap `97.32/97.80`.
+
+Managed local finding: tiny vector content-fit viewport floor
+
+- `F-Line_LoArm_F.910/F-Watch_Base-1`, `F-Line_LoArm_F.910/F-Watch_Base-2`, and `F-Sleeve_bk_F/F-Sleeve_bk_F-1` were under-scaled by the `336` field-chart viewport floor even though their source content is tiny. Probing viewports `240..280` produced the same better fit, while `300+` progressively shrank the candidate.
+- A global field-chart floor reduction is rejected. Larger or more complex drawings either already use content extent to dominate the viewport or require the full scene-space floor.
+- Accepted rule: for default full renders only, when a drawing has no bitmaps or text labels, visible layers are only `line`/`color`, at least one line layer exists, there are at most two shapes and eight components, and source content extent is `<=96`, use a `280` viewport floor before the normal `contentExtent + padding` expansion. Preserve the normal viewport for underlay/overlay drawings, layer-filter/matte/origin-centered renders, dense line-fill portraits, and larger cutouts.
+- Targeted result: `F-Watch_Base-1` raw `98.2344 -> 99.2227`, aligned `99.3359 -> 99.9297`; `F-Watch_Base-2` raw `98.0508 -> 99.0781`, aligned `99.5234 -> 99.9961`; `F-Sleeve_bk_F-1` raw `98.3242 -> 99.1133`, aligned `99.8477 -> 99.9844`.
+- Guard evidence: `B_Shadow_LoLeg/B_Shadow_LoLeg-1` stays raw `98.1016`, `B_Shorts/B_Shorts-1` stays `98.3594`, `Eye/Eye-1` stays `98.4766`, and `Foot_B.6/Foot_B-1` stays `98.4922`.
+- Full raw benchmark after the tiny-vector floor: raw averages overall/vector/bitmap `98.66/98.55/99.20`; source-fresh raw averages `99.18/99.18/99.20`; trusted source-fresh raw averages `99.24/99.26/99.20`; trusted source-fresh minima remain vector/bitmap `97.32/97.80`.
 
 Managed local finding: embedded dark legacy-chain suppression
 

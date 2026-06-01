@@ -3011,6 +3011,10 @@ const BITMAP_ATLAS_EDGE_TONE_MAX_TILES = 32;
 const TVG_VIEWPORT_CONTENT_PADDING = 227;
 const TVG_COMPACT_CUTOUT_VIEWPORT_CONTENT_PADDING = 220;
 const TVG_COMPACT_CUTOUT_MAX_UNDERLAY_EXTENT = 220;
+const TVG_TINY_VECTOR_VIEWPORT_FLOOR = 280;
+const TVG_TINY_VECTOR_MAX_CONTENT_EXTENT = 96;
+const TVG_TINY_VECTOR_MAX_SHAPES = 2;
+const TVG_TINY_VECTOR_MAX_COMPONENTS = 8;
 
 function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type'][] {
   const includeUnderlay = options?.includeUnderlay ?? true;
@@ -3086,6 +3090,43 @@ function shouldUseCompactCutoutViewportPadding(
   return visibleLayers.every(layer =>
     (layer.textLabels?.length ?? 0) === 0
     && layer.shapes.every(shape =>
+      shape.components.every(comp =>
+        comp.path
+        && comp.path.segments.length > 0
+        && (comp.componentType === 0 || comp.componentType === 1 || comp.componentType === 2 || comp.componentType === 4),
+      ),
+    ),
+  );
+}
+
+function shouldUseTinyVectorViewportFloor(
+  drawing: TVGDrawing,
+  contentExtent: number,
+  options?: TVGRenderOptions,
+): boolean {
+  if (options?.artLayerFilter || options?.centerOnOrigin || options?.skipBackgroundComposite || options?.skipClipping) {
+    return false;
+  }
+  if (drawing.bitmapTiles.length > 0) return false;
+  if (contentExtent <= 0 || contentExtent > TVG_TINY_VECTOR_MAX_CONTENT_EXTENT) return false;
+
+  const visibleLayers = drawing.layers.filter(layer => layer.shapes.length > 0);
+  if (visibleLayers.length === 0) return false;
+  if (!visibleLayers.some(layer => layer.type === 'line')) return false;
+  if (!visibleLayers.every(layer => layer.type === 'line' || layer.type === 'color')) return false;
+  if (visibleLayers.some(layer => (layer.textLabels?.length ?? 0) > 0)) return false;
+
+  const shapeCount = visibleLayers.reduce((sum, layer) => sum + layer.shapes.length, 0);
+  if (shapeCount === 0 || shapeCount > TVG_TINY_VECTOR_MAX_SHAPES) return false;
+
+  const componentCount = visibleLayers.reduce(
+    (sum, layer) => sum + layer.shapes.reduce((shapeSum, shape) => shapeSum + shape.components.length, 0),
+    0,
+  );
+  if (componentCount === 0 || componentCount > TVG_TINY_VECTOR_MAX_COMPONENTS) return false;
+
+  return visibleLayers.every(layer =>
+    layer.shapes.every(shape =>
       shape.components.every(comp =>
         comp.path
         && comp.path.segments.length > 0
@@ -3760,11 +3801,14 @@ export function renderTVGToCanvas(
     const viewportContentPadding = shouldUseCompactCutoutViewportPadding(activeDrawing, options)
       ? TVG_COMPACT_CUTOUT_VIEWPORT_CONTENT_PADDING
       : TVG_VIEWPORT_CONTENT_PADDING;
+    const viewportFloor = shouldUseTinyVectorViewportFloor(activeDrawing, contentExtent, options)
+      ? Math.min(viewport, TVG_TINY_VECTOR_VIEWPORT_FLOOR)
+      : viewport;
     if (centerOnOrigin) {
       const originExtent = 2 * Math.max(Math.abs(minX), Math.abs(maxX), Math.abs(minY), Math.abs(maxY));
-      viewportSize = Math.max(viewport, contentExtent + viewportContentPadding, originExtent + 100);
+      viewportSize = Math.max(viewportFloor, contentExtent + viewportContentPadding, originExtent + 100);
     } else {
-      const baseViewportSize = Math.max(viewport, contentExtent + viewportContentPadding);
+      const baseViewportSize = Math.max(viewportFloor, contentExtent + viewportContentPadding);
       viewportSize = baseViewportSize + computeAdditionalViewportSourcePadding(
         activeDrawing,
         defaultBoundaryFillColor,
