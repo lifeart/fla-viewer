@@ -3008,6 +3008,9 @@ const BITMAP_ATLAS_EDGE_TONE_MIN_ALPHA = 32;
 const BITMAP_ATLAS_EDGE_TONE_MAX_ALPHA = 223;
 const BITMAP_ATLAS_EDGE_TONE_MIN_PIXELS = 500;
 const BITMAP_ATLAS_EDGE_TONE_MAX_TILES = 32;
+const TVG_VIEWPORT_CONTENT_PADDING = 227;
+const TVG_COMPACT_CUTOUT_VIEWPORT_CONTENT_PADDING = 220;
+const TVG_COMPACT_CUTOUT_MAX_UNDERLAY_EXTENT = 220;
 
 function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type'][] {
   const includeUnderlay = options?.includeUnderlay ?? true;
@@ -3027,6 +3030,69 @@ function shouldApplyDenseLineFillInkDensityAdjustment(
   if (options?.skipBackgroundComposite || options?.skipClipping || options?.centerOnOrigin) return false;
   if (options?.artLayerFilter && options.artLayerFilter !== 'all') return false;
   return shouldInsetViewportForLineFillDrawing(drawing);
+}
+
+function unionShapeBounds(shapes: TVGShape[]): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const shape of shapes) {
+    const bounds = computeShapeBounds(shape);
+    if (!bounds) continue;
+    minX = Math.min(minX, bounds.minX);
+    minY = Math.min(minY, bounds.minY);
+    maxX = Math.max(maxX, bounds.maxX);
+    maxY = Math.max(maxY, bounds.maxY);
+  }
+
+  return Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY)
+    ? { minX, minY, maxX, maxY }
+    : null;
+}
+
+function shouldUseCompactCutoutViewportPadding(
+  drawing: TVGDrawing,
+  options?: TVGRenderOptions,
+): boolean {
+  if (options?.artLayerFilter || options?.centerOnOrigin || options?.skipBackgroundComposite || options?.skipClipping) {
+    return false;
+  }
+
+  const visibleLayers = drawing.layers.filter(layer => layer.shapes.length > 0);
+  const underlayLayers = visibleLayers.filter(layer => layer.type === 'underlay');
+  if (underlayLayers.length === 0) return false;
+  if (!visibleLayers.some(layer => layer.type === 'color')) return false;
+
+  const shapeCount = visibleLayers.reduce((sum, layer) => sum + layer.shapes.length, 0);
+  if (shapeCount === 0 || shapeCount > 5) return false;
+
+  const componentCount = visibleLayers.reduce(
+    (sum, layer) => sum + layer.shapes.reduce((shapeSum, shape) => shapeSum + shape.components.length, 0),
+    0,
+  );
+  if (componentCount === 0 || componentCount > 48) return false;
+
+  const underlayBounds = unionShapeBounds(underlayLayers.flatMap(layer => layer.shapes));
+  if (!underlayBounds) return false;
+  const underlayWidth = underlayBounds.maxX - underlayBounds.minX;
+  const underlayHeight = underlayBounds.maxY - underlayBounds.minY;
+  if (underlayWidth <= 0 || underlayHeight <= 0) return false;
+  if (Math.max(underlayWidth, underlayHeight) > TVG_COMPACT_CUTOUT_MAX_UNDERLAY_EXTENT) return false;
+  const underlayAspect = underlayWidth / underlayHeight;
+  if (underlayAspect < 0.75 || underlayAspect > 1.0) return false;
+
+  return visibleLayers.every(layer =>
+    (layer.textLabels?.length ?? 0) === 0
+    && layer.shapes.every(shape =>
+      shape.components.every(comp =>
+        comp.path
+        && comp.path.segments.length > 0
+        && (comp.componentType === 0 || comp.componentType === 1 || comp.componentType === 2 || comp.componentType === 4),
+      ),
+    ),
+  );
 }
 
 function applyDenseLineFillInkDensityAdjustment(
@@ -3691,11 +3757,14 @@ export function renderTVGToCanvas(
     const contentExtent = Math.max(maxX - minX, maxY - minY);
     const centerOnOrigin = options?.centerOnOrigin ?? false;
     const canvasViewportSize = Math.max(1, Math.min(ssWidth, ssHeight));
+    const viewportContentPadding = shouldUseCompactCutoutViewportPadding(activeDrawing, options)
+      ? TVG_COMPACT_CUTOUT_VIEWPORT_CONTENT_PADDING
+      : TVG_VIEWPORT_CONTENT_PADDING;
     if (centerOnOrigin) {
       const originExtent = 2 * Math.max(Math.abs(minX), Math.abs(maxX), Math.abs(minY), Math.abs(maxY));
-      viewportSize = Math.max(viewport, contentExtent + 227, originExtent + 100);
+      viewportSize = Math.max(viewport, contentExtent + viewportContentPadding, originExtent + 100);
     } else {
-      const baseViewportSize = Math.max(viewport, contentExtent + 227);
+      const baseViewportSize = Math.max(viewport, contentExtent + viewportContentPadding);
       viewportSize = baseViewportSize + computeAdditionalViewportSourcePadding(
         activeDrawing,
         defaultBoundaryFillColor,

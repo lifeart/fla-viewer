@@ -3229,6 +3229,54 @@ describe('tvg rendering', () => {
     expect(score.alignedScore).toBeGreaterThan(98.0);
   });
 
+  it('uses tighter viewport padding for compact multi-art cutouts', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const cases = [
+      { elementName: 'F_Lacing', drawingName: 'F_Lacing-1', viewport: 336, minRaw: 99.8 },
+      { elementName: 'F_Boot_top', drawingName: 'F_Boot_top-1', viewport: 336, minRaw: 99.7 },
+    ];
+
+    for (const testCase of cases) {
+      const base = `CH_Anna_rig_football_suit_V001_V07/elements/${testCase.elementName}`;
+      const tvgData = await zip.file(`${base}/${testCase.drawingName}.tvg`)!.async('arraybuffer');
+      const thumbData = await zip.file(`${base}/.thumbnails/.${testCase.drawingName}.tvg.png`)!.async('arraybuffer');
+      const drawing = parseTVG(tvgData);
+      resolveExternalPalette(drawing, externalColors);
+
+      const canvas = renderTVGToCanvas(drawing, 160, 160, testCase.viewport);
+      expect(canvas).not.toBeNull();
+      const reference = await loadImageFromArrayBuffer(thumbData);
+      const score = scoreCanvasSources(reference, canvas!, 160);
+
+      expect(score.rawScore).toBeGreaterThan(testCase.minRaw);
+      expect(score.alignedScore).toBeGreaterThan(99.9);
+      expect(score.candidateBounds).toEqual(score.referenceBounds);
+    }
+
+    const guardCases = [
+      { elementName: 'F_Boot_bttm', drawingName: 'F_Boot_bttm-1_no_OL', viewport: 336, minRaw: 99.5 },
+      { elementName: 'B_Shorts', drawingName: 'B_Shorts-1', viewport: 336, minRaw: 98.2 },
+    ];
+
+    for (const testCase of guardCases) {
+      const base = `CH_Anna_rig_football_suit_V001_V07/elements/${testCase.elementName}`;
+      const tvgData = await zip.file(`${base}/${testCase.drawingName}.tvg`)!.async('arraybuffer');
+      const thumbData = await zip.file(`${base}/.thumbnails/.${testCase.drawingName}.tvg.png`)!.async('arraybuffer');
+      const drawing = parseTVG(tvgData);
+      resolveExternalPalette(drawing, externalColors);
+
+      const canvas = renderTVGToCanvas(drawing, 160, 160, testCase.viewport);
+      expect(canvas).not.toBeNull();
+      const reference = await loadImageFromArrayBuffer(thumbData);
+      const score = scoreCanvasSources(reference, canvas!, 160);
+
+      expect(score.rawScore).toBeGreaterThan(testCase.minRaw);
+      expect(score.alignedScore).toBeGreaterThan(99.8);
+    }
+  });
+
   it('orders broad dense line-fill carriers before smaller inherited detail carriers', async () => {
     const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
     const zip = await JSZip.loadAsync(await response.arrayBuffer());

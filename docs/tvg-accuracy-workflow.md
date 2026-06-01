@@ -215,6 +215,14 @@ Managed local finding: alternate-source thumbnail detection
 - Accepted benchmark rule: only classify `thumbnail-matches-alternate-drawing` when a sibling or backup same-name TVG beats the active drawing by at least `6` raw points and the alternate also scores raw `>=92` and aligned `>=95`.
 - This is not a renderer shortcut. It prevents stale/copied thumbnails from driving topology hacks against the wrong source while preserving them in the full raw results with alternate-source diagnostics.
 
+Managed local finding: compact multi-art cutout viewport padding
+
+- `F_Lacing/F_Lacing-1`, `F_Lacing/F_Lacing-2`, `F_Lacing_bk/F_Lacing_bk-1`, and `F_Boot_top/F_Boot_top-1` were uniformly too small: candidate bounds were inset by about one pixel and reference-only pixels appeared on the outer edge with no candidate-only counterpart.
+- A global reduction of the viewport content padding from `227` to `220` fixed these compact cutouts but regressed dense `color.101` portraits, so the broad change is rejected.
+- Accepted rule: use `220` content padding only for default full renders of compact multi-art cutouts with visible underlay and color art, at most five shapes, at most 48 components, and underlay source extent `<=220` with aspect `0.75..1.0`. Preserve the existing `227` padding for dense line-only portraits, layer-filter/matte/origin-centered renders, and larger drawings.
+- Targeted result: `F_Lacing/F_Lacing-1` raw `97.7852 -> 99.9922`, aligned `99.6250 -> 100`, focused `93.4763 -> 99.5471`; `F_Boot_top/F_Boot_top-1` raw `97.8672 -> 99.8789`, aligned `99.6953 -> 99.9883`, focused `95.1799 -> 99.1500`. Guard cases excluded by the underlay extent cap: `F_Boot_bttm/F_Boot_bttm-1_no_OL` stays raw `99.6797` and `B_Shorts/B_Shorts-1` stays raw `98.3594`; dense `color.101` guard cases returned to their previous scores.
+- Full raw benchmark after the compact gate: raw averages overall/vector/bitmap `98.62/98.50/99.20`; source-fresh raw averages `99.13/99.09/99.20`; trusted source-fresh raw averages `99.17/99.16/99.20`; trusted source-fresh minima remain vector/bitmap `97.32/97.80`.
+
 Managed local finding: embedded dark legacy-chain suppression
 
 - `color.101/color-13` shape21 has a small closed dark chain `solid:15,46,48,255` embedded inside a much larger green line-fill shape. Rendering it as an independent legacy paint group adds a lower face/neck protrusion that the source-fresh thumbnail mostly lacks.
