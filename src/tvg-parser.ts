@@ -3003,6 +3003,11 @@ const DENSE_LINE_FILL_INTERIOR_SHADOW_LUMA_LIMIT = 96;
 const DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT = { r: 8, g: 40, b: 40 };
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_SIZE = 1500;
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_DISTANCE = 2500;
+const BITMAP_ATLAS_EDGE_TONE_SUBTRACT = 8;
+const BITMAP_ATLAS_EDGE_TONE_MIN_ALPHA = 32;
+const BITMAP_ATLAS_EDGE_TONE_MAX_ALPHA = 223;
+const BITMAP_ATLAS_EDGE_TONE_MIN_PIXELS = 500;
+const BITMAP_ATLAS_EDGE_TONE_MAX_TILES = 32;
 
 function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type'][] {
   const includeUnderlay = options?.includeUnderlay ?? true;
@@ -4332,6 +4337,62 @@ function drawImageWithProgressiveDownscale(
   ctx.drawImage(current, 0, 0, currentW, currentH, dx, dy, dw, dh);
 }
 
+function shouldApplyBitmapAtlasEdgeTone(
+  fallbackScanUsed: boolean,
+  hasClipRects: boolean,
+  loadedCount: number,
+): boolean {
+  return !fallbackScanUsed
+    && hasClipRects
+    && loadedCount >= 8
+    && loadedCount < BITMAP_ATLAS_EDGE_TONE_MAX_TILES;
+}
+
+function createBitmapAtlasEdgeAlphaMask(
+  renderCanvas: HTMLCanvasElement,
+  width: number,
+  height: number,
+  dx: number,
+  dy: number,
+  targetW: number,
+  targetH: number,
+): Uint8ClampedArray | null {
+  const alphaCanvas = document.createElement('canvas');
+  alphaCanvas.width = width;
+  alphaCanvas.height = height;
+  const alphaCtx = alphaCanvas.getContext('2d');
+  if (!alphaCtx) return null;
+
+  drawImageWithProgressiveDownscale(alphaCtx, renderCanvas, dx, dy, targetW, targetH);
+  const image = alphaCtx.getImageData(0, 0, width, height);
+  let edgePixels = 0;
+  for (let index = 3; index < image.data.length; index += 4) {
+    const alpha = image.data[index];
+    if (alpha >= BITMAP_ATLAS_EDGE_TONE_MIN_ALPHA && alpha <= BITMAP_ATLAS_EDGE_TONE_MAX_ALPHA) {
+      edgePixels++;
+    }
+  }
+  return edgePixels >= BITMAP_ATLAS_EDGE_TONE_MIN_PIXELS ? image.data : null;
+}
+
+function applyBitmapAtlasEdgeTone(
+  ctx: CanvasRenderingContext2D,
+  alphaMask: Uint8ClampedArray,
+  width: number,
+  height: number,
+): void {
+  const image = ctx.getImageData(0, 0, width, height);
+  const data = image.data;
+  for (let index = 0; index < data.length; index += 4) {
+    const alpha = alphaMask[index + 3];
+    if (alpha < BITMAP_ATLAS_EDGE_TONE_MIN_ALPHA || alpha > BITMAP_ATLAS_EDGE_TONE_MAX_ALPHA) continue;
+    data[index] = Math.max(0, data[index] - BITMAP_ATLAS_EDGE_TONE_SUBTRACT);
+    data[index + 1] = Math.max(0, data[index + 1] - BITMAP_ATLAS_EDGE_TONE_SUBTRACT);
+    data[index + 2] = Math.max(0, data[index + 2] - BITMAP_ATLAS_EDGE_TONE_SUBTRACT);
+  }
+  ctx.putImageData(image, 0, 0);
+}
+
 function renderBitmapTVGToCanvas(
   drawing: TVGDrawing,
   width: number,
@@ -4572,7 +4633,14 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
   if (shouldTrimSparsePortraitFallbackAtlas(fallbackScanUsed, hasClipRects, loaded.length, renderW / Math.max(renderH, 1))) {
     targetH = Math.max(1, targetH - 2);
   }
+  const bitmapEdgeAlphaMask = (state?.backgroundComposite ?? true)
+    && shouldApplyBitmapAtlasEdgeTone(fallbackScanUsed, hasClipRects, loaded.length)
+    ? createBitmapAtlasEdgeAlphaMask(renderCanvas, width, height, dx, dy, targetW, targetH)
+    : null;
   drawImageWithProgressiveDownscale(ctx, renderCanvas, dx, dy, targetW, targetH);
+  if (bitmapEdgeAlphaMask) {
+    applyBitmapAtlasEdgeTone(ctx, bitmapEdgeAlphaMask, width, height);
+  }
 
   // Clean up
   delete (canvas as any).__bitmapTiles;

@@ -145,6 +145,8 @@ Managed local finding: bitmap atlas aspect-band fit
 - Fallback-scanned clipped atlases with `32..127` tiles and aspect `>1.35` use `5.5px`.
 - Targeted improvements from these rules: `3255/3255-1` raw `97.07 -> 97.64`, `7f81/7f81-1` `97.18 -> 98.33`, `6172/6172-1` `99.08 -> 99.97`, `1388/1388-1` `99.84 -> 99.92`, `cc62/cc62-1` `98.25 -> 98.64`, `Agata_Special_Poses_Vik/Agata_Special_Poses_Vik-1` `98.28 -> 99.24`, `Agata_Head_Angles.87/Agata_Head_Angles-1` `97.46 -> 99.45`, and `Screenshot_2022/Screenshot_2022-1` `99.18 -> 99.68`.
 - Full raw benchmark after the current fit bands: raw averages overall/vector/bitmap `98.54/98.41/99.17`; source-fresh raw averages overall/vector/bitmap `98.98/98.90/99.17`; source-fresh bitmap min `97.64`.
+- Accepted bitmap edge-tone rule: for normal background-composited, non-fallback clipped bitmap atlases with `8..31` loaded tiles and at least `500` mid-alpha edge pixels, darken only alpha-mask pixels in `32..223` by `8` RGB after final downscale. This targets the observed clipped-atlas antialias halo without changing bounds, transparent/matte renders, fallback-scanned atlases, low-edge near-perfect sheets, or large cell-bound atlases.
+- Targeted effect: `3255/3255-1` raw `97.6406 -> 97.7969`, aligned `98.6563 -> 98.7578`, focused `95.0088 -> 95.2080`; guard cases `4bf5`, `7f81`, `6172`, `1388`, `cc62`, `Agata_Special_Poses_Vik`, `Agata_Head_Angles.87`, and `Screenshot_2022` were unchanged by the implemented gate.
 
 Managed local finding: `color.101/color-13` shape21 component probes
 

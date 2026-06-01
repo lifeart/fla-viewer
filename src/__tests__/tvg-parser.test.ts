@@ -480,6 +480,57 @@ describe('tvg rendering', () => {
     expect(samplePixel(canvas, 6, 50).a).toBeGreaterThan(50);
   });
 
+  it('darkens mid-alpha clipped bitmap atlas edges only for exact clipped atlases', async () => {
+    const tileCanvas = document.createElement('canvas');
+    tileCanvas.width = 40;
+    tileCanvas.height = 40;
+    const tileCtx = tileCanvas.getContext('2d')!;
+    tileCtx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    tileCtx.fillRect(0, 0, 40, 40);
+    tileCtx.clearRect(4, 4, 32, 32);
+    tileCtx.fillStyle = '#c85028';
+    tileCtx.fillRect(4, 4, 32, 32);
+    const tileBytes = canvasToPngBytes(tileCanvas);
+
+    const createAtlasCanvas = (fallbackScanUsed: boolean) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 200;
+      canvas.height = 120;
+      (canvas as any).__bitmapTiles = Array.from({ length: 8 }, (_, index) => ({
+        clipX: (index % 4) * 40,
+        clipY: Math.floor(index / 4) * 40,
+        clipW: 40,
+        clipH: 40,
+        pngData: tileBytes,
+      }));
+      (canvas as any).__bitmapState = {
+        bounds: { minX: 0, minY: 0, maxX: 160, maxY: 80 },
+        viewport: 0,
+        centerOnOrigin: false,
+        backgroundComposite: true,
+        diagnostics: {
+          events: [],
+          counts: fallbackScanUsed ? { BITMAP_FALLBACK_SCAN_USED: 1 } : {},
+        },
+      };
+      return canvas;
+    };
+
+    const clippedCanvas = createAtlasCanvas(false);
+    const fallbackCanvas = createAtlasCanvas(true);
+
+    expect(await loadBitmapTiles(clippedCanvas, (clippedCanvas as any).__bitmapState.diagnostics)).toBe(true);
+    expect(await loadBitmapTiles(fallbackCanvas, (fallbackCanvas as any).__bitmapState.diagnostics)).toBe(true);
+
+    const clippedEdge = samplePixel(clippedCanvas, 9, 16);
+    const fallbackEdge = samplePixel(fallbackCanvas, 9, 16);
+    expect(clippedEdge.r).toBeLessThanOrEqual(fallbackEdge.r - 6);
+    expect(clippedEdge.g).toBeLessThanOrEqual(fallbackEdge.g - 6);
+    expect(clippedEdge.b).toBeLessThanOrEqual(fallbackEdge.b - 6);
+    expectColorNear(samplePixel(clippedCanvas, 30, 37), { r: 200, g: 80, b: 40 }, 8);
+    expectColorNear(samplePixel(clippedCanvas, 3, 10), { r: 255, g: 255, b: 255 }, 0);
+  });
+
   it('parses top-level TBBM bitmap tiles with TBBH metadata', async () => {
     const tileCanvas = document.createElement('canvas');
     tileCanvas.width = 8;
