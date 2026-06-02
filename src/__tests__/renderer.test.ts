@@ -3,6 +3,7 @@ import { FLARenderer, setRendererDebug } from '../renderer';
 import type { Edge } from '../types';
 import {
   createConsoleSpy,
+  createConsoleWarnSpy,
   expectLogContaining,
   createRectangleShape,
   createTriangleShape,
@@ -3154,80 +3155,141 @@ describe('FLARenderer', () => {
       expect(linear).toBeCloseTo(0.5, 5);
     });
 
-    it('applies quadratic ease-in (slow start) for negative intensity', () => {
-      const t = progressAt(5, [{ target: 'all', method: 'quadratic', intensity: -100 }]);
-      // ease-in quad at t=0.5 => 0.25, clearly below the linear 0.5
+    // The real reporter's file uses CreateJS-style "<base><Direction>" tokens
+    // where the DIRECTION is part of the token (cubicIn / cubicOut / quadInOut),
+    // NOT derived from the intensity sign.
+    it('applies cubicIn (slow start) -> below linear at the midpoint', () => {
+      const t = progressAt(5, [{ target: 'all', method: 'cubicIn' }]);
+      // ease-in cubic at t=0.5 => 0.125, clearly below the linear 0.5
       expect(t).toBeLessThan(0.45);
-      expect(t).toBeCloseTo(0.25, 5);
+      expect(t).toBeCloseTo(0.125, 5);
     });
 
-    it('applies quadratic ease-out (fast start) for positive intensity', () => {
-      const t = progressAt(5, [{ target: 'all', method: 'quadratic', intensity: 100 }]);
-      // ease-out quad at t=0.5 => 0.75, clearly above the linear 0.5
+    it('applies cubicOut (fast start) -> above linear at the midpoint', () => {
+      const t = progressAt(5, [{ target: 'all', method: 'cubicOut' }]);
+      // ease-out cubic at t=0.5 => 0.875, clearly above the linear 0.5
       expect(t).toBeGreaterThan(0.55);
-      expect(t).toBeCloseTo(0.75, 5);
+      expect(t).toBeCloseTo(0.875, 5);
     });
 
-    it('uses ease-in-out when intensity is 0 but a method is set', () => {
-      const start = progressAt(2, [{ target: 'all', method: 'sine', intensity: 0 }]);
-      const end = progressAt(8, [{ target: 'all', method: 'sine', intensity: 0 }]);
-      // ease-in-out is symmetric around the midpoint
-      expect(start).toBeLessThan(0.2);
-      expect(end).toBeGreaterThan(0.8);
+    it('direction comes from the token suffix, not the intensity sign', () => {
+      // cubicIn with a POSITIVE intensity must still be ease-in (below linear),
+      // because the direction is "In" from the token, not from the sign.
+      const t = progressAt(5, [{ target: 'all', method: 'cubicIn', intensity: 100 }]);
+      expect(t).toBeCloseTo(0.125, 5);
+    });
+
+    it('quadInOut is symmetric around the midpoint', () => {
+      const start = progressAt(2, [{ target: 'all', method: 'quadInOut' }]);
+      const mid = progressAt(5, [{ target: 'all', method: 'quadInOut' }]);
+      const end = progressAt(8, [{ target: 'all', method: 'quadInOut' }]);
+      expect(mid).toBeCloseTo(0.5, 5);
+      expect(start).toBeLessThan(0.5);
+      expect(end).toBeGreaterThan(0.5);
       expect(start + end).toBeCloseTo(1, 5);
     });
 
-    it('blends toward linear by intensity magnitude', () => {
-      const full = progressAt(5, [{ target: 'all', method: 'cubic', intensity: -100 }]);
-      const half = progressAt(5, [{ target: 'all', method: 'cubic', intensity: -50 }]);
+    it('sineInOut is symmetric around the midpoint', () => {
+      const start = progressAt(2, [{ target: 'all', method: 'sineInOut' }]);
+      const mid = progressAt(5, [{ target: 'all', method: 'sineInOut' }]);
+      const end = progressAt(8, [{ target: 'all', method: 'sineInOut' }]);
+      expect(mid).toBeCloseTo(0.5, 5);
+      expect(start + end).toBeCloseTo(1, 5);
+    });
+
+    it('backOut overshoots and is distinct from cubicOut', () => {
+      // backOut's curve overshoots the target before settling; its raw
+      // (pre-clamp) value at an early t goes above the eventual 1. Assert it is
+      // non-linear, and clearly different from cubicOut at the same t.
+      const back = progressAt(7, [{ target: 'all', method: 'backOut' }]);
+      const cubic = progressAt(7, [{ target: 'all', method: 'cubicOut' }]);
+      expect(Math.abs(back - 0.5)).toBeGreaterThan(0.01); // non-linear
+      expect(Math.abs(back - cubic)).toBeGreaterThan(0.01); // distinct family
+      // backOut overshoots past the target before t=1 (raw curve > 1 mid-span).
+      const raw = (renderer as any).easeOut(0.6, 'back');
+      expect(raw).toBeGreaterThan(1);
+    });
+
+    it('blends toward linear when an intensity strength accompanies a method', () => {
+      const full = progressAt(5, [{ target: 'all', method: 'cubicIn' }]);
+      const half = progressAt(5, [{ target: 'all', method: 'cubicIn', intensity: 50 }]);
       const linear = 0.5;
-      // 50% intensity lands halfway between linear and the full curve
+      // 50% strength lands halfway between linear and the full curve
       expect(half).toBeGreaterThan(full);
       expect(half).toBeLessThan(linear);
       expect(half).toBeCloseTo((full + linear) / 2, 5);
     });
 
+    // Every distinct method token found in the reporter's file must resolve to
+    // a real (base, direction) and produce a non-linear curve - none may fall
+    // through to linear.
     it.each([
-      'quadratic',
-      'cubic',
-      'quartic',
-      'quintic',
-      'sine',
-      'exponential',
-      'circular',
-      'back',
-      'bounce',
-      'elastic',
-    ] as const)('produces a non-linear curve for method "%s"', (method) => {
-      const t = progressAt(5, [{ target: 'all', method, intensity: -100 }]);
-      // Every easing method must deviate from the linear 0.5 midpoint
-      expect(Math.abs(t - 0.5)).toBeGreaterThan(0.01);
+      'backOut',
+      'cubicIn',
+      'cubicInOut',
+      'quadIn',
+      'quartIn',
+      'quadInOut',
+      'quartOut',
+      'circOut',
+      'cubicOut',
+      'quadOut',
+      'circIn',
+      'sineInOut',
+      'quintIn',
+      'quintOut',
+      'elasticOut',
+      'backInOut',
+    ] as const)('resolves real token "%s" to a non-linear curve', (method) => {
+      // Sample OFF the midpoint: symmetric InOut curves legitimately pass through
+      // 0.5 at t=0.5, so non-linearity must be checked away from the midpoint.
+      // At frameIndex=3 the linear progress would be exactly 0.3.
+      const t = progressAt(3, [{ target: 'all', method }]);
+      // Must deviate from the linear 0.3 value (i.e. did NOT fall to linear).
+      expect(Math.abs(t - 0.3)).toBeGreaterThan(0.01);
+    });
+
+    it('warns and falls back to linear for an unrecognized method token', () => {
+      const spy = createConsoleWarnSpy().mockImplementation(() => {});
+      const t = progressAt(5, [{ target: 'all', method: 'totallyBogus' }]);
+      expect(t).toBeCloseTo(0.5, 5);
+      const warned = spy.mock.calls.some(
+        (call: unknown[]) => typeof call[0] === 'string' && call[0].includes('totallyBogus')
+      );
+      expect(warned).toBe(true);
+      spy.mockRestore();
     });
 
     it('selects the position/all ease, not just tweens[0]', () => {
       // tweens[0] is a non-spatial target with no easing; the spatial ease is second.
       const tweens: import('../types').Tween[] = [
         { target: 'rotation', intensity: 0 },
-        { target: 'position', method: 'quadratic', intensity: -100 },
+        { target: 'position', method: 'cubicIn' },
       ];
       const t = progressAt(5, tweens);
-      // Must apply the position quadratic ease-in (0.25), not the rotation linear (0.5)
-      expect(t).toBeCloseTo(0.25, 5);
+      // Must apply the position cubicIn ease (0.125), not the rotation linear (0.5)
+      expect(t).toBeCloseTo(0.125, 5);
     });
 
     it('prefers an "all" ease over other targets', () => {
       const tweens: import('../types').Tween[] = [
-        { target: 'color', method: 'sine', intensity: 100 },
-        { target: 'all', method: 'quadratic', intensity: -100 },
+        { target: 'color', method: 'sineInOut' },
+        { target: 'all', method: 'cubicIn' },
       ];
       const t = progressAt(5, tweens);
-      expect(t).toBeCloseTo(0.25, 5);
+      expect(t).toBeCloseTo(0.125, 5);
     });
 
-    it('keeps the legacy intensity-only ("classic") path working', () => {
-      // No method => classic intensity ease. Negative = ease-in (below linear).
-      const t = progressAt(5, [{ target: 'all', intensity: -100 }]);
-      expect(t).toBeLessThan(0.5);
+    it('keeps the legacy intensity-only path working (no method)', () => {
+      // No method => legacy intensity ease. Negative = ease-in (below linear).
+      const easeIn = progressAt(5, [{ target: 'all', intensity: -100 }]);
+      expect(easeIn).toBeLessThan(0.5);
+      // Positive intensity => ease-out (above linear).
+      const easeOut = progressAt(5, [{ target: 'all', intensity: 100 }]);
+      expect(easeOut).toBeGreaterThan(0.5);
+      // intensity 0 with no method => linear.
+      const linear = progressAt(5, [{ target: 'all', intensity: 0 }]);
+      expect(linear).toBeCloseTo(0.5, 5);
     });
 
     it('falls back to acceleration easing when no tweens are present', () => {

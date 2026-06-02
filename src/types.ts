@@ -110,28 +110,32 @@ export interface FrameSound {
   loopCount?: number;
 }
 
-// Named easing methods used by Adobe Animate classic-tween frames.
-// Stored as the `method` attribute on <Ease> (e.g. <Ease method="quadratic" intensity="100"/>).
-// "none" = linear, "classic" = the legacy intensity-only ease-in/out, all others are
-// the standard Penner equations. intensity sign selects in (<0) vs out (>0); 0 = ease-in-out.
-export type EaseMethod =
-  | 'none'
-  | 'classic'
-  | 'quadratic'
+// Penner easing families that Adobe Animate / CreateJS reference by name.
+// These are the BASE of a method token; the direction (In/Out/InOut) is a
+// separate suffix on the token, not part of this set.
+export type EaseBase =
+  | 'quad'
   | 'cubic'
-  | 'quartic'
-  | 'quintic'
+  | 'quart'
+  | 'quint'
   | 'sine'
-  | 'exponential'
-  | 'circular'
-  | 'bounce'
+  | 'circ'
+  | 'expo'
+  | 'back'
   | 'elastic'
-  | 'back';
+  | 'bounce';
 
+export type EaseDirection = 'in' | 'out' | 'inOut';
+
+// The `method` attribute on <Ease> is stored RAW as Adobe writes it. Modern
+// Animate files use CreateJS-style "<base><Direction>" tokens where the
+// direction is part of the token (e.g. "cubicIn", "backOut", "quadInOut"),
+// plus the special "none" (linear). Decomposition into (base, direction)
+// happens in the renderer. Legacy intensity-only eases have NO method at all.
 export interface Tween {
   target: string;
   intensity?: number;
-  method?: EaseMethod;
+  method?: string;
   customEase?: Point[];
 }
 

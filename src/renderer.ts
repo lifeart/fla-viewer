@@ -14,7 +14,8 @@ import type {
   StrokeStyle,
   Edge,
   Tween,
-  EaseMethod,
+  EaseBase,
+  EaseDirection,
   Point,
   PathCommand,
   Filter,
@@ -1264,11 +1265,12 @@ export class FLARenderer {
       const tween = this.selectTween(tweens);
       if (tween.customEase && tween.customEase.length >= 4) {
         progress = this.evaluateBezierEase(progress, tween.customEase);
-      } else if (tween.method && tween.method !== 'classic') {
-        // Named easing method (quadratic/sine/bounce/...). "none" => linear.
-        progress = this.applyEaseMethod(progress, tween.method, tween.intensity ?? 0);
+      } else if (tween.method) {
+        // CreateJS-style "<base><Direction>" token (e.g. "cubicIn", "backOut").
+        // "none" => linear; unknown tokens warn and fall back to linear.
+        progress = this.applyEaseMethod(progress, tween.method, tween.intensity);
       } else if (tween.intensity !== undefined) {
-        // Legacy intensity-only ("classic") ease, or method absent.
+        // Legacy intensity-only ease (no method): sign = ease-in/out direction.
         progress = this.applyEaseIntensity(progress, tween.intensity);
       }
     } else if (acceleration !== undefined) {
@@ -1304,38 +1306,77 @@ export class FLARenderer {
     }
   }
 
-  // Apply a named Adobe Animate easing method using the standard Penner equations.
-  // intensity sign selects the direction: <0 = ease-in, >0 = ease-out, 0 = ease-in-out.
-  // intensity magnitude (|intensity|/100) blends between linear (0) and the full
-  // easing curve (100), matching Animate's "ease strength" slider.
-  private applyEaseMethod(t: number, method: EaseMethod, intensity: number): number {
+  // The set of Penner easing families Animate/CreateJS can name. The DIRECTION
+  // is encoded in the method token suffix, not here.
+  private static readonly EASE_BASES: ReadonlySet<string> = new Set<EaseBase>([
+    'quad', 'cubic', 'quart', 'quint', 'sine', 'circ', 'expo', 'back', 'elastic', 'bounce',
+  ]);
+
+  // Decompose a CreateJS-style method token into (base, direction). The
+  // direction is the SUFFIX: "InOut" (checked first), "In", or "Out". The
+  // remainder is the base family (e.g. "cubicInOut" => base="cubic",
+  // dir="inOut"; "backOut" => base="back", dir="out"). Returns null for tokens
+  // we don't understand so the caller can surface a warning.
+  private parseEaseMethod(method: string): { base: EaseBase; direction: EaseDirection } | null {
+    let base = method;
+    let direction: EaseDirection;
+    if (method.endsWith('InOut')) {
+      direction = 'inOut';
+      base = method.slice(0, -'InOut'.length);
+    } else if (method.endsWith('In')) {
+      direction = 'in';
+      base = method.slice(0, -'In'.length);
+    } else if (method.endsWith('Out')) {
+      direction = 'out';
+      base = method.slice(0, -'Out'.length);
+    } else {
+      return null;
+    }
+    if (!FLARenderer.EASE_BASES.has(base)) return null;
+    return { base: base as EaseBase, direction };
+  }
+
+  // Apply a CreateJS-style "<base><Direction>" easing token (e.g. "cubicIn",
+  // "backOut", "quadInOut") using the standard Penner equations. The direction
+  // comes from the TOKEN SUFFIX (not the intensity sign). When `intensity` is
+  // also present it acts as a strength percentage that blends linear->curve
+  // (100 = full); absent => full strength.
+  private applyEaseMethod(t: number, method: string, intensity?: number): number {
     if (method === 'none') return t;
 
-    let eased: number;
-    if (intensity < 0) {
-      eased = this.easeIn(t, method);
-    } else if (intensity > 0) {
-      eased = this.easeOut(t, method);
-    } else {
-      eased = this.easeInOut(t, method);
+    const parsed = this.parseEaseMethod(method);
+    if (!parsed) {
+      // Do not silently swallow: surface the unrecognized token, fall back linear.
+      console.warn(`Unrecognized tween ease method "${method}"; rendering linearly.`);
+      return t;
     }
 
-    // Blend toward linear by the easing strength so partial intensities are honored.
-    // For ease-in-out (intensity 0) Animate applies the curve at full strength.
-    const strength = intensity === 0 ? 1 : Math.min(Math.abs(intensity), 100) / 100;
+    let eased: number;
+    if (parsed.direction === 'in') {
+      eased = this.easeIn(t, parsed.base);
+    } else if (parsed.direction === 'out') {
+      eased = this.easeOut(t, parsed.base);
+    } else {
+      eased = this.easeInOut(t, parsed.base);
+    }
+
+    // If Animate attached an intensity to a method, treat it as a strength
+    // percentage blending between linear and the full curve. No intensity (or
+    // 0) => full strength curve.
+    const strength = intensity ? Math.min(Math.abs(intensity), 100) / 100 : 1;
     return t + (eased - t) * strength;
   }
 
   // Penner ease-in equations on normalized t in [0,1].
-  private easeIn(t: number, method: EaseMethod): number {
-    switch (method) {
-      case 'quadratic': return t * t;
+  private easeIn(t: number, base: EaseBase): number {
+    switch (base) {
+      case 'quad': return t * t;
       case 'cubic': return t * t * t;
-      case 'quartic': return t * t * t * t;
-      case 'quintic': return t * t * t * t * t;
+      case 'quart': return t * t * t * t;
+      case 'quint': return t * t * t * t * t;
       case 'sine': return 1 - Math.cos((t * Math.PI) / 2);
-      case 'exponential': return t === 0 ? 0 : Math.pow(2, 10 * (t - 1));
-      case 'circular': return 1 - Math.sqrt(1 - t * t);
+      case 'expo': return t === 0 ? 0 : Math.pow(2, 10 * (t - 1));
+      case 'circ': return 1 - Math.sqrt(1 - t * t);
       case 'back': {
         const s = 1.70158;
         return t * t * ((s + 1) * t - s);
@@ -1347,20 +1388,19 @@ export class FLARenderer {
         return -Math.pow(2, 10 * (t - 1)) * Math.sin(((t - 1 - s) * (2 * Math.PI)) / p);
       }
       case 'bounce': return 1 - this.bounceOut(1 - t);
-      default: return t;
     }
   }
 
   // Penner ease-out equations on normalized t in [0,1].
-  private easeOut(t: number, method: EaseMethod): number {
-    switch (method) {
-      case 'quadratic': return 1 - (1 - t) * (1 - t);
+  private easeOut(t: number, base: EaseBase): number {
+    switch (base) {
+      case 'quad': return 1 - (1 - t) * (1 - t);
       case 'cubic': return 1 + Math.pow(t - 1, 3);
-      case 'quartic': return 1 - Math.pow(1 - t, 4);
-      case 'quintic': return 1 + Math.pow(t - 1, 5);
+      case 'quart': return 1 - Math.pow(1 - t, 4);
+      case 'quint': return 1 + Math.pow(t - 1, 5);
       case 'sine': return Math.sin((t * Math.PI) / 2);
-      case 'exponential': return t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
-      case 'circular': return Math.sqrt(1 - (t - 1) * (t - 1));
+      case 'expo': return t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
+      case 'circ': return Math.sqrt(1 - (t - 1) * (t - 1));
       case 'back': {
         const s = 1.70158;
         const u = t - 1;
@@ -1373,18 +1413,17 @@ export class FLARenderer {
         return Math.pow(2, -10 * t) * Math.sin(((t - s) * (2 * Math.PI)) / p) + 1;
       }
       case 'bounce': return this.bounceOut(t);
-      default: return t;
     }
   }
 
   // Penner ease-in-out equations on normalized t in [0,1].
-  private easeInOut(t: number, method: EaseMethod): number {
-    if (method === 'bounce') {
+  private easeInOut(t: number, base: EaseBase): number {
+    if (base === 'bounce') {
       return t < 0.5
         ? (1 - this.bounceOut(1 - 2 * t)) / 2
         : (1 + this.bounceOut(2 * t - 1)) / 2;
     }
-    if (method === 'elastic') {
+    if (base === 'elastic') {
       if (t === 0 || t === 1) return t;
       const p = 0.45;
       const s = p / 4;
@@ -1394,11 +1433,11 @@ export class FLARenderer {
       }
       return 0.5 * Math.pow(2, -10 * u) * Math.sin(((u - s) * (2 * Math.PI)) / p) + 1;
     }
-    // The remaining methods are symmetric: ease-in for the first half,
+    // The remaining families are symmetric: ease-in for the first half,
     // ease-out for the second half.
     return t < 0.5
-      ? this.easeIn(2 * t, method) / 2
-      : 0.5 + this.easeOut(2 * t - 1, method) / 2;
+      ? this.easeIn(2 * t, base) / 2
+      : 0.5 + this.easeOut(2 * t - 1, base) / 2;
   }
 
   // Penner bounce-out: a series of decaying parabolic bounces.

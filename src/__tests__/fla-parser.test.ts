@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import JSZip from 'jszip';
 import pako from 'pako';
 import { FLAParser, setParserDebug } from '../fla-parser';
+import { FLARenderer } from '../renderer';
 import { createConsoleSpy, expectLogContaining, type ConsoleSpy } from './test-utils';
 
 // Helper to create a real FLA zip file with given content
@@ -657,7 +658,10 @@ describe('FLAParser', () => {
       expect(frame.tweens![0].intensity).toBe(50);
     });
 
-    it('should capture the easing method attribute', async () => {
+    it('should capture the raw CreateJS-style easing method token (with intensity)', async () => {
+      // Real Animate files use "<base><Direction>" tokens; a few carry a
+      // method AND an intensity strength (e.g. method="cubicIn" intensity="100"
+      // appears verbatim in the reporter's file). The parser keeps both raw.
       const timelines = `
         <timelines>
           <DOMTimeline name="Scene 1">
@@ -667,7 +671,7 @@ describe('FLAParser', () => {
                   <DOMFrame index="0" duration="10" tweenType="motion">
                     <elements></elements>
                     <tweens>
-                      <Ease target="all" method="quadratic" intensity="-100"/>
+                      <Ease target="all" method="cubicIn" intensity="100"/>
                     </tweens>
                   </DOMFrame>
                 </frames>
@@ -683,8 +687,8 @@ describe('FLAParser', () => {
       expect(frame.tweens).toBeDefined();
       expect(frame.tweens).toHaveLength(1);
       expect(frame.tweens![0].target).toBe('all');
-      expect(frame.tweens![0].method).toBe('quadratic');
-      expect(frame.tweens![0].intensity).toBe(-100);
+      expect(frame.tweens![0].method).toBe('cubicIn');
+      expect(frame.tweens![0].intensity).toBe(100);
     });
 
     it('should not set method when the attribute is absent', async () => {
@@ -5933,6 +5937,90 @@ describe('FLAParser', () => {
       expect(symbol).toBeDefined();
       expect(symbol!.symbolType).toBe('graphic');
       expect(symbol!.hitAreaFrame).toBeUndefined();
+    });
+  });
+
+  // End-to-end seam check (issue #11): a real motion-tween frame from the
+  // reporter's file -> FLAParser -> Tween -> FLARenderer.calculateTweenProgress.
+  // The XML below is verbatim-shaped from "28-21 p0tatomango.fla" (note the
+  // redundant easeMethodName mirror attribute, which we deliberately ignore in
+  // favour of the canonical <Ease> element).
+  describe('motion-tween easing end-to-end (issue #11)', () => {
+    it('parses a real <Ease method="backOut"/> frame and renders non-linearly', async () => {
+      const timelines = `<timelines><DOMTimeline name="Scene 1"><layers><DOMLayer name="Layer 1"><frames>
+        <DOMFrame index="0" duration="10" tweenType="motion" motionTweenSnap="true" keyMode="22017" easeMethodName="backOut">
+          <tweens>
+            <Ease target="all" method="backOut"/>
+          </tweens>
+          <elements>
+            <DOMSymbolInstance libraryItemName="X" symbolType="movie clip">
+              <matrix><Matrix/></matrix>
+            </DOMSymbolInstance>
+          </elements>
+        </DOMFrame>
+        <DOMFrame index="10" duration="1"><elements></elements></DOMFrame>
+      </frames></DOMLayer></layers></DOMTimeline></timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      // Parser must have captured the raw CreateJS-style token verbatim.
+      expect(frame.tweens).toBeDefined();
+      const allTween = frame.tweens!.find((t) => t.target === 'all');
+      expect(allTween?.method).toBe('backOut');
+
+      // Drive the parsed tween through the real renderer at the span midpoint.
+      const canvas = document.createElement('canvas');
+      canvas.width = 550;
+      canvas.height = 400;
+      const renderer = new FLARenderer(canvas);
+      const startFrame = { ...frame } as any;
+      const endFrame = { index: 10, duration: 1, keyMode: 0, elements: [] } as any;
+      const progress = (renderer as any).calculateTweenProgress(
+        5,
+        startFrame,
+        endFrame,
+        frame.acceleration,
+        frame.tweens
+      );
+
+      // backOut at t=0.5 is well above linear 0.5 (fast start, settles high).
+      // The key assertion: it is NOT linear (the issue #11 regression symptom).
+      expect(Math.abs(progress - 0.5)).toBeGreaterThan(0.05);
+      expect(progress).toBeGreaterThan(0.5);
+    });
+
+    it('parses a legacy intensity-only <Ease intensity="-100"/> frame (no method)', async () => {
+      const timelines = `<timelines><DOMTimeline name="Scene 1"><layers><DOMLayer name="Layer 1"><frames>
+        <DOMFrame index="0" duration="10" tweenType="motion">
+          <tweens>
+            <Ease target="all" intensity="-100"/>
+          </tweens>
+          <elements></elements>
+        </DOMFrame>
+      </frames></DOMLayer></layers></DOMTimeline></timelines>`;
+
+      const flaFile = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(flaFile);
+      const frame = doc.timelines[0].layers[0].frames[0];
+      const allTween = frame.tweens!.find((t) => t.target === 'all');
+      expect(allTween?.method).toBeUndefined();
+      expect(allTween?.intensity).toBe(-100);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 550;
+      canvas.height = 400;
+      const renderer = new FLARenderer(canvas);
+      const progress = (renderer as any).calculateTweenProgress(
+        5,
+        { ...frame } as any,
+        { index: 10, duration: 1, keyMode: 0, elements: [] } as any,
+        frame.acceleration,
+        frame.tweens
+      );
+      // Legacy negative intensity => ease-in (below linear), still works.
+      expect(progress).toBeLessThan(0.5);
     });
   });
 });
