@@ -1728,21 +1728,22 @@ describe('FLAParser', () => {
     function createFlaBitmapDat(options: {
       width: number;
       height: number;
-      pixelData?: Uint8Array; // ABGR pixel data (if not provided, creates solid color)
+      pixelData?: Uint8Array; // A,R,G,B pixel data (if not provided, creates solid red)
       corruptAt?: number; // Offset to corrupt the deflate stream
       useInvalidData?: boolean; // Use completely invalid data
     }): Uint8Array {
       const { width, height, corruptAt, useInvalidData = false } = options;
 
-      // Create ABGR pixel data if not provided (solid red per JPEXS spec)
+      // Pixel byte layout per JPEXS: byte0=A, byte1=R, byte2=G, byte3=B.
+      // Default = solid red (byte1=0xFF).
       let pixelData = options.pixelData;
       if (!pixelData) {
         pixelData = new Uint8Array(width * height * 4);
         for (let i = 0; i < width * height; i++) {
-          pixelData[i * 4 + 0] = 0xFF; // A (alpha)
-          pixelData[i * 4 + 1] = 0x00; // B (blue)
-          pixelData[i * 4 + 2] = 0x00; // G (green)
-          pixelData[i * 4 + 3] = 0xFF; // R (red)
+          pixelData[i * 4 + 0] = 0xFF; // A (alpha, byte 0)
+          pixelData[i * 4 + 1] = 0xFF; // R (red,   byte 1)
+          pixelData[i * 4 + 2] = 0x00; // G (green, byte 2)
+          pixelData[i * 4 + 3] = 0x00; // B (blue,  byte 3)
         }
       }
 
@@ -1861,6 +1862,49 @@ describe('FLAParser', () => {
       const bitmap = doc.bitmaps.get('test2.png');
       expect(bitmap).toBeDefined();
       expect(bitmap?.imageData).toBeDefined();
+    });
+
+    // Issue #10: red detail was rendering as blue. The .dat byte layout is
+    // A,R,G,B (byte1=red, byte3=blue) per JPEXS; reading it as ABGR swaps R/B.
+    it('decodes the .dat channel order as A,R,G,B (red stays red, not blue)', async () => {
+      const width = 4;
+      const height = 4;
+      // Pure red: A=0xFF (byte0), R=0xFF (byte1), G=0 (byte2), B=0 (byte3).
+      const pixelData = new Uint8Array(width * height * 4);
+      for (let i = 0; i < width * height; i++) {
+        pixelData[i * 4 + 0] = 0xFF;
+        pixelData[i * 4 + 1] = 0xFF;
+        pixelData[i * 4 + 2] = 0x00;
+        pixelData[i * 4 + 3] = 0x00;
+      }
+      const datFile = createFlaBitmapDat({ width, height, pixelData });
+      const media = `
+        <media>
+          <DOMBitmapItem name="red.png" href="red.png"
+            bitmapDataHRef="M 9 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 9 123456.dat': datFile }
+      );
+      const doc = await parser.parse(fla);
+      const img = doc.bitmaps.get('red.png')?.imageData as HTMLImageElement;
+      expect(img).toBeDefined();
+      if (!img.complete) {
+        await new Promise<void>((r) => { img.onload = () => r(); });
+      }
+
+      // Draw the decoded image and read the center pixel.
+      const c = document.createElement('canvas');
+      c.width = width;
+      c.height = height;
+      const cx = c.getContext('2d')!;
+      cx.drawImage(img, 0, 0);
+      const [r, g, b] = cx.getImageData(2, 2, 1, 1).data;
+      expect(r).toBeGreaterThan(200); // red channel high
+      expect(b).toBeLessThan(60); //     blue channel low (not swapped)
+      expect(g).toBeLessThan(60);
     });
 
     it('should handle partial recovery for corrupted deflate stream', async () => {

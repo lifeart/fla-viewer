@@ -1515,7 +1515,9 @@ export class FLAParser {
    *    - Scans for valid deflate segments after corruption points
    *    - Combines all recovered segments to maximize data recovery
    *
-   * Pixel format: ABGR (alpha, blue, green, red), converted to RGBA for Canvas
+   * Pixel byte layout: A,R,G,B (byte0=alpha, byte1=red, byte2=green, byte3=blue),
+   * converted to RGBA for Canvas. This matches JPEXS ImageBinDataGenerator (writer)
+   * and LosslessImageBinDataReader (reader); reading it as ABGR swaps red/blue (issue #10).
    * Colors are stored premultiplied by alpha and must be unmultiplied when reading.
    */
   private async decodeFlaBitmap(data: ArrayBuffer, expectedWidth: number, expectedHeight: number, onAlgoProgress?: (algo: string) => void): Promise<HTMLImageElement | null> {
@@ -1888,10 +1890,14 @@ export class FLAParser {
         const srcIdx = i * 4;
         const dstIdx = i * 4;
         if (srcIdx + 3 < actualPixelData.length) {
+          // Channel order per JPEXS LosslessImageBinDataReader: the stored int
+          // is byte0=A, byte1=R, byte2=G, byte3=B (it reads a,b,g,r then emits
+          // r|(g<<8)|(b<<16)|(a<<24) into an ARGB BufferedImage, i.e. byte1→R,
+          // byte3→B). Reading it as ABGR swaps red and blue (issue #10).
           const a = actualPixelData[srcIdx];     // Alpha (byte 0)
-          let b = actualPixelData[srcIdx + 1];   // Blue  (byte 1)
+          let r = actualPixelData[srcIdx + 1];   // Red   (byte 1)
           let g = actualPixelData[srcIdx + 2];   // Green (byte 2)
-          let r = actualPixelData[srcIdx + 3];   // Red   (byte 3)
+          let b = actualPixelData[srcIdx + 3];   // Blue  (byte 3)
 
           // Unmultiply alpha (colors are stored premultiplied)
           // Per JPEXS: if alpha is not 0 or 255, unmultiply using: color = floor(color * 256 / alpha)
@@ -1901,9 +1907,9 @@ export class FLAParser {
             b = Math.min(255, Math.floor(b * 256 / a));
           }
 
-          rgba[dstIdx] = r;         // R ← byte 3 (unmultiplied)
+          rgba[dstIdx] = r;         // R ← byte 1 (unmultiplied)
           rgba[dstIdx + 1] = g;     // G ← byte 2 (unmultiplied)
-          rgba[dstIdx + 2] = b;     // B ← byte 1 (unmultiplied)
+          rgba[dstIdx + 2] = b;     // B ← byte 3 (unmultiplied)
           rgba[dstIdx + 3] = a;     // A ← byte 0
         }
       }
@@ -1931,7 +1937,7 @@ export class FLAParser {
    * Format per JPEXS:
    * - Header: 26 bytes (same as 32-bit)
    * - Palette count: UI16 LE (number of palette entries)
-   * - Palette data: count × 4 bytes (ABGR per entry if hasAlpha, else RGB)
+   * - Palette data: count × 4 bytes, A,R,G,B byte layout per entry (byte0=alpha)
    * - Pixel data: 1 byte per pixel (palette index)
    */
   private decode8BitFlaBitmap(
@@ -1956,10 +1962,11 @@ export class FLAParser {
       const bytesPerEntry = 4; // Always 4 bytes per JPEXS (ABGR)
 
       for (let i = 0; i < paletteCount && pos + bytesPerEntry <= bytes.length; i++) {
+        // Same A,R,G,B byte layout as the 32-bit format (byte1=R, byte3=B).
         const a = hasAlpha ? bytes[pos] : 255;
-        const b = bytes[pos + 1];
+        const r = bytes[pos + 1];
         const g = bytes[pos + 2];
-        const r = bytes[pos + 3];
+        const b = bytes[pos + 3];
         palette.push({ r, g, b, a });
         pos += bytesPerEntry;
       }
