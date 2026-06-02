@@ -5226,6 +5226,13 @@ function isWidthlessBoundaryStroke(comp: TVGComponent): boolean {
     && comp.path.segments.length > 0;
 }
 
+function isImplicitWidthlessBoundaryStroke(comp: TVGComponent): boolean {
+  return isWidthlessBoundaryStroke(comp)
+    && comp.colorId === null
+    && comp.contourColorId === null
+    && comp.insideColorId === null;
+}
+
 function paintHasVisibleAlpha(paint: TVGPaint | null): boolean {
   if (!paint) return false;
   if (paint.kind === 'solid') return paint.rgba.a > 0;
@@ -5296,6 +5303,21 @@ function shouldRenderWidthlessBoundaryStroke(
   if (layer.type !== 'line') return false;
   if (!paintHasVisibleAlpha(comp.outerPaint)) return false;
   if (shape.shapeType === 7 && boundaryStrokeMatchesActiveColorFill(layer, comp, allLayers)) return false;
+  if (isImplicitWidthlessBoundaryStroke(comp)
+    && shape.components.some(other =>
+      other !== comp
+      && (other.componentType === 0 || other.componentType === 1)
+      && other.path
+      && other.outerPaint !== null,
+    )
+    && shape.components.some(other =>
+      other !== comp
+      && other.componentType === 4
+      && other.path
+      && paintHasVisibleAlpha(other.outerPaint),
+    )) {
+    return false;
+  }
   if (shape.shapeType === 7 && shape.components.length > 0 && shape.components.every(other => isWidthlessBoundaryStroke(other))) {
     const boundaryOnlyComps = shape.components.filter(other => isWidthlessBoundaryStroke(other));
     const isSingleOpenSegment = boundaryOnlyComps.length === 1

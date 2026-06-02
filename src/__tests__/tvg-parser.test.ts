@@ -3004,7 +3004,8 @@ describe('tvg rendering', () => {
     const reference = await loadImageFromArrayBuffer(thumbData);
     const defaultScore = scoreCanvasSources(reference, defaultCanvas!, 160);
     const includeUnderlayScore = scoreCanvasSources(reference, includeUnderlayCanvas!, 160);
-    expect(defaultScore.rawScore).toBeGreaterThan(98);
+    expect(defaultScore.rawScore).toBeGreaterThan(98.5);
+    expect(defaultScore.alignedScore).toBeGreaterThan(99.2);
     expect(defaultScore.rawScore).toBeGreaterThan(includeUnderlayScore.rawScore + 0.3);
   });
 

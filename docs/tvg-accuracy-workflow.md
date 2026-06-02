@@ -232,6 +232,14 @@ Managed local finding: tiny vector content-fit viewport floor
 - Guard evidence: `B_Shadow_LoLeg/B_Shadow_LoLeg-1` stays raw `98.1016`, `B_Shorts/B_Shorts-1` stays `98.3594`, `Eye/Eye-1` stays `98.4766`, and `Foot_B.6/Foot_B-1` stays `98.4922`.
 - Full raw benchmark after the tiny-vector floor: raw averages overall/vector/bitmap `98.66/98.55/99.20`; source-fresh raw averages `99.18/99.18/99.20`; trusted source-fresh raw averages `99.24/99.26/99.20`; trusted source-fresh minima remain vector/bitmap `97.32/97.80`.
 
+Managed local finding: implicit widthless boundary support-only strokes
+
+- `B_Shadow_LoLeg/B_Shadow_LoLeg-1` is a mixed line-fill shape where three `ct=2` widthless boundary paths have no color ids, no contour/inside ids, and no thickness. They are needed to close the blue fill, but painting them as visible strokes adds the lower black outline that the thumbnail does not show.
+- Accepted rule: in `line` layers, keep implicit widthless type-2 paths as fill support, but do not paint them as visible strokes when the same shape already has painted fill carriers and visible `ct=4` pencil/stroke components. Preserve boundary-only shapes, colored/contour-id boundaries, active-color boundaries, and support-less shapes.
+- Targeted result: `B_Shadow_LoLeg/B_Shadow_LoLeg-1` raw `98.1016 -> 98.5820`, aligned `99.1719 -> 99.2852`. The full raw benchmark found no raw/aligned regressions among the 15 drawings touched by the mutation sweep.
+- Rejected probes: global underlay inclusion improves silhouette/aligned score but lowers raw (`98.1094`) and can reintroduce construction strokes; synthetic final-canvas scaling can improve focused overlap for this one sample but is not source-grounded and is unsafe as a general renderer rule.
+- Full raw benchmark after the support-only boundary rule: raw averages overall/vector/bitmap `98.66/98.55/99.20`; source-fresh raw averages `99.19/99.19/99.20`; trusted source-fresh raw averages `99.24/99.26/99.20`; trusted source-fresh minima remain vector/bitmap `97.32/97.80`.
+
 Managed local finding: embedded dark legacy-chain suppression
 
 - `color.101/color-13` shape21 has a small closed dark chain `solid:15,46,48,255` embedded inside a much larger green line-fill shape. Rendering it as an independent legacy paint group adds a lower face/neck protrusion that the source-fresh thumbnail mostly lacks.
