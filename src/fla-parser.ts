@@ -1899,18 +1899,28 @@ export class FLAParser {
           let g = actualPixelData[srcIdx + 2];   // Green (byte 2)
           let b = actualPixelData[srcIdx + 3];   // Blue  (byte 3)
 
-          // Unmultiply alpha (colors are stored premultiplied)
-          // Per JPEXS: if alpha is not 0 or 255, unmultiply using: color = floor(color * 256 / alpha)
+          // Unmultiply alpha (colors are stored premultiplied).
+          // Per JPEXS LosslessImageBinDataReader, the reader does `a = a - 1`
+          // first (pairing with the writer ImageBinDataGenerator's `a + 1`),
+          // then unmultiplies with: color = floor(color * 256 / (a - 1)).
+          // Without the -1 the recovered colors are slightly too dark and the
+          // emitted alpha is 1 too high on semi-transparent pixels. Opaque
+          // (a=255) and fully transparent (a=0) pixels are stored literally.
+          let outA = a;
           if (a > 0 && a < 255) {
-            r = Math.min(255, Math.floor(r * 256 / a));
-            g = Math.min(255, Math.floor(g * 256 / a));
-            b = Math.min(255, Math.floor(b * 256 / a));
+            const a1 = a - 1;
+            if (a1 > 0) {
+              r = Math.min(255, Math.floor(r * 256 / a1));
+              g = Math.min(255, Math.floor(g * 256 / a1));
+              b = Math.min(255, Math.floor(b * 256 / a1));
+            }
+            outA = a1;
           }
 
           rgba[dstIdx] = r;         // R ← byte 1 (unmultiplied)
           rgba[dstIdx + 1] = g;     // G ← byte 2 (unmultiplied)
           rgba[dstIdx + 2] = b;     // B ← byte 3 (unmultiplied)
-          rgba[dstIdx + 3] = a;     // A ← byte 0
+          rgba[dstIdx + 3] = outA;  // A ← byte 0 (a-1 for semi-transparent)
         }
       }
 
@@ -1937,8 +1947,23 @@ export class FLAParser {
    * Format per JPEXS:
    * - Header: 26 bytes (same as 32-bit)
    * - Palette count: UI16 LE (number of palette entries)
-   * - Palette data: count × 4 bytes, A,R,G,B byte layout per entry (byte0=alpha)
+   * - Palette data: count × 4 bytes (ABGR per entry if hasAlpha, else RGB)
    * - Pixel data: 1 byte per pixel (palette index)
+   *
+   * NOTE (unverified): the per-entry palette channel order below is NOT
+   * confirmed. JPEXS does not implement 8-bit FLA bitmaps at all, and SWF
+   * DefineBitsLossless 8-bit colormaps are RGB(A) (not ABGR), so the byte
+   * layout — including which byte holds alpha — is uncertain. The mapping
+   * here mirrors the original (pre issue #10) code and is deliberately left
+   * unchanged; do not assume it is A,R,G,B like the verified 32-bit path.
+   *
+   * KNOWN LATENT BUG (out of scope for issue #10, documented so it is not
+   * lost): unlike the 32-bit path (decodeFlaBitmap), this function does NOT
+   * zlib-inflate the pixel data and does NOT strip the variant==1 chunk-length
+   * framing. It reads bytes.slice(pos) directly as raw palette indices, so any
+   * compressed (variant==1) 8-bit .dat file decodes to garbage. A proper fix
+   * would route the bytes through the same chunk-stripping + pako.inflateRaw
+   * pipeline used by decodeFlaBitmap before indexing into the palette.
    */
   private decode8BitFlaBitmap(
     bytes: Uint8Array,
@@ -1962,11 +1987,14 @@ export class FLAParser {
       const bytesPerEntry = 4; // Always 4 bytes per JPEXS (ABGR)
 
       for (let i = 0; i < paletteCount && pos + bytesPerEntry <= bytes.length; i++) {
-        // Same A,R,G,B byte layout as the 32-bit format (byte1=R, byte3=B).
+        // Channel order UNVERIFIED — preserved from the original pre issue #10
+        // code (byte1→B, byte3→R). There is no JPEXS/SWF confirmation that the
+        // 8-bit palette is A,R,G,B, so this is intentionally NOT changed to
+        // match the verified 32-bit path. See the function doc comment.
         const a = hasAlpha ? bytes[pos] : 255;
-        const r = bytes[pos + 1];
+        const b = bytes[pos + 1];
         const g = bytes[pos + 2];
-        const b = bytes[pos + 3];
+        const r = bytes[pos + 3];
         palette.push({ r, g, b, a });
         pos += bytesPerEntry;
       }
