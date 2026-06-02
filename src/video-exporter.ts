@@ -1,4 +1,5 @@
 import type { FLADocument, SoundItem, FrameSound } from './types';
+import { isLayerVisibleInFla } from './layer-utils';
 import { FLARenderer } from './renderer';
 
 export interface ExportProgress {
@@ -1272,7 +1273,10 @@ export async function exportSVG(
 
     for (const layerIndex of layerIndices) {
       const layer = symbol.timeline.layers[layerIndex];
-      if (!layer.visible || layer.layerType === 'guide' || layer.layerType === 'folder') continue;
+      // Honor FLA layer visibility with the folder/parent cascade so SVG/video
+      // export agrees with the canvas renderer (shared helper, src/layer-utils.ts).
+      if (!isLayerVisibleInFla(symbol.timeline.layers, layerIndex) ||
+          layer.layerType === 'guide' || layer.layerType === 'folder') continue;
 
       // Find frame at symbolFrame
       let currentFrame: import('./types').Frame | null = null;
@@ -1317,7 +1321,10 @@ export async function exportSVG(
 
   for (const layerIndex of layerIndices) {
     const layer = timeline.layers[layerIndex];
-    if (!layer.visible || layer.layerType === 'guide' || layer.layerType === 'folder') continue;
+    // Honor FLA layer visibility with the folder/parent cascade so SVG/video
+    // export agrees with the canvas renderer (shared helper, src/layer-utils.ts).
+    if (!isLayerVisibleInFla(timeline.layers, layerIndex) ||
+        layer.layerType === 'guide' || layer.layerType === 'folder') continue;
     if (timeline.referenceLayers.has(layerIndex)) continue;
 
     // Find frame at frameIndex
