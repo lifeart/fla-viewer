@@ -10,12 +10,13 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 ## Current State
 
-- Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, narrow same-paint detail threshold expansion, dense line-fill edge/coverage/tone passes, clipped bitmap atlas fit bands, portrait bitmap fit retune, low-alpha saturated-fill density relief, compact multi-art cutout padding, and tiny vector content-fit viewport floors.
+- Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, narrow same-paint detail threshold expansion, dense line-fill edge/coverage/tone passes, clipped bitmap atlas fit bands, portrait bitmap fit retune, low-alpha saturated-fill density relief, compact multi-art cutout padding, tiny vector content-fit viewport floors, implicit widthless support-only boundary strokes, and text-only TGTL art-layer preservation.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
 - Current raw benchmark after compact cutout padding and tiny vector viewport floors: overall `98.66`, vector `98.55`, bitmap `99.20`.
 - Source-fresh raw average before trust classification is overall `99.18`, vector `99.18`, bitmap `99.20`.
 - Trusted source-fresh raw average excludes stale, alternate-source, suspicious sparse-overlap, and noisy low-foreground thumbnails: overall `99.24`, vector `99.26`, bitmap `99.20`.
 - Current trusted source-fresh raw minimum is `color.101/color-21` at `97.32`; trusted source-fresh bitmap minimum is `3255/3255-1` at raw `97.80`.
+- `MC_Emotions/Lipsync_MC_HNDL_1-3` is now a text/fringe residual, not missing content: aligned `99.95`, focused `96.16`, IoU `96.61`, raw `98.11`.
 - Current benchmark classes: `92` trusted, `4` suspicious sparse-overlap, `4` noisy low-foreground, `1` alternate-source, and `79` stale-thumbnail cases.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
 - Current `color.101/color-13` scores against its own source remain raw `85.4453125`, aligned `92.0078125`, normalized/focused about `76.83`, foreground IoU about `84.57`.
@@ -239,6 +240,21 @@ Managed local finding: implicit widthless boundary support-only strokes
 - Targeted result: `B_Shadow_LoLeg/B_Shadow_LoLeg-1` raw `98.1016 -> 98.5820`, aligned `99.1719 -> 99.2852`. The full raw benchmark found no raw/aligned regressions among the 15 drawings touched by the mutation sweep.
 - Rejected probes: global underlay inclusion improves silhouette/aligned score but lowers raw (`98.1094`) and can reintroduce construction strokes; synthetic final-canvas scaling can improve focused overlap for this one sample but is not source-grounded and is unsafe as a general renderer rule.
 - Full raw benchmark after the support-only boundary rule: raw averages overall/vector/bitmap `98.66/98.55/99.20`; source-fresh raw averages `99.19/99.19/99.20`; trusted source-fresh raw averages `99.24/99.26/99.20`; trusted source-fresh minima remain vector/bitmap `97.32/97.80`.
+
+Managed local finding: text-only TGTL art layers
+
+- `MC_Emotions/Lipsync_MC_HNDL_1-3` has no vector shapes on its line layer, but the decompressed `tLAA` payload contains a `TGND` footer with `31` `TGTL` labels, including `Emotions` and frame numbers `1..30`.
+- Old parser behavior dropped this data twice: `parseArtLayer()` returned immediately for `dataType=0`, and `parseMainData()` only retained layers with `shapes.length > 0`.
+- Accepted parser rule: even empty art layers must scan trailing `TGND/TGTL` text labels, and main-data layer retention must preserve layers with text labels even when they have no vector shapes.
+- Targeted result for `MC_Emotions/Lipsync_MC_HNDL_1-3`: raw `98.2148 -> 98.1094`, aligned `99.7266 -> 99.9531`, focused `78.38 -> 96.16`, IoU `80.78 -> 96.61`. The small raw drop is accepted because the source-format content is now present; the remaining exact-pixel error is candidate-only low-alpha strip fringe at x `19/20/139/140` plus text antialias tone.
+- Full raw benchmark after the parser fix: gate averages overall/vector/bitmap `100.00/99.99/100.00`; raw averages `98.66/98.55/99.20`; source-fresh raw averages `99.19/99.18/99.20`; trusted source-fresh raw averages `99.24/99.26/99.20`; trusted floors remain vector/bitmap `97.32/97.80`.
+
+Managed local finding: rejected saturated-edge relief for mask-green underlays
+
+- `B_Shorts/B_Shorts-1` residuals are edge coverage, not topology: `refOnly=0`, `candidateOnly=136`, interior mean delta is near zero, and bad overlap is concentrated in antialias pixels on the green underlay edge. Removing overlay is a no-op, removing line slightly regresses, and higher supersampling only gives a small raw gain while worsening other focused/aligned metrics.
+- Local target probe: blending saturated exterior edge pixels toward white by `0.55` improves `B_Shorts-1` raw `98.3594 -> 99.1133`; limiting to mask-green pixels improves raw `98.3594 -> 99.0742`.
+- Rejected rule: do not apply generic saturated-edge or mask-green edge relief. The full mutation sweep regressed already-good source-fresh guards: saturated-edge relief regressed `Drawing_1-3` by `-2.6797`, `Number_Body-1` by `-0.7656`, `F_Lacing-1` by `-0.6016`, and `Foot_B.6/Foot_B-1` by `-0.4141`. Mask-green-only relief still regressed `F-sole_F-1` by `-0.9023`, `F_Lacing-1` by `-0.5625`, `F_Boot_top-1` by `-0.4609`, `Line_body-1` by `-0.4258`, and `Foot_B.6/Foot_B-1` by `-0.4141`.
+- Conclusion: `B_Shorts-1` likely needs a source-grounded antialias/downsample model or a stronger per-drawing signal; post-composite edge toning is not sustainable.
 
 Managed local finding: embedded dark legacy-chain suppression
 

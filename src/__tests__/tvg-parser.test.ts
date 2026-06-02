@@ -3126,6 +3126,19 @@ describe('tvg rendering', () => {
     expect(sad?.matrixC && Math.abs(sad.matrixC) > 3).toBe(true);
   });
 
+  it('keeps text-only TGTL art layers from Lipsync control drawings', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/MC_Emotions/Lipsync_MC_HNDL_1-3.tvg')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    const lineLayer = drawing.layers.find(layer => layer.type === 'line');
+
+    expect(lineLayer).toBeDefined();
+    expect(lineLayer?.shapes).toHaveLength(0);
+    expect(lineLayer?.textLabels?.length ?? 0).toBeGreaterThan(0);
+    expect(lineLayer?.textLabels?.some(label => label.text === 'Emotions')).toBe(true);
+  });
+
   it('resolves TGTL label colors through the palette style token', async () => {
     const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
     const zip = await JSZip.loadAsync(await response.arrayBuffer());

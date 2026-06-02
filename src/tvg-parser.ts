@@ -1212,7 +1212,7 @@ function parseMainData(reader: BinaryReader, drawing: TVGDrawing): void {
       try {
         const data = readEncodedData(reader);
         const layer = parseArtLayer(new BinaryReader(data.buffer), layerType, drawing.diagnostics);
-        if (layer.shapes.length > 0) {
+        if (layer.shapes.length > 0 || (layer.textLabels?.length ?? 0) > 0) {
           drawing.layers.push(layer);
         }
       } catch (_e) {
@@ -1512,7 +1512,10 @@ function parseArtLayer(reader: BinaryReader, type: TVGArtLayer['type'], diagnost
 
   // Preamble
   const dataType = reader.readU16LE();
-  if (dataType === 0x0000) return layer; // Empty layer
+  if (dataType === 0x0000) {
+    layer.textLabels = parseTrailingTextLabels(reader);
+    return layer;
+  }
 
   const shapeCount = reader.readU32LE();
 
