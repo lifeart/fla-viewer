@@ -805,6 +805,24 @@ export class FLARenderer {
     this.renderTimeline(timeline, frameIndex);
   }
 
+  // A layer is hidden in the FLA if it — or any ancestor it is linked under
+  // via parentLayerIndex (its folder/group, or the layer it is parented to) —
+  // is marked visible="false". This mirrors Adobe Animate's stage, where
+  // hiding a folder or a parent layer hides everything linked beneath it
+  // (issue #12: "group / parent child link layer" support).
+  private isLayerVisibleInFla(layers: Layer[], index: number): boolean {
+    let i = index;
+    const seen = new Set<number>();
+    while (i >= 0 && i < layers.length && !seen.has(i)) {
+      seen.add(i); // guard against malformed parent cycles
+      const layer = layers[i];
+      if (layer.visible === false) return false;
+      if (layer.parentLayerIndex === undefined) break;
+      i = layer.parentLayerIndex;
+    }
+    return true;
+  }
+
   // Render timeline layers (extracted for reuse)
   private renderTimelineLayers(
     timeline: Timeline,
@@ -846,6 +864,13 @@ export class FLARenderer {
       const layerTypeLower = (layer.layerType as string)?.toLowerCase() || '';
       if (layer.layerType === 'guide' || layerTypeLower === 'guide' ||
           layer.layerType === 'folder' || layerTypeLower === 'folder') {
+        continue;
+      }
+
+      // Honor FLA layer visibility (with folder/parent cascade). Mask layers
+      // are handled by their own block below.
+      if (layer.layerType !== 'mask' && layerTypeLower !== 'mask' &&
+          !this.isLayerVisibleInFla(timeline.layers, i)) {
         continue;
       }
 
@@ -1016,6 +1041,13 @@ export class FLARenderer {
       const isFolderLayer = layer.layerType === 'folder' || layerTypeLower === 'folder';
 
       if (isGuideLayer || isFolderLayer) {
+        continue;
+      }
+
+      // Honor FLA layer visibility (with folder/parent cascade). Mask layers
+      // are handled by their own block below.
+      if (layer.layerType !== 'mask' && layerTypeLower !== 'mask' &&
+          !this.isLayerVisibleInFla(timeline.layers, i)) {
         continue;
       }
 
