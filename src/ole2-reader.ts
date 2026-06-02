@@ -269,9 +269,17 @@ export class OLE2File {
     this.dirEntries = entries;
   }
 
-  /** Byte offset of regular sector `n` (sectors start after the 512B header). */
+  /**
+   * Byte offset of regular sector `n`. Per [MS-CFB] §2.5, the array of sectors
+   * begins immediately after the 512-byte header, and a sector's offset is
+   * `(n + 1) * sectorSize`. For v3 (512-byte sectors) this equals the header
+   * size plus `n * 512`; for v4 (4096-byte sectors) the header occupies only
+   * the first 512 bytes of sector 0's region, so the formula must scale with
+   * `sectorSize` — not be a fixed 512-byte header offset (which misaligned
+   * every v4 sector by 3584 bytes).
+   */
   private sectorOffset(n: number): number {
-    return 512 + n * this.sectorSize;
+    return (n + 1) * this.sectorSize;
   }
 
   /**
