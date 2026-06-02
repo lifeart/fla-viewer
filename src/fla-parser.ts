@@ -23,6 +23,7 @@ import type {
   VideoItem,
   Point,
   Tween,
+  EaseMethod,
   Edge,
   Filter,
   MorphShape,
@@ -701,9 +702,14 @@ export class FLAParser {
 
       if (tweenEl.tagName === 'Ease') {
         const intensity = tweenEl.getAttribute('intensity');
+        // Adobe Animate classic tweens encode the easing TYPE in `method`
+        // (e.g. method="quadratic"/"sine"/"bounce"...). When absent the ease is
+        // the legacy intensity-only "classic" ease-in/out.
+        const method = tweenEl.getAttribute('method');
         tweens.push({
           target,
-          intensity: intensity ? parseInt(intensity) : 0
+          intensity: intensity ? parseInt(intensity) : 0,
+          ...(method && { method: method as EaseMethod })
         });
       } else if (tweenEl.tagName === 'CustomEase') {
         const points: Point[] = [];

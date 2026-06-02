@@ -656,6 +656,94 @@ describe('FLAParser', () => {
       expect(frame.tweens![0].target).toBe('all');
       expect(frame.tweens![0].intensity).toBe(50);
     });
+
+    it('should capture the easing method attribute', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0" duration="10" tweenType="motion">
+                    <elements></elements>
+                    <tweens>
+                      <Ease target="all" method="quadratic" intensity="-100"/>
+                    </tweens>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      expect(frame.tweens).toBeDefined();
+      expect(frame.tweens).toHaveLength(1);
+      expect(frame.tweens![0].target).toBe('all');
+      expect(frame.tweens![0].method).toBe('quadratic');
+      expect(frame.tweens![0].intensity).toBe(-100);
+    });
+
+    it('should not set method when the attribute is absent', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0" duration="10" tweenType="motion">
+                    <elements></elements>
+                    <tweens>
+                      <Ease target="all" intensity="25"/>
+                    </tweens>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      expect(frame.tweens![0].method).toBeUndefined();
+      expect(frame.tweens![0].intensity).toBe(25);
+    });
+
+    it('should parse multiple per-target eases', async () => {
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0" duration="10" tweenType="motion">
+                    <elements></elements>
+                    <tweens>
+                      <Ease target="rotation" intensity="0"/>
+                      <Ease target="position" method="sine" intensity="100"/>
+                    </tweens>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      expect(frame.tweens).toHaveLength(2);
+      const position = frame.tweens!.find((t) => t.target === 'position');
+      expect(position).toBeDefined();
+      expect(position!.method).toBe('sine');
+      expect(position!.intensity).toBe(100);
+    });
   });
 
   describe('sound parsing', () => {
@@ -2311,6 +2399,49 @@ describe('FLAParser', () => {
       expect(frame.tweens![0].customEase).toHaveLength(4);
       expect(frame.tweens![0].customEase![0]).toEqual({ x: 0, y: 0 });
       expect(frame.tweens![0].customEase![3]).toEqual({ x: 1, y: 1 });
+    });
+
+    it('should keep ALL points of a multi-segment CustomEase (3n+1)', async () => {
+      // A real Adobe CustomEase with 2 cubic segments has 7 points.
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0" duration="10" tweenType="motion">
+                    <elements>
+                      <DOMShape>
+                        <fills><FillStyle index="1"><SolidColor color="#FF0000"/></FillStyle></fills>
+                        <strokes></strokes>
+                        <edges><Edge fillStyle0="1" edges="!0 0|50 50"/></edges>
+                      </DOMShape>
+                    </elements>
+                    <tweens>
+                      <CustomEase target="all">
+                        <Point x="0" y="0"/>
+                        <Point x="0.1" y="0.4"/>
+                        <Point x="0.3" y="0.5"/>
+                        <Point x="0.5" y="0.5"/>
+                        <Point x="0.7" y="0.5"/>
+                        <Point x="0.9" y="0.6"/>
+                        <Point x="1" y="1"/>
+                      </CustomEase>
+                    </tweens>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const fla = await createFlaZip(createDOMDocument({ timelines }));
+      const doc = await parser.parse(fla);
+
+      const frame = doc.timelines[0].layers[0].frames[0];
+      expect(frame.tweens![0].customEase).toHaveLength(7);
+      expect(frame.tweens![0].customEase![0]).toEqual({ x: 0, y: 0 });
+      expect(frame.tweens![0].customEase![6]).toEqual({ x: 1, y: 1 });
     });
   });
 

@@ -110,9 +110,28 @@ export interface FrameSound {
   loopCount?: number;
 }
 
+// Named easing methods used by Adobe Animate classic-tween frames.
+// Stored as the `method` attribute on <Ease> (e.g. <Ease method="quadratic" intensity="100"/>).
+// "none" = linear, "classic" = the legacy intensity-only ease-in/out, all others are
+// the standard Penner equations. intensity sign selects in (<0) vs out (>0); 0 = ease-in-out.
+export type EaseMethod =
+  | 'none'
+  | 'classic'
+  | 'quadratic'
+  | 'cubic'
+  | 'quartic'
+  | 'quintic'
+  | 'sine'
+  | 'exponential'
+  | 'circular'
+  | 'bounce'
+  | 'elastic'
+  | 'back';
+
 export interface Tween {
   target: string;
   intensity?: number;
+  method?: EaseMethod;
   customEase?: Point[];
 }
 

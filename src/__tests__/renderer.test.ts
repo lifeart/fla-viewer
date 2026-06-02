@@ -3128,6 +3128,181 @@ describe('FLARenderer', () => {
     });
   });
 
+  describe('named easing methods (issue #11)', () => {
+    // Reach into the private progress calculation so we can assert the actual
+    // eased value at the parser->renderer seam, not just that rendering doesn't throw.
+    // Signature: calculateTweenProgress(frameIndex, startFrame, endFrame, acceleration?, tweens?)
+    const progressAt = (
+      frameIndex: number,
+      tweens: import('../types').Tween[] | undefined,
+      acceleration?: number
+    ): number => {
+      const startFrame = { index: 0, duration: 10, keyMode: 0, elements: [] } as any;
+      const endFrame = { index: 10, duration: 10, keyMode: 0, elements: [] } as any;
+      return (renderer as any).calculateTweenProgress(
+        frameIndex,
+        startFrame,
+        endFrame,
+        acceleration,
+        tweens
+      );
+    };
+
+    it('reproduces the bug baseline: method "none" stays linear', () => {
+      const linear = progressAt(5, [{ target: 'all', method: 'none', intensity: 0 }]);
+      // Halfway through a 10-frame span => exactly 0.5 (no easing applied)
+      expect(linear).toBeCloseTo(0.5, 5);
+    });
+
+    it('applies quadratic ease-in (slow start) for negative intensity', () => {
+      const t = progressAt(5, [{ target: 'all', method: 'quadratic', intensity: -100 }]);
+      // ease-in quad at t=0.5 => 0.25, clearly below the linear 0.5
+      expect(t).toBeLessThan(0.45);
+      expect(t).toBeCloseTo(0.25, 5);
+    });
+
+    it('applies quadratic ease-out (fast start) for positive intensity', () => {
+      const t = progressAt(5, [{ target: 'all', method: 'quadratic', intensity: 100 }]);
+      // ease-out quad at t=0.5 => 0.75, clearly above the linear 0.5
+      expect(t).toBeGreaterThan(0.55);
+      expect(t).toBeCloseTo(0.75, 5);
+    });
+
+    it('uses ease-in-out when intensity is 0 but a method is set', () => {
+      const start = progressAt(2, [{ target: 'all', method: 'sine', intensity: 0 }]);
+      const end = progressAt(8, [{ target: 'all', method: 'sine', intensity: 0 }]);
+      // ease-in-out is symmetric around the midpoint
+      expect(start).toBeLessThan(0.2);
+      expect(end).toBeGreaterThan(0.8);
+      expect(start + end).toBeCloseTo(1, 5);
+    });
+
+    it('blends toward linear by intensity magnitude', () => {
+      const full = progressAt(5, [{ target: 'all', method: 'cubic', intensity: -100 }]);
+      const half = progressAt(5, [{ target: 'all', method: 'cubic', intensity: -50 }]);
+      const linear = 0.5;
+      // 50% intensity lands halfway between linear and the full curve
+      expect(half).toBeGreaterThan(full);
+      expect(half).toBeLessThan(linear);
+      expect(half).toBeCloseTo((full + linear) / 2, 5);
+    });
+
+    it.each([
+      'quadratic',
+      'cubic',
+      'quartic',
+      'quintic',
+      'sine',
+      'exponential',
+      'circular',
+      'back',
+      'bounce',
+      'elastic',
+    ] as const)('produces a non-linear curve for method "%s"', (method) => {
+      const t = progressAt(5, [{ target: 'all', method, intensity: -100 }]);
+      // Every easing method must deviate from the linear 0.5 midpoint
+      expect(Math.abs(t - 0.5)).toBeGreaterThan(0.01);
+    });
+
+    it('selects the position/all ease, not just tweens[0]', () => {
+      // tweens[0] is a non-spatial target with no easing; the spatial ease is second.
+      const tweens: import('../types').Tween[] = [
+        { target: 'rotation', intensity: 0 },
+        { target: 'position', method: 'quadratic', intensity: -100 },
+      ];
+      const t = progressAt(5, tweens);
+      // Must apply the position quadratic ease-in (0.25), not the rotation linear (0.5)
+      expect(t).toBeCloseTo(0.25, 5);
+    });
+
+    it('prefers an "all" ease over other targets', () => {
+      const tweens: import('../types').Tween[] = [
+        { target: 'color', method: 'sine', intensity: 100 },
+        { target: 'all', method: 'quadratic', intensity: -100 },
+      ];
+      const t = progressAt(5, tweens);
+      expect(t).toBeCloseTo(0.25, 5);
+    });
+
+    it('keeps the legacy intensity-only ("classic") path working', () => {
+      // No method => classic intensity ease. Negative = ease-in (below linear).
+      const t = progressAt(5, [{ target: 'all', intensity: -100 }]);
+      expect(t).toBeLessThan(0.5);
+    });
+
+    it('falls back to acceleration easing when no tweens are present', () => {
+      const t = progressAt(5, undefined, -100);
+      expect(t).toBeLessThan(0.5);
+    });
+  });
+
+  describe('multi-segment custom ease (issue #11)', () => {
+    const evalEase = (t: number, points: import('../types').Point[]): number =>
+      (renderer as any).evaluateBezierEase(t, points);
+
+    it('evaluates a single-segment (4-point) curve at its anchors', () => {
+      const pts = [
+        { x: 0, y: 0 },
+        { x: 0.25, y: 0.1 },
+        { x: 0.75, y: 0.9 },
+        { x: 1, y: 1 },
+      ];
+      expect(evalEase(0, pts)).toBeCloseTo(0, 5);
+      expect(evalEase(1, pts)).toBeCloseTo(1, 5);
+    });
+
+    it('uses LATER segments of a multi-segment (7-point) curve, not just the first 4', () => {
+      // Two segments. The first segment ends at x=0.5,y=0.9 (steep rise),
+      // the second segment is nearly flat then jumps to 1. A first-4-points-only
+      // evaluator would ignore the second segment entirely and mis-evaluate x>0.5.
+      const pts = [
+        { x: 0, y: 0 },
+        { x: 0.1, y: 0.6 },
+        { x: 0.3, y: 0.9 },
+        { x: 0.5, y: 0.9 }, // shared anchor between the two segments
+        { x: 0.7, y: 0.9 },
+        { x: 0.9, y: 0.92 },
+        { x: 1, y: 1 },
+      ];
+
+      // Anchors evaluate exactly.
+      expect(evalEase(0, pts)).toBeCloseTo(0, 4);
+      expect(evalEase(0.5, pts)).toBeCloseTo(0.9, 4);
+      expect(evalEase(1, pts)).toBeCloseTo(1, 4);
+
+      // In the second segment (x in 0.5..1) the curve stays high/flat near 0.9.
+      const mid2 = evalEase(0.7, pts);
+      expect(mid2).toBeGreaterThan(0.85);
+      expect(mid2).toBeLessThan(0.95);
+
+      // The curve must be monotonically non-decreasing across the segment boundary.
+      expect(evalEase(0.6, pts)).toBeGreaterThanOrEqual(evalEase(0.4, pts) - 1e-6);
+    });
+
+    it('is monotonic and well-formed across a 10-point (3-segment) curve', () => {
+      const pts = [
+        { x: 0, y: 0 },
+        { x: 0.1, y: 0.2 },
+        { x: 0.2, y: 0.3 },
+        { x: 0.333, y: 0.4 },
+        { x: 0.45, y: 0.5 },
+        { x: 0.55, y: 0.6 },
+        { x: 0.667, y: 0.7 },
+        { x: 0.8, y: 0.85 },
+        { x: 0.9, y: 0.95 },
+        { x: 1, y: 1 },
+      ];
+      let prev = -Infinity;
+      for (let i = 0; i <= 10; i++) {
+        const y = evalEase(i / 10, pts);
+        expect(y).toBeGreaterThanOrEqual(-0.01);
+        expect(y).toBeLessThanOrEqual(1.01);
+        expect(y).toBeGreaterThanOrEqual(prev - 0.02);
+        prev = y;
+      }
+    });
+  });
+
   describe('text with letter spacing', () => {
     it('should render text with custom letter spacing', async () => {
       const doc = createMinimalDoc({
