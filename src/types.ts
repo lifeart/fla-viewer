@@ -110,9 +110,32 @@ export interface FrameSound {
   loopCount?: number;
 }
 
+// Penner easing families that Adobe Animate / CreateJS reference by name.
+// These are the BASE of a method token; the direction (In/Out/InOut) is a
+// separate suffix on the token, not part of this set.
+export type EaseBase =
+  | 'quad'
+  | 'cubic'
+  | 'quart'
+  | 'quint'
+  | 'sine'
+  | 'circ'
+  | 'expo'
+  | 'back'
+  | 'elastic'
+  | 'bounce';
+
+export type EaseDirection = 'in' | 'out' | 'inOut';
+
+// The `method` attribute on <Ease> is stored RAW as Adobe writes it. Modern
+// Animate files use CreateJS-style "<base><Direction>" tokens where the
+// direction is part of the token (e.g. "cubicIn", "backOut", "quadInOut"),
+// plus the special "none" (linear). Decomposition into (base, direction)
+// happens in the renderer. Legacy intensity-only eases have NO method at all.
 export interface Tween {
   target: string;
   intensity?: number;
+  method?: string;
   customEase?: Point[];
 }
 

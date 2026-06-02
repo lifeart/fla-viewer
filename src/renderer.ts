@@ -14,6 +14,8 @@ import type {
   StrokeStyle,
   Edge,
   Tween,
+  EaseBase,
+  EaseDirection,
   Point,
   PathCommand,
   Filter,
@@ -1256,10 +1258,19 @@ export class FLARenderer {
 
     // Apply easing
     if (tweens && tweens.length > 0) {
-      const tween = tweens[0];
+      // A frame can carry multiple eases per target ("all", "position", "rotation",
+      // "scale", "color", "filters"). The spatial motion follows "all"/"position";
+      // pick that tween rather than blindly using tweens[0] (which could be a
+      // non-matching target and render as no-easing).
+      const tween = this.selectTween(tweens);
       if (tween.customEase && tween.customEase.length >= 4) {
         progress = this.evaluateBezierEase(progress, tween.customEase);
+      } else if (tween.method) {
+        // CreateJS-style "<base><Direction>" token (e.g. "cubicIn", "backOut").
+        // "none" => linear; unknown tokens warn and fall back to linear.
+        progress = this.applyEaseMethod(progress, tween.method, tween.intensity);
       } else if (tween.intensity !== undefined) {
+        // Legacy intensity-only ease (no method): sign = ease-in/out direction.
         progress = this.applyEaseIntensity(progress, tween.intensity);
       }
     } else if (acceleration !== undefined) {
@@ -1267,6 +1278,16 @@ export class FLARenderer {
     }
 
     return Math.max(0, Math.min(1, progress));
+  }
+
+  // Choose the tween that governs the spatial motion. Adobe writes one <Ease>/<CustomEase>
+  // per target; "all" eases everything, otherwise "position" drives the visible movement.
+  private selectTween(tweens: Tween[]): Tween {
+    return (
+      tweens.find((t) => t.target === 'all') ??
+      tweens.find((t) => t.target === 'position') ??
+      tweens[0]
+    );
   }
 
   private applyEaseIntensity(t: number, intensity: number): number {
@@ -1285,25 +1306,191 @@ export class FLARenderer {
     }
   }
 
-  private evaluateBezierEase(t: number, points: Point[]): number {
-    // Cubic bezier evaluation
-    if (points.length < 4) return t;
+  // The set of Penner easing families Animate/CreateJS can name. The DIRECTION
+  // is encoded in the method token suffix, not here.
+  private static readonly EASE_BASES: ReadonlySet<string> = new Set<EaseBase>([
+    'quad', 'cubic', 'quart', 'quint', 'sine', 'circ', 'expo', 'back', 'elastic', 'bounce',
+  ]);
 
-    const p0 = points[0];
-    const p1 = points[1];
-    const p2 = points[2];
-    const p3 = points[3];
+  // Decompose a CreateJS-style method token into (base, direction). The
+  // direction is the SUFFIX: "InOut" (checked first), "In", or "Out". The
+  // remainder is the base family (e.g. "cubicInOut" => base="cubic",
+  // dir="inOut"; "backOut" => base="back", dir="out"). Returns null for tokens
+  // we don't understand so the caller can surface a warning.
+  private parseEaseMethod(method: string): { base: EaseBase; direction: EaseDirection } | null {
+    let base = method;
+    let direction: EaseDirection;
+    if (method.endsWith('InOut')) {
+      direction = 'inOut';
+      base = method.slice(0, -'InOut'.length);
+    } else if (method.endsWith('In')) {
+      direction = 'in';
+      base = method.slice(0, -'In'.length);
+    } else if (method.endsWith('Out')) {
+      direction = 'out';
+      base = method.slice(0, -'Out'.length);
+    } else {
+      return null;
+    }
+    if (!FLARenderer.EASE_BASES.has(base)) return null;
+    return { base: base as EaseBase, direction };
+  }
 
-    // Find t value on x axis using Newton-Raphson
-    let x = t;
-    for (let i = 0; i < 10; i++) {
-      const bx = this.cubicBezier(x, p0.x, p1.x, p2.x, p3.x);
-      const dx = this.cubicBezierDerivative(x, p0.x, p1.x, p2.x, p3.x);
-      if (Math.abs(dx) < 0.0001) break;
-      x = x - (bx - t) / dx;
+  // Apply a CreateJS-style "<base><Direction>" easing token (e.g. "cubicIn",
+  // "backOut", "quadInOut") using the standard Penner equations. The direction
+  // comes from the TOKEN SUFFIX (not the intensity sign). When `intensity` is
+  // also present it acts as a strength percentage that blends linear->curve
+  // (100 = full); absent => full strength.
+  private applyEaseMethod(t: number, method: string, intensity?: number): number {
+    if (method === 'none') return t;
+
+    const parsed = this.parseEaseMethod(method);
+    if (!parsed) {
+      // Do not silently swallow: surface the unrecognized token, fall back linear.
+      console.warn(`Unrecognized tween ease method "${method}"; rendering linearly.`);
+      return t;
     }
 
-    return this.cubicBezier(x, p0.y, p1.y, p2.y, p3.y);
+    let eased: number;
+    if (parsed.direction === 'in') {
+      eased = this.easeIn(t, parsed.base);
+    } else if (parsed.direction === 'out') {
+      eased = this.easeOut(t, parsed.base);
+    } else {
+      eased = this.easeInOut(t, parsed.base);
+    }
+
+    // If Animate attached an intensity to a method, treat it as a strength
+    // percentage blending between linear and the full curve. No intensity (or
+    // 0) => full strength curve.
+    const strength = intensity ? Math.min(Math.abs(intensity), 100) / 100 : 1;
+    return t + (eased - t) * strength;
+  }
+
+  // Penner ease-in equations on normalized t in [0,1].
+  private easeIn(t: number, base: EaseBase): number {
+    switch (base) {
+      case 'quad': return t * t;
+      case 'cubic': return t * t * t;
+      case 'quart': return t * t * t * t;
+      case 'quint': return t * t * t * t * t;
+      case 'sine': return 1 - Math.cos((t * Math.PI) / 2);
+      case 'expo': return t === 0 ? 0 : Math.pow(2, 10 * (t - 1));
+      case 'circ': return 1 - Math.sqrt(1 - t * t);
+      case 'back': {
+        const s = 1.70158;
+        return t * t * ((s + 1) * t - s);
+      }
+      case 'elastic': {
+        if (t === 0 || t === 1) return t;
+        const p = 0.3;
+        const s = p / 4;
+        return -Math.pow(2, 10 * (t - 1)) * Math.sin(((t - 1 - s) * (2 * Math.PI)) / p);
+      }
+      case 'bounce': return 1 - this.bounceOut(1 - t);
+    }
+  }
+
+  // Penner ease-out equations on normalized t in [0,1].
+  private easeOut(t: number, base: EaseBase): number {
+    switch (base) {
+      case 'quad': return 1 - (1 - t) * (1 - t);
+      case 'cubic': return 1 + Math.pow(t - 1, 3);
+      case 'quart': return 1 - Math.pow(1 - t, 4);
+      case 'quint': return 1 + Math.pow(t - 1, 5);
+      case 'sine': return Math.sin((t * Math.PI) / 2);
+      case 'expo': return t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
+      case 'circ': return Math.sqrt(1 - (t - 1) * (t - 1));
+      case 'back': {
+        const s = 1.70158;
+        const u = t - 1;
+        return u * u * ((s + 1) * u + s) + 1;
+      }
+      case 'elastic': {
+        if (t === 0 || t === 1) return t;
+        const p = 0.3;
+        const s = p / 4;
+        return Math.pow(2, -10 * t) * Math.sin(((t - s) * (2 * Math.PI)) / p) + 1;
+      }
+      case 'bounce': return this.bounceOut(t);
+    }
+  }
+
+  // Penner ease-in-out equations on normalized t in [0,1].
+  private easeInOut(t: number, base: EaseBase): number {
+    if (base === 'bounce') {
+      return t < 0.5
+        ? (1 - this.bounceOut(1 - 2 * t)) / 2
+        : (1 + this.bounceOut(2 * t - 1)) / 2;
+    }
+    if (base === 'elastic') {
+      if (t === 0 || t === 1) return t;
+      const p = 0.45;
+      const s = p / 4;
+      const u = 2 * t - 1;
+      if (u < 0) {
+        return -0.5 * Math.pow(2, 10 * u) * Math.sin(((u - s) * (2 * Math.PI)) / p);
+      }
+      return 0.5 * Math.pow(2, -10 * u) * Math.sin(((u - s) * (2 * Math.PI)) / p) + 1;
+    }
+    // The remaining families are symmetric: ease-in for the first half,
+    // ease-out for the second half.
+    return t < 0.5
+      ? this.easeIn(2 * t, base) / 2
+      : 0.5 + this.easeOut(2 * t - 1, base) / 2;
+  }
+
+  // Penner bounce-out: a series of decaying parabolic bounces.
+  private bounceOut(t: number): number {
+    const n = 7.5625;
+    const d = 2.75;
+    if (t < 1 / d) {
+      return n * t * t;
+    } else if (t < 2 / d) {
+      const u = t - 1.5 / d;
+      return n * u * u + 0.75;
+    } else if (t < 2.5 / d) {
+      const u = t - 2.25 / d;
+      return n * u * u + 0.9375;
+    } else {
+      const u = t - 2.625 / d;
+      return n * u * u + 0.984375;
+    }
+  }
+
+  private evaluateBezierEase(t: number, points: Point[]): number {
+    // Adobe CustomEase curves are PIECEWISE cubic beziers with 3n+1 points
+    // (n cubic segments). Points are anchor/control/control/anchor repeating with
+    // shared anchors, so a 7-point curve is 2 segments, 10 points is 3, etc.
+    if (points.length < 4) return t;
+
+    // Locate the segment whose x-range contains t. Segment i spans anchors
+    // points[3i] .. points[3i+3]; anchors are monotonically increasing in x.
+    const segmentCount = Math.floor((points.length - 1) / 3);
+    let seg = 0;
+    for (; seg < segmentCount - 1; seg++) {
+      if (t <= points[3 * (seg + 1)].x) break;
+    }
+
+    const p0 = points[3 * seg];
+    const p1 = points[3 * seg + 1];
+    const p2 = points[3 * seg + 2];
+    const p3 = points[3 * seg + 3];
+
+    // Find the bezier parameter `u` that yields x == t via Newton-Raphson,
+    // seeded by linearly mapping t into the segment's x-range.
+    const span = p3.x - p0.x;
+    let u = span > 0 ? (t - p0.x) / span : 0;
+    u = Math.max(0, Math.min(1, u));
+    for (let i = 0; i < 10; i++) {
+      const bx = this.cubicBezier(u, p0.x, p1.x, p2.x, p3.x);
+      const dx = this.cubicBezierDerivative(u, p0.x, p1.x, p2.x, p3.x);
+      if (Math.abs(dx) < 0.0001) break;
+      u = u - (bx - t) / dx;
+    }
+    u = Math.max(0, Math.min(1, u));
+
+    return this.cubicBezier(u, p0.y, p1.y, p2.y, p3.y);
   }
 
   private cubicBezier(t: number, p0: number, p1: number, p2: number, p3: number): number {

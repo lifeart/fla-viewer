@@ -701,9 +701,15 @@ export class FLAParser {
 
       if (tweenEl.tagName === 'Ease') {
         const intensity = tweenEl.getAttribute('intensity');
+        // Modern Adobe Animate tweens encode the easing TYPE+DIRECTION in
+        // `method` as a CreateJS-style token (e.g. "cubicIn", "backOut",
+        // "quadInOut"). It is stored raw and decomposed in the renderer.
+        // When `method` is absent the ease is the legacy intensity-only one.
+        const method = tweenEl.getAttribute('method');
         tweens.push({
           target,
-          intensity: intensity ? parseInt(intensity) : 0
+          intensity: intensity ? parseInt(intensity) : 0,
+          ...(method && { method })
         });
       } else if (tweenEl.tagName === 'CustomEase') {
         const points: Point[] = [];
