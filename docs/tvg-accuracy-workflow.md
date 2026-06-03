@@ -338,6 +338,15 @@ Managed side-agent finding: rejected `color.101/color-21` topology/order path
 - Contour/order changes are rejected: shape `21` resolves cleanly with same-paint child details inside the current policy, shape `22` has a support-dominated unresolved dark chain that should remain rejected, shape `23` child details are tiny same-paint islands, and local source-order moves around `21..23` produced exact zero deltas.
 - Manager decision: preserve the current same-paint detail and support-dominated unresolved-chain rules. The remaining `color-21` floor needs a better dense line-fill compositing/tone model, not topology deletion, auto-close relaxation, or local z-order changes.
 
+Managed side-agent finding: rejected `color.101/color-3` fringe/tone paths
+
+- `color-3` baseline after current dense line-fill ordering is raw about `97.75`, aligned `99.4766`, focused `97.7242`, IoU `98.1141`; reference bounds are `{minX:21,minY:8,maxX:138,maxY:152}` and candidate bounds are `{minX:20,minY:7,maxX:139,maxY:152}`.
+- Residuals point to compositing/tone rather than topology: bad interior pixels are too dark/desaturated with mean delta about `[-16.65,-36.36,-30.59]`, while bad edges are slightly too light with mean delta about `[+6.97,+7.45,+7.06]`.
+- Shape deletion/topology is rejected: best single-shape deletion was only raw `+0.015625`; removing the dominant green carrier regressed raw `-9.6875`, and removing the dark base carrier regressed raw `-27.5508`.
+- Reordering is rejected: source-order moves around the dominant base carriers produced exact zero deltas because the current base-carrier ordering already normalizes the relevant fill order.
+- Tone/lift probes are rejected for now: dense tone variants and source-green lifts either regressed `color-3` or improved one residual channel while worsening aggregate raw.
+- A proposed low-alpha extrema fringe trim looked promising in a side-agent in-memory probe, but the direct Vitest renderer guard rejected the implementation: `color-21` foreground IoU fell below its guard and `color-3` raw fell to `97.7031` in the test harness. Manager decision: do not implement extrema fringe trimming until the script/test discrepancy is explained and the rule is proven against `color-21`.
+
 Managed local bitmap finding: resampling is currently exhausted
 
 - `Agata_Head_Angles.87/Agata_Head_Angles-1` was the trusted bitmap floor at raw `97.46`, aligned `97.60`, focused `66.44`, IoU `71.27` before the portrait padding retune.
