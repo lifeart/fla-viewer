@@ -27,6 +27,7 @@ import type {
   MovieClipInstanceState
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
+import { isLayerVisibleInFla } from './layer-utils';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -805,6 +806,17 @@ export class FLARenderer {
     this.renderTimeline(timeline, frameIndex);
   }
 
+  // Delegates to the shared visibility-cascade helper (src/layer-utils.ts) so the
+  // canvas renderer and the SVG/video exporter agree on which layers are hidden.
+  // A layer is hidden if it — or any ancestor it is linked under via
+  // parentLayerIndex (its folder/group, or the layer it is parented to) — is
+  // marked visible="false". NOTE: only the visibility *flag* cascades here;
+  // parent-layer *transforms* are not composed onto children (a known gap / out
+  // of scope — not "baked" into child keyframes; see layer-utils.ts).
+  private isLayerVisibleInFla(layers: Layer[], index: number): boolean {
+    return isLayerVisibleInFla(layers, index);
+  }
+
   // Render timeline layers (extracted for reuse)
   private renderTimelineLayers(
     timeline: Timeline,
@@ -849,8 +861,19 @@ export class FLARenderer {
         continue;
       }
 
+      // Honor FLA layer visibility (with folder/parent cascade). Mask layers
+      // are handled by their own block below.
+      if (layer.layerType !== 'mask' && layerTypeLower !== 'mask' &&
+          !this.isLayerVisibleInFla(timeline.layers, i)) {
+        continue;
+      }
+
       // Check if this is a mask layer
       if (layer.layerType === 'mask' || layerTypeLower === 'mask') {
+        // A hidden mask hides its whole group (the mask and everything masked
+        // by it). Honor the mask layer's own visibility before rendering.
+        if (layer.visible === false) continue;
+
         // Find all layers masked by this layer
         const maskedByThis: number[] = [];
         for (const [maskedIdx, maskIdx] of maskedLayers) {
@@ -892,6 +915,10 @@ export class FLARenderer {
     if (!maskFrame || maskFrame.elements.length === 0) {
       // No mask content, just render masked layers normally
       for (const maskedIdx of maskedLayerIndices) {
+        // Honor each masked child's own visibility (and its parent cascade —
+        // its parentLayerIndex points at the mask, so a hidden mask also hides
+        // it here).
+        if (!this.isLayerVisibleInFla(timeline.layers, maskedIdx)) continue;
         const maskedLayer = timeline.layers[maskedIdx];
         if (maskedLayer) {
           this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx);
@@ -928,6 +955,9 @@ export class FLARenderer {
 
     // Render masked layers within the clip
     for (const maskedIdx of maskedLayerIndices) {
+      // Honor each masked child's own visibility (and its parent cascade — its
+      // parentLayerIndex points at the mask, so a hidden mask also hides it).
+      if (!this.isLayerVisibleInFla(timeline.layers, maskedIdx)) continue;
       const maskedLayer = timeline.layers[maskedIdx];
       if (maskedLayer) {
         this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx);
@@ -1019,8 +1049,19 @@ export class FLARenderer {
         continue;
       }
 
+      // Honor FLA layer visibility (with folder/parent cascade). Mask layers
+      // are handled by their own block below.
+      if (layer.layerType !== 'mask' && layerTypeLower !== 'mask' &&
+          !this.isLayerVisibleInFla(timeline.layers, i)) {
+        continue;
+      }
+
       // Check if this is a mask layer
       if (layer.layerType === 'mask' || layerTypeLower === 'mask') {
+        // A hidden mask hides its whole group (the mask and everything masked
+        // by it). Honor the mask layer's own visibility before rendering.
+        if (layer.visible === false) continue;
+
         // Find all layers masked by this layer
         const maskedByThis: number[] = [];
         for (const [maskedIdx, maskIdx] of maskedLayers) {
