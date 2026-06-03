@@ -4,15 +4,12 @@ const args = process.argv.slice(2);
 const [elementName, drawingNamesArg] = args;
 
 if (!elementName || !drawingNamesArg) {
-  console.error('Usage: node scripts/score-tvg-tone-variants.mjs <elementName> <drawing[,drawing...]> [--summary-only] [--variants=name[,name...]]');
+  console.error('Usage: node scripts/score-tvg-tone-variants.mjs <elementName> <drawing[,drawing...]> [--summary-only] [--variants=name[;name...]]');
   process.exit(1);
 }
 
 const summaryOnly = args.includes('--summary-only');
 const variantsArg = args.find((arg) => arg.startsWith('--variants='));
-const selectedVariantNames = variantsArg
-  ? new Set(variantsArg.slice('--variants='.length).split(',').map((name) => name.trim()).filter(Boolean))
-  : null;
 const drawingNames = drawingNamesArg.split(',').map((name) => name.trim()).filter(Boolean);
 
 const allVariants = [
@@ -73,6 +70,14 @@ const allVariants = [
   { name: 'source-edge-48 high-frac', sourceEdgeAdd: [-48, -42, -42], minFractionalAlpha: 1500 },
 ];
 
+const splitVariantNames = (value) => {
+  if (allVariants.some((variant) => variant.name === value)) return [value];
+  const separator = value.includes(';') ? ';' : value.includes('|') ? '|' : ',';
+  return value.split(separator).map((name) => name.trim()).filter(Boolean);
+};
+const selectedVariantNames = variantsArg
+  ? new Set(splitVariantNames(variantsArg.slice('--variants='.length)))
+  : null;
 const variants = selectedVariantNames
   ? allVariants.filter((variant) => variant.name === 'baseline' || selectedVariantNames.has(variant.name))
   : allVariants;
