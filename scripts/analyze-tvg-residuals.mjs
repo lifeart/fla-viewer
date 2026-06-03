@@ -4,11 +4,12 @@ const args = process.argv.slice(2);
 const [elementName, drawingNamesArg] = args;
 
 if (!elementName || !drawingNamesArg) {
-  console.error('Usage: node scripts/analyze-tvg-residuals.mjs <elementName> <drawing[,drawing...]> [--details]');
+  console.error('Usage: node scripts/analyze-tvg-residuals.mjs <elementName> <drawing[,drawing...]> [--details] [--paint-buckets]');
   process.exit(1);
 }
 
 const includeDetails = args.includes('--details');
+const includePaintBuckets = args.includes('--paint-buckets');
 const drawingNames = drawingNamesArg.split(',').map((name) => name.trim()).filter(Boolean);
 
 const browser = await puppeteer.launch({ headless: 'new' });
@@ -18,7 +19,7 @@ try {
   page.setDefaultNavigationTimeout(0);
   await page.goto('http://127.0.0.1:4175/', { waitUntil: 'domcontentloaded' });
 
-  const result = await page.evaluate(async ({ elementName, drawingNames, includeDetails }) => {
+  const result = await page.evaluate(async ({ elementName, drawingNames, includeDetails, includePaintBuckets }) => {
     const JSZipMod = await import('/node_modules/.vite/deps/jszip.js');
     const tvg = await import('/src/tvg-parser.ts');
     const pal = await import('/src/tpl-palette.ts');
@@ -148,6 +149,107 @@ try {
       image.src = URL.createObjectURL(blob);
     });
 
+    const paintKeyForPaint = (paint) => {
+      if (!paint) return null;
+      if (paint.kind === 'solid') {
+        const { r, g, b, a } = paint.rgba;
+        return `solid:${r},${g},${b},${a}`;
+      }
+      return JSON.stringify(paint);
+    };
+
+    const paintLabel = (paint) => {
+      if (!paint) return 'none';
+      if (paint.kind === 'solid') {
+        const { r, g, b, a } = paint.rgba;
+        return `solid(${r},${g},${b},${a})`;
+      }
+      return paint.kind;
+    };
+
+    const collectLinePaints = (drawing) => {
+      const paints = new Map();
+      for (const layer of drawing.layers) {
+        if (layer.type !== 'line') continue;
+        for (const shape of layer.shapes) {
+          for (const comp of shape.components) {
+            const key = paintKeyForPaint(comp.outerPaint);
+            if (!key || paints.has(key)) continue;
+            paints.set(key, comp.outerPaint);
+          }
+        }
+      }
+      return [...paints.entries()].map(([key, paint]) => ({ key, paint, label: paintLabel(paint) }));
+    };
+
+    const drawingForLinePaintKey = (drawing, targetKey) => {
+      const clone = structuredClone(drawing);
+      for (const layer of clone.layers) {
+        if (layer.type !== 'line') {
+          layer.shapes = [];
+          continue;
+        }
+        layer.shapes = layer.shapes
+          .map((shape) => {
+            const hasTargetPaint = shape.components.some(comp => paintKeyForPaint(comp.outerPaint) === targetKey);
+            if (!hasTargetPaint) return null;
+            return {
+              ...shape,
+              components: shape.components.filter(comp =>
+                paintKeyForPaint(comp.outerPaint) === targetKey
+                || (comp.outerPaint === null && comp.path && comp.path.segments.length > 0),
+              ),
+            };
+          })
+          .filter(Boolean);
+      }
+      return clone;
+    };
+
+    const buildPaintMasks = async (drawing) => {
+      if (!includePaintBuckets) return [];
+      const paints = collectLinePaints(drawing).slice(0, 16);
+      const masks = [];
+      for (const paint of paints) {
+        const paintDrawing = drawingForLinePaintKey(drawing, paint.key);
+        const canvas = tvg.renderTVGToCanvas(
+          paintDrawing,
+          SIZE,
+          SIZE,
+          viewport,
+          {
+            supersample: 2,
+            skipBackgroundComposite: true,
+            disableDenseLineFillAdjustment: true,
+          },
+        );
+        if (!canvas) continue;
+        await tvg.loadBitmapTiles(canvas, paintDrawing.diagnostics);
+        masks.push({
+          ...paint,
+          data: canvas.getContext('2d').getImageData(0, 0, SIZE, SIZE).data,
+        });
+      }
+      return masks;
+    };
+
+    const dominantPaintMask = (paintMasks, index) => {
+      let best = null;
+      let bestAlpha = 0;
+      for (const mask of paintMasks) {
+        const alpha = mask.data[index + 3];
+        if (alpha <= bestAlpha) continue;
+        best = mask;
+        bestAlpha = alpha;
+      }
+      return bestAlpha > 0 ? best : null;
+    };
+
+    const finalizePaintBuckets = (paintBuckets) => [...paintBuckets.entries()]
+      .map(([key, bucket]) => ({ key, ...finalizeBucket(bucket) }))
+      .sort((a, b) => b.count - a.count || b.meanAbsDelta - a.meanAbsDelta)
+      .slice(0, 32);
+
     const analyzeCase = async (drawingName) => {
       const drawing = tvg.parseTVG(await zip.file(`${base}/${drawingName}.tvg`).async('arraybuffer'));
       tvg.resolveExternalPalette(drawing, externalColors);
@@ -176,6 +278,7 @@ try {
       const candidateData = candidate.getContext('2d').getImageData(0, 0, SIZE, SIZE).data;
       const alphaData = transparent.getContext('2d').getImageData(0, 0, SIZE, SIZE).data;
       const score = bench.scoreCanvasSources(thumbnail, candidate, SIZE);
+      const paintMasks = await buildPaintMasks(drawing);
 
       const buckets = {
         bothForegroundEdge: emptyBucket(),
@@ -184,10 +287,12 @@ try {
         bothForegroundBadInterior: emptyBucket(),
       };
       const lumaBuckets = new Map();
+      const paintBuckets = new Map();
       const refOnly = [];
       const candidateOnly = [];
       let bothForeground = 0;
       let badBothForeground = 0;
+      let channelToleranceFailures = 0;
       let edgeForeground = 0;
       let interiorForeground = 0;
 
@@ -198,13 +303,25 @@ try {
           const candidateFg = isForeground(candidateData, index);
           const alpha = alphaData[index + 3];
           const isEdge = alpha > 0 && alpha < 255;
+          const dominantPaint = includePaintBuckets ? dominantPaintMask(paintMasks, index) : null;
+          const paintBucketPrefix = dominantPaint?.label ?? 'unclassified';
 
           if (refFg && !candidateFg) {
             refOnly.push({ x, y });
+            if (includePaintBuckets) {
+              const key = `${paintBucketPrefix}|ref-only`;
+              if (!paintBuckets.has(key)) paintBuckets.set(key, emptyBucket());
+              addToBucket(paintBuckets.get(key), refData, candidateData, index);
+            }
             continue;
           }
           if (!refFg && candidateFg) {
             candidateOnly.push({ x, y });
+            if (includePaintBuckets) {
+              const key = `${paintBucketPrefix}|candidate-only`;
+              if (!paintBuckets.has(key)) paintBuckets.set(key, emptyBucket());
+              addToBucket(paintBuckets.get(key), refData, candidateData, index);
+            }
             continue;
           }
           if (!refFg || !candidateFg) continue;
@@ -215,18 +332,40 @@ try {
 
           const bucket = isEdge ? buckets.bothForegroundEdge : buckets.bothForegroundInterior;
           addToBucket(bucket, refData, candidateData, index);
+          if (includePaintBuckets) {
+            const key = `${paintBucketPrefix}|${isEdge ? 'edge' : 'interior'}`;
+            if (!paintBuckets.has(key)) paintBuckets.set(key, emptyBucket());
+            addToBucket(paintBuckets.get(key), refData, candidateData, index);
+          }
 
           const absDelta = Math.abs(candidateData[index] - refData[index])
             + Math.abs(candidateData[index + 1] - refData[index + 1])
             + Math.abs(candidateData[index + 2] - refData[index + 2]);
+          const channelToleranceFail = Math.abs(candidateData[index] - refData[index]) > BAD_DELTA_THRESHOLD
+            || Math.abs(candidateData[index + 1] - refData[index + 1]) > BAD_DELTA_THRESHOLD
+            || Math.abs(candidateData[index + 2] - refData[index + 2]) > BAD_DELTA_THRESHOLD;
           const refLumaBucket = `${Math.floor(luma(refData, index) / 32) * 32}-${Math.floor(luma(refData, index) / 32) * 32 + 31}`;
           if (!lumaBuckets.has(refLumaBucket)) lumaBuckets.set(refLumaBucket, emptyBucket());
           addToBucket(lumaBuckets.get(refLumaBucket), refData, candidateData, index);
+
+          if (channelToleranceFail) {
+            channelToleranceFailures += 1;
+            if (includePaintBuckets) {
+              const key = `${paintBucketPrefix}|tolerance-fail-${isEdge ? 'edge' : 'interior'}`;
+              if (!paintBuckets.has(key)) paintBuckets.set(key, emptyBucket());
+              addToBucket(paintBuckets.get(key), refData, candidateData, index);
+            }
+          }
 
           if (absDelta > BAD_DELTA_THRESHOLD) {
             badBothForeground += 1;
             const badBucket = isEdge ? buckets.bothForegroundBadEdge : buckets.bothForegroundBadInterior;
             addToBucket(badBucket, refData, candidateData, index);
+            if (includePaintBuckets) {
+              const key = `${paintBucketPrefix}|bad-${isEdge ? 'edge' : 'interior'}`;
+              if (!paintBuckets.has(key)) paintBuckets.set(key, emptyBucket());
+              addToBucket(paintBuckets.get(key), refData, candidateData, index);
+            }
           }
         }
       }
@@ -238,6 +377,7 @@ try {
         counts: {
           bothForeground,
           badBothForeground,
+          channelToleranceFailures,
           edgeForeground,
           interiorForeground,
           refOnly: refOnly.length,
@@ -249,6 +389,7 @@ try {
         lumaBuckets: [...lumaBuckets.entries()]
           .sort(([a], [b]) => Number(a.split('-')[0]) - Number(b.split('-')[0]))
           .map(([range, bucket]) => ({ range, ...finalizeBucket(bucket) })),
+        paintBuckets: includePaintBuckets ? finalizePaintBuckets(paintBuckets) : undefined,
         refOnlySummary: {
           bounds: boundsForMask(refOnly),
           topRows: rowCounts(refOnly),
@@ -269,7 +410,7 @@ try {
     };
 
     return Promise.all(drawingNames.map(analyzeCase));
-  }, { elementName, drawingNames, includeDetails });
+  }, { elementName, drawingNames, includeDetails, includePaintBuckets });
 
   console.log(JSON.stringify(result, null, 2));
 } finally {

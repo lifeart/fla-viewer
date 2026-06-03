@@ -2985,6 +2985,10 @@ export interface TVGRenderOptions {
   skipClipping?: boolean;
   /** Skip white background pre-composite (for matte/compositor sources). */
   skipBackgroundComposite?: boolean;
+  /** Experimental: bypass dense line-fill post-processing in local score probes. */
+  disableDenseLineFillAdjustment?: boolean;
+  /** Experimental: choose when white background is composited relative to downsampling/dense post-processing. */
+  backgroundCompositeTiming?: 'pre-downsample' | 'post-downsample-before-dense' | 'post-downsample-after-dense';
 }
 
 const DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT = 220;
@@ -3038,6 +3042,7 @@ function shouldApplyDenseLineFillInkDensityAdjustment(
   drawing: TVGDrawing,
   options?: TVGRenderOptions,
 ): boolean {
+  if (options?.disableDenseLineFillAdjustment) return false;
   if (options?.skipBackgroundComposite || options?.skipClipping || options?.centerOnOrigin) return false;
   if (options?.artLayerFilter && options.artLayerFilter !== 'all') return false;
   return shouldInsetViewportForLineFillDrawing(drawing);
@@ -3398,6 +3403,17 @@ function applyDenseLineFillInteriorShadowToneAdjustment(
     data[index + 2] = Math.min(255, data[index + 2] + DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT.b);
   }
   ctx.putImageData(image, 0, 0);
+}
+
+function compositeWhiteBackground(canvas: HTMLCanvasElement): void {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'destination-over';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
 }
 
 function filterDrawingToActiveLayerTypes(
@@ -3937,13 +3953,10 @@ export function renderTVGToCanvas(
   }
 
   // Pre-composite against white background (skip for matte/compositor sources)
-  if (!options?.skipBackgroundComposite) {
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalCompositeOperation = 'destination-over';
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, ssWidth, ssHeight);
-    ctx.restore();
+  const backgroundCompositeTiming = options?.backgroundCompositeTiming ?? 'pre-downsample';
+  const shouldCompositeBackground = !options?.skipBackgroundComposite;
+  if (shouldCompositeBackground && backgroundCompositeTiming === 'pre-downsample') {
+    compositeWhiteBackground(canvas);
   }
 
   // Downsample from SS resolution to output resolution
@@ -3955,6 +3968,9 @@ export function renderTVGToCanvas(
     outCtx.imageSmoothingEnabled = true;
     outCtx.imageSmoothingQuality = 'high';
     outCtx.drawImage(canvas, 0, 0, width, height);
+    if (shouldCompositeBackground && backgroundCompositeTiming === 'post-downsample-before-dense') {
+      compositeWhiteBackground(outCanvas);
+    }
     if (shouldApplyDenseLineFillAdjustment) {
       applyDenseLineFillInkDensityAdjustment(outCanvas, denseLineFillOutputFractionalAlphaPixels);
       applyDenseLineFillInteriorShadowToneAdjustment(outCanvas, denseLineFillOutputAlphaMask);
@@ -3962,15 +3978,24 @@ export function renderTVGToCanvas(
         applyDenseLineFillEdgeToneAdjustment(outCanvas, denseLineFillOutputAlphaMask);
       }
     }
+    if (shouldCompositeBackground && backgroundCompositeTiming === 'post-downsample-after-dense') {
+      compositeWhiteBackground(outCanvas);
+    }
     return outCanvas;
   }
 
+  if (shouldCompositeBackground && backgroundCompositeTiming === 'post-downsample-before-dense') {
+    compositeWhiteBackground(canvas);
+  }
   if (shouldApplyDenseLineFillAdjustment) {
     applyDenseLineFillInkDensityAdjustment(canvas, denseLineFillOutputFractionalAlphaPixels);
     applyDenseLineFillInteriorShadowToneAdjustment(canvas, denseLineFillOutputAlphaMask);
     if (shouldApplyDenseLineFillEdgeTone) {
       applyDenseLineFillEdgeToneAdjustment(canvas, denseLineFillOutputAlphaMask);
     }
+  }
+  if (shouldCompositeBackground && backgroundCompositeTiming === 'post-downsample-after-dense') {
+    compositeWhiteBackground(canvas);
   }
   return canvas;
 }

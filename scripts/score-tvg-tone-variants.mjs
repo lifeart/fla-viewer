@@ -4,23 +4,41 @@ const args = process.argv.slice(2);
 const [elementName, drawingNamesArg] = args;
 
 if (!elementName || !drawingNamesArg) {
-  console.error('Usage: node scripts/score-tvg-tone-variants.mjs <elementName> <drawing[,drawing...]>');
+  console.error('Usage: node scripts/score-tvg-tone-variants.mjs <elementName> <drawing[,drawing...]> [--summary-only]');
   process.exit(1);
 }
 
+const summaryOnly = args.includes('--summary-only');
 const drawingNames = drawingNamesArg.split(',').map((name) => name.trim()).filter(Boolean);
 
 const variants = [
   { name: 'baseline' },
+  { name: 'no-dense-post', renderOptions: { disableDenseLineFillAdjustment: true } },
+  { name: 'bg-post-before-dense', renderOptions: { backgroundCompositeTiming: 'post-downsample-before-dense' } },
+  { name: 'bg-post-after-dense', renderOptions: { backgroundCompositeTiming: 'post-downsample-after-dense' } },
   { name: 'interior+4,+12,+12', interiorAdd: [4, 12, 12], maxLuma: 220 },
   { name: 'interior+6,+18,+18', interiorAdd: [6, 18, 18], maxLuma: 220 },
   { name: 'interior+8,+24,+22', interiorAdd: [8, 24, 22], maxLuma: 220 },
   { name: 'interior+4,+20,+20 shadows', interiorAdd: [4, 20, 20], maxLuma: 96 },
   { name: 'interior+8,+24,+22 mid', interiorAdd: [8, 24, 22], minLuma: 64, maxLuma: 180 },
   { name: 'interior+4,+16,+16 dark-mid', interiorAdd: [4, 16, 16], minLuma: 32, maxLuma: 160 },
+  { name: 'sat-green+10,+28,+24', interiorAdd: [10, 28, 24], minLuma: 105, maxLuma: 185, maxR: 80, minG: 115, minChroma: 70 },
+  { name: 'sat-green+14,+36,+30', interiorAdd: [14, 36, 30], minLuma: 105, maxLuma: 185, maxR: 80, minG: 115, minChroma: 70 },
+  { name: 'sat-green+18,+44,+36', interiorAdd: [18, 44, 36], minLuma: 105, maxLuma: 185, maxR: 90, minG: 115, minChroma: 70 },
+  { name: 'dark-cyan+0,-12,-12', interiorAdd: [0, -12, -12], minLuma: 32, maxLuma: 95, maxR: 55, minG: 40, minB: 40, maxChroma: 90 },
+  { name: 'dark-cyan-2,-20,-16', interiorAdd: [-2, -20, -16], minLuma: 32, maxLuma: 95, maxR: 60, minG: 40, minB: 40, maxChroma: 100 },
+  { name: 'sat-green+14 plus dark-cyan-12', multiInterior: [
+    { interiorAdd: [14, 36, 30], minLuma: 105, maxLuma: 185, maxR: 80, minG: 115, minChroma: 70 },
+    { interiorAdd: [0, -12, -12], minLuma: 32, maxLuma: 95, maxR: 55, minG: 40, minB: 40, maxChroma: 90 },
+  ] },
   { name: 'edge-8,-8,-8', edgeAdd: [-8, -8, -8] },
   { name: 'edge-16,-16,-16', edgeAdd: [-16, -16, -16] },
   { name: 'edge-24,-20,-20', edgeAdd: [-24, -20, -20] },
+  { name: 'edge-luma120-8', edgeAdd: [-8, -8, -8], minLuma: 120 },
+  { name: 'edge-luma120-16', edgeAdd: [-16, -16, -16], minLuma: 120 },
+  { name: 'edge-luma140-16', edgeAdd: [-16, -16, -16], minLuma: 140 },
+  { name: 'edge-luma140-24', edgeAdd: [-24, -20, -20], minLuma: 140 },
+  { name: 'edge-sat-luma120-16', edgeAdd: [-16, -16, -16], minLuma: 120, minChroma: 40 },
   { name: 'edge-16 + shadow lift', edgeAdd: [-16, -16, -16], interiorAdd: [4, 20, 20], maxLuma: 96 },
   { name: 'source-edge-16 high-frac', sourceEdgeAdd: [-16, -16, -16], minFractionalAlpha: 1500 },
   { name: 'source-edge-32 high-frac', sourceEdgeAdd: [-32, -32, -32], minFractionalAlpha: 1500 },
@@ -91,8 +109,34 @@ try {
       return count;
     };
 
+    const pixelMatchesVariant = (data, index, variant) => {
+      const pixelLuma = luma(data, index);
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+      const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+      if (variant.minLuma !== undefined && pixelLuma < variant.minLuma) return false;
+      if (variant.maxLuma !== undefined && pixelLuma > variant.maxLuma) return false;
+      if (variant.minR !== undefined && r < variant.minR) return false;
+      if (variant.maxR !== undefined && r > variant.maxR) return false;
+      if (variant.minG !== undefined && g < variant.minG) return false;
+      if (variant.maxG !== undefined && g > variant.maxG) return false;
+      if (variant.minB !== undefined && b < variant.minB) return false;
+      if (variant.maxB !== undefined && b > variant.maxB) return false;
+      if (variant.minChroma !== undefined && chroma < variant.minChroma) return false;
+      if (variant.maxChroma !== undefined && chroma > variant.maxChroma) return false;
+      return true;
+    };
+
+    const applyInteriorAdjustment = (data, index, variant) => {
+      data[index] = clamp(data[index] + variant.interiorAdd[0]);
+      data[index + 1] = clamp(data[index + 1] + variant.interiorAdd[1]);
+      data[index + 2] = clamp(data[index + 2] + variant.interiorAdd[2]);
+    };
+
     const applyVariant = (canvas, alphaData, variant, fractionalAlphaCount) => {
-      if (!variant.interiorAdd && !variant.edgeAdd && !variant.sourceEdgeAdd) return canvas;
+      if (variant.renderOptions) return canvas;
+      if (!variant.interiorAdd && !variant.edgeAdd && !variant.sourceEdgeAdd && !variant.multiInterior) return canvas;
       if (variant.minFractionalAlpha !== undefined && fractionalAlphaCount < variant.minFractionalAlpha) return canvas;
 
       const output = cloneCanvas(canvas);
@@ -112,18 +156,19 @@ try {
             continue;
           }
           if (isEdge && variant.edgeAdd) {
+            if (!pixelMatchesVariant(data, index, variant)) continue;
             data[index] = clamp(data[index] + variant.edgeAdd[0]);
             data[index + 1] = clamp(data[index + 1] + variant.edgeAdd[1]);
             data[index + 2] = clamp(data[index + 2] + variant.edgeAdd[2]);
             continue;
           }
-          if (isEdge || alphaData[index + 3] !== 255 || !variant.interiorAdd) continue;
-          const pixelLuma = luma(data, index);
-          if (variant.minLuma !== undefined && pixelLuma < variant.minLuma) continue;
-          if (variant.maxLuma !== undefined && pixelLuma > variant.maxLuma) continue;
-          data[index] = clamp(data[index] + variant.interiorAdd[0]);
-          data[index + 1] = clamp(data[index + 1] + variant.interiorAdd[1]);
-          data[index + 2] = clamp(data[index + 2] + variant.interiorAdd[2]);
+          if (isEdge || alphaData[index + 3] !== 255) continue;
+          const interiorVariants = variant.multiInterior ?? (variant.interiorAdd ? [variant] : []);
+          for (const interiorVariant of interiorVariants) {
+            if (!pixelMatchesVariant(data, index, interiorVariant)) continue;
+            applyInteriorAdjustment(data, index, interiorVariant);
+            break;
+          }
         }
       }
       ctx.putImageData(image, 0, 0);
@@ -148,19 +193,24 @@ try {
 
       const alphaData = transparent.getContext('2d').getImageData(0, 0, SIZE, SIZE).data;
       const fractionalAlphaCount = countFractionalAlpha(alphaData);
-      return variants.map((variant) => {
-        const canvas = variant.name === 'baseline'
+      const rows = [];
+      for (const variant of variants) {
+        const canvas = variant.renderOptions
+          ? tvg.renderTVGToCanvas(drawing, SIZE, SIZE, viewport, { supersample: 2, ...variant.renderOptions })
+          : variant.name === 'baseline'
           ? candidate
           : applyVariant(candidate, alphaData, variant, fractionalAlphaCount);
+        if (variant.renderOptions && canvas) await tvg.loadBitmapTiles(canvas, drawing.diagnostics);
         const score = bench.scoreCanvasSources(thumb, canvas, SIZE);
-        return {
+        rows.push({
           variant: variant.name,
           rawScore: score.rawScore,
           alignedScore: score.alignedScore,
           normalizedScore: score.normalizedScore,
           foregroundIou: score.foregroundIou,
-        };
-      });
+        });
+      }
+      return rows;
     };
 
     const byDrawing = {};
@@ -192,7 +242,7 @@ try {
     return { byDrawing, summary };
   }, { elementName, drawingNames, variants });
 
-  console.log(JSON.stringify(result, null, 2));
+  console.log(JSON.stringify(summaryOnly ? { summary: result.summary } : result, null, 2));
 } finally {
   await browser.close();
 }
