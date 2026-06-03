@@ -368,12 +368,30 @@ describe('video-exporter', () => {
         progressCalls.push({ stage: progress.stage });
       });
 
+      // Export must always produce a valid, non-empty MP4 blob, whether or not
+      // the audio codec is available in this environment.
       expect(blob).toBeInstanceOf(Blob);
       expect(blob.type).toBe('video/mp4');
       expect(blob.size).toBeGreaterThan(0);
 
-      // Should have encoding-audio stage
-      expect(progressCalls.some(p => p.stage === 'encoding-audio')).toBe(true);
+      // Only assert the audio-encoding stage ran when the AAC codec is actually
+      // supported here; otherwise the exporter degrades to video-only.
+      const aacSupported =
+        typeof AudioEncoder !== 'undefined' &&
+        typeof AudioEncoder.isConfigSupported === 'function' &&
+        (await AudioEncoder.isConfigSupported({
+          codec: 'mp4a.40.2',
+          numberOfChannels: 2,
+          sampleRate,
+          bitrate: 128_000,
+        })).supported === true;
+
+      if (aacSupported) {
+        expect(progressCalls.some(p => p.stage === 'encoding-audio')).toBe(true);
+      } else {
+        // Graceful video-only degradation: no audio stage was emitted.
+        expect(progressCalls.some(p => p.stage === 'encoding-audio')).toBe(false);
+      }
 
       await audioContext.close();
     });
@@ -419,6 +437,7 @@ describe('video-exporter', () => {
 
       const blob = await exportVideo(doc);
 
+      // Export completes with a valid blob whether or not audio is supported.
       expect(blob).toBeInstanceOf(Blob);
       expect(blob.size).toBeGreaterThan(0);
 
@@ -467,10 +486,108 @@ describe('video-exporter', () => {
 
       const blob = await exportVideo(doc);
 
+      // Export completes with a valid blob whether or not audio is supported.
       expect(blob).toBeInstanceOf(Blob);
       expect(blob.size).toBeGreaterThan(0);
 
       await audioContext.close();
+    });
+
+    it('should gracefully export video-only when audio codec is unsupported', async () => {
+      // Force the unsupported-codec path deterministically (the AAC codec IS
+      // available on most dev machines, so we stub support detection to false).
+      // This is the load-bearing test for the graceful-degradation path: it
+      // verifies that a missing audio codec yields a valid video-only file
+      // with a warning, instead of an unhandled NotSupportedError crash.
+      const audioContext = new AudioContext();
+      const sampleRate = audioContext.sampleRate;
+      const duration = 0.5;
+      const audioBuffer = audioContext.createBuffer(2, Math.ceil(sampleRate * duration), sampleRate);
+
+      const leftChannel = audioBuffer.getChannelData(0);
+      const rightChannel = audioBuffer.getChannelData(1);
+      for (let i = 0; i < audioBuffer.length; i++) {
+        leftChannel[i] = Math.sin(2 * Math.PI * 440 * i / sampleRate) * 0.5;
+        rightChannel[i] = Math.sin(2 * Math.PI * 440 * i / sampleRate) * 0.5;
+      }
+
+      const sounds = new Map();
+      sounds.set('test.mp3', {
+        name: 'test.mp3',
+        audioData: audioBuffer,
+      });
+
+      const doc = createMinimalDoc({
+        width: 80,
+        height: 60,
+        frameRate: 12,
+        sounds,
+        timelines: [createTimeline({
+          totalFrames: 6,
+          layers: [createLayer({
+            frames: [createFrame({
+              index: 0,
+              duration: 6,
+              sound: {
+                name: 'test.mp3',
+                sync: 'stream',
+                inPoint44: 0,
+              },
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 10, y: 10 },
+                    { type: 'L', x: 70, y: 10 },
+                    { type: 'L', x: 70, y: 50 },
+                    { type: 'L', x: 10, y: 50 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      // Stub support detection so the AAC codec is reported as unsupported,
+      // exercising the degradation guard even on machines where it IS supported.
+      const isConfigSupportedSpy = vi
+        .spyOn(AudioEncoder, 'isConfigSupported')
+        .mockResolvedValue({ supported: false, config: {} } as AudioEncoderSupport);
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      try {
+        const progressCalls: { stage: string }[] = [];
+
+        // Must NOT throw — it should degrade to a valid video-only export.
+        const blob = await exportVideo(doc, (progress) => {
+          progressCalls.push({ stage: progress.stage });
+        });
+
+        expect(blob).toBeInstanceOf(Blob);
+        expect(blob.type).toBe('video/mp4');
+        expect(blob.size).toBeGreaterThan(0);
+
+        // No audio was encoded, so the audio stage must be absent.
+        expect(progressCalls.some(p => p.stage === 'encoding-audio')).toBe(false);
+
+        // The degradation is surfaced via a warning (no silent swallowing).
+        expect(warnSpy).toHaveBeenCalled();
+        expect(
+          warnSpy.mock.calls.some(call =>
+            String(call[0]).includes('mp4a.40.2')
+          )
+        ).toBe(true);
+      } finally {
+        isConfigSupportedSpy.mockRestore();
+        warnSpy.mockRestore();
+        await audioContext.close();
+      }
     });
   });
 
