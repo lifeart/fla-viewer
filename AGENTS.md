@@ -303,9 +303,15 @@ Decodes to:
 
 ### Fill Styles in Edges
 
-- `fillStyle0`: Fill on the LEFT side of the edge direction
-- `fillStyle1`: Fill on the RIGHT side of the edge direction
-- Used for complex shapes with holes (winding rule)
+- `fillStyle1`: Fill on the **LEFT** side of the edge direction — contributed
+  FORWARD (as-written) when stitching that fill's contour.
+- `fillStyle0`: Fill on the **RIGHT** side of the edge direction — contributed
+  REVERSED (the edge's point list is flipped) when stitching that fill's contour.
+- This matches the canonical SWF / Ruffle convention (`render/src/shape_utils.rs`:
+  `fill_style_1` = left/forward, `fill_style_0` = right/reversed via `flip()`) and
+  the renderer in `src/renderer.ts` (`getOrComputeShapePaths` reverses `fillStyle0`
+  contributions via `reverseCommands`).
+- Used for complex shapes with holes (nonzero winding rule).
 
 ---
 

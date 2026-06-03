@@ -529,57 +529,47 @@ export function readShapeData(
 
 /**
  * Convert decoded raw edges (ultra-twips) into viewer {@link Edge}s with
- * pixel-space {@link PathCommand}s. Contiguous edges sharing the same
- * fill/line indices are grouped into one path so the renderer can fill them
- * as a single region; an `M` is emitted whenever the start of an edge does
- * not continue the previous endpoint.
+ * pixel-space {@link PathCommand}s.
+ *
+ * One {@link Edge} is emitted PER {@link RawEdge}: `[M(from), L|Q(to)]`. This is
+ * the canonical SWF/Ruffle "edge soup" contract — each edge carries its own
+ * `fillStyle0` (RIGHT side, reversed at render) and `fillStyle1` (LEFT side,
+ * forward), and the renderer (`getOrComputeShapePaths`) is responsible for
+ * stitching the per-edge contributions into closed contours per fill index.
+ *
+ * We deliberately do NOT pre-group contiguous same-style edges into one path:
+ * grouping by `(fill0, fill1, lineStyle)` scatters the boundary edges of a
+ * single fill region across different groups whenever those edges happen to
+ * carry a different style on their OTHER side (e.g. a bevel quad whose four
+ * sides each border a different neighbour), which defeats the renderer's
+ * per-edge fill model and leaves regions unable to close (missing fills).
+ * Emitting raw edges hands the renderer exactly the soup it expects.
+ *
+ * `fillStyle0/1`/`strokeStyle` are kept undefined when their index is 0 (the
+ * "no style" sentinel), matching the previous contract.
  */
 export function rawEdgesToEdges(rawEdges: RawEdge[]): Edge[] {
-  const out: Edge[] = [];
-  // Group by (fill0, fill1, lineStyle) preserving first-seen order.
-  const groups = new Map<string, RawEdge[]>();
-  const order: string[] = [];
-  for (const e of rawEdges) {
-    const key = `${e.fill0}|${e.fill1}|${e.lineStyle}`;
-    let g = groups.get(key);
-    if (!g) {
-      g = [];
-      groups.set(key, g);
-      order.push(key);
-    }
-    g.push(e);
-  }
   const px = (v: number) => v / ULTRA_TWIPS_PER_PX;
-  for (const key of order) {
-    const group = groups.get(key)!;
-    const [f0, f1, ls] = key.split('|').map((n) => parseInt(n, 10));
-    const commands: PathCommand[] = [];
-    let cur: [number, number] | null = null;
-    for (const e of group) {
-      const fx = px(e.fromX);
-      const fy = px(e.fromY);
-      const tx = px(e.toX);
-      const ty = px(e.toY);
-      if (cur === null || cur[0] !== fx || cur[1] !== fy) {
-        commands.push({ type: 'M', x: fx, y: fy });
-      }
-      if (e.kind === 'line') {
-        commands.push({ type: 'L', x: tx, y: ty });
-      } else {
-        commands.push({
-          type: 'Q',
-          cx: px(e.ctrlX),
-          cy: px(e.ctrlY),
-          x: tx,
-          y: ty,
-        });
-      }
-      cur = [tx, ty];
+  const out: Edge[] = [];
+  for (const e of rawEdges) {
+    const commands: PathCommand[] = [
+      { type: 'M', x: px(e.fromX), y: px(e.fromY) },
+    ];
+    if (e.kind === 'line') {
+      commands.push({ type: 'L', x: px(e.toX), y: px(e.toY) });
+    } else {
+      commands.push({
+        type: 'Q',
+        cx: px(e.ctrlX),
+        cy: px(e.ctrlY),
+        x: px(e.toX),
+        y: px(e.toY),
+      });
     }
     const edge: Edge = { commands };
-    if (f0) edge.fillStyle0 = f0;
-    if (f1) edge.fillStyle1 = f1;
-    if (ls) edge.strokeStyle = ls;
+    if (e.fill0) edge.fillStyle0 = e.fill0;
+    if (e.fill1) edge.fillStyle1 = e.fill1;
+    if (e.lineStyle) edge.strokeStyle = e.lineStyle;
     out.push(edge);
   }
   return out;

@@ -375,14 +375,33 @@ describe('binary-shape-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () => {
       { index: 1, type: 'solid', color: '#66ff00', alpha: 1 },
     ]);
     expect(shape.strokes[0]).toMatchObject({ index: 1, color: '#ff0000' });
-    // One grouped edge: the closed 180×180 square path.
-    expect(shape.edges).toHaveLength(1);
-    expect(shape.edges[0].commands).toEqual([
-      { type: 'M', x: 180, y: 180 },
-      { type: 'L', x: 0, y: 180 },
-      { type: 'L', x: 0, y: 0 },
-      { type: 'L', x: 180, y: 0 },
-      { type: 'L', x: 180, y: 180 },
+    // ONE Edge PER RawEdge (Ruffle/SWF edge-soup contract): the 180×180 square
+    // is four straight edges, each `[M(from), L(to)]`, each carrying its OWN
+    // per-edge fill/stroke refs (fillStyle0=1 RIGHT side, strokeStyle=1). The
+    // decoder no longer pre-concatenates them into one grouped path — the
+    // renderer stitches the soup into a closed contour itself.
+    expect(shape.edges).toHaveLength(4);
+    for (const edge of shape.edges) {
+      expect(edge.commands).toHaveLength(2);
+      expect(edge.commands[0].type).toBe('M');
+      expect(edge.commands[1].type).toBe('L');
+      // Each square side borders fill 1 on its RIGHT (fillStyle0) and carries
+      // the red stroke; fillStyle1 is unset (the outside).
+      expect(edge.fillStyle0).toBe(1);
+      expect(edge.fillStyle1).toBeUndefined();
+      expect(edge.strokeStyle).toBe(1);
+    }
+    // The four edges, walked head-to-tail, still trace the closed square.
+    const verts = shape.edges.map((e) => {
+      const m = e.commands[0] as { type: 'M'; x: number; y: number };
+      const l = e.commands[1] as { type: 'L'; x: number; y: number };
+      return { from: [m.x, m.y], to: [l.x, l.y] };
+    });
+    expect(verts).toEqual([
+      { from: [180, 180], to: [0, 180] },
+      { from: [0, 180], to: [0, 0] },
+      { from: [0, 0], to: [180, 0] },
+      { from: [180, 0], to: [180, 180] },
     ]);
   });
 
@@ -392,6 +411,45 @@ describe('binary-shape-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () => {
     const res = decodeStreamShapes(ole.readStream('Symbol 2'));
     expect(res.shapes.length).toBeGreaterThanOrEqual(2);
     expect(res.totalEdges).toBeGreaterThanOrEqual(16);
+  });
+
+  // ── Load-bearing regression for the un-grouping fix ───────────────────────
+  // Symbol 2 shape[1] is a 4-fill bordered frame (#ffffff ×2, #000000 ×2). The
+  // OLD decoder grouped raw edges by (fill0,fill1,lineStyle), producing 10
+  // Edges, two of which CONCATENATED disjoint raw edges with an internal `M`
+  // (e.g. outer-top + inner-top under fill1=1). The NEW decoder emits ONE Edge
+  // per RawEdge (12 single-segment `[M, L]` edges, zero internal moves), each
+  // carrying its own fill ref — the Ruffle/SWF edge-soup contract the renderer
+  // expects. This pins that contract: it FAILS against the grouped decoder
+  // (which gave 10 edges / 2 multi-segment) and PASSES against the per-edge one.
+  it('emits one Edge per RawEdge for the 4-fill bordered frame (no grouping)', async () => {
+    const bytes = await loadBtnstrob();
+    const ole = new OLE2File(bytes);
+    const res = decodeStreamShapes(ole.readStream('Symbol 2'));
+    const shape = res.shapes[1];
+
+    // Four declared solid fills (two white bevels, two black bevels).
+    expect(shape.fills.map((f) => f.index)).toEqual([1, 2, 3, 4]);
+
+    // Exactly one Edge per raw edge: 12 single-segment edges, each a `[M, L]`.
+    expect(shape.edges).toHaveLength(12);
+    let internalMoves = 0;
+    for (const edge of shape.edges) {
+      expect(edge.commands).toHaveLength(2);
+      expect(edge.commands[0].type).toBe('M');
+      // No edge concatenates a second subpath via an internal MoveTo.
+      internalMoves += edge.commands.filter((c) => c.type === 'M').length - 1;
+    }
+    expect(internalMoves).toBe(0);
+
+    // Every declared fill is referenced as some edge's LEFT side (fillStyle1) —
+    // the frame's four bevel regions each have a boundary contribution, so the
+    // renderer can stitch all four (none is silently dropped by grouping).
+    const refFill1 = new Set<number>();
+    for (const edge of shape.edges) {
+      if (edge.fillStyle1 !== undefined) refFill1.add(edge.fillStyle1);
+    }
+    expect([...refFill1].sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
   });
 });
 
