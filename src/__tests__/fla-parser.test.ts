@@ -1728,21 +1728,22 @@ describe('FLAParser', () => {
     function createFlaBitmapDat(options: {
       width: number;
       height: number;
-      pixelData?: Uint8Array; // ABGR pixel data (if not provided, creates solid color)
+      pixelData?: Uint8Array; // A,R,G,B pixel data (if not provided, creates solid red)
       corruptAt?: number; // Offset to corrupt the deflate stream
       useInvalidData?: boolean; // Use completely invalid data
     }): Uint8Array {
       const { width, height, corruptAt, useInvalidData = false } = options;
 
-      // Create ABGR pixel data if not provided (solid red per JPEXS spec)
+      // Pixel byte layout per JPEXS: byte0=A, byte1=R, byte2=G, byte3=B.
+      // Default = solid red (byte1=0xFF).
       let pixelData = options.pixelData;
       if (!pixelData) {
         pixelData = new Uint8Array(width * height * 4);
         for (let i = 0; i < width * height; i++) {
-          pixelData[i * 4 + 0] = 0xFF; // A (alpha)
-          pixelData[i * 4 + 1] = 0x00; // B (blue)
-          pixelData[i * 4 + 2] = 0x00; // G (green)
-          pixelData[i * 4 + 3] = 0xFF; // R (red)
+          pixelData[i * 4 + 0] = 0xFF; // A (alpha, byte 0)
+          pixelData[i * 4 + 1] = 0xFF; // R (red,   byte 1)
+          pixelData[i * 4 + 2] = 0x00; // G (green, byte 2)
+          pixelData[i * 4 + 3] = 0x00; // B (blue,  byte 3)
         }
       }
 
@@ -1861,6 +1862,121 @@ describe('FLAParser', () => {
       const bitmap = doc.bitmaps.get('test2.png');
       expect(bitmap).toBeDefined();
       expect(bitmap?.imageData).toBeDefined();
+    });
+
+    // Issue #10: red detail was rendering as blue. The .dat byte layout is
+    // A,R,G,B (byte1=red, byte3=blue) per JPEXS; reading it as ABGR swaps R/B.
+    it('decodes the .dat channel order as A,R,G,B (red stays red, not blue)', async () => {
+      const width = 4;
+      const height = 4;
+      // Pure red: A=0xFF (byte0), R=0xFF (byte1), G=0 (byte2), B=0 (byte3).
+      const pixelData = new Uint8Array(width * height * 4);
+      for (let i = 0; i < width * height; i++) {
+        pixelData[i * 4 + 0] = 0xFF;
+        pixelData[i * 4 + 1] = 0xFF;
+        pixelData[i * 4 + 2] = 0x00;
+        pixelData[i * 4 + 3] = 0x00;
+      }
+      const datFile = createFlaBitmapDat({ width, height, pixelData });
+      const media = `
+        <media>
+          <DOMBitmapItem name="red.png" href="red.png"
+            bitmapDataHRef="M 9 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 9 123456.dat': datFile }
+      );
+      const doc = await parser.parse(fla);
+      const img = doc.bitmaps.get('red.png')?.imageData as HTMLImageElement;
+      expect(img).toBeDefined();
+      if (!img.complete) {
+        await new Promise<void>((r) => { img.onload = () => r(); });
+      }
+
+      // Draw the decoded image and read the center pixel.
+      const c = document.createElement('canvas');
+      c.width = width;
+      c.height = height;
+      const cx = c.getContext('2d')!;
+      cx.drawImage(img, 0, 0);
+      const [r, g, b] = cx.getImageData(2, 2, 1, 1).data;
+      expect(r).toBeGreaterThan(200); // red channel high
+      expect(b).toBeLessThan(60); //     blue channel low (not swapped)
+      expect(g).toBeLessThan(60);
+    });
+
+    // Regression for PR #15: premultiplied-alpha unmultiply must subtract 1 from
+    // alpha (`a1 = a - 1`) before dividing, matching JPEXS LosslessImageBinDataReader
+    // (which pairs with the writer's `a + 1`). The existing channel-order test above
+    // only uses opaque alpha (255), so it never exercises this `a1` path.
+    //
+    // Chosen semi-transparent pixel (premultiplied input, A,R,G,B byte order):
+    //   A = 33  -> a1 = a - 1 = 32   (output alpha emitted as a1, NOT a)
+    //   R = 32  -> floor(32 * 256 / 32) = 256 -> clamps to 255
+    //   G = 24  -> floor(24 * 256 / 32) = 192
+    //   B = 16  -> floor(16 * 256 / 32) = 128
+    // JPEXS-correct decoded pixel: R=255 G=192 B=128 A=32
+    //
+    // The buggy `/a` (no `-1`, output alpha = a) would instead produce:
+    //   R = floor(32 * 256 / 33) = 248   (does NOT clamp to 255)
+    //   G = floor(24 * 256 / 33) = 186
+    //   B = floor(16 * 256 / 33) = 124
+    //   A = 33
+    // So the correct R clamps to 255 while the buggy R is 248, and the output
+    // alpha is 32 (correct) vs 33 (buggy) -- both are comfortably detectable and
+    // survive the Chromium canvas/PNG round-trip (RGB drifts by <=1, alpha exact).
+    it('unmultiplies premultiplied alpha with the JPEXS a-1 step (semi-transparent pixel)', async () => {
+      const width = 4;
+      const height = 4;
+      const PREMULT_A = 33; // 0 < a < 255 so the a1 = a - 1 path is taken
+      const PREMULT_R = 32; // -> floor(32*256/32) = 256 -> 255 (correct) vs 248 (buggy)
+      const PREMULT_G = 24; // -> floor(24*256/32) = 192 (correct) vs 186 (buggy)
+      const PREMULT_B = 16; // -> floor(16*256/32) = 128 (correct) vs 124 (buggy)
+      const pixelData = new Uint8Array(width * height * 4);
+      for (let i = 0; i < width * height; i++) {
+        pixelData[i * 4 + 0] = PREMULT_A; // A (byte 0)
+        pixelData[i * 4 + 1] = PREMULT_R; // R (byte 1)
+        pixelData[i * 4 + 2] = PREMULT_G; // G (byte 2)
+        pixelData[i * 4 + 3] = PREMULT_B; // B (byte 3)
+      }
+      const datFile = createFlaBitmapDat({ width, height, pixelData });
+      const media = `
+        <media>
+          <DOMBitmapItem name="semi.png" href="semi.png"
+            bitmapDataHRef="M 10 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 10 123456.dat': datFile }
+      );
+      const doc = await parser.parse(fla);
+      const img = doc.bitmaps.get('semi.png')?.imageData as HTMLImageElement;
+      expect(img).toBeDefined();
+      if (!img.complete) {
+        await new Promise<void>((r) => { img.onload = () => r(); });
+      }
+
+      // Draw onto a canvas WITHOUT compositing over a background so the stored
+      // (un-premultiplied) RGBA survives the readback.
+      const c = document.createElement('canvas');
+      c.width = width;
+      c.height = height;
+      const cx = c.getContext('2d')!;
+      cx.clearRect(0, 0, width, height);
+      cx.drawImage(img, 0, 0);
+      const [r, g, b, a] = cx.getImageData(2, 2, 1, 1).data;
+
+      // JPEXS-correct expected output (tolerance 2 absorbs the canvas/PNG drift).
+      expect(r).toBeGreaterThanOrEqual(253); // 255 correct; buggy /a gives 248
+      expect(g).toBeGreaterThanOrEqual(190); // 192 correct; buggy /a gives 186
+      expect(g).toBeLessThanOrEqual(194);
+      expect(b).toBeGreaterThanOrEqual(126); // 128 correct; buggy /a gives 124
+      expect(b).toBeLessThanOrEqual(130);
+      // Output alpha must be a-1 (32), not a (33). Alpha round-trips exactly.
+      expect(a).toBe(PREMULT_A - 1);
     });
 
     it('should handle partial recovery for corrupted deflate stream', async () => {
