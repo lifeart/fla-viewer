@@ -4,18 +4,46 @@ const args = process.argv.slice(2);
 const [elementName, drawingNamesArg] = args;
 
 if (!elementName || !drawingNamesArg) {
-  console.error('Usage: node scripts/score-tvg-tone-variants.mjs <elementName> <drawing[,drawing...]> [--summary-only]');
+  console.error('Usage: node scripts/score-tvg-tone-variants.mjs <elementName> <drawing[,drawing...]> [--summary-only] [--variants=name[,name...]]');
   process.exit(1);
 }
 
 const summaryOnly = args.includes('--summary-only');
+const variantsArg = args.find((arg) => arg.startsWith('--variants='));
+const selectedVariantNames = variantsArg
+  ? new Set(variantsArg.slice('--variants='.length).split(',').map((name) => name.trim()).filter(Boolean))
+  : null;
 const drawingNames = drawingNamesArg.split(',').map((name) => name.trim()).filter(Boolean);
 
-const variants = [
+const allVariants = [
   { name: 'baseline' },
   { name: 'no-dense-post', renderOptions: { disableDenseLineFillAdjustment: true } },
   { name: 'bg-post-before-dense', renderOptions: { backgroundCompositeTiming: 'post-downsample-before-dense' } },
   { name: 'bg-post-after-dense', renderOptions: { backgroundCompositeTiming: 'post-downsample-after-dense' } },
+  { name: 'dense-edge-alpha-1.00', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.0 } } },
+  { name: 'dense-edge-alpha-1.05', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.05 } } },
+  { name: 'dense-edge-alpha-1.10', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.1 } } },
+  { name: 'dense-edge-alpha-1.12', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.12 } } },
+  { name: 'dense-edge-alpha-1.14', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.14 } } },
+  { name: 'dense-edge-alpha-1.15', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.15 } } },
+  { name: 'dense-edge-alpha-1.16', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.16 } } },
+  { name: 'dense-edge-alpha-1.18', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.18 } } },
+  { name: 'dense-edge-alpha-1.20', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.2 } } },
+  { name: 'dense-expansion-0.70', renderOptions: { denseLineFillTuning: { exteriorEdgeExpansionScale: 0.7 } } },
+  { name: 'dense-expansion-0.80', renderOptions: { denseLineFillTuning: { exteriorEdgeExpansionScale: 0.8 } } },
+  { name: 'dense-expansion-1.00', renderOptions: { denseLineFillTuning: { exteriorEdgeExpansionScale: 1.0 } } },
+  { name: 'dense-edge-tone-0', renderOptions: { denseLineFillTuning: { edgeToneSubtract: 0 } } },
+  { name: 'dense-edge-tone-16', renderOptions: { denseLineFillTuning: { edgeToneSubtract: 16 } } },
+  { name: 'dense-edge-tone-24', renderOptions: { denseLineFillTuning: { edgeToneSubtract: 24 } } },
+  { name: 'dense-edge-tone-40', renderOptions: { denseLineFillTuning: { edgeToneSubtract: 40 } } },
+  {
+    name: 'dense-alpha1.05-tone24',
+    renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.05, edgeToneSubtract: 24 } },
+  },
+  {
+    name: 'dense-alpha1.15-tone40',
+    renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.15, edgeToneSubtract: 40 } },
+  },
   { name: 'interior+4,+12,+12', interiorAdd: [4, 12, 12], maxLuma: 220 },
   { name: 'interior+6,+18,+18', interiorAdd: [6, 18, 18], maxLuma: 220 },
   { name: 'interior+8,+24,+22', interiorAdd: [8, 24, 22], maxLuma: 220 },
@@ -44,6 +72,17 @@ const variants = [
   { name: 'source-edge-32 high-frac', sourceEdgeAdd: [-32, -32, -32], minFractionalAlpha: 1500 },
   { name: 'source-edge-48 high-frac', sourceEdgeAdd: [-48, -42, -42], minFractionalAlpha: 1500 },
 ];
+
+const variants = selectedVariantNames
+  ? allVariants.filter((variant) => variant.name === 'baseline' || selectedVariantNames.has(variant.name))
+  : allVariants;
+const missingVariantNames = selectedVariantNames
+  ? [...selectedVariantNames].filter((name) => !allVariants.some((variant) => variant.name === name))
+  : [];
+if (missingVariantNames.length > 0) {
+  console.error(`Unknown variants: ${missingVariantNames.join(', ')}`);
+  process.exit(1);
+}
 
 const browser = await puppeteer.launch({ headless: 'new' });
 

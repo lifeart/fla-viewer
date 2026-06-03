@@ -37,6 +37,13 @@ const NOISY_LOW_FOREGROUND_RAW_MIN = 98;
 const NOISY_LOW_FOREGROUND_GATE_MIN = 99;
 const NOISY_LOW_FOREGROUND_OVERLAP_MAX = 50;
 
+function optionalNumberParam(params, name) {
+  const raw = params.get(name);
+  if (raw === null || raw.trim() === '') return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
+}
+
 function findFile(zip, filename) {
   if (zip.file(filename)) return filename;
   const topDirs = new Set();
@@ -164,7 +171,17 @@ function collectAlternateDrawingPaths(zip, drawingPath) {
   return candidates;
 }
 
-async function findAlternateSourceMatch(zip, drawingPath, reference, viewport, size, externalColors, currentScore, scoreOptions) {
+async function findAlternateSourceMatch(
+  zip,
+  drawingPath,
+  reference,
+  viewport,
+  size,
+  externalColors,
+  currentScore,
+  scoreOptions,
+  renderOptions,
+) {
   const shouldCheck = currentScore.rawScore < ALTERNATE_SOURCE_CHECK_RAW_MAX
     || (currentScore.normalizedScore < ALTERNATE_SOURCE_CHECK_FOCUSED_MAX
       && currentScore.foregroundIou < ALTERNATE_SOURCE_CHECK_FOCUSED_MAX);
@@ -178,7 +195,7 @@ async function findAlternateSourceMatch(zip, drawingPath, reference, viewport, s
     const candidateDrawing = parseTVG(await candidateFile.async('arraybuffer'));
     if (externalColors.length > 0) resolveExternalPalette(candidateDrawing, externalColors);
 
-    const candidateCanvas = renderTVGToCanvas(candidateDrawing, size, size, viewport, { supersample: 2 });
+    const candidateCanvas = renderTVGToCanvas(candidateDrawing, size, size, viewport, renderOptions);
     if (!candidateCanvas) continue;
     await loadBitmapTiles(candidateCanvas, candidateDrawing.diagnostics);
 
@@ -212,6 +229,19 @@ async function runBenchmark() {
   const backgroundTolerance = Number(params.get('backgroundTolerance') || DEFAULT_BACKGROUND_TOL);
   const searchRadius = Number(params.get('searchRadius') || DEFAULT_SEARCH_RADIUS);
   const mode = params.get('mode') === 'raw' ? 'raw' : 'preview';
+  const denseLineFillTuning = {};
+  const denseEdgeAlphaScale = optionalNumberParam(params, 'denseEdgeAlphaScale');
+  const denseExteriorEdgeExpansionScale = optionalNumberParam(params, 'denseExteriorEdgeExpansionScale');
+  const denseEdgeToneSubtract = optionalNumberParam(params, 'denseEdgeToneSubtract');
+  if (denseEdgeAlphaScale !== undefined) denseLineFillTuning.edgeAlphaScale = denseEdgeAlphaScale;
+  if (denseExteriorEdgeExpansionScale !== undefined) {
+    denseLineFillTuning.exteriorEdgeExpansionScale = denseExteriorEdgeExpansionScale;
+  }
+  if (denseEdgeToneSubtract !== undefined) denseLineFillTuning.edgeToneSubtract = denseEdgeToneSubtract;
+  const renderOptions = {
+    supersample: 2,
+    ...(Object.keys(denseLineFillTuning).length > 0 ? { denseLineFillTuning } : {}),
+  };
   const status = document.getElementById('status');
 
   const zip = await JSZip.loadAsync(await (await fetch(zipPath)).arrayBuffer());
@@ -247,8 +277,8 @@ async function runBenchmark() {
     const reference = await loadImageFromZip(zip, thumbPath);
     if (!reference) continue;
     const canvas = mode === 'raw'
-      ? renderTVGToCanvas(drawing, size, size, viewport, { supersample: 2 })
-      : await renderTVGWithEmbeddedThumbnailFallback(drawing, size, size, viewport, { supersample: 2 }, reference);
+      ? renderTVGToCanvas(drawing, size, size, viewport, renderOptions)
+      : await renderTVGWithEmbeddedThumbnailFallback(drawing, size, size, viewport, renderOptions, reference);
     if (!canvas) continue;
     if (mode === 'raw') {
       await loadBitmapTiles(canvas, drawing.diagnostics);
@@ -265,7 +295,17 @@ async function runBenchmark() {
     const scoreResult = scoreCanvasSources(reference, canvas, size, scoreOptions);
     const timestampFreshness = sourceFreshnessFor(zip, drawingPath, thumbPath);
     const alternateSource = timestampFreshness.sourceFreshness === 'same-or-newer-thumbnail'
-      ? await findAlternateSourceMatch(zip, drawingPath, reference, viewport, size, externalColors, scoreResult, scoreOptions)
+      ? await findAlternateSourceMatch(
+          zip,
+          drawingPath,
+          reference,
+          viewport,
+          size,
+          externalColors,
+          scoreResult,
+          scoreOptions,
+          renderOptions,
+        )
       : null;
     const freshness = alternateSource
       ? {
@@ -346,6 +386,7 @@ async function runBenchmark() {
       maxShift,
       backgroundTolerance,
       searchRadius,
+      renderOptions,
     },
     finalVectorAverage: averageFinal(vector),
     finalBitmapAverage: averageFinal(bitmap),

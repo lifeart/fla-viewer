@@ -8,6 +8,23 @@ const PAGE_URL = `${SERVER_URL}/benchmark-tvg.html`;
 const OUTPUT_PATH = 'test-results/benchmark-tvg.json';
 const RAW_OUTPUT_PATH = 'test-results/benchmark-tvg-raw.json';
 
+function buildBenchmarkUrl(rawMode, args) {
+  const url = new URL(PAGE_URL);
+  if (rawMode) url.searchParams.set('mode', 'raw');
+
+  const passthroughParams = [
+    ['--dense-edge-alpha-scale=', 'denseEdgeAlphaScale'],
+    ['--dense-exterior-edge-expansion-scale=', 'denseExteriorEdgeExpansionScale'],
+    ['--dense-edge-tone-subtract=', 'denseEdgeToneSubtract'],
+  ];
+  for (const [prefix, paramName] of passthroughParams) {
+    const arg = args.find((entry) => entry.startsWith(prefix));
+    if (!arg) continue;
+    url.searchParams.set(paramName, arg.slice(prefix.length));
+  }
+  return url.toString();
+}
+
 const BASELINE_FLOORS = {
   'Number_Body-1': 98,
   'F_3_symbol-1': 79,
@@ -143,7 +160,7 @@ function printSummary(summary) {
 
 async function main() {
   const rawMode = process.argv.includes('--raw');
-  const pageUrl = rawMode ? `${PAGE_URL}?mode=raw` : PAGE_URL;
+  const pageUrl = buildBenchmarkUrl(rawMode, process.argv.slice(2));
   const outputPath = rawMode ? RAW_OUTPUT_PATH : OUTPUT_PATH;
   mkdirSync('test-results', { recursive: true });
 

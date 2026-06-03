@@ -2989,6 +2989,14 @@ export interface TVGRenderOptions {
   disableDenseLineFillAdjustment?: boolean;
   /** Experimental: choose when white background is composited relative to downsampling/dense post-processing. */
   backgroundCompositeTiming?: 'pre-downsample' | 'post-downsample-before-dense' | 'post-downsample-after-dense';
+  /** Experimental: override dense line-fill post-processing constants for local score probes. */
+  denseLineFillTuning?: TVGDenseLineFillTuning;
+}
+
+export interface TVGDenseLineFillTuning {
+  edgeAlphaScale?: number;
+  exteriorEdgeExpansionScale?: number;
+  edgeToneSubtract?: number;
 }
 
 const DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT = 220;
@@ -3000,7 +3008,7 @@ const DENSE_LINE_FILL_TONE_PIVOT = 96;
 const DENSE_LINE_FILL_TONE_CONTRAST = 0.9024;
 const DENSE_LINE_FILL_TONE_OFFSET = -4;
 const DENSE_LINE_FILL_BACKGROUND_TOLERANCE = 12;
-const DENSE_LINE_FILL_EDGE_ALPHA_SCALE = 1.1;
+const DENSE_LINE_FILL_EDGE_ALPHA_SCALE = 1.14;
 const DENSE_LINE_FILL_EXTERIOR_EDGE_EXPANSION_SCALE = 0.9;
 const DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS = 900;
 const DENSE_LINE_FILL_EDGE_EXPANSION_MAX_FRACTIONAL_ALPHA_PIXELS = 1000;
@@ -3026,6 +3034,21 @@ const TVG_TINY_VECTOR_VIEWPORT_FLOOR = 280;
 const TVG_TINY_VECTOR_MAX_CONTENT_EXTENT = 96;
 const TVG_TINY_VECTOR_MAX_SHAPES = 2;
 const TVG_TINY_VECTOR_MAX_COMPONENTS = 8;
+
+interface ResolvedDenseLineFillTuning {
+  edgeAlphaScale: number;
+  exteriorEdgeExpansionScale: number;
+  edgeToneSubtract: number;
+}
+
+function resolveDenseLineFillTuning(options?: TVGRenderOptions): ResolvedDenseLineFillTuning {
+  return {
+    edgeAlphaScale: options?.denseLineFillTuning?.edgeAlphaScale ?? DENSE_LINE_FILL_EDGE_ALPHA_SCALE,
+    exteriorEdgeExpansionScale:
+      options?.denseLineFillTuning?.exteriorEdgeExpansionScale ?? DENSE_LINE_FILL_EXTERIOR_EDGE_EXPANSION_SCALE,
+    edgeToneSubtract: options?.denseLineFillTuning?.edgeToneSubtract ?? DENSE_LINE_FILL_EDGE_TONE_SUBTRACT,
+  };
+}
 
 function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type'][] {
   const includeUnderlay = options?.includeUnderlay ?? true;
@@ -3239,6 +3262,7 @@ function applyDenseLineFillEdgeCoverageAdjustment(
   canvas: HTMLCanvasElement,
   outputWidth: number,
   outputHeight: number,
+  tuning: ResolvedDenseLineFillTuning,
 ): number {
   const outputFractionalAlphaPixels = countDenseLineFillOutputFractionalAlphaPixels(canvas, outputWidth, outputHeight);
   if (outputFractionalAlphaPixels < DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS) return outputFractionalAlphaPixels;
@@ -3251,11 +3275,11 @@ function applyDenseLineFillEdgeCoverageAdjustment(
   for (let index = 3; index < data.length; index += 4) {
     const alpha = data[index];
     if (alpha <= 0 || alpha >= 255) continue;
-    data[index] = Math.min(255, Math.round(alpha * DENSE_LINE_FILL_EDGE_ALPHA_SCALE));
+    data[index] = Math.min(255, Math.round(alpha * tuning.edgeAlphaScale));
   }
 
   if (outputFractionalAlphaPixels <= DENSE_LINE_FILL_EDGE_EXPANSION_MAX_FRACTIONAL_ALPHA_PIXELS) {
-    expandDenseLineFillExteriorCoverage(data, canvas.width, canvas.height);
+    expandDenseLineFillExteriorCoverage(data, canvas.width, canvas.height, tuning);
   }
   ctx.putImageData(image, 0, 0);
   return outputFractionalAlphaPixels;
@@ -3265,6 +3289,7 @@ function expandDenseLineFillExteriorCoverage(
   data: Uint8ClampedArray,
   width: number,
   height: number,
+  tuning: ResolvedDenseLineFillTuning,
 ): void {
   // Grow only the flood-filled exterior alpha fringe. Interior transparent holes
   // are left untouched so this behaves like thumbnail antialias coverage, not
@@ -3329,7 +3354,7 @@ function expandDenseLineFillExteriorCoverage(
       }
       if (alphaSum === 0 || neighborCount === 0) continue;
 
-      const alpha = Math.round(Math.min(255, (alphaSum / neighborCount) * DENSE_LINE_FILL_EXTERIOR_EDGE_EXPANSION_SCALE));
+      const alpha = Math.round(Math.min(255, (alphaSum / neighborCount) * tuning.exteriorEdgeExpansionScale));
       data[index] = Math.round(redSum / alphaSum);
       data[index + 1] = Math.round(greenSum / alphaSum);
       data[index + 2] = Math.round(blueSum / alphaSum);
@@ -3357,6 +3382,7 @@ function createOutputAlphaMask(
 function applyDenseLineFillEdgeToneAdjustment(
   canvas: HTMLCanvasElement,
   alphaMask: Uint8ClampedArray | null,
+  tuning: ResolvedDenseLineFillTuning,
 ): void {
   if (!alphaMask) return;
 
@@ -3368,9 +3394,9 @@ function applyDenseLineFillEdgeToneAdjustment(
   for (let index = 0; index < data.length; index += 4) {
     const alpha = alphaMask[index + 3];
     if (alpha <= 0 || alpha >= 255) continue;
-    data[index] = Math.max(0, data[index] - DENSE_LINE_FILL_EDGE_TONE_SUBTRACT);
-    data[index + 1] = Math.max(0, data[index + 1] - DENSE_LINE_FILL_EDGE_TONE_SUBTRACT);
-    data[index + 2] = Math.max(0, data[index + 2] - DENSE_LINE_FILL_EDGE_TONE_SUBTRACT);
+    data[index] = Math.max(0, data[index] - tuning.edgeToneSubtract);
+    data[index + 1] = Math.max(0, data[index + 1] - tuning.edgeToneSubtract);
+    data[index + 2] = Math.max(0, data[index + 2] - tuning.edgeToneSubtract);
   }
   ctx.putImageData(image, 0, 0);
 }
@@ -3942,11 +3968,17 @@ export function renderTVGToCanvas(
   }
 
   const shouldApplyDenseLineFillAdjustment = shouldApplyDenseLineFillInkDensityAdjustment(renderDrawing, options);
+  const denseLineFillTuning = resolveDenseLineFillTuning(options);
   let denseLineFillOutputAlphaMask: Uint8ClampedArray | null = null;
   let shouldApplyDenseLineFillEdgeTone = false;
   let denseLineFillOutputFractionalAlphaPixels = 0;
   if (shouldApplyDenseLineFillAdjustment) {
-    const outputFractionalAlphaPixels = applyDenseLineFillEdgeCoverageAdjustment(canvas, width, height);
+    const outputFractionalAlphaPixels = applyDenseLineFillEdgeCoverageAdjustment(
+      canvas,
+      width,
+      height,
+      denseLineFillTuning,
+    );
     denseLineFillOutputFractionalAlphaPixels = outputFractionalAlphaPixels;
     denseLineFillOutputAlphaMask = createOutputAlphaMask(canvas, width, height);
     shouldApplyDenseLineFillEdgeTone = outputFractionalAlphaPixels >= DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS;
@@ -3975,7 +4007,7 @@ export function renderTVGToCanvas(
       applyDenseLineFillInkDensityAdjustment(outCanvas, denseLineFillOutputFractionalAlphaPixels);
       applyDenseLineFillInteriorShadowToneAdjustment(outCanvas, denseLineFillOutputAlphaMask);
       if (shouldApplyDenseLineFillEdgeTone) {
-        applyDenseLineFillEdgeToneAdjustment(outCanvas, denseLineFillOutputAlphaMask);
+        applyDenseLineFillEdgeToneAdjustment(outCanvas, denseLineFillOutputAlphaMask, denseLineFillTuning);
       }
     }
     if (shouldCompositeBackground && backgroundCompositeTiming === 'post-downsample-after-dense') {
@@ -3991,7 +4023,7 @@ export function renderTVGToCanvas(
     applyDenseLineFillInkDensityAdjustment(canvas, denseLineFillOutputFractionalAlphaPixels);
     applyDenseLineFillInteriorShadowToneAdjustment(canvas, denseLineFillOutputAlphaMask);
     if (shouldApplyDenseLineFillEdgeTone) {
-      applyDenseLineFillEdgeToneAdjustment(canvas, denseLineFillOutputAlphaMask);
+      applyDenseLineFillEdgeToneAdjustment(canvas, denseLineFillOutputAlphaMask, denseLineFillTuning);
     }
   }
   if (shouldCompositeBackground && backgroundCompositeTiming === 'post-downsample-after-dense') {
