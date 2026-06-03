@@ -587,10 +587,13 @@ export function rawEdgesToEdges(rawEdges: RawEdge[]): Edge[] {
 
 // ── CPicShape body ──────────────────────────────────────────────────────────
 
-/** A decoded shape plus where it ended in the stream (for region tracking). */
+/** A decoded shape plus where it sat in the stream (for region tracking and
+ *  per-frame attribution — see {@link ./binary-timeline-decoder}). */
 export interface DecodedShape {
   shape: Shape;
   edgeCount: number;
+  /** Byte offset of the shape body start (just past its class tag/signature). */
+  bodyStart: number;
   /** Byte offset just past the shape body. */
   endPos: number;
 }
@@ -711,7 +714,7 @@ function tryParseShapeAt(
       if (Math.abs(v) > MAX_ULTRA_TWIPS) return null;
     }
   }
-  return { shape, edgeCount: rawEdges.length, endPos: r.pos };
+  return { shape, edgeCount: rawEdges.length, bodyStart, endPos: r.pos };
 }
 
 /**
@@ -782,6 +785,13 @@ export interface DecodedStreamShapes {
   rootClass: string;
   /** Every recovered shape, in stream order. */
   shapes: Shape[];
+  /**
+   * The same recovered shapes WITH their stream byte offsets, in stream order
+   * (1:1 with `shapes`). Used for per-frame attribution by
+   * {@link ./binary-timeline-decoder}. `shapes` is kept for callers that only
+   * need the geometry.
+   */
+  decoded: DecodedShape[];
   /** Total edge count across all shapes (for honest coverage reporting). */
   totalEdges: number;
 }
@@ -819,5 +829,5 @@ export function decodeStreamShapes(data: Uint8Array): DecodedStreamShapes {
   const decoded = scanForShapes(data, seedClasses);
   const shapes = decoded.map((d) => d.shape);
   const totalEdges = decoded.reduce((n, d) => n + d.edgeCount, 0);
-  return { rootClass, shapes, totalEdges };
+  return { rootClass, shapes, decoded, totalEdges };
 }

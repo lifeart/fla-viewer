@@ -28,12 +28,23 @@
  * the decoded library symbols, so a scene that places a symbol composites its
  * artwork ONTO THE STAGE instead of showing an empty stage.
  *
- * What is still NOT decoded here: precise per-layer / per-frame ATTRIBUTION of
- * recovered content (which keyframe of which layer a shape/placement belongs
- * to), tweens, and text/bitmap/sound element placement. CPicFrame's schema-
- * gated timeline tail is unparsed (even the reference decoder resolves shapes
- * only via signature recovery), so all recovered content for a stream is
- * composited into one frame. We never silently swallow errors (project rule).
+ * NEW (issue #8 timeline attribution): per-LAYER / per-FRAME attribution is now
+ * decoded for streams whose `CPicPage → CPicLayer → CPicFrame` tree walks
+ * cleanly — see {@link ./binary-timeline-decoder}. A keyframe's SPAN (Flash
+ * "duration") is `CPicFrame.field_18c`; the frame INDEX is positional (each
+ * keyframe starts where the previous ended). Recovered shapes/instances (which
+ * carry their stream offsets) are attributed to the keyframe whose byte range
+ * contains them, so a multi-keyframe scene/clip animates instead of showing one
+ * overlaid frame. The walk is CONFIDENCE-GATED: when it cannot cleanly decode a
+ * stream (legacy schema, desync), the stream keeps the single-frame fallback
+ * below — no regression.
+ *
+ * What is still NOT decoded here: tweens (motion/shape interpolation), frame
+ * labels, sounds, and per-frame placement matrices for instances inside a
+ * movie-clip frame (the instance's matrix is recovered by the scanner, but
+ * Flash's per-frame placement-matrix table — FUN_8f9570 — is not). Streams that
+ * fail the confidence gate still composite all recovered content into one frame.
+ * We never silently swallow errors (project rule).
  */
 import { OLE2File } from './ole2-reader';
 import {
@@ -41,15 +52,24 @@ import {
   type BinaryLayerInfo,
   type BinaryLayerType,
 } from './binary-fla-structure';
-import { decodeStreamShapes } from './binary-shape-decoder';
+import {
+  decodeStreamShapes,
+  type DecodedShape,
+} from './binary-shape-decoder';
 import {
   dedupeInstances,
   instanceSymbolType,
   scanForInstances,
   type DecodedInstance,
 } from './binary-instance-decoder';
+import {
+  attributeToFrames,
+  decodeStreamTimeline,
+  type DecodedStreamTimeline,
+} from './binary-timeline-decoder';
 import type {
   FLADocument,
+  Frame,
   Layer,
   Shape,
   Symbol,
@@ -96,6 +116,21 @@ export interface BinaryFLAInfo {
   sceneShapes: Map<number, Shape[]>;
   /** Vector shapes decoded from each `Symbol N` stream, keyed by symbol number. */
   symbolShapes: Map<number, Shape[]>;
+  /**
+   * The same decoded shapes WITH their stream byte offsets, in stream order, so
+   * per-frame timeline attribution ({@link ./binary-timeline-decoder}) can map
+   * each shape to its keyframe. Keyed by scene / symbol number.
+   */
+  sceneShapesDecoded: Map<number, DecodedShape[]>;
+  symbolShapesDecoded: Map<number, DecodedShape[]>;
+  /**
+   * Confident per-LAYER / per-FRAME timeline structure for streams whose
+   * `CPicPage → CPicLayer → CPicFrame` tree decodes cleanly (issue #8 timeline
+   * attribution). Absent when the structural walk was not confident — the
+   * caller then keeps the single-frame fallback. Keyed by scene / symbol number.
+   */
+  sceneTimelines: Map<number, DecodedStreamTimeline>;
+  symbolTimelines: Map<number, DecodedStreamTimeline>;
   /**
    * Symbol-instance PLACEMENTS recovered from each scene's `Page N` stream
    * (issue #8 instance placement), keyed by scene number. Each placement
@@ -327,8 +362,12 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
   const symbolLayers = new Map<number, BinaryLayerInfo[]>();
   const sceneShapes = new Map<number, Shape[]>();
   const symbolShapes = new Map<number, Shape[]>();
+  const sceneShapesDecoded = new Map<number, DecodedShape[]>();
+  const symbolShapesDecoded = new Map<number, DecodedShape[]>();
   const sceneInstances = new Map<number, DecodedInstance[]>();
   const symbolInstances = new Map<number, DecodedInstance[]>();
+  const sceneTimelines = new Map<number, DecodedStreamTimeline>();
+  const symbolTimelines = new Map<number, DecodedStreamTimeline>();
   for (const name of streams) {
     // Scene streams are named `Page N` (Flash 5..MX 2004) or `P N <timestamp>`
     // (Flash 8 / CS3+); symbol streams `Symbol N` or `S N <timestamp>`. Both
@@ -337,20 +376,37 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
     if (pageNum !== null) {
       const streamData = ole.readStream(name);
       scenes.push({ scene: pageNum, layers: extractLayers(streamData) });
-      const shapes = decodeStreamShapes(streamData).shapes;
-      if (shapes.length > 0) sceneShapes.set(pageNum, shapes);
-      const insts = dedupeInstances(scanForInstances(streamData));
-      if (insts.length > 0) sceneInstances.set(pageNum, insts);
+      const decoded = decodeStreamShapes(streamData).decoded;
+      if (decoded.length > 0) {
+        sceneShapes.set(pageNum, decoded.map((d) => d.shape));
+        sceneShapesDecoded.set(pageNum, decoded);
+      }
+      const insts = scanForInstances(streamData);
+      const deduped = dedupeInstances(insts);
+      if (deduped.length > 0) sceneInstances.set(pageNum, deduped);
+      // Attribution uses the UN-deduped placements (deduping would discard the
+      // per-keyframe copies needed to tell frames apart); the dedupe above is
+      // only for the single-frame fallback.
+      const tl = decodeStreamTimeline(streamData);
+      if (tl) sceneTimelines.set(pageNum, tl);
+      if (tl && insts.length > 0) sceneInstances.set(pageNum, insts);
       continue;
     }
     const symNum = parseSymbolStreamNumber(name);
     if (symNum !== null) {
       const streamData = ole.readStream(name);
       symbolLayers.set(symNum, extractLayers(streamData));
-      const shapes = decodeStreamShapes(streamData).shapes;
-      if (shapes.length > 0) symbolShapes.set(symNum, shapes);
-      const insts = dedupeInstances(scanForInstances(streamData));
-      if (insts.length > 0) symbolInstances.set(symNum, insts);
+      const decoded = decodeStreamShapes(streamData).decoded;
+      if (decoded.length > 0) {
+        symbolShapes.set(symNum, decoded.map((d) => d.shape));
+        symbolShapesDecoded.set(symNum, decoded);
+      }
+      const insts = scanForInstances(streamData);
+      const deduped = dedupeInstances(insts);
+      if (deduped.length > 0) symbolInstances.set(symNum, deduped);
+      const tl = decodeStreamTimeline(streamData);
+      if (tl) symbolTimelines.set(symNum, tl);
+      if (tl && insts.length > 0) symbolInstances.set(symNum, insts);
     }
   }
   scenes.sort((a, b) => a.scene - b.scene);
@@ -370,8 +426,12 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
     symbolLayers,
     sceneShapes,
     symbolShapes,
+    sceneShapesDecoded,
+    symbolShapesDecoded,
     sceneInstances,
     symbolInstances,
+    sceneTimelines,
+    symbolTimelines,
   };
 }
 
@@ -530,6 +590,102 @@ function buildLayers(
 }
 
 /**
+ * Build viewer {@link Layer}s with REAL per-layer / per-frame attribution from a
+ * confident structural timeline walk (issue #8 timeline attribution).
+ *
+ * For each decoded layer we emit one viewer layer whose `frames[]` are the
+ * decoded keyframes (each with its positional `index` and `duration` span). The
+ * already-recovered shapes/instances — which carry their stream byte offsets —
+ * are attributed to the keyframe whose body byte-range contains them
+ * ({@link attributeToFrames}), so the renderer's `findFrameAtIndex` shows the
+ * right content as the playhead moves.
+ *
+ * Returns `null` (so the caller falls back to {@link buildLayers}) when NO
+ * content could be attributed to any keyframe — that means the timeline walk
+ * and the recovery scanners disagree about where content lives, and the safe
+ * single-frame behaviour is preferable to an empty animated timeline. Content
+ * that falls outside every keyframe range is hosted on the layer's FIRST
+ * keyframe so nothing recovered is ever dropped.
+ */
+function buildAttributedLayers(
+  timeline: DecodedStreamTimeline,
+  decodedShapes: DecodedShape[],
+  decodedInstances: DecodedInstance[],
+  libraryByNumber: Map<number, BinaryLibraryEntry>
+): { layers: Layer[]; referenceLayers: Set<number>; totalFrames: number } | null {
+  const referenceLayers = new Set<number>();
+  let attributedAny = false;
+
+  const layers: Layer[] = timeline.layers.map((dl, index) => {
+    const layerType =
+      dl.typeByte === LAYER_TYPE_GUIDE_BYTE
+        ? 'guide'
+        : dl.typeByte === LAYER_TYPE_FOLDER_BYTE
+          ? 'folder'
+          : 'normal';
+    if (layerType === 'guide' || layerType === 'folder') {
+      referenceLayers.add(index);
+    }
+
+    const shapeBuckets = attributeToFrames(dl.keyframes, decodedShapes);
+    const instBuckets = attributeToFrames(dl.keyframes, decodedInstances);
+
+    const frames: Frame[] = dl.keyframes.map((kf, ki) => {
+      const shapes = shapeBuckets.perKeyframe[ki].map((d) => d.shape);
+      const instances = buildSymbolInstances(
+        instBuckets.perKeyframe[ki],
+        libraryByNumber
+      );
+      if (shapes.length > 0 || instances.length > 0) attributedAny = true;
+      return {
+        index: kf.startIndex,
+        duration: kf.duration,
+        keyMode: 0,
+        elements: [...shapes, ...instances] as Frame['elements'],
+      };
+    });
+
+    // Any content that fell outside every keyframe range goes on the first
+    // keyframe (never drop recovered artwork). For a layer with no keyframes at
+    // all, synthesise a single frame to carry it.
+    const orphanShapes = shapeBuckets.unattributed.map((d) => d.shape);
+    const orphanInstances = buildSymbolInstances(
+      instBuckets.unattributed,
+      libraryByNumber
+    );
+    if (orphanShapes.length > 0 || orphanInstances.length > 0) {
+      if (frames.length === 0) {
+        frames.push({ index: 0, duration: 1, keyMode: 0, elements: [] });
+      }
+      frames[0].elements.push(
+        ...(orphanShapes as Frame['elements']),
+        ...(orphanInstances as Frame['elements'])
+      );
+    }
+    if (frames.length === 0) {
+      frames.push({ index: 0, duration: 1, keyMode: 0, elements: [] });
+    }
+
+    return {
+      name: dl.name,
+      color: '#4FFF4F',
+      visible: dl.visible,
+      locked: dl.locked,
+      outline: false,
+      layerType,
+      frames,
+    };
+  });
+
+  if (!attributedAny) return null;
+  return { layers, referenceLayers, totalFrames: timeline.totalFrames };
+}
+
+// CPicLayer.type byte values used by the structural walk (FORMAT.md §4).
+const LAYER_TYPE_GUIDE_BYTE = 1;
+const LAYER_TYPE_FOLDER_BYTE = 5;
+
+/**
  * Parse a binary FLA into a {@link FLADocument} the existing viewer/renderer
  * can consume.
  *
@@ -538,11 +694,13 @@ function buildLayers(
  * flags), the vector SHAPE geometry of each symbol, and the symbol-INSTANCE
  * PLACEMENTS that compose a scene — each placement is emitted as a
  * `SymbolInstance` referencing a decoded library symbol with its transform
- * matrix, so a scene composites its symbols onto the stage. NOT decoded (so
- * left empty/placeholder): precise per-frame timeline attribution, tweens, and
- * text/bitmap/sound element placement (CPicFrame's schema-gated tail is
- * unparsed — recovered content is composited into one frame). Nothing is
- * fabricated: a placement whose reference does not resolve is dropped.
+ * matrix, so a scene composites its symbols onto the stage. Per-LAYER /
+ * per-FRAME attribution (issue #8 timeline) is decoded for streams that walk
+ * cleanly: content lands in its real keyframe (index + duration) so the
+ * timeline animates; streams that fail the confidence gate keep the
+ * single-frame fallback. NOT decoded: tweens, frame labels, sounds, and
+ * per-frame placement matrices. Nothing is fabricated: a placement whose
+ * reference does not resolve is dropped.
  */
 export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
   const info = extractBinaryFLAInfo(bytes);
@@ -577,30 +735,57 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
     });
   }
 
+  // Build one stream's viewer timeline: prefer confident per-frame attribution
+  // (issue #8 timeline), else the existing single-frame fallback (#22/#24).
+  const buildStreamTimeline = (
+    name: string,
+    fallbackLayers: BinaryLayerInfo[],
+    streamTimeline: DecodedStreamTimeline | undefined,
+    decodedShapes: DecodedShape[],
+    decodedInstances: DecodedInstance[],
+    dedupedInstances: DecodedInstance[]
+  ): Timeline => {
+    if (streamTimeline) {
+      const attributed = buildAttributedLayers(
+        streamTimeline,
+        decodedShapes,
+        decodedInstances,
+        libraryByNumber
+      );
+      if (attributed) {
+        return {
+          name,
+          layers: attributed.layers,
+          totalFrames: attributed.totalFrames,
+          referenceLayers: attributed.referenceLayers,
+        };
+      }
+    }
+    // Fallback: everything into one frame on a host layer (pre-issue-8 behaviour).
+    const { layers, referenceLayers } = buildLayers(
+      fallbackLayers,
+      decodedShapes.map((d) => d.shape),
+      buildSymbolInstances(dedupedInstances, libraryByNumber)
+    );
+    return { name, layers, totalFrames: 1, referenceLayers };
+  };
+
   const symbols = new Map<string, Symbol>();
   for (const entry of libraryByNumber.values()) {
     const symbolType =
       entry.symbolType === 'unknown' ? 'graphic' : entry.symbolType;
-    const binaryLayers = info.symbolLayers.get(entry.symbolNumber) ?? [];
-    const shapes = info.symbolShapes.get(entry.symbolNumber) ?? [];
-    const instances = buildSymbolInstances(
-      info.symbolInstances.get(entry.symbolNumber) ?? [],
-      libraryByNumber
+    const num = entry.symbolNumber;
+    const timeline = buildStreamTimeline(
+      entry.name,
+      info.symbolLayers.get(num) ?? [],
+      info.symbolTimelines.get(num),
+      info.symbolShapesDecoded.get(num) ?? [],
+      info.symbolInstances.get(num) ?? [],
+      dedupeInstances(info.symbolInstances.get(num) ?? [])
     );
-    const { layers, referenceLayers } = buildLayers(
-      binaryLayers,
-      shapes,
-      instances
-    );
-    const timeline: Timeline = {
-      name: entry.name,
-      layers,
-      totalFrames: 1,
-      referenceLayers,
-    };
     const symbol: Symbol = {
       name: entry.name,
-      itemID: `Symbol ${entry.symbolNumber}`,
+      itemID: `Symbol ${num}`,
       symbolType,
       timeline,
     };
@@ -611,24 +796,16 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
   // back to a single empty "Scene 1" so the document still opens.
   const timelines: Timeline[] =
     info.scenes.length > 0
-      ? info.scenes.map((s) => {
-          const shapes = info.sceneShapes.get(s.scene) ?? [];
-          const instances = buildSymbolInstances(
-            info.sceneInstances.get(s.scene) ?? [],
-            libraryByNumber
-          );
-          const { layers, referenceLayers } = buildLayers(
+      ? info.scenes.map((s) =>
+          buildStreamTimeline(
+            `Scene ${s.scene}`,
             s.layers,
-            shapes,
-            instances
-          );
-          return {
-            name: `Scene ${s.scene}`,
-            layers,
-            totalFrames: 1,
-            referenceLayers,
-          };
-        })
+            info.sceneTimelines.get(s.scene),
+            info.sceneShapesDecoded.get(s.scene) ?? [],
+            info.sceneInstances.get(s.scene) ?? [],
+            dedupeInstances(info.sceneInstances.get(s.scene) ?? [])
+          )
+        )
       : [
           {
             name: 'Scene 1',
