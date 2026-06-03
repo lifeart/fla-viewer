@@ -538,6 +538,37 @@ describe('tvg rendering', () => {
     expectColorNear(samplePixel(clippedCanvas, 3, 10), { r: 255, g: 255, b: 255 }, 0);
   });
 
+  it('keeps source-fresh clipped bitmap atlas raw floors stable', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+
+    const cases = [
+      { elementName: '4bf5', drawingName: '4bf5-1', minRaw: 97.7, minGate: 98.3 },
+      { elementName: '3255', drawingName: '3255-1', minRaw: 97.6, minGate: 98.6 },
+      { elementName: '7f81', drawingName: '7f81-1', minRaw: 98.2, minGate: 99.2 },
+      { elementName: 'cc62', drawingName: 'cc62-1', minRaw: 98.4, minGate: 99.2 },
+      { elementName: 'Screenshot_2022', drawingName: 'Screenshot_2022-1', minRaw: 99.6, minGate: 99.9 },
+    ];
+
+    for (const testCase of cases) {
+      const base = `CH_Anna_rig_football_suit_V001_V07/elements/${testCase.elementName}`;
+      const tvgData = await zip.file(`${base}/${testCase.drawingName}.tvg`)!.async('arraybuffer');
+      const thumbData = await zip.file(`${base}/.thumbnails/.${testCase.drawingName}.tvg.png`)!.async('arraybuffer');
+      const drawing = parseTVG(tvgData);
+      resolveExternalPalette(drawing, externalColors);
+
+      const canvas = renderTVGToCanvas(drawing, 160, 160, 336, { supersample: 2 });
+      expect(canvas).not.toBeNull();
+      expect(await loadBitmapTiles(canvas!, drawing.diagnostics)).toBe(true);
+      const reference = await loadImageFromArrayBuffer(thumbData);
+      const score = scoreCanvasSources(reference, canvas!, 160, { contentKind: 'bitmap' });
+
+      expect(score.rawScore, `${testCase.elementName}/${testCase.drawingName}`).toBeGreaterThan(testCase.minRaw);
+      expect(score.gateScore, `${testCase.elementName}/${testCase.drawingName}`).toBeGreaterThan(testCase.minGate);
+    }
+  });
+
   it('parses top-level TBBM bitmap tiles with TBBH metadata', async () => {
     const tileCanvas = document.createElement('canvas');
     tileCanvas.width = 8;

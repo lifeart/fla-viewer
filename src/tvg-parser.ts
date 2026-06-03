@@ -3011,7 +3011,9 @@ const BITMAP_ATLAS_EDGE_TONE_FOREGROUND_SUBTRACT = 32;
 const BITMAP_ATLAS_EDGE_TONE_BACKGROUND_THRESHOLD = 243;
 const BITMAP_ATLAS_EDGE_TONE_MIN_ALPHA = 32;
 const BITMAP_ATLAS_EDGE_TONE_MAX_ALPHA = 223;
-const BITMAP_ATLAS_EDGE_TONE_MIN_PIXELS = 500;
+const BITMAP_ATLAS_EDGE_TONE_MIN_PIXELS = 400;
+const BITMAP_ATLAS_EDGE_TONE_WIDE_ASPECT_MIN = 1.6;
+const BITMAP_ATLAS_EDGE_TONE_MULTI_TILE_MIN = 16;
 const BITMAP_ATLAS_EDGE_TONE_MAX_TILES = 32;
 const TVG_VIEWPORT_CONTENT_PADDING = 227;
 const TVG_COMPACT_CUTOUT_VIEWPORT_CONTENT_PADDING = 220;
@@ -4459,11 +4461,14 @@ function shouldApplyBitmapAtlasEdgeTone(
   fallbackScanUsed: boolean,
   hasClipRects: boolean,
   loadedCount: number,
+  aspectRatio: number,
 ): boolean {
   return !fallbackScanUsed
     && hasClipRects
     && loadedCount >= 8
-    && loadedCount < BITMAP_ATLAS_EDGE_TONE_MAX_TILES;
+    && loadedCount < BITMAP_ATLAS_EDGE_TONE_MAX_TILES
+    && (loadedCount >= BITMAP_ATLAS_EDGE_TONE_MULTI_TILE_MIN
+      || aspectRatio >= BITMAP_ATLAS_EDGE_TONE_WIDE_ASPECT_MIN);
 }
 
 function createBitmapAtlasEdgeAlphaMask(
@@ -4761,7 +4766,7 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
     targetH = Math.max(1, targetH - 2);
   }
   const bitmapEdgeAlphaMask = (state?.backgroundComposite ?? true)
-    && shouldApplyBitmapAtlasEdgeTone(fallbackScanUsed, hasClipRects, loaded.length)
+    && shouldApplyBitmapAtlasEdgeTone(fallbackScanUsed, hasClipRects, loaded.length, renderW / Math.max(renderH, 1))
     ? createBitmapAtlasEdgeAlphaMask(renderCanvas, width, height, dx, dy, targetW, targetH)
     : null;
   drawImageWithProgressiveDownscale(ctx, renderCanvas, dx, dy, targetW, targetH);

@@ -238,9 +238,16 @@ try {
       fallbackScanUsed && hasClipRects && loadedCount < 32 && aspectRatio < 1
     );
 
+    // Keep the production row authoritative: the exploratory fit variants below
+    // intentionally bypass renderer-only post passes such as atlas edge tone.
     const fitVariants = [
       {
-        name: 'current',
+        name: 'production-current',
+        production: true,
+        padding: (meta) => bitmapFitPadding(meta.fallbackScanUsed, meta.hasClipRects, meta.loadedCount, meta.aspectRatio),
+      },
+      {
+        name: 'fit-current-no-edge-tone',
         padding: (meta) => bitmapFitPadding(meta.fallbackScanUsed, meta.hasClipRects, meta.loadedCount, meta.aspectRatio),
       },
       { name: 'padding-4.5', padding: () => 4.5 },
@@ -280,6 +287,11 @@ try {
 
     const renderVariant = async (drawing, viewport, variant) => {
       const canvas = tvg.renderTVGToCanvas(drawing, SIZE, SIZE, viewport, { supersample: 2 });
+      if (variant.production) {
+        await tvg.loadBitmapTiles(canvas, drawing.diagnostics);
+        return { canvas, meta: { production: true } };
+      }
+
       const state = canvas.__bitmapState;
       const tiles = canvas.__bitmapTiles;
       const bounds = state?.bounds ?? computeBitmapBounds(tiles) ?? { minX: 0, minY: 0, maxX: 0, maxY: 0 };
