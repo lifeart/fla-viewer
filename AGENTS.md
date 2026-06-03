@@ -83,8 +83,12 @@ FLA files (Adobe Animate/Flash Professional) are ZIP archives containing XML fil
     acceleration="-50">        <!-- -100 to 100: negative=ease-in, positive=ease-out -->
 
     <tweens>
+        <!-- Named ease: CreateJS-style "<base><Direction>" token. The DIRECTION is
+             in the token (In/Out/InOut), NOT derived from intensity. -->
+        <Ease target="all" method="cubicInOut"/>
+        <!-- Legacy intensity-only ease (no method): negative=ease-in, positive=ease-out -->
         <Ease target="all" intensity="-50"/>
-        <!-- OR custom bezier easing -->
+        <!-- OR a custom piecewise-bezier ease (3n+1 points = n cubic segments) -->
         <CustomEase target="all">
             <Point x="0" y="0"/>
             <Point x="0.333" y="0.396"/>
@@ -95,6 +99,15 @@ FLA files (Adobe Animate/Flash Professional) are ZIP archives containing XML fil
     <elements>...</elements>
 </DOMFrame>
 ```
+
+**Easing = CreateJS.** Adobe Animate's runtime easing *is* CreateJS `TweenJS/Ease.js`, so
+match it exactly. `method` tokens are `<base><Direction>` where base ∈ {quad, cubic, quart,
+quint, sine, circ, expo, back, elastic, bounce} and direction ∈ {In, Out, InOut} — strip
+`InOut` before `In`/`Out` when parsing. Per-target eases exist (`target="all"|"position"|
+"rotation"|"scale"|"color"|"filters"`); the spatial motion follows `all`/`position`.
+Gotchas: `back` uses overshoot constant **1.7** (not Penner's 1.70158) and `backInOut`
+scales it by **×1.525**; `elasticInOut` period is **0.45**. CustomEase is a multi-segment
+piecewise cubic bezier (3n+1 points), not a single 4-point curve.
 
 ### Matrix Transform
 
@@ -597,6 +610,10 @@ Edge contributions are collected per fill style, then sorted into connected chai
 - [XFL Format Reference (Adobe)](https://help.adobe.com/en_US/flash/cs/extend/WS5b3ccc516d4fbf351e63e3d118a9024f3f-7ff7CS5.html)
 - [SWF File Format Specification](https://www.adobe.com/content/dam/acom/en/devnet/pdf/swf-file-format-spec.pdf)
 - [Canvas 2D API (MDN)](https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D)
+- [JPEXS Free Flash Decompiler](https://github.com/jindrapetrik/jpexs-decompiler) — authoritative for `.dat` bitmap encoding (`xfl/ImageBinDataGenerator.java` writer, `xfl/LosslessImageBinDataReader.java` reader) and XFL export.
+- [CreateJS TweenJS `Ease.js`](https://github.com/CreateJS/TweenJS/blob/master/src/tweenjs/Ease.js) — Animate's runtime easing; the definition of every `<Ease method>` token.
+- [eddiemoore/fla-decoder](https://github.com/eddiemoore/fla-decoder) — reverse-engineered pre-CS5 **binary** FLA format ("not 100%"). ⚠️ Its bitmap channel order has the same red/blue bug as the JPEXS reader's variable names — verify against the JPEXS *writer*.
+- [MS-CFB (Compound File Binary)](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/) — the OLE2 container used by pre-CS5 binary FLAs.
 
 
 ## Adobe FLA Bitmap Format (.dat files in bin/)
@@ -650,23 +667,34 @@ When `variant=1`, data is stored in chunks (max 2048 bytes each):
 
 The first chunk typically starts with zlib header `78 01` (deflate, no dictionary).
 
-### Pixel Format: ABGR (NOT ARGB!)
+### Pixel Format: A,R,G,B byte layout (byte1 = Red, byte3 = Blue)
 
-32-bit pixels are stored as **ABGR** (Alpha, Blue, Green, Red):
+32-bit pixels are stored with bytes in **A, R, G, B** order:
 ```
 Byte 0: Alpha (0-255)
-Byte 1: Blue  (0-255)  ← Note: Blue before Red!
+Byte 1: Red   (0-255)  ← Red comes before Blue
 Byte 2: Green (0-255)
-Byte 3: Red   (0-255)
+Byte 3: Blue  (0-255)
 ```
 
-Canvas ImageData requires RGBA, so conversion is:
+> ⚠️ **Historical bug (issue #10):** earlier docs/code called this "ABGR" and read
+> byte1 as Blue / byte3 as Red, which swaps red and blue (e.g. a photo's red detail
+> rendered blue). The authoritative source is the JPEXS **writer** round-trip,
+> `ImageBinDataGenerator.java`: it reads a Java `TYPE_INT_ARGB` pixel and writes
+> `a, (rgb>>16)&0xFF, g, rgb&0xFF` — i.e. byte1 = `(rgb>>16)` = **Red**, byte3 =
+> `rgb&0xFF` = **Blue**, so on disk the layout is A,R,G,B. (The JPEXS *reader*
+> `LosslessImageBinDataReader.java` uses misleadingly-named local vars `b`/`r`, but
+> its bit-packing `r|(g<<8)|(b<<16)|(a<<24)` into an ARGB image still maps byte1→Red,
+> byte3→Blue.) **`eddiemoore/fla-decoder` has the same red/blue bug** (it copied the
+> reader's variable names into a straight RGBA emit) — do NOT use it to confirm
+> channel order; the JPEXS writer is ground truth.
+
+Canvas ImageData requires RGBA:
 ```typescript
-// ABGR → RGBA conversion (per JPEXS source)
-rgba[dstIdx + 0] = abgr[srcIdx + 3];  // R ← byte 3
-rgba[dstIdx + 1] = abgr[srcIdx + 2];  // G ← byte 2
-rgba[dstIdx + 2] = abgr[srcIdx + 1];  // B ← byte 1
-rgba[dstIdx + 3] = abgr[srcIdx + 0];  // A ← byte 0
+rgba[dstIdx + 0] = data[srcIdx + 1];  // R ← byte 1
+rgba[dstIdx + 1] = data[srcIdx + 2];  // G ← byte 2
+rgba[dstIdx + 2] = data[srcIdx + 3];  // B ← byte 3
+rgba[dstIdx + 3] = data[srcIdx + 0];  // A ← byte 0
 ```
 
 ### Alpha Premultiplication
@@ -680,11 +708,16 @@ if (alpha != 0 && alpha != 255) {
 }
 color = Math.floor(color * alpha / 256);
 
-// Reader (LosslessImageBinDataReader.java):
+// Reader (LosslessImageBinDataReader.java) — note the `alpha - 1`:
 if (alpha > 0 && alpha < 255) {
+  alpha = alpha - 1;            // pairs with the writer's `alpha + 1`
   color = Math.floor(color * 256 / alpha);
 }
+// and the recovered pixel's alpha channel is this `alpha - 1`, not the raw byte.
 ```
+Omitting the `- 1` (as the original viewer code did) makes semi-transparent colors
+slightly too dark and the recovered alpha 1 too high. Opaque (255) and fully
+transparent (0) pixels are stored literally and unaffected.
 
 ### 8-bit Palette Mode (magic: 03 03)
 
@@ -696,9 +729,18 @@ Offset  Size  Field
 0-1     2     magic (03 03)
 2-25    24    header (same structure as 32-bit)
 26-27   2     palette entry count (1-256) as UI16 LE
-28+     N×4   palette entries (ABGR, 4 bytes each)
+28+     N×4   palette entries (4 bytes each — channel order UNVERIFIED, see below)
 ...     var   pixel data as palette indices (1 byte per pixel)
 ```
+
+> ⚠️ **8-bit caveats (under follow-up):** (1) The per-entry channel order is **unverified**
+> — JPEXS does not implement 8-bit FLA bitmaps, and SWF `DefineBitsLossless` 8-bit
+> colormaps are RGB(A), so even the alpha-byte position is uncertain. Don't assume it
+> matches the verified 32-bit A,R,G,B. (2) The pixel data (and possibly the palette) are
+> almost certainly **deflate-compressed** with the same chunked framing as the 32-bit
+> path; an earlier reader read them raw (no inflate), which decodes compressed 8-bit files
+> to garbage. Route through the same chunk-strip + `inflateRaw` pipeline as the 32-bit
+> decoder.
 
 ### Sample File Analysis
 
@@ -716,7 +758,7 @@ b8 2e 00 00     frameBottom = 0x00002eb8 = 11960 twips (598 px)
 01              variant = 1 (chunked compression)
 00 08           chunk length = 0x0800 = 2048 bytes
 78 01           zlib header (deflate, no dict)
-...             compressed ABGR pixel data
+...             compressed A,R,G,B pixel data
 ```
 
 ### Implementation Notes
@@ -726,3 +768,41 @@ b8 2e 00 00     frameBottom = 0x00002eb8 = 11960 twips (598 px)
 - Chunked format: concatenate all chunks before inflating, or inflate incrementally
 - JPEG files in bin/ are passed through directly (no conversion needed)
 - Verify `rowSize == width * 4` for consistency check
+
+## Decoder Reference Notes & Gotchas
+
+Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground truth.
+
+### Easing (issues #11, #13)
+- Animate's runtime easing is **CreateJS `Ease.js`** — match it exactly. See the Motion
+  Tween Frame section above for token format and the `back`/`elastic` constants.
+
+### `.dat` bitmaps (issue #10)
+- 32-bit layout is **A,R,G,B** (byte1=Red, byte3=Blue) per the JPEXS *writer* round-trip;
+  the reader's variable names mislead. fla-decoder shares the red/blue bug. Premultiply
+  unmultiplies with `alpha - 1`. 8-bit (`03 03`) channel order is unverified and the path
+  must inflate compressed data (see those sections above).
+
+### Layer parenting & visibility (issue #12)
+- `parentLayerIndex` on a `<DOMLayer>` is **overloaded**: the parent may be a `folder`
+  (group), a `mask`, or a normal layer (Animate "Layer Parenting" rig).
+- The renderer honors `layer.visible` and cascades a hidden folder/parent to its children
+  via `isLayerVisibleInFla` (`src/layer-utils.ts`, shared with the SVG/video exporter).
+  Mask groups honor visibility too (guarded inside `renderMaskGroup`).
+- **Not implemented:** layer-parenting *transforms* (composing a parent layer's transform
+  onto its children). In observed files the child keyframe matrices are already world-space,
+  so the rig renders correctly without composition; the open gap is interpolation when a
+  parent tweens while a child holds a single keyframe. Do NOT blindly add
+  `childWorld = parentWorld × childLocal` — it double-transforms world-space children.
+
+### Pre-CS5 binary FLA (issue #8)
+- Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not
+  ZIP. `src/fla-parser.ts` detects the magic and routes to `src/binary-fla-parser.ts` (via
+  `src/ole2-reader.ts`) before JSZip. Sector byte offset is `(n + 1) * sectorSize` (works for
+  both v3=512 and v4=4096-byte sectors). Currently extracts document props + library only
+  (empty stage); timeline/geometry decoding is future work (reference: eddiemoore/fla-decoder).
+
+### Video export (CI)
+- The exporter checks `AudioEncoder.isConfigSupported` and **degrades to video-only** (with a
+  `console.warn`) when the audio codec is unavailable — headless CI lacks the AAC encoder, and
+  this also prevents a real user-facing crash. Don't reintroduce an unconditional `AudioEncoder`.
