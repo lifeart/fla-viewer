@@ -64,6 +64,31 @@ const allVariants = [
   { name: 'edge-luma140-16', edgeAdd: [-16, -16, -16], minLuma: 140 },
   { name: 'edge-luma140-24', edgeAdd: [-24, -20, -20], minLuma: 140 },
   { name: 'edge-sat-luma120-16', edgeAdd: [-16, -16, -16], minLuma: 120, minChroma: 40 },
+  {
+    name: 'paint-solid15-edge-8',
+    sourcePaintEdgeKeys: ['solid:15,46,48,255'],
+    sourcePaintEdgeAdd: [-8, -8, -8],
+  },
+  {
+    name: 'paint-solid15-edge-16',
+    sourcePaintEdgeKeys: ['solid:15,46,48,255'],
+    sourcePaintEdgeAdd: [-16, -16, -16],
+  },
+  {
+    name: 'paint-solid15-edge-24',
+    sourcePaintEdgeKeys: ['solid:15,46,48,255'],
+    sourcePaintEdgeAdd: [-24, -24, -24],
+  },
+  {
+    name: 'paint-solid22-edge-16',
+    sourcePaintEdgeKeys: ['solid:22,198,133,255'],
+    sourcePaintEdgeAdd: [-16, -16, -16],
+  },
+  {
+    name: 'paint-solid15+22-edge-16',
+    sourcePaintEdgeKeys: ['solid:15,46,48,255', 'solid:22,198,133,255'],
+    sourcePaintEdgeAdd: [-16, -16, -16],
+  },
   { name: 'edge-16 + shadow lift', edgeAdd: [-16, -16, -16], interiorAdd: [4, 20, 20], maxLuma: 96 },
   { name: 'source-edge-16 high-frac', sourceEdgeAdd: [-16, -16, -16], minFractionalAlpha: 1500 },
   { name: 'source-edge-32 high-frac', sourceEdgeAdd: [-32, -32, -32], minFractionalAlpha: 1500 },
@@ -178,9 +203,103 @@ try {
       data[index + 2] = clamp(data[index + 2] + variant.interiorAdd[2]);
     };
 
-    const applyVariant = (canvas, alphaData, variant, fractionalAlphaCount) => {
+    const paintKeyForPaint = (paint) => {
+      if (!paint) return null;
+      if (paint.kind === 'solid') {
+        const { r, g, b, a } = paint.rgba;
+        return `solid:${r},${g},${b},${a}`;
+      }
+      return JSON.stringify(paint);
+    };
+
+    const collectLinePaints = (drawing, requiredKeys) => {
+      const paints = new Map();
+      for (const layer of drawing.layers) {
+        if (layer.type !== 'line') continue;
+        for (const shape of layer.shapes) {
+          for (const comp of shape.components) {
+            const key = paintKeyForPaint(comp.outerPaint);
+            if (!key || !requiredKeys.has(key) || paints.has(key)) continue;
+            paints.set(key, comp.outerPaint);
+          }
+        }
+      }
+      return [...paints.entries()].map(([key, paint]) => ({ key, paint }));
+    };
+
+    const drawingForLinePaintKey = (drawing, targetKey) => {
+      const clone = structuredClone(drawing);
+      for (const layer of clone.layers) {
+        if (layer.type !== 'line') {
+          layer.shapes = [];
+          continue;
+        }
+        layer.shapes = layer.shapes
+          .map((shape) => {
+            const hasTargetPaint = shape.components.some(comp => paintKeyForPaint(comp.outerPaint) === targetKey);
+            if (!hasTargetPaint) return null;
+            return {
+              ...shape,
+              components: shape.components.filter(comp =>
+                paintKeyForPaint(comp.outerPaint) === targetKey
+                || (comp.outerPaint === null && comp.path && comp.path.segments.length > 0),
+              ),
+            };
+          })
+          .filter(Boolean);
+      }
+      return clone;
+    };
+
+    const buildPaintMasks = async (drawing) => {
+      const requiredKeys = new Set(
+        variants.flatMap((variant) => variant.sourcePaintEdgeKeys ?? []),
+      );
+      if (requiredKeys.size === 0) return [];
+
+      const masks = [];
+      for (const paint of collectLinePaints(drawing, requiredKeys)) {
+        const paintDrawing = drawingForLinePaintKey(drawing, paint.key);
+        const canvas = tvg.renderTVGToCanvas(
+          paintDrawing,
+          SIZE,
+          SIZE,
+          viewport,
+          {
+            supersample: 2,
+            skipBackgroundComposite: true,
+            disableDenseLineFillAdjustment: true,
+          },
+        );
+        if (!canvas) continue;
+        await tvg.loadBitmapTiles(canvas, paintDrawing.diagnostics);
+        masks.push({
+          key: paint.key,
+          data: canvas.getContext('2d').getImageData(0, 0, SIZE, SIZE).data,
+        });
+      }
+      return masks;
+    };
+
+    const dominantPaintKey = (paintMasks, index) => {
+      let bestKey = null;
+      let bestAlpha = 0;
+      for (const mask of paintMasks) {
+        const alpha = mask.data[index + 3];
+        if (alpha <= bestAlpha) continue;
+        bestKey = mask.key;
+        bestAlpha = alpha;
+      }
+      return bestAlpha > 0 ? bestKey : null;
+    };
+
+    const applyVariant = (canvas, alphaData, variant, fractionalAlphaCount, paintMasks) => {
       if (variant.renderOptions) return canvas;
-      if (!variant.interiorAdd && !variant.edgeAdd && !variant.sourceEdgeAdd && !variant.multiInterior) return canvas;
+      if (!variant.interiorAdd
+        && !variant.edgeAdd
+        && !variant.sourceEdgeAdd
+        && !variant.sourcePaintEdgeAdd
+        && !variant.multiInterior) return canvas;
       if (variant.minFractionalAlpha !== undefined && fractionalAlphaCount < variant.minFractionalAlpha) return canvas;
 
       const output = cloneCanvas(canvas);
@@ -192,6 +311,15 @@ try {
           const index = (y * output.width + x) * 4;
           if (!isForeground(data, index)) continue;
           const isEdge = alphaData[index + 3] > 0 && alphaData[index + 3] < 255;
+          if (isEdge && variant.sourcePaintEdgeAdd) {
+            const dominantKey = dominantPaintKey(paintMasks, index);
+            if (!dominantKey || !variant.sourcePaintEdgeKeys.includes(dominantKey)) continue;
+            if (!pixelMatchesVariant(data, index, variant)) continue;
+            data[index] = clamp(data[index] + variant.sourcePaintEdgeAdd[0]);
+            data[index + 1] = clamp(data[index + 1] + variant.sourcePaintEdgeAdd[1]);
+            data[index + 2] = clamp(data[index + 2] + variant.sourcePaintEdgeAdd[2]);
+            continue;
+          }
           if (isEdge && variant.sourceEdgeAdd) {
             const alpha = alphaData[index + 3] / 255;
             data[index] = clamp((clamp(alphaData[index] + variant.sourceEdgeAdd[0]) * alpha) + 255 * (1 - alpha));
@@ -237,13 +365,14 @@ try {
 
       const alphaData = transparent.getContext('2d').getImageData(0, 0, SIZE, SIZE).data;
       const fractionalAlphaCount = countFractionalAlpha(alphaData);
+      const paintMasks = await buildPaintMasks(drawing);
       const rows = [];
       for (const variant of variants) {
         const canvas = variant.renderOptions
           ? tvg.renderTVGToCanvas(drawing, SIZE, SIZE, viewport, { supersample: 2, ...variant.renderOptions })
           : variant.name === 'baseline'
           ? candidate
-          : applyVariant(candidate, alphaData, variant, fractionalAlphaCount);
+          : applyVariant(candidate, alphaData, variant, fractionalAlphaCount, paintMasks);
         if (variant.renderOptions && canvas) await tvg.loadBitmapTiles(canvas, drawing.diagnostics);
         const score = bench.scoreCanvasSources(thumb, canvas, SIZE);
         rows.push({
