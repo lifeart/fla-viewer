@@ -5,17 +5,25 @@
 // NOT the shared Chrome MCP browser), renders frame 0 of the binary FLA's scene
 // to a real <canvas>, and writes the canvas to a PNG for visual inspection.
 //
-// Usage: node scripts/render-binary-fla.mjs <in.fla> <out.png> [frameIndex]
+// Usage: node scripts/render-binary-fla.mjs <in.fla> <out.png> [frameIndex] [symbolName]
+//
+// When [symbolName] is given, that library symbol's OWN timeline is rendered
+// (its `frames[]` are drawn at the requested frameIndex) instead of the scene —
+// this is how the issue-#8 per-frame attribution is proven, since the recovered
+// animation lives inside movie-clip symbols.
 import { build } from 'esbuild';
 import { readFileSync, writeFileSync } from 'fs';
 import { chromium } from 'playwright';
 
-const [, , inPath, outPath, frameArg] = process.argv;
+const [, , inPath, outPath, frameArg, symbolArg] = process.argv;
 if (!inPath || !outPath) {
-  console.error('usage: render-binary-fla.mjs <in.fla> <out.png> [frameIndex]');
+  console.error(
+    'usage: render-binary-fla.mjs <in.fla> <out.png> [frameIndex] [symbolName]'
+  );
   process.exit(1);
 }
 const frameIndex = frameArg ? parseInt(frameArg, 10) : 0;
+const symbolName = symbolArg ?? null;
 
 // Bundle a tiny entry that exposes the production parser + renderer on window.
 const entry = `
@@ -45,13 +53,26 @@ page.on('pageerror', (e) => consoleLines.push(`[pageerror] ${e.message}`));
 await page.setContent('<!doctype html><html><body><canvas id="c"></canvas></body></html>');
 await page.addScriptTag({ content: code });
 
-const result = await page.evaluate(async ({ flaBase64, frameIndex }) => {
+const result = await page.evaluate(async ({ flaBase64, frameIndex, symbolName }) => {
   const { parseBinaryFLA, FLARenderer } = window.__fla;
   const bin = atob(flaBase64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
   const doc = parseBinaryFLA(bytes);
+
+  // To prove per-frame attribution inside a movie-clip symbol, promote that
+  // symbol's timeline to the FIRST scene so renderFrame draws ITS keyframes.
+  if (symbolName) {
+    const sym = doc.symbols.get(symbolName);
+    if (!sym) {
+      throw new Error(
+        `symbol "${symbolName}" not found; have: ${[...doc.symbols.keys()].join(', ')}`
+      );
+    }
+    doc.timelines = [sym.timeline];
+  }
+
   const canvas = document.getElementById('c');
   canvas.width = doc.width;
   canvas.height = doc.height;
@@ -87,11 +108,25 @@ const result = await page.evaluate(async ({ flaBase64, frameIndex }) => {
     symbolKeys: [...doc.symbols.keys()],
     sceneElementCounts: doc.timelines.map((t) => ({
       name: t.name,
-      layers: t.layers.map((l) => ({ name: l.name, els: l.frames[0]?.elements.length ?? 0, types: (l.frames[0]?.elements ?? []).map((e) => e.type) })),
+      totalFrames: t.totalFrames,
+      layers: t.layers.map((l) => {
+        // Report the keyframe ACTIVE at the rendered frameIndex (index..index+duration).
+        const active =
+          l.frames.find(
+            (f) => frameIndex >= f.index && frameIndex < f.index + f.duration
+          ) ?? l.frames[0];
+        return {
+          name: l.name,
+          frameCount: l.frames.length,
+          activeFrameIndex: active?.index,
+          els: active?.elements.length ?? 0,
+          types: (active?.elements ?? []).map((e) => e.type),
+        };
+      }),
     })),
     dataUrl,
   };
-}, { flaBase64, frameIndex });
+}, { flaBase64, frameIndex, symbolName });
 
 await browser.close();
 
