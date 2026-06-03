@@ -1907,6 +1907,78 @@ describe('FLAParser', () => {
       expect(g).toBeLessThan(60);
     });
 
+    // Regression for PR #15: premultiplied-alpha unmultiply must subtract 1 from
+    // alpha (`a1 = a - 1`) before dividing, matching JPEXS LosslessImageBinDataReader
+    // (which pairs with the writer's `a + 1`). The existing channel-order test above
+    // only uses opaque alpha (255), so it never exercises this `a1` path.
+    //
+    // Chosen semi-transparent pixel (premultiplied input, A,R,G,B byte order):
+    //   A = 33  -> a1 = a - 1 = 32   (output alpha emitted as a1, NOT a)
+    //   R = 32  -> floor(32 * 256 / 32) = 256 -> clamps to 255
+    //   G = 24  -> floor(24 * 256 / 32) = 192
+    //   B = 16  -> floor(16 * 256 / 32) = 128
+    // JPEXS-correct decoded pixel: R=255 G=192 B=128 A=32
+    //
+    // The buggy `/a` (no `-1`, output alpha = a) would instead produce:
+    //   R = floor(32 * 256 / 33) = 248   (does NOT clamp to 255)
+    //   G = floor(24 * 256 / 33) = 186
+    //   B = floor(16 * 256 / 33) = 124
+    //   A = 33
+    // So the correct R clamps to 255 while the buggy R is 248, and the output
+    // alpha is 32 (correct) vs 33 (buggy) -- both are comfortably detectable and
+    // survive the Chromium canvas/PNG round-trip (RGB drifts by <=1, alpha exact).
+    it('unmultiplies premultiplied alpha with the JPEXS a-1 step (semi-transparent pixel)', async () => {
+      const width = 4;
+      const height = 4;
+      const PREMULT_A = 33; // 0 < a < 255 so the a1 = a - 1 path is taken
+      const PREMULT_R = 32; // -> floor(32*256/32) = 256 -> 255 (correct) vs 248 (buggy)
+      const PREMULT_G = 24; // -> floor(24*256/32) = 192 (correct) vs 186 (buggy)
+      const PREMULT_B = 16; // -> floor(16*256/32) = 128 (correct) vs 124 (buggy)
+      const pixelData = new Uint8Array(width * height * 4);
+      for (let i = 0; i < width * height; i++) {
+        pixelData[i * 4 + 0] = PREMULT_A; // A (byte 0)
+        pixelData[i * 4 + 1] = PREMULT_R; // R (byte 1)
+        pixelData[i * 4 + 2] = PREMULT_G; // G (byte 2)
+        pixelData[i * 4 + 3] = PREMULT_B; // B (byte 3)
+      }
+      const datFile = createFlaBitmapDat({ width, height, pixelData });
+      const media = `
+        <media>
+          <DOMBitmapItem name="semi.png" href="semi.png"
+            bitmapDataHRef="M 10 123456.dat"
+            frameRight="${width * 20}" frameBottom="${height * 20}"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M 10 123456.dat': datFile }
+      );
+      const doc = await parser.parse(fla);
+      const img = doc.bitmaps.get('semi.png')?.imageData as HTMLImageElement;
+      expect(img).toBeDefined();
+      if (!img.complete) {
+        await new Promise<void>((r) => { img.onload = () => r(); });
+      }
+
+      // Draw onto a canvas WITHOUT compositing over a background so the stored
+      // (un-premultiplied) RGBA survives the readback.
+      const c = document.createElement('canvas');
+      c.width = width;
+      c.height = height;
+      const cx = c.getContext('2d')!;
+      cx.clearRect(0, 0, width, height);
+      cx.drawImage(img, 0, 0);
+      const [r, g, b, a] = cx.getImageData(2, 2, 1, 1).data;
+
+      // JPEXS-correct expected output (tolerance 2 absorbs the canvas/PNG drift).
+      expect(r).toBeGreaterThanOrEqual(253); // 255 correct; buggy /a gives 248
+      expect(g).toBeGreaterThanOrEqual(190); // 192 correct; buggy /a gives 186
+      expect(g).toBeLessThanOrEqual(194);
+      expect(b).toBeGreaterThanOrEqual(126); // 128 correct; buggy /a gives 124
+      expect(b).toBeLessThanOrEqual(130);
+      // Output alpha must be a-1 (32), not a (33). Alpha round-trips exactly.
+      expect(a).toBe(PREMULT_A - 1);
+    });
+
     it('should handle partial recovery for corrupted deflate stream', async () => {
       const width = 20;
       const height = 20;
