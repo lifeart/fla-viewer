@@ -717,8 +717,16 @@ export function readShapeData(
     // The edge stream stores only fillStyle1 per edge; recover the implicit
     // fillStyle0 of regions that share boundary edges with neighbours so they
     // can close (e.g. the side bevels of a multi-fill frame). See
-    // {@link recoverFillStyle0FromGeometry}.
-    recoverFillStyle0FromGeometry(rawEdges);
+    // {@link recoverFillStyle0FromGeometry}. This is a geometric heuristic run
+    // on untrusted real files; if it throws on malformed/degenerate geometry,
+    // degrade to the un-recovered edges (the prior, blank-but-safe behaviour)
+    // rather than failing the whole shape decode. Surfaced as a warning so the
+    // skipped recovery is visible, not silently swallowed.
+    try {
+      recoverFillStyle0FromGeometry(rawEdges);
+    } catch (err) {
+      console.warn('binary-shape-decoder: fillStyle0 recovery skipped —', err);
+    }
   }
   return { shapeDataSchema, fills, strokes, rawEdges };
 }
