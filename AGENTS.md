@@ -727,20 +727,26 @@ When first bytes are `03 03`, the format uses palette indexing:
 Offset  Size  Field
 ──────────────────────────────────────────
 0-1     2     magic (03 03)
-2-25    24    header (same structure as 32-bit)
-26-27   2     palette entry count (1-256) as UI16 LE
-28+     N×4   palette entries (4 bytes each — channel order UNVERIFIED, see below)
-...     var   pixel data as palette indices (1 byte per pixel)
+2-3     2     rowSize (bytes per PADDED row)
+4-7     4     width, height (UI16 LE each)
+8-23    16    frame bounds (twips)
+24      1     hasAlpha
+25      1     palette colour count (0 = 256) — per SWF BitmapColorTableSize
+26-27   2     prefix (observed 00 00 / 01 ff; not needed to decode)
+28+     N×4   palette entries, R,G,B,A (alpha LAST), N = count
+...     var   palette indices, deflate-compressed (chunked, same framing as 32-bit)
 ```
 
-> ⚠️ **8-bit caveats (under follow-up):** (1) The per-entry channel order is **unverified**
-> — JPEXS does not implement 8-bit FLA bitmaps, and SWF `DefineBitsLossless` 8-bit
-> colormaps are RGB(A), so even the alpha-byte position is uncertain. Don't assume it
-> matches the verified 32-bit A,R,G,B. (2) The pixel data (and possibly the palette) are
-> almost certainly **deflate-compressed** with the same chunked framing as the 32-bit
-> path; an earlier reader read them raw (no inflate), which decodes compressed 8-bit files
-> to garbage. Route through the same chunk-strip + `inflateRaw` pipeline as the 32-bit
-> decoder.
+> ✅ **8-bit layout (resolved — issue #10 follow-up).** Reverse-engineered from real files
+> (`Blue in Super Mario 2.fla`) plus the SWF colormap convention (JPEXS/fla-decoder don't
+> implement 8-bit). Key differences from the 32-bit path:
+> - Palette is **R,G,B,A — alpha LAST, and NOT premultiplied** (the 32-bit path is
+>   A,R,G,B and premultiplied). Palette **count is byte 25** (`0` means 256).
+> - Indices are **deflate-compressed** with the same chunked `[UI16 len][data]…[UI16 0]`
+>   framing as 32-bit (an earlier reader read them raw → decoded compressed files to garbage).
+> - Inflated index data is `rowSize × height`, so rows are **padded to `rowSize`** and must
+>   be strided by `rowSize`, not `width`.
+> The 2-byte prefix at 26-27 is unexplained but unnecessary for decoding.
 
 ### Sample File Analysis
 
@@ -780,8 +786,9 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
 ### `.dat` bitmaps (issue #10)
 - 32-bit layout is **A,R,G,B** (byte1=Red, byte3=Blue) per the JPEXS *writer* round-trip;
   the reader's variable names mislead. fla-decoder shares the red/blue bug. Premultiply
-  unmultiplies with `alpha - 1`. 8-bit (`03 03`) channel order is unverified and the path
-  must inflate compressed data (see those sections above).
+  unmultiplies with `alpha - 1`. 8-bit (`03 03`) is **different**: palette is R,G,B,A (alpha
+  last, NOT premultiplied), count at byte 25 (0=256), indices deflate-compressed, rows padded
+  to `rowSize` (see the 8-bit section above).
 
 ### Layer parenting & visibility (issue #12)
 - `parentLayerIndex` on a `<DOMLayer>` is **overloaded**: the parent may be a `folder`
