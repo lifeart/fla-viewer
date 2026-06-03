@@ -1378,7 +1378,8 @@ export class FLARenderer {
       case 'expo': return t === 0 ? 0 : Math.pow(2, 10 * (t - 1));
       case 'circ': return 1 - Math.sqrt(1 - t * t);
       case 'back': {
-        const s = 1.70158;
+        // Overshoot constant 1.7 matches Adobe/CreateJS Ease.backIn = getBackIn(1.7).
+        const s = 1.7;
         return t * t * ((s + 1) * t - s);
       }
       case 'elastic': {
@@ -1402,7 +1403,8 @@ export class FLARenderer {
       case 'expo': return t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
       case 'circ': return Math.sqrt(1 - (t - 1) * (t - 1));
       case 'back': {
-        const s = 1.70158;
+        // Overshoot constant 1.7 matches Adobe/CreateJS Ease.backOut = getBackOut(1.7).
+        const s = 1.7;
         const u = t - 1;
         return u * u * ((s + 1) * u + s) + 1;
       }
@@ -1432,6 +1434,18 @@ export class FLARenderer {
         return -0.5 * Math.pow(2, 10 * u) * Math.sin(((u - s) * (2 * Math.PI)) / p);
       }
       return 0.5 * Math.pow(2, -10 * u) * Math.sin(((u - s) * (2 * Math.PI)) / p) + 1;
+    }
+    if (base === 'back') {
+      // CreateJS getBackInOut scales the overshoot by 1.525 before applying the
+      // symmetric halves, so backInOut overshoots more than the generic
+      // ease-in/ease-out split would (Ease.backInOut = getBackInOut(1.7)).
+      const s = 1.7 * 1.525;
+      let u = t * 2;
+      if (u < 1) {
+        return 0.5 * (u * u * ((s + 1) * u - s));
+      }
+      u -= 2;
+      return 0.5 * (u * u * ((s + 1) * u + s) + 2);
     }
     // The remaining families are symmetric: ease-in for the first half,
     // ease-out for the second half.

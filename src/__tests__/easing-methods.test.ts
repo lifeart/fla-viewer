@@ -105,6 +105,44 @@ describe('Ease method tokens (issue #11 real-file coverage)', () => {
     expect(ease(0.5, 'backInOut')).toBeCloseTo(0.5, 6); //  still symmetric
   });
 
+  it('pins back overshoot magnitude to Adobe/CreateJS Ease.js values', () => {
+    // Expected values derived directly from CreateJS src/tweenjs/Ease.js, the
+    // runtime Adobe Animate emits for back easing:
+    //   Ease.backOut    = getBackOut(1.7)                 // s = 1.7
+    //   Ease.backInOut  = getBackInOut(1.7) // amount *= 1.525 => s = 1.7*1.525
+    // The old code used s = 1.70158 for backIn/backOut and routed backInOut
+    // through the generic symmetric-halves split (no 1.525 scaling), so it
+    // UNDERSHOT the true overshoot. These exact-value asserts fail against that
+    // pre-fix code while passing for the corrected constants.
+
+    // backOut(0.3) with s=1.7: (--t)*t*((s+1)*t + s) + 1 = 0.9069 exactly.
+    // (Old s=1.70158 produced 0.90713, so the 5-digit pin distinguishes them.)
+    expect(ease(0.3, 'backOut')).toBeCloseTo(0.9069, 5);
+
+    // backInOut sample points: scaled overshoot s = 1.7*1.525 = 2.5925.
+    //   backInOut(0.85) = 1.06816375 (old generic split only reached ~1.0401)
+    //   backInOut(0.15) = -0.06816375 (old only dipped to ~-0.0401)
+    expect(ease(0.85, 'backInOut')).toBeCloseTo(1.06816375, 6);
+    expect(ease(0.15, 'backInOut')).toBeCloseTo(-0.06816375, 6);
+
+    // True curve extrema (scanned) must clear the thresholds the old buggy
+    // curve could never reach: new peak ~1.100 / dip ~-0.100 vs old ~1.050 /
+    // ~-0.050. The old generic split peaked at only ~1.050, so > 1.08 / < -0.08
+    // would have failed pre-fix.
+    let peak = -Infinity;
+    let dip = Infinity;
+    for (let i = 0; i <= 1000; i++) {
+      const v = ease(i / 1000, 'backInOut');
+      if (v > peak) peak = v;
+      if (v < dip) dip = v;
+    }
+    expect(peak).toBeGreaterThan(1.08);
+    expect(dip).toBeLessThan(-0.08);
+
+    // Still symmetric about (0.5, 0.5).
+    expect(ease(0.5, 'backInOut')).toBeCloseTo(0.5, 6);
+  });
+
   it('makes elasticOut oscillate around the target', () => {
     const samples = [0.1, 0.2, 0.3, 0.4, 0.5].map((t) => ease(t, 'elasticOut'));
     expect(Math.max(...samples)).toBeGreaterThan(1); // springs past target
