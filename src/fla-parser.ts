@@ -1552,9 +1552,13 @@ export class FLAParser {
     const is8Bit = bytes[1] === 0x03;
 
     // Parse header per JPEXS specification
+    const headerRowSize = bytes[2] | (bytes[3] << 8);
     const headerWidth = bytes[4] | (bytes[5] << 8);
     const headerHeight = bytes[6] | (bytes[7] << 8);
     const hasAlpha = bytes[24] === 1;
+    // Byte 25 means different things per format: for 32-bit it is the chunk
+    // variant flag (1 = chunked); for 8-bit it is the palette colour count
+    // (0 means 256). See decode8BitFlaBitmap.
     const variant = bytes[25];
 
     if (DEBUG) {
@@ -1563,7 +1567,7 @@ export class FLAParser {
 
     // Handle 8-bit palette mode
     if (is8Bit) {
-      return this.decode8BitFlaBitmap(bytes, headerWidth, headerHeight, hasAlpha);
+      return this.decode8BitFlaBitmap(bytes, headerWidth, headerHeight, headerRowSize, hasAlpha);
     }
 
     // Decompress the data using pako
@@ -1958,66 +1962,129 @@ export class FLAParser {
   }
 
   /**
+   * Strip the FLA chunk-length framing from a deflate/zlib stream and return
+   * the concatenated payload. Adobe stores the compressed pixel/index data as a
+   * sequence of `[UI16 chunkLen][chunkLen bytes]` records terminated by a zero
+   * length. The first chunk begins with a zlib header (0x78 0xNN). This framing
+   * is used by both the 32-bit (decodeFlaBitmap) and 8-bit pixel streams.
+   *
+   * The first chunk's two header bytes (0x78 0xNN) are dropped so the result is
+   * a raw deflate stream suitable for pako.inflateRaw.
+   */
+  private static dechunkFlaDeflateStream(bytes: Uint8Array, start: number): Uint8Array {
+    const chunks: Uint8Array[] = [];
+    let pos = start;
+
+    while (pos + 2 <= bytes.length) {
+      const chunkLen = bytes[pos] | (bytes[pos + 1] << 8);
+      pos += 2;
+      if (chunkLen === 0) break; // Terminator
+      const truncated = pos + chunkLen > bytes.length;
+      const end = truncated ? bytes.length : pos + chunkLen;
+      chunks.push(bytes.slice(pos, end));
+      pos = end;
+      if (truncated) break; // Last chunk was cut short by EOF
+    }
+
+    const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
+    let combined = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const chunk of chunks) {
+      combined.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    // Drop the zlib header (0x78 0xNN) so callers can use raw inflate.
+    if (combined.length >= 2 && combined[0] === 0x78) {
+      combined = combined.slice(2);
+    }
+    return combined;
+  }
+
+  /**
    * Decode 8-bit palette-indexed FLA bitmap format (magic: 03 03).
    *
-   * Format per JPEXS:
-   * - Header: 26 bytes (same as 32-bit)
-   * - Palette count: UI16 LE (number of palette entries)
-   * - Palette data: count × 4 bytes (ABGR per entry if hasAlpha, else RGB)
-   * - Pixel data: 1 byte per pixel (palette index)
+   * Layout (reverse-engineered from real Adobe Animate .fla bitmaps; see the
+   * "Blue in Super Mario 2.fla" Media streams M 3 / M 12-18):
    *
-   * NOTE (unverified): the per-entry palette channel order below is NOT
-   * confirmed. JPEXS does not implement 8-bit FLA bitmaps at all, and SWF
-   * DefineBitsLossless 8-bit colormaps are RGB(A) (not ABGR), so the byte
-   * layout — including which byte holds alpha — is uncertain. The mapping
-   * here mirrors the original (pre issue #10) code and is deliberately left
-   * unchanged; do not assume it is A,R,G,B like the verified 32-bit path.
+   * - Bytes 0-1:   magic 0x03 0x03
+   * - Bytes 2-3:   rowSize (UI16 LE) — bytes per index row, padded to a 4-byte
+   *                multiple (so rowSize >= width and rows are NOT tightly packed)
+   * - Bytes 4-5:   width  (UI16 LE)
+   * - Bytes 6-7:   height (UI16 LE)
+   * - Bytes 8-23:  frame bounds (twips, unused here)
+   * - Byte 24:     hasAlpha (0 or 1)
+   * - Byte 25:     palette colour count, where 0 means 256 (single byte, so the
+   *                max of 256 colours wraps to 0). This is the field byte 25
+   *                holds for the *32-bit* format's "variant"; for 8-bit it is
+   *                the colour-table size, matching SWF DefineBitsLossless's
+   *                `BitmapColorTableSize` semantics.
+   * - Bytes 26-27: 2-byte palette/stream prefix (observed `01 ff`/`00 ff` when
+   *                hasAlpha=0, `00 00` when hasAlpha=1). Not needed for decoding.
+   * - Byte 28..:   palette — `count` entries of 4 bytes each in R,G,B,A order
+   *                (red first, alpha last). This matches SWF DefineBitsLossless
+   *                colormaps (RGB/RGBA), and is DELIBERATELY NOT the A,R,G,B /
+   *                ABGR order used by the verified 32-bit path.
+   * - After the palette: the pixel indices, deflate-compressed with the same
+   *                `[UI16 chunkLen][data]…[UI16 0]` chunk framing as the 32-bit
+   *                stream. After inflating, indices are `rowSize` bytes per row
+   *                (only the first `width` of each row are real pixels).
    *
-   * KNOWN LATENT BUG (out of scope for issue #10, documented so it is not
-   * lost): unlike the 32-bit path (decodeFlaBitmap), this function does NOT
-   * zlib-inflate the pixel data and does NOT strip the variant==1 chunk-length
-   * framing. It reads bytes.slice(pos) directly as raw palette indices, so any
-   * compressed (variant==1) 8-bit .dat file decodes to garbage. A proper fix
-   * would route the bytes through the same chunk-stripping + pako.inflateRaw
-   * pipeline used by decodeFlaBitmap before indexing into the palette.
+   * CHANNEL ORDER EVIDENCE: rendered the real M 3 bitmap with each candidate
+   * order; R,G,B,A produced Bowser Jr. with natural green/tan/orange colours,
+   * while a B/R swap turned the skin blue. Alpha is the 4th byte (the palette
+   * shows a clean 10→25→43→64→…→255 alpha ramp in byte 3). 8-bit palettes are
+   * NOT alpha-premultiplied (unlike the 32-bit pixels), so colours are used
+   * literally.
    */
   private decode8BitFlaBitmap(
     bytes: Uint8Array,
     width: number,
     height: number,
+    rowSize: number,
     hasAlpha: boolean
   ): Promise<HTMLImageElement | null> {
     try {
-      let pos = 26;
+      // Byte 25 = palette colour count (0 => 256).
+      const paletteCount = bytes[25] === 0 ? 256 : bytes[25];
 
-      // Read palette count
-      const paletteCount = bytes[pos] | (bytes[pos + 1] << 8);
-      pos += 2;
+      // Palette starts at byte 28 (after the 26-byte header + 2-byte prefix).
+      const paletteStart = 28;
+      const bytesPerEntry = 4;
 
       if (DEBUG) {
-        console.log(`8-bit bitmap: ${width}x${height}, palette=${paletteCount} entries, hasAlpha=${hasAlpha}`);
+        console.log(`8-bit bitmap: ${width}x${height}, rowSize=${rowSize}, palette=${paletteCount} entries, hasAlpha=${hasAlpha}`);
       }
 
-      // Read palette (ABGR format, 4 bytes each)
+      // Read palette in R,G,B,A order (red first, alpha last).
       const palette: { r: number; g: number; b: number; a: number }[] = [];
-      const bytesPerEntry = 4; // Always 4 bytes per JPEXS (ABGR)
-
+      let pos = paletteStart;
       for (let i = 0; i < paletteCount && pos + bytesPerEntry <= bytes.length; i++) {
-        // Channel order UNVERIFIED — preserved from the original pre issue #10
-        // code (byte1→B, byte3→R). There is no JPEXS/SWF confirmation that the
-        // 8-bit palette is A,R,G,B, so this is intentionally NOT changed to
-        // match the verified 32-bit path. See the function doc comment.
-        const a = hasAlpha ? bytes[pos] : 255;
-        const b = bytes[pos + 1];
-        const g = bytes[pos + 2];
-        const r = bytes[pos + 3];
+        const r = bytes[pos];
+        const g = bytes[pos + 1];
+        const b = bytes[pos + 2];
+        const a = hasAlpha ? bytes[pos + 3] : 255;
         palette.push({ r, g, b, a });
         pos += bytesPerEntry;
       }
 
-      // Remaining bytes are pixel indices
-      const pixelData = bytes.slice(pos);
-      const pixelCount = width * height;
+      // The pixel indices follow the palette as a chunk-framed deflate stream.
+      const indexStart = paletteStart + paletteCount * bytesPerEntry;
+      const compData = FLAParser.dechunkFlaDeflateStream(bytes, indexStart);
+
+      let indices: Uint8Array;
+      try {
+        indices = pako.inflateRaw(compData);
+      } catch {
+        // Some streams reference a preset (zero) dictionary, like the 32-bit
+        // path. If this also fails it throws to the outer catch (no swallowing).
+        const zeroDict = new Uint8Array(32768);
+        indices = pako.inflateRaw(compData, { dictionary: zeroDict } as pako.InflateOptions);
+      }
+
+      // Rows are padded to `rowSize` bytes; fall back to width if the header's
+      // rowSize looks wrong (smaller than width, or 0).
+      const stride = rowSize >= width && rowSize > 0 ? rowSize : width;
 
       // Create canvas
       const canvas = document.createElement('canvas');
@@ -2029,15 +2096,20 @@ export class FLAParser {
       const imageData = ctx.createImageData(width, height);
       const rgba = imageData.data;
 
-      // Convert indexed pixels to RGBA
-      for (let i = 0; i < pixelCount && i < pixelData.length; i++) {
-        const index = pixelData[i];
-        const color = palette[index] || { r: 0, g: 0, b: 0, a: 255 };
-        const dstIdx = i * 4;
-        rgba[dstIdx] = color.r;
-        rgba[dstIdx + 1] = color.g;
-        rgba[dstIdx + 2] = color.b;
-        rgba[dstIdx + 3] = color.a;
+      // Convert indexed pixels to RGBA, honouring the row stride.
+      for (let y = 0; y < height; y++) {
+        const rowBase = y * stride;
+        for (let x = 0; x < width; x++) {
+          const srcIdx = rowBase + x;
+          if (srcIdx >= indices.length) break;
+          const index = indices[srcIdx];
+          const color = palette[index] || { r: 0, g: 0, b: 0, a: 255 };
+          const dstIdx = (y * width + x) * 4;
+          rgba[dstIdx] = color.r;
+          rgba[dstIdx + 1] = color.g;
+          rgba[dstIdx + 2] = color.b;
+          rgba[dstIdx + 3] = color.a;
+        }
       }
 
       ctx.putImageData(imageData, 0, 0);

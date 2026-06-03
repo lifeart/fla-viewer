@@ -589,6 +589,167 @@ describe('FLAParser', () => {
     });
   });
 
+  describe('8-bit palette FLA bitmap (magic 03 03)', () => {
+    // Build a compressed 8-bit FLA bitmap .dat exactly like Adobe Animate emits:
+    // 26-byte header, byte 25 = palette count (0 => 256), 2-byte prefix,
+    // R,G,B,A palette entries from byte 28, then the pixel indices as a
+    // chunk-framed ([UI16 len][data]...[UI16 0]) zlib stream. Rows in the index
+    // plane are padded to `rowSize` bytes.
+    function build8BitDat(opts: {
+      width: number;
+      height: number;
+      rowSize?: number;
+      hasAlpha: boolean;
+      palette: Array<[number, number, number, number]>; // [r,g,b,a]
+      indices: number[][]; // [height][width] palette indices
+    }): Uint8Array {
+      const { width, height, hasAlpha, palette, indices } = opts;
+      const rowSize = opts.rowSize ?? width;
+
+      // --- Build the raw index plane (rowSize-padded rows). ---
+      const indexPlane = new Uint8Array(rowSize * height);
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          indexPlane[y * rowSize + x] = indices[y][x];
+        }
+      }
+
+      // --- zlib-deflate the index plane, then split into <=2048-byte chunks
+      //     prefixed with their UI16 length and terminated by a 0 length. ---
+      const deflated = pako.deflate(indexPlane); // includes the 0x78 zlib header
+      const framed: number[] = [];
+      const CHUNK = 2048;
+      for (let off = 0; off < deflated.length; off += CHUNK) {
+        const slice = deflated.subarray(off, off + CHUNK);
+        framed.push(slice.length & 0xff, (slice.length >> 8) & 0xff);
+        for (const b of slice) framed.push(b);
+      }
+      framed.push(0, 0); // terminator
+
+      // --- Header (26 bytes) + prefix + palette + framed indices. ---
+      const header = new Uint8Array(26);
+      header[0] = 0x03;
+      header[1] = 0x03;
+      header[2] = rowSize & 0xff;
+      header[3] = (rowSize >> 8) & 0xff;
+      header[4] = width & 0xff;
+      header[5] = (width >> 8) & 0xff;
+      header[6] = height & 0xff;
+      header[7] = (height >> 8) & 0xff;
+      // bytes 8..23: frame bounds (twips) — width/height * 20, irrelevant to decode
+      header[12] = (width * 20) & 0xff;
+      header[13] = ((width * 20) >> 8) & 0xff;
+      header[20] = (height * 20) & 0xff;
+      header[21] = ((height * 20) >> 8) & 0xff;
+      header[24] = hasAlpha ? 1 : 0;
+      header[25] = palette.length === 256 ? 0 : palette.length; // 0 => 256
+
+      const prefix = new Uint8Array([0x01, 0xff]); // observed real-file prefix
+      const pal = new Uint8Array(palette.length * 4);
+      palette.forEach(([r, g, b, a], i) => {
+        pal[i * 4] = r;
+        pal[i * 4 + 1] = g;
+        pal[i * 4 + 2] = b;
+        pal[i * 4 + 3] = a;
+      });
+
+      const out = new Uint8Array(
+        header.length + prefix.length + pal.length + framed.length
+      );
+      let p = 0;
+      out.set(header, p); p += header.length;
+      out.set(prefix, p); p += prefix.length;
+      out.set(pal, p); p += pal.length;
+      out.set(new Uint8Array(framed), p);
+      return out;
+    }
+
+    // Render a decoded HTMLImageElement back to flat RGBA so we can assert pixels.
+    function imageToRgba(img: HTMLImageElement, w: number, h: number): Uint8ClampedArray {
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d')!;
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0);
+      return ctx.getImageData(0, 0, w, h).data;
+    }
+
+    async function parse8BitDat(dat: Uint8Array, w: number, h: number) {
+      const media = `
+        <media>
+          <DOMBitmapItem name="pal8.dat" href="pal8.dat" bitmapDataHRef="pal8.dat"
+            frameRight="${w * 20}" frameBottom="${h * 20}"/>
+        </media>`;
+      const fla = await createFlaZip(createDOMDocument({ media }), {
+        'bin/pal8.dat': dat,
+      });
+      const doc = await parser.parse(fla);
+      const bitmap = doc.bitmaps.get('pal8.dat');
+      expect(bitmap).toBeDefined();
+      expect(bitmap!.imageData).toBeDefined();
+      return imageToRgba(bitmap!.imageData as HTMLImageElement, w, h);
+    }
+
+    it('decompresses indices and applies the R,G,B,A palette (load-bearing)', async () => {
+      // 3x2 image. Palette: red, green, blue, opaque white.
+      const palette: Array<[number, number, number, number]> = [
+        [200, 30, 40, 255],   // 0: red
+        [20, 180, 60, 255],   // 1: green
+        [10, 50, 220, 255],   // 2: blue
+        [255, 255, 255, 255], // 3: white
+      ];
+      const indices = [
+        [0, 1, 2],
+        [3, 2, 1],
+      ];
+      const dat = build8BitDat({ width: 3, height: 2, hasAlpha: false, palette, indices });
+      const rgba = await parse8BitDat(dat, 3, 2);
+
+      const px = (x: number, y: number) => {
+        const i = (y * 3 + x) * 4;
+        return [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]];
+      };
+
+      // These exact values FAIL against the old code, which (a) never inflated
+      // the chunk-framed zlib stream and (b) read the palette as A,B,G,R.
+      expect(px(0, 0)).toEqual([200, 30, 40, 255]);   // red
+      expect(px(1, 0)).toEqual([20, 180, 60, 255]);   // green
+      expect(px(2, 0)).toEqual([10, 50, 220, 255]);   // blue
+      expect(px(0, 1)).toEqual([255, 255, 255, 255]); // white
+      expect(px(1, 1)).toEqual([10, 50, 220, 255]);   // blue
+      expect(px(2, 1)).toEqual([20, 180, 60, 255]);   // green
+    });
+
+    it('honours rowSize padding (stride > width) and the alpha channel', async () => {
+      // width 3 but rowSize 4 -> each index row has 1 padding byte that must be
+      // skipped; if the decoder used `width` as the stride the image would skew.
+      const palette: Array<[number, number, number, number]> = [
+        [255, 0, 0, 128], // semi-transparent red
+        [0, 255, 0, 255], // opaque green
+      ];
+      const indices = [
+        [0, 1, 0],
+        [1, 0, 1],
+      ];
+      const dat = build8BitDat({
+        width: 3, height: 2, rowSize: 4, hasAlpha: true, palette, indices,
+      });
+      const rgba = await parse8BitDat(dat, 3, 2);
+      const px = (x: number, y: number) => {
+        const i = (y * 3 + x) * 4;
+        return [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]];
+      };
+      // Canvas un-premultiplies; alpha=128 red stays red-ish. Assert alpha + hue.
+      expect(px(0, 0)[3]).toBe(128);                 // semi-transparent
+      expect(px(0, 0)[0]).toBeGreaterThan(200);      // red channel dominant
+      expect(px(1, 0)).toEqual([0, 255, 0, 255]);    // opaque green
+      expect(px(2, 0)[3]).toBe(128);
+      expect(px(1, 1)[3]).toBe(128);                 // red again on row 2
+      expect(px(0, 1)).toEqual([0, 255, 0, 255]);    // green, proving no skew
+    });
+  });
+
   describe('tween parsing', () => {
     it('should parse motion tween frame', async () => {
       const timelines = `
