@@ -10,6 +10,32 @@ export interface ExportProgress {
 export type ProgressCallback = (progress: ExportProgress) => void;
 export type CancellationCheck = () => boolean;
 
+/**
+ * Check whether an AudioEncoder for the given config can be constructed in the
+ * current environment. Some browsers / headless CI environments lack particular
+ * audio codecs (e.g. AAC `mp4a.40.2`), in which case constructing an
+ * AudioEncoder with that codec throws `NotSupportedError`. We detect this up
+ * front so the export can gracefully degrade to a video-only file instead of
+ * crashing.
+ */
+async function isAudioCodecSupported(
+  config: AudioEncoderConfig
+): Promise<boolean> {
+  // AudioEncoder may be entirely absent (older browsers, some test envs).
+  if (typeof AudioEncoder === 'undefined') {
+    return false;
+  }
+
+  // isConfigSupported is the spec'd way to feature-detect a codec without
+  // constructing an encoder. Guard for environments where it is missing.
+  if (typeof AudioEncoder.isConfigSupported !== 'function') {
+    return false;
+  }
+
+  const result = await AudioEncoder.isConfigSupported(config);
+  return result.supported === true;
+}
+
 interface StreamSound {
   sound: FrameSound;
   soundItem: SoundItem;
@@ -63,6 +89,27 @@ export async function exportVideo(
     sampleRate = result.sampleRate;
   }
 
+  // Determine whether we can actually encode the audio track. The AAC encoder
+  // (`mp4a.40.2`) is unavailable in some environments (e.g. headless CI
+  // Chromium), where constructing an AudioEncoder would otherwise throw
+  // NotSupportedError. If the codec is unsupported we degrade gracefully and
+  // export a valid video-only file rather than crashing the whole export.
+  const audioEncoderConfig: AudioEncoderConfig = {
+    codec: 'mp4a.40.2', // AAC-LC
+    numberOfChannels: 2,
+    sampleRate,
+    bitrate: 128_000, // 128 kbps
+  };
+  const encodeAudio =
+    hasAudio && audioData !== null && (await isAudioCodecSupported(audioEncoderConfig));
+
+  if (hasAudio && !encodeAudio) {
+    console.warn(
+      'exportVideo: audio codec "mp4a.40.2" (AAC) is not supported in this ' +
+        'environment; exporting video-only without an audio track.'
+    );
+  }
+
   // Create MP4 muxer target
   const target = new ArrayBufferTarget();
 
@@ -78,7 +125,7 @@ export async function exportVideo(
     fastStart: 'in-memory',
   };
 
-  if (hasAudio && audioData) {
+  if (encodeAudio) {
     muxerOptions.audio = {
       codec: 'aac',
       numberOfChannels: 2,
@@ -151,8 +198,8 @@ export async function exportVideo(
   await videoEncoder.flush();
   videoEncoder.close();
 
-  // Encode audio if present
-  if (hasAudio && audioData) {
+  // Encode audio if present and the codec is supported
+  if (encodeAudio && audioData) {
     onProgress?.({
       currentFrame: totalFrames,
       totalFrames,
@@ -168,12 +215,7 @@ export async function exportVideo(
       },
     });
 
-    audioEncoder.configure({
-      codec: 'mp4a.40.2', // AAC-LC
-      numberOfChannels: 2,
-      sampleRate,
-      bitrate: 128_000, // 128 kbps
-    });
+    audioEncoder.configure(audioEncoderConfig);
 
     // Encode audio in chunks
     const samplesPerChunk = 1024;
@@ -276,6 +318,26 @@ export async function exportWebM(
     sampleRate = result.sampleRate;
   }
 
+  // Determine whether we can actually encode the audio track. The Opus encoder
+  // may be unavailable in some environments, where constructing an AudioEncoder
+  // would otherwise throw NotSupportedError. Degrade gracefully to a valid
+  // video-only file instead of crashing the export.
+  const audioEncoderConfig: AudioEncoderConfig = {
+    codec: 'opus',
+    numberOfChannels: 2,
+    sampleRate,
+    bitrate: 128_000, // 128 kbps
+  };
+  const encodeAudio =
+    hasAudio && audioData !== null && (await isAudioCodecSupported(audioEncoderConfig));
+
+  if (hasAudio && !encodeAudio) {
+    console.warn(
+      'exportWebM: audio codec "opus" is not supported in this environment; ' +
+        'exporting video-only without an audio track.'
+    );
+  }
+
   // Create WebM muxer target
   const target = new ArrayBufferTarget();
 
@@ -291,7 +353,7 @@ export async function exportWebM(
     firstTimestampBehavior: 'offset',
   };
 
-  if (hasAudio && audioData) {
+  if (encodeAudio) {
     muxerOptions.audio = {
       codec: 'A_OPUS',
       numberOfChannels: 2,
@@ -362,8 +424,8 @@ export async function exportWebM(
   await videoEncoder.flush();
   videoEncoder.close();
 
-  // Encode audio if present
-  if (hasAudio && audioData) {
+  // Encode audio if present and the codec is supported
+  if (encodeAudio && audioData) {
     onProgress?.({
       currentFrame: totalFrames,
       totalFrames,
@@ -379,12 +441,7 @@ export async function exportWebM(
       },
     });
 
-    audioEncoder.configure({
-      codec: 'opus',
-      numberOfChannels: 2,
-      sampleRate,
-      bitrate: 128_000, // 128 kbps
-    });
+    audioEncoder.configure(audioEncoderConfig);
 
     // Encode audio in chunks
     const samplesPerChunk = 1024;
