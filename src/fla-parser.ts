@@ -44,6 +44,8 @@ import {
   getAudioCodecName,
   getKeyframes
 } from './flv-parser';
+import { isOLE2 } from './ole2-reader';
+import { parseBinaryFLA } from './binary-fla-parser';
 
 // Debug flag - enabled via ?debug=true URL parameter or setParserDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -74,6 +76,20 @@ export class FLAParser {
   async parse(file: File, onProgress?: ProgressCallback, isSkipImagesFix?: SkipCheckCallback): Promise<FLADocument> {
     const progress = onProgress || (() => {});
     const shouldSkipImagesFix = isSkipImagesFix || (() => false);
+
+    // Detect format by leading bytes. CS5+ FLAs are ZIP archives ("PK"…);
+    // pre-CS5 FLAs are OLE2 compound documents (D0 CF 11 E0 …) — a completely
+    // different container that JSZip cannot read (GitHub issue #8). Branch
+    // before touching JSZip so binary files take the dedicated code path
+    // instead of failing later with "DOMDocument.xml not found".
+    const headerBytes = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+    if (isOLE2(headerBytes)) {
+      progress('Reading binary (pre-CS5) FLA...');
+      const fullBytes = new Uint8Array(await file.arrayBuffer());
+      // parseBinaryFLA throws with a specific message on unrecognized binary
+      // FLAs; let it propagate so the UI shows real feedback (no silent catch).
+      return parseBinaryFLA(fullBytes);
+    }
 
     // Try to load ZIP, handling potentially corrupted files
     progress('Extracting archive...');
