@@ -2901,7 +2901,8 @@ export class FLARenderer {
     return null;
   }
 
-  // Reverse commands for fillStyle0 (left-side fill)
+  // Reverse commands for fillStyle0 (right-side fill — see AGENTS.md / Ruffle:
+  // fillStyle1 = LEFT/forward, fillStyle0 = RIGHT/reversed)
   private reverseCommands(commands: PathCommand[]): PathCommand[] {
     const points: { x: number; y: number; type: string; cx?: number; cy?: number; c1x?: number; c1y?: number; c2x?: number; c2y?: number }[] = [];
 
