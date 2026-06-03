@@ -218,7 +218,8 @@ Managed finding from `Lovelace`: dense line-fill compositing probes after the cu
 - Source-mask tonal probes are rejected: saturated-base `+8,+24,+22` averaged `-0.1217`, dark-base `0,-12,-12` averaged `-0.0384`, and source-domain pre-white compositing averaged `-0.4753`.
 - Source paint mutation is rejected: splitting inherited components from their explicit seed cratered raw scores, with average `-7.8477` and `color-1` `-20.7188`. Whole green/base paint-group lifts were near-neutral or negative.
 - Source metadata did not reveal a hidden opacity/blend field: the checked cases have only a line layer, empty diagnostics, `tGTI opacity=0`, `TGRV=0`, and `insideColor=0`.
-- Prioritized next experiment: prototype exact paint-key carrier group isolation for dense line-fill base carriers. Render each exact same-paint carrier group as one coverage/offscreen group, then composite the group once before the accepted dense tone passes. Preserve exact paint keys and source order; do not split inherited components from their explicit seed.
+- Rejected local prototype: cross-shape same-paint max-alpha coverage grouping for line-fill base carriers. It passed targeted parser guards but produced no meaningful raw gain: `color-21`, `color-3`, and `color-18` were unchanged, `color-19` moved only `+0.0039`, and `color-31` regressed `-0.0039`. Do not add this complexity unless a future probe targets component-level grouping inside the actual mixed carrier, not only separate base-carrier shapes.
+- Prioritized next experiment: prototype exact paint-key carrier group isolation inside mixed dense line-fill carriers. Render each exact same-paint component group as one coverage/offscreen group, then composite the group once before the accepted dense tone passes. Preserve exact paint keys and source order; do not split inherited components from their explicit seed.
 
 Managed local finding: alternate-source thumbnail detection
 
