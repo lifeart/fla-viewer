@@ -16,17 +16,24 @@
  * byte-for-byte against real Flash MX 2004 sample FLAs (see
  * `src/__tests__/binary-fla-parser.test.ts`).
  *
- * NEW (issue #8 shape geometry): per-stream vector SHAPE geometry is now
- * decoded too — see {@link ./binary-shape-decoder}. The CPicShape fill/stroke
- * styles and edge stream are read and converted to pixel-space PathCommands,
- * so real artwork renders on the stage instead of an empty document.
+ * NEW (issue #8 shape geometry): per-stream vector SHAPE geometry is decoded —
+ * see {@link ./binary-shape-decoder}. The CPicShape fill/stroke styles and edge
+ * stream are read and converted to pixel-space PathCommands, so library symbols
+ * render real artwork instead of empty placeholders.
  *
- * What is still NOT decoded here: per-frame timeline content (keyframes,
- * tweens, symbol placements), text/bitmap/sound element placement. Those
- * require walking the full MFC `Serialize` field orderings including
- * CPicFrame's schema-gated timeline tail, which even the reference decoder
- * only resolves via signature-based recovery. We never silently swallow
- * errors (project rule).
+ * NEW (issue #8 instance placement): symbol-INSTANCE placements are now decoded
+ * too — see {@link ./binary-instance-decoder}. A scene's stage holds symbol
+ * instances (a library reference + a transform matrix), not inline art; those
+ * placements are recovered and emitted as `SymbolInstance` elements referencing
+ * the decoded library symbols, so a scene that places a symbol composites its
+ * artwork ONTO THE STAGE instead of showing an empty stage.
+ *
+ * What is still NOT decoded here: precise per-layer / per-frame ATTRIBUTION of
+ * recovered content (which keyframe of which layer a shape/placement belongs
+ * to), tweens, and text/bitmap/sound element placement. CPicFrame's schema-
+ * gated timeline tail is unparsed (even the reference decoder resolves shapes
+ * only via signature recovery), so all recovered content for a stream is
+ * composited into one frame. We never silently swallow errors (project rule).
  */
 import { OLE2File } from './ole2-reader';
 import {
@@ -35,7 +42,20 @@ import {
   type BinaryLayerType,
 } from './binary-fla-structure';
 import { decodeStreamShapes } from './binary-shape-decoder';
-import type { FLADocument, Layer, Shape, Symbol, Timeline } from './types';
+import {
+  dedupeInstances,
+  instanceSymbolType,
+  scanForInstances,
+  type DecodedInstance,
+} from './binary-instance-decoder';
+import type {
+  FLADocument,
+  Layer,
+  Shape,
+  Symbol,
+  SymbolInstance,
+  Timeline,
+} from './types';
 
 export type BinarySymbolType = 'graphic' | 'button' | 'movieclip' | 'unknown';
 
@@ -76,6 +96,16 @@ export interface BinaryFLAInfo {
   sceneShapes: Map<number, Shape[]>;
   /** Vector shapes decoded from each `Symbol N` stream, keyed by symbol number. */
   symbolShapes: Map<number, Shape[]>;
+  /**
+   * Symbol-instance PLACEMENTS recovered from each scene's `Page N` stream
+   * (issue #8 instance placement), keyed by scene number. Each placement
+   * references a library item (by `mediaRef`) and carries its matrix, so the
+   * renderer composites the library symbol onto the stage. Located by the
+   * instance recovery scanner (see {@link ./binary-instance-decoder}).
+   */
+  sceneInstances: Map<number, DecodedInstance[]>;
+  /** Symbol-instance placements recovered from each `Symbol N` stream. */
+  symbolInstances: Map<number, DecodedInstance[]>;
 }
 
 const SYMBOL_TYPE_NAMES: Record<number, BinarySymbolType> = {
@@ -100,6 +130,24 @@ function indexOf(hay: Uint8Array, needle: Uint8Array, from: number): number {
     return i;
   }
   return -1;
+}
+
+/**
+ * Return the scene number for an OLE2 stream name, or null. Handles both the
+ * `Page N` (Flash 5..MX 2004) and `P N <timestamp>` (Flash 8 / CS3+) naming.
+ */
+function parseSceneStreamNumber(name: string): number | null {
+  const m = /^(?:Page|P) (\d+)(?: \d+)?$/.exec(name);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+/**
+ * Return the symbol number for an OLE2 stream name, or null. Handles both the
+ * `Symbol N` and `S N <timestamp>` naming.
+ */
+function parseSymbolStreamNumber(name: string): number | null {
+  const m = /^(?:Symbol|S) (\d+)(?: \d+)?$/.exec(name);
+  return m ? parseInt(m[1], 10) : null;
 }
 
 /**
@@ -279,23 +327,30 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
   const symbolLayers = new Map<number, BinaryLayerInfo[]>();
   const sceneShapes = new Map<number, Shape[]>();
   const symbolShapes = new Map<number, Shape[]>();
+  const sceneInstances = new Map<number, DecodedInstance[]>();
+  const symbolInstances = new Map<number, DecodedInstance[]>();
   for (const name of streams) {
-    const pageMatch = /^Page (\d+)$/.exec(name);
-    if (pageMatch) {
-      const sceneNum = parseInt(pageMatch[1], 10);
+    // Scene streams are named `Page N` (Flash 5..MX 2004) or `P N <timestamp>`
+    // (Flash 8 / CS3+); symbol streams `Symbol N` or `S N <timestamp>`. Both
+    // are the same MFC object tree — only the OLE2 stream label differs.
+    const pageNum = parseSceneStreamNumber(name);
+    if (pageNum !== null) {
       const streamData = ole.readStream(name);
-      scenes.push({ scene: sceneNum, layers: extractLayers(streamData) });
+      scenes.push({ scene: pageNum, layers: extractLayers(streamData) });
       const shapes = decodeStreamShapes(streamData).shapes;
-      if (shapes.length > 0) sceneShapes.set(sceneNum, shapes);
+      if (shapes.length > 0) sceneShapes.set(pageNum, shapes);
+      const insts = dedupeInstances(scanForInstances(streamData));
+      if (insts.length > 0) sceneInstances.set(pageNum, insts);
       continue;
     }
-    const symMatch = /^Symbol (\d+)$/.exec(name);
-    if (symMatch) {
-      const symNum = parseInt(symMatch[1], 10);
+    const symNum = parseSymbolStreamNumber(name);
+    if (symNum !== null) {
       const streamData = ole.readStream(name);
       symbolLayers.set(symNum, extractLayers(streamData));
       const shapes = decodeStreamShapes(streamData).shapes;
       if (shapes.length > 0) symbolShapes.set(symNum, shapes);
+      const insts = dedupeInstances(scanForInstances(streamData));
+      if (insts.length > 0) symbolInstances.set(symNum, insts);
     }
   }
   scenes.sort((a, b) => a.scene - b.scene);
@@ -315,7 +370,56 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
     symbolLayers,
     sceneShapes,
     symbolShapes,
+    sceneInstances,
+    symbolInstances,
   };
+}
+
+/**
+ * Build a viewer {@link SymbolInstance} for one decoded placement, or null when
+ * its `mediaRef` does not resolve to a known library symbol (we never fabricate
+ * a placement for an unknown reference). `libraryByNumber` maps a library item
+ * id to its display name (the key under which the symbol lives in
+ * `FLADocument.symbols`).
+ */
+function buildSymbolInstance(
+  inst: DecodedInstance,
+  libraryByNumber: Map<number, BinaryLibraryEntry>
+): SymbolInstance | null {
+  const entry = libraryByNumber.get(inst.mediaRef);
+  if (!entry) return null;
+  // Prefer the library item's real kind; when the library type is unknown,
+  // fall back to the kind implied by the placement's class.
+  const symbolType: SymbolInstance['symbolType'] =
+    entry.symbolType === 'unknown'
+      ? instanceSymbolType(inst.className)
+      : entry.symbolType;
+  return {
+    type: 'symbol',
+    libraryItemName: entry.name,
+    symbolType,
+    matrix: inst.matrix,
+    // The matrix tx/ty already place the instance; the transformation point is
+    // metadata we cannot reliably recover from the binary frame, so use origin.
+    transformationPoint: { x: 0, y: 0 },
+    loop: symbolType === 'movieclip' ? 'loop' : 'play once',
+  };
+}
+
+/**
+ * Convert decoded placements into viewer {@link SymbolInstance}s, dropping any
+ * whose `mediaRef` does not resolve to a library symbol.
+ */
+function buildSymbolInstances(
+  insts: DecodedInstance[],
+  libraryByNumber: Map<number, BinaryLibraryEntry>
+): SymbolInstance[] {
+  const out: SymbolInstance[] = [];
+  for (const inst of insts) {
+    const built = buildSymbolInstance(inst, libraryByNumber);
+    if (built) out.push(built);
+  }
+  return out;
 }
 
 /** Map a decoded binary layer type to the viewer's narrower Layer.layerType. */
@@ -339,26 +443,49 @@ function toViewerLayerType(
 
 /**
  * Build viewer {@link Layer}s from the reliably-decoded binary layer list.
- * Each layer carries its real name / type / locked / visible state. Per-frame
- * timeline content (keyframes, tweens, symbol placements) is still not decoded
- * from the binary format (see {@link ./binary-fla-structure}); the CPicShape
- * recovery scanner, however, locates shapes per STREAM but not per layer/frame,
- * so all of a stream's decoded shapes are placed into the first renderable
- * (non-reference) layer's single frame. The shapes carry their own matrices,
- * so they land in the right place on the stage even without per-layer
- * attribution. Guide / folder layers are reference layers (never rendered).
+ * Each layer carries its real name / type / locked / visible state.
+ *
+ * Frame-by-frame timeline attribution (which keyframe of which layer a given
+ * piece of content belongs to) is still NOT decoded — CPicFrame's schema-gated
+ * tail is unparsed (see {@link ./binary-fla-structure} and
+ * {@link ./binary-instance-decoder}). Two STREAM-level recovery scanners,
+ * however, reliably locate content carrying its own matrix:
+ *   - the CPicShape scanner ({@link ./binary-shape-decoder}) → inline `Shape`s;
+ *   - the placement scanner ({@link ./binary-instance-decoder}) →
+ *     `SymbolInstance`s referencing library symbols.
+ *
+ * Because that per-layer/per-frame attribution is unavailable, all recovered
+ * content for a stream is composited into ONE frame; shapes are drawn first,
+ * then instances on top, each carrying its own matrix so it lands at the right
+ * place on the stage. The decoded layer stack (names / types / locked / visible
+ * flags) is preserved untouched — we do NOT overwrite a layer's decoded flags.
+ *
+ * The content is hosted on the first decoded layer that the renderer will
+ * actually draw (visible + not guide/folder). If NO decoded layer qualifies
+ * (e.g. the only real layer decoded as hidden, or a stream whose layer records
+ * were not recovered), a synthetic always-visible "normal" layer is appended to
+ * carry the content — otherwise the recovered artwork would be silently dropped
+ * by the renderer's hidden/reference-layer skip. Guide / folder layers are
+ * marked as reference layers (never rendered).
  */
 function buildLayers(
   binaryLayers: BinaryLayerInfo[],
-  shapes: Shape[] = []
+  shapes: Shape[] = [],
+  instances: SymbolInstance[] = []
 ): { layers: Layer[]; referenceLayers: Set<number> } {
   const referenceLayers = new Set<number>();
-  // Choose the first non-guide/folder layer to host the recovered shapes.
-  let shapeLayerIndex = binaryLayers.findIndex((bl) => {
+  const content: (Shape | SymbolInstance)[] = [...shapes, ...instances];
+
+  // Prefer a host layer the renderer will actually draw: visible AND not a
+  // guide/folder reference layer. Fall back to the first non-guide/folder
+  // layer even if hidden, then to none (handled by the synthetic layer below).
+  const renderable = (bl: BinaryLayerInfo) => {
     const t = toViewerLayerType(bl.layerType);
     return t !== 'guide' && t !== 'folder';
-  });
-  if (shapeLayerIndex < 0) shapeLayerIndex = 0;
+  };
+  let hostLayerIndex = binaryLayers.findIndex(
+    (bl) => renderable(bl) && bl.visible
+  );
 
   const layers: Layer[] = binaryLayers.map((bl, index) => {
     const layerType = toViewerLayerType(bl.layerType);
@@ -366,7 +493,7 @@ function buildLayers(
       referenceLayers.add(index);
     }
     const elements =
-      index === shapeLayerIndex && shapes.length > 0 ? [...shapes] : [];
+      index === hostLayerIndex && content.length > 0 ? [...content] : [];
     return {
       name: bl.name,
       color: '#4FFF4F',
@@ -385,17 +512,18 @@ function buildLayers(
     };
   });
 
-  // If shapes were decoded but the stream had no layer records, synthesise a
-  // single layer so the artwork still renders.
-  if (shapes.length > 0 && layers.length === 0) {
+  // If there is content but no decoded layer the renderer would draw (all
+  // hidden/guide/folder, or no layer records at all), host the content on a
+  // synthetic always-visible "normal" layer so the artwork is not dropped.
+  if (content.length > 0 && hostLayerIndex < 0) {
     layers.push({
-      name: 'Layer 1',
+      name: binaryLayers.length === 0 ? 'Layer 1' : 'Recovered Content',
       color: '#4FFF4F',
       visible: true,
       locked: false,
       outline: false,
       layerType: 'normal',
-      frames: [{ index: 0, duration: 1, keyMode: 0, elements: [...shapes] }],
+      frames: [{ index: 0, duration: 1, keyMode: 0, elements: [...content] }],
     });
   }
   return { layers, referenceLayers };
@@ -405,24 +533,65 @@ function buildLayers(
  * Parse a binary FLA into a {@link FLADocument} the existing viewer/renderer
  * can consume.
  *
- * Decoded and populated: document properties, the symbol library, and — new in
- * the issue #8 follow-up — the LAYER STRUCTURE of every scene and library item
- * (names, types, locked/visible flags), validated byte-for-byte against the
- * fla-decoder reference on real Flash MX 2004 files. NOT decoded (so left
- * empty/placeholder): per-frame timeline content, symbol placements/positions,
- * tweens, and vector shape geometry. The viewer therefore shows a named layer
- * stack per timeline instead of an empty stage, without inventing content.
+ * Decoded and populated: document properties, the symbol library, the LAYER
+ * STRUCTURE of every scene and library item (names, types, locked/visible
+ * flags), the vector SHAPE geometry of each symbol, and the symbol-INSTANCE
+ * PLACEMENTS that compose a scene — each placement is emitted as a
+ * `SymbolInstance` referencing a decoded library symbol with its transform
+ * matrix, so a scene composites its symbols onto the stage. NOT decoded (so
+ * left empty/placeholder): precise per-frame timeline attribution, tweens, and
+ * text/bitmap/sound element placement (CPicFrame's schema-gated tail is
+ * unparsed — recovered content is composited into one frame). Nothing is
+ * fabricated: a placement whose reference does not resolve is dropped.
  */
 export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
   const info = extractBinaryFLAInfo(bytes);
 
+  // Library id (the N in "Symbol N") → entry, so a placement's `mediaRef`
+  // resolves to the library item it references.
+  const libraryByNumber = new Map<number, BinaryLibraryEntry>();
+  for (const entry of info.library) libraryByNumber.set(entry.symbolNumber, entry);
+
+  // Some FLAs (Flash 8 / CS3+ with NAMED library items) write a library table
+  // we do not yet parse, so `info.library` is empty even though the `Symbol N`
+  // streams carry decodable content. So that placements still resolve, we
+  // synthesise a `"Symbol N"` library entry for every symbol stream number that
+  // has decoded content (shapes / layers / nested placements) but no
+  // library-table entry. The placement's `mediaRef` is exactly that stream
+  // number, so this is a faithful reference — not a fabricated symbol.
+  const contentStreamNumbers = new Set<number>([
+    ...info.symbolShapes.keys(),
+    ...info.symbolLayers.keys(),
+    ...info.symbolInstances.keys(),
+  ]);
+  for (const num of contentStreamNumbers) {
+    if (libraryByNumber.has(num)) continue;
+    const hasShapes = (info.symbolShapes.get(num)?.length ?? 0) > 0;
+    const hasInstances = (info.symbolInstances.get(num)?.length ?? 0) > 0;
+    // Only synthesise when there is renderable content to reference.
+    if (!hasShapes && !hasInstances) continue;
+    libraryByNumber.set(num, {
+      symbolNumber: num,
+      name: `Symbol ${num}`,
+      symbolType: 'unknown',
+    });
+  }
+
   const symbols = new Map<string, Symbol>();
-  for (const entry of info.library) {
+  for (const entry of libraryByNumber.values()) {
     const symbolType =
       entry.symbolType === 'unknown' ? 'graphic' : entry.symbolType;
     const binaryLayers = info.symbolLayers.get(entry.symbolNumber) ?? [];
     const shapes = info.symbolShapes.get(entry.symbolNumber) ?? [];
-    const { layers, referenceLayers } = buildLayers(binaryLayers, shapes);
+    const instances = buildSymbolInstances(
+      info.symbolInstances.get(entry.symbolNumber) ?? [],
+      libraryByNumber
+    );
+    const { layers, referenceLayers } = buildLayers(
+      binaryLayers,
+      shapes,
+      instances
+    );
     const timeline: Timeline = {
       name: entry.name,
       layers,
@@ -444,7 +613,15 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
     info.scenes.length > 0
       ? info.scenes.map((s) => {
           const shapes = info.sceneShapes.get(s.scene) ?? [];
-          const { layers, referenceLayers } = buildLayers(s.layers, shapes);
+          const instances = buildSymbolInstances(
+            info.sceneInstances.get(s.scene) ?? [],
+            libraryByNumber
+          );
+          const { layers, referenceLayers } = buildLayers(
+            s.layers,
+            shapes,
+            instances
+          );
           return {
             name: `Scene ${s.scene}`,
             layers,
