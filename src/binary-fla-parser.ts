@@ -16,12 +16,17 @@
  * byte-for-byte against real Flash MX 2004 sample FLAs (see
  * `src/__tests__/binary-fla-parser.test.ts`).
  *
- * What is NOT decoded here: per-symbol vector shape geometry, timeline
- * frames/tweens, text/bitmap/sound content. Those require walking the full MFC
- * `Serialize` field orderings (CPicShape edge streams, etc.), which the
- * reference itself only achieves with extensive Ghidra-derived schema tables.
- * We surface the library so the viewer can DISPLAY the document instead of
- * failing, and we never silently swallow errors (project rule).
+ * NEW (issue #8 shape geometry): per-stream vector SHAPE geometry is now
+ * decoded too — see {@link ./binary-shape-decoder}. The CPicShape fill/stroke
+ * styles and edge stream are read and converted to pixel-space PathCommands,
+ * so real artwork renders on the stage instead of an empty document.
+ *
+ * What is still NOT decoded here: per-frame timeline content (keyframes,
+ * tweens, symbol placements), text/bitmap/sound element placement. Those
+ * require walking the full MFC `Serialize` field orderings including
+ * CPicFrame's schema-gated timeline tail, which even the reference decoder
+ * only resolves via signature-based recovery. We never silently swallow
+ * errors (project rule).
  */
 import { OLE2File } from './ole2-reader';
 import {
@@ -29,7 +34,8 @@ import {
   type BinaryLayerInfo,
   type BinaryLayerType,
 } from './binary-fla-structure';
-import type { FLADocument, Layer, Symbol, Timeline } from './types';
+import { decodeStreamShapes } from './binary-shape-decoder';
+import type { FLADocument, Layer, Shape, Symbol, Timeline } from './types';
 
 export type BinarySymbolType = 'graphic' | 'button' | 'movieclip' | 'unknown';
 
@@ -61,6 +67,15 @@ export interface BinaryFLAInfo {
   scenes: { scene: number; layers: BinaryLayerInfo[] }[];
   /** Layer list decoded from each `Symbol N` stream, keyed by symbol number. */
   symbolLayers: Map<number, BinaryLayerInfo[]>;
+  /**
+   * Vector shapes decoded from each scene's `Page N` stream (issue #8 shape
+   * geometry), keyed by scene number. Located by the CPicShape recovery
+   * scanner (see {@link ./binary-shape-decoder}); each shape carries its own
+   * matrix so the renderer places it on the stage.
+   */
+  sceneShapes: Map<number, Shape[]>;
+  /** Vector shapes decoded from each `Symbol N` stream, keyed by symbol number. */
+  symbolShapes: Map<number, Shape[]>;
 }
 
 const SYMBOL_TYPE_NAMES: Record<number, BinarySymbolType> = {
@@ -262,21 +277,25 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
   // binary-fla-structure.ts); frame content is intentionally not read.
   const scenes: { scene: number; layers: BinaryLayerInfo[] }[] = [];
   const symbolLayers = new Map<number, BinaryLayerInfo[]>();
+  const sceneShapes = new Map<number, Shape[]>();
+  const symbolShapes = new Map<number, Shape[]>();
   for (const name of streams) {
     const pageMatch = /^Page (\d+)$/.exec(name);
     if (pageMatch) {
-      scenes.push({
-        scene: parseInt(pageMatch[1], 10),
-        layers: extractLayers(ole.readStream(name)),
-      });
+      const sceneNum = parseInt(pageMatch[1], 10);
+      const streamData = ole.readStream(name);
+      scenes.push({ scene: sceneNum, layers: extractLayers(streamData) });
+      const shapes = decodeStreamShapes(streamData).shapes;
+      if (shapes.length > 0) sceneShapes.set(sceneNum, shapes);
       continue;
     }
     const symMatch = /^Symbol (\d+)$/.exec(name);
     if (symMatch) {
-      symbolLayers.set(
-        parseInt(symMatch[1], 10),
-        extractLayers(ole.readStream(name))
-      );
+      const symNum = parseInt(symMatch[1], 10);
+      const streamData = ole.readStream(name);
+      symbolLayers.set(symNum, extractLayers(streamData));
+      const shapes = decodeStreamShapes(streamData).shapes;
+      if (shapes.length > 0) symbolShapes.set(symNum, shapes);
     }
   }
   scenes.sort((a, b) => a.scene - b.scene);
@@ -294,6 +313,8 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
       dims.width !== undefined && dims.height !== undefined,
     scenes,
     symbolLayers,
+    sceneShapes,
+    symbolShapes,
   };
 }
 
@@ -318,21 +339,34 @@ function toViewerLayerType(
 
 /**
  * Build viewer {@link Layer}s from the reliably-decoded binary layer list.
- * Each layer carries its real name / type / locked / visible state but a
- * SINGLE placeholder frame with no elements: per-frame content (keyframes,
- * tweens, symbol placements, shapes) is not decoded from the binary format
- * (see {@link ./binary-fla-structure}). Guide / folder layers are marked as
- * reference layers so the viewer does not attempt to render them.
+ * Each layer carries its real name / type / locked / visible state. Per-frame
+ * timeline content (keyframes, tweens, symbol placements) is still not decoded
+ * from the binary format (see {@link ./binary-fla-structure}); the CPicShape
+ * recovery scanner, however, locates shapes per STREAM but not per layer/frame,
+ * so all of a stream's decoded shapes are placed into the first renderable
+ * (non-reference) layer's single frame. The shapes carry their own matrices,
+ * so they land in the right place on the stage even without per-layer
+ * attribution. Guide / folder layers are reference layers (never rendered).
  */
 function buildLayers(
-  binaryLayers: BinaryLayerInfo[]
+  binaryLayers: BinaryLayerInfo[],
+  shapes: Shape[] = []
 ): { layers: Layer[]; referenceLayers: Set<number> } {
   const referenceLayers = new Set<number>();
+  // Choose the first non-guide/folder layer to host the recovered shapes.
+  let shapeLayerIndex = binaryLayers.findIndex((bl) => {
+    const t = toViewerLayerType(bl.layerType);
+    return t !== 'guide' && t !== 'folder';
+  });
+  if (shapeLayerIndex < 0) shapeLayerIndex = 0;
+
   const layers: Layer[] = binaryLayers.map((bl, index) => {
     const layerType = toViewerLayerType(bl.layerType);
     if (layerType === 'guide' || layerType === 'folder') {
       referenceLayers.add(index);
     }
+    const elements =
+      index === shapeLayerIndex && shapes.length > 0 ? [...shapes] : [];
     return {
       name: bl.name,
       color: '#4FFF4F',
@@ -340,18 +374,30 @@ function buildLayers(
       locked: bl.locked,
       outline: false,
       layerType,
-      // One empty placeholder frame: we do not fabricate frame content we
-      // cannot decode. The viewer shows the named layer; the stage stays empty.
       frames: [
         {
           index: 0,
           duration: 1,
           keyMode: 0,
-          elements: [],
+          elements,
         },
       ],
     };
   });
+
+  // If shapes were decoded but the stream had no layer records, synthesise a
+  // single layer so the artwork still renders.
+  if (shapes.length > 0 && layers.length === 0) {
+    layers.push({
+      name: 'Layer 1',
+      color: '#4FFF4F',
+      visible: true,
+      locked: false,
+      outline: false,
+      layerType: 'normal',
+      frames: [{ index: 0, duration: 1, keyMode: 0, elements: [...shapes] }],
+    });
+  }
   return { layers, referenceLayers };
 }
 
@@ -375,7 +421,8 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
     const symbolType =
       entry.symbolType === 'unknown' ? 'graphic' : entry.symbolType;
     const binaryLayers = info.symbolLayers.get(entry.symbolNumber) ?? [];
-    const { layers, referenceLayers } = buildLayers(binaryLayers);
+    const shapes = info.symbolShapes.get(entry.symbolNumber) ?? [];
+    const { layers, referenceLayers } = buildLayers(binaryLayers, shapes);
     const timeline: Timeline = {
       name: entry.name,
       layers,
@@ -396,7 +443,8 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
   const timelines: Timeline[] =
     info.scenes.length > 0
       ? info.scenes.map((s) => {
-          const { layers, referenceLayers } = buildLayers(s.layers);
+          const shapes = info.sceneShapes.get(s.scene) ?? [];
+          const { layers, referenceLayers } = buildLayers(s.layers, shapes);
           return {
             name: `Scene ${s.scene}`,
             layers,
