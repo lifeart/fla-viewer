@@ -9,6 +9,10 @@ export default defineConfig({
   optimizeDeps: {
     include: ['mp4-muxer'],
   },
+  // Treat gzipped test fixtures as static assets so `import x from './f.gz?url'`
+  // resolves to a served URL. The large DIFAT CFB regression fixture is ~6.8 MB
+  // uncompressed but commits to ~75 KB gzipped (inflated in the test).
+  assetsInclude: ['**/*.gz'],
   build: {
     target: 'esnext',
   },

@@ -24,7 +24,12 @@
  * failing, and we never silently swallow errors (project rule).
  */
 import { OLE2File } from './ole2-reader';
-import type { FLADocument, Symbol, Timeline } from './types';
+import {
+  extractLayers,
+  type BinaryLayerInfo,
+  type BinaryLayerType,
+} from './binary-fla-structure';
+import type { FLADocument, Layer, Symbol, Timeline } from './types';
 
 export type BinarySymbolType = 'graphic' | 'button' | 'movieclip' | 'unknown';
 
@@ -48,6 +53,14 @@ export interface BinaryFLAInfo {
   library: BinaryLibraryEntry[];
   /** True when stage dimensions came from publish settings (else defaults). */
   dimensionsFromPublishSettings: boolean;
+  /**
+   * Layer list decoded from each scene's `Page N` stream. The N (scene number)
+   * maps to the OLE2 stream `Page N`. Layers are RELIABLE (name/type/locked/
+   * visible); frame content is not decoded (see binary-fla-structure docstring).
+   */
+  scenes: { scene: number; layers: BinaryLayerInfo[] }[];
+  /** Layer list decoded from each `Symbol N` stream, keyed by symbol number. */
+  symbolLayers: Map<number, BinaryLayerInfo[]>;
 }
 
 const SYMBOL_TYPE_NAMES: Record<number, BinarySymbolType> = {
@@ -244,6 +257,30 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
   const dims = extractDimensions(strings);
   const library = extractLibrary(contents);
 
+  // ── Decode the layer structure of every scene (`Page N`) and library item
+  // (`Symbol N`) stream. Only the layer list is reliably decodable (see
+  // binary-fla-structure.ts); frame content is intentionally not read.
+  const scenes: { scene: number; layers: BinaryLayerInfo[] }[] = [];
+  const symbolLayers = new Map<number, BinaryLayerInfo[]>();
+  for (const name of streams) {
+    const pageMatch = /^Page (\d+)$/.exec(name);
+    if (pageMatch) {
+      scenes.push({
+        scene: parseInt(pageMatch[1], 10),
+        layers: extractLayers(ole.readStream(name)),
+      });
+      continue;
+    }
+    const symMatch = /^Symbol (\d+)$/.exec(name);
+    if (symMatch) {
+      symbolLayers.set(
+        parseInt(symMatch[1], 10),
+        extractLayers(ole.readStream(name))
+      );
+    }
+  }
+  scenes.sort((a, b) => a.scene - b.scene);
+
   return {
     // Flash's default stage is 550×400 @ 24fps on a white stage — apply these
     // as fallbacks when a value could not be recovered.
@@ -255,16 +292,80 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
     library,
     dimensionsFromPublishSettings:
       dims.width !== undefined && dims.height !== undefined,
+    scenes,
+    symbolLayers,
   };
+}
+
+/** Map a decoded binary layer type to the viewer's narrower Layer.layerType. */
+function toViewerLayerType(
+  t: BinaryLayerType
+): Layer['layerType'] {
+  // The viewer's Layer.layerType union is exactly these values.
+  switch (t) {
+    case 'guide':
+      return 'guide';
+    case 'folder':
+      return 'folder';
+    case 'mask':
+      return 'mask';
+    case 'masked':
+      return 'masked';
+    default:
+      return 'normal';
+  }
+}
+
+/**
+ * Build viewer {@link Layer}s from the reliably-decoded binary layer list.
+ * Each layer carries its real name / type / locked / visible state but a
+ * SINGLE placeholder frame with no elements: per-frame content (keyframes,
+ * tweens, symbol placements, shapes) is not decoded from the binary format
+ * (see {@link ./binary-fla-structure}). Guide / folder layers are marked as
+ * reference layers so the viewer does not attempt to render them.
+ */
+function buildLayers(
+  binaryLayers: BinaryLayerInfo[]
+): { layers: Layer[]; referenceLayers: Set<number> } {
+  const referenceLayers = new Set<number>();
+  const layers: Layer[] = binaryLayers.map((bl, index) => {
+    const layerType = toViewerLayerType(bl.layerType);
+    if (layerType === 'guide' || layerType === 'folder') {
+      referenceLayers.add(index);
+    }
+    return {
+      name: bl.name,
+      color: '#4FFF4F',
+      visible: bl.visible,
+      locked: bl.locked,
+      outline: false,
+      layerType,
+      // One empty placeholder frame: we do not fabricate frame content we
+      // cannot decode. The viewer shows the named layer; the stage stays empty.
+      frames: [
+        {
+          index: 0,
+          duration: 1,
+          keyMode: 0,
+          elements: [],
+        },
+      ],
+    };
+  });
+  return { layers, referenceLayers };
 }
 
 /**
  * Parse a binary FLA into a {@link FLADocument} the existing viewer/renderer
- * can consume. Document properties and the library are populated; per-symbol
- * geometry and timeline frames are not yet decoded (see module docstring), so
- * each library item is registered as an empty symbol and a single empty main
- * timeline is provided. This lets the viewer open the file and list its
- * library rather than erroring out.
+ * can consume.
+ *
+ * Decoded and populated: document properties, the symbol library, and — new in
+ * the issue #8 follow-up — the LAYER STRUCTURE of every scene and library item
+ * (names, types, locked/visible flags), validated byte-for-byte against the
+ * fla-decoder reference on real Flash MX 2004 files. NOT decoded (so left
+ * empty/placeholder): per-frame timeline content, symbol placements/positions,
+ * tweens, and vector shape geometry. The viewer therefore shows a named layer
+ * stack per timeline instead of an empty stage, without inventing content.
  */
 export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
   const info = extractBinaryFLAInfo(bytes);
@@ -273,34 +374,51 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
   for (const entry of info.library) {
     const symbolType =
       entry.symbolType === 'unknown' ? 'graphic' : entry.symbolType;
-    const emptyTimeline: Timeline = {
+    const binaryLayers = info.symbolLayers.get(entry.symbolNumber) ?? [];
+    const { layers, referenceLayers } = buildLayers(binaryLayers);
+    const timeline: Timeline = {
       name: entry.name,
-      layers: [],
+      layers,
       totalFrames: 1,
-      referenceLayers: new Set<number>(),
+      referenceLayers,
     };
     const symbol: Symbol = {
       name: entry.name,
       itemID: `Symbol ${entry.symbolNumber}`,
       symbolType,
-      timeline: emptyTimeline,
+      timeline,
     };
     symbols.set(entry.name, symbol);
   }
 
-  const mainTimeline: Timeline = {
-    name: 'Scene 1',
-    layers: [],
-    totalFrames: 1,
-    referenceLayers: new Set<number>(),
-  };
+  // One timeline per scene (`Page N`). If no scene streams were found, fall
+  // back to a single empty "Scene 1" so the document still opens.
+  const timelines: Timeline[] =
+    info.scenes.length > 0
+      ? info.scenes.map((s) => {
+          const { layers, referenceLayers } = buildLayers(s.layers);
+          return {
+            name: `Scene ${s.scene}`,
+            layers,
+            totalFrames: 1,
+            referenceLayers,
+          };
+        })
+      : [
+          {
+            name: 'Scene 1',
+            layers: [],
+            totalFrames: 1,
+            referenceLayers: new Set<number>(),
+          },
+        ];
 
   return {
     width: info.width,
     height: info.height,
     frameRate: info.frameRate,
     backgroundColor: info.backgroundColor,
-    timelines: [mainTimeline],
+    timelines,
     symbols,
     bitmaps: new Map(),
     sounds: new Map(),
