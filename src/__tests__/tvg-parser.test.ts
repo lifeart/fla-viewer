@@ -490,6 +490,9 @@ describe('tvg rendering', () => {
     tileCtx.clearRect(4, 4, 32, 32);
     tileCtx.fillStyle = '#c85028';
     tileCtx.fillRect(4, 4, 32, 32);
+    tileCtx.clearRect(0, 0, 8, 8);
+    tileCtx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    tileCtx.fillRect(0, 0, 8, 8);
     const tileBytes = canvasToPngBytes(tileCanvas);
 
     const createAtlasCanvas = (fallbackScanUsed: boolean) => {
@@ -522,11 +525,15 @@ describe('tvg rendering', () => {
     expect(await loadBitmapTiles(clippedCanvas, (clippedCanvas as any).__bitmapState.diagnostics)).toBe(true);
     expect(await loadBitmapTiles(fallbackCanvas, (fallbackCanvas as any).__bitmapState.diagnostics)).toBe(true);
 
-    const clippedEdge = samplePixel(clippedCanvas, 9, 16);
-    const fallbackEdge = samplePixel(fallbackCanvas, 9, 16);
-    expect(clippedEdge.r).toBeLessThanOrEqual(fallbackEdge.r - 6);
-    expect(clippedEdge.g).toBeLessThanOrEqual(fallbackEdge.g - 6);
-    expect(clippedEdge.b).toBeLessThanOrEqual(fallbackEdge.b - 6);
+    const clippedEdge = samplePixel(clippedCanvas, 20, 16);
+    const fallbackEdge = samplePixel(fallbackCanvas, 20, 16);
+    expect(clippedEdge.r).toBeLessThanOrEqual(fallbackEdge.r - 24);
+    expect(clippedEdge.g).toBeLessThanOrEqual(fallbackEdge.g - 24);
+    expect(clippedEdge.b).toBeLessThanOrEqual(fallbackEdge.b - 24);
+    const whitePadding = samplePixel(clippedCanvas, 10, 16);
+    expect(whitePadding.r).toBeGreaterThanOrEqual(243);
+    expect(whitePadding.g).toBeGreaterThanOrEqual(243);
+    expect(whitePadding.b).toBeGreaterThanOrEqual(243);
     expectColorNear(samplePixel(clippedCanvas, 30, 37), { r: 200, g: 80, b: 40 }, 8);
     expectColorNear(samplePixel(clippedCanvas, 3, 10), { r: 255, g: 255, b: 255 }, 0);
   });

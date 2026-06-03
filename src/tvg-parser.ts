@@ -3006,7 +3006,9 @@ const DENSE_LINE_FILL_INTERIOR_SHADOW_LUMA_LIMIT = 96;
 const DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT = { r: 8, g: 40, b: 40 };
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_SIZE = 1500;
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_DISTANCE = 2500;
-const BITMAP_ATLAS_EDGE_TONE_SUBTRACT = 8;
+const BITMAP_ATLAS_EDGE_TONE_BASE_SUBTRACT = 8;
+const BITMAP_ATLAS_EDGE_TONE_FOREGROUND_SUBTRACT = 32;
+const BITMAP_ATLAS_EDGE_TONE_BACKGROUND_THRESHOLD = 243;
 const BITMAP_ATLAS_EDGE_TONE_MIN_ALPHA = 32;
 const BITMAP_ATLAS_EDGE_TONE_MAX_ALPHA = 223;
 const BITMAP_ATLAS_EDGE_TONE_MIN_PIXELS = 500;
@@ -4502,9 +4504,18 @@ function applyBitmapAtlasEdgeTone(
   for (let index = 0; index < data.length; index += 4) {
     const alpha = alphaMask[index + 3];
     if (alpha < BITMAP_ATLAS_EDGE_TONE_MIN_ALPHA || alpha > BITMAP_ATLAS_EDGE_TONE_MAX_ALPHA) continue;
-    data[index] = Math.max(0, data[index] - BITMAP_ATLAS_EDGE_TONE_SUBTRACT);
-    data[index + 1] = Math.max(0, data[index + 1] - BITMAP_ATLAS_EDGE_TONE_SUBTRACT);
-    data[index + 2] = Math.max(0, data[index + 2] - BITMAP_ATLAS_EDGE_TONE_SUBTRACT);
+    const baseR = Math.max(0, data[index] - BITMAP_ATLAS_EDGE_TONE_BASE_SUBTRACT);
+    const baseG = Math.max(0, data[index + 1] - BITMAP_ATLAS_EDGE_TONE_BASE_SUBTRACT);
+    const baseB = Math.max(0, data[index + 2] - BITMAP_ATLAS_EDGE_TONE_BASE_SUBTRACT);
+    const subtract = baseR < BITMAP_ATLAS_EDGE_TONE_BACKGROUND_THRESHOLD
+      || baseG < BITMAP_ATLAS_EDGE_TONE_BACKGROUND_THRESHOLD
+      || baseB < BITMAP_ATLAS_EDGE_TONE_BACKGROUND_THRESHOLD
+      || data[index + 3] < BITMAP_ATLAS_EDGE_TONE_BACKGROUND_THRESHOLD
+      ? BITMAP_ATLAS_EDGE_TONE_FOREGROUND_SUBTRACT
+      : BITMAP_ATLAS_EDGE_TONE_BASE_SUBTRACT;
+    data[index] = Math.max(0, data[index] - subtract);
+    data[index + 1] = Math.max(0, data[index + 1] - subtract);
+    data[index + 2] = Math.max(0, data[index + 2] - subtract);
   }
   ctx.putImageData(image, 0, 0);
 }

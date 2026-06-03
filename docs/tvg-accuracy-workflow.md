@@ -10,12 +10,12 @@ The benchmark gate is intentionally tolerance-aware and alignment-aware. Raw sco
 
 ## Current State
 
-- Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, narrow same-paint detail threshold expansion, dense line-fill edge/coverage/tone passes, clipped bitmap atlas fit bands, portrait bitmap fit retune, low-alpha saturated-fill density relief, compact multi-art cutout padding, tiny vector content-fit viewport floors, implicit widthless support-only boundary strokes, and text-only TGTL art-layer preservation.
+- Latest verified renderer work: removed unsafe later sparse-marker resolved-contour suppression, tuned gated dense line-fill ink-density correction, embedded dark legacy-chain suppression, narrow same-paint detail threshold expansion, dense line-fill edge/coverage/tone passes, clipped bitmap atlas fit bands, portrait bitmap fit retune, low-alpha saturated-fill density relief, compact multi-art cutout padding, tiny vector content-fit viewport floors, implicit widthless support-only boundary strokes, text-only TGTL art-layer preservation, and two-tier clipped bitmap atlas edge tone.
 - Main benchmark command: `npm run benchmark:tvg:raw`.
-- Current raw benchmark after compact cutout padding and tiny vector viewport floors: overall `98.66`, vector `98.55`, bitmap `99.20`.
-- Source-fresh raw average before trust classification is overall `99.18`, vector `99.18`, bitmap `99.20`.
-- Trusted source-fresh raw average excludes stale, alternate-source, suspicious sparse-overlap, and noisy low-foreground thumbnails: overall `99.24`, vector `99.26`, bitmap `99.20`.
-- Current trusted source-fresh raw minimum is `color.101/color-21` at `97.32`; trusted source-fresh bitmap minimum is `3255/3255-1` at raw `97.80`.
+- Current raw benchmark after two-tier clipped bitmap atlas edge tone: overall `98.66`, vector `98.55`, bitmap `99.22`.
+- Source-fresh raw average before trust classification is overall `99.19`, vector `99.18`, bitmap `99.22`.
+- Trusted source-fresh raw average excludes stale, alternate-source, suspicious sparse-overlap, and noisy low-foreground thumbnails: overall `99.25`, vector `99.26`, bitmap `99.22`.
+- Current trusted source-fresh raw minimum is `color.101/color-21` at `97.32`; trusted source-fresh bitmap minimum is `4bf5/4bf5-1` at raw `97.89`.
 - `MC_Emotions/Lipsync_MC_HNDL_1-3` is now a text/fringe residual, not missing content: aligned `99.95`, focused `96.16`, IoU `96.61`, raw `98.11`.
 - Current benchmark classes: `92` trusted, `4` suspicious sparse-overlap, `4` noisy low-foreground, `1` alternate-source, and `79` stale-thumbnail cases.
 - `color.101/color-13` is no longer treated as source-fresh after alternate-source probing: its thumbnail matches sibling `elements/color/color-13.tvg` much better than `elements/color.101/color-13.tvg`.
@@ -146,8 +146,9 @@ Managed local finding: bitmap atlas aspect-band fit
 - Fallback-scanned clipped atlases with `32..127` tiles and aspect `>1.35` use `5.5px`.
 - Targeted improvements from these rules: `3255/3255-1` raw `97.07 -> 97.64`, `7f81/7f81-1` `97.18 -> 98.33`, `6172/6172-1` `99.08 -> 99.97`, `1388/1388-1` `99.84 -> 99.92`, `cc62/cc62-1` `98.25 -> 98.64`, `Agata_Special_Poses_Vik/Agata_Special_Poses_Vik-1` `98.28 -> 99.24`, `Agata_Head_Angles.87/Agata_Head_Angles-1` `97.46 -> 99.45`, and `Screenshot_2022/Screenshot_2022-1` `99.18 -> 99.68`.
 - Full raw benchmark after the current fit bands: raw averages overall/vector/bitmap `98.54/98.41/99.17`; source-fresh raw averages overall/vector/bitmap `98.98/98.90/99.17`; source-fresh bitmap min `97.64`.
-- Accepted bitmap edge-tone rule: for normal background-composited, non-fallback clipped bitmap atlases with `8..31` loaded tiles and at least `500` mid-alpha edge pixels, darken only alpha-mask pixels in `32..223` by `8` RGB after final downscale. This targets the observed clipped-atlas antialias halo without changing bounds, transparent/matte renders, fallback-scanned atlases, low-edge near-perfect sheets, or large cell-bound atlases.
-- Targeted effect: `3255/3255-1` raw `97.6406 -> 97.7969`, aligned `98.6563 -> 98.7578`, focused `95.0088 -> 95.2080`; guard cases `4bf5`, `7f81`, `6172`, `1388`, `cc62`, `Agata_Special_Poses_Vik`, `Agata_Head_Angles.87`, and `Screenshot_2022` were unchanged by the implemented gate.
+- Accepted bitmap edge-tone rule: for normal background-composited, non-fallback clipped bitmap atlases with `8..31` loaded tiles and at least `500` mid-alpha edge pixels, darken alpha-mask pixels in `32..223` after final downscale. The baseline subtract is `8` RGB; if that baseline-toned pixel is already foreground against the white matte, use the stronger `32` RGB subtract. This targets visible clipped-atlas antialias halo while preserving white/transparent padding as background.
+- Rejected probe: applying a flat `32` RGB subtract to every mid-alpha mask pixel improved `3255/3255-1` raw but expanded its candidate foreground bounds from `{maxX:147}` to `{maxX:153}` and created false halos in cases like `cc62` and `Screenshot_2022`. Do not use unconstrained edge tone.
+- Targeted effect after the accepted two-tier rule: `3255/3255-1` raw `97.7969 -> 97.9141`, aligned `98.7578 -> 98.7813`, with candidate bounds preserved at `{minX:7,minY:43,maxX:147,maxY:116}`. Guard cases `4bf5`, `7f81`, `6172`, `1388`, `cc62`, `Agata_Special_Poses_Vik`, `Agata_Head_Angles.87`, and `Screenshot_2022` kept their previous production scores/bounds at targeted precision.
 
 Managed local finding: `color.101/color-13` shape21 component probes
 
@@ -328,6 +329,14 @@ Managed local rejected experiment: exterior edge expansion retune
 - Increasing dense line-fill exterior edge expansion from `0.9` to `1.0` gave only a tiny `color-21` raw gain (`97.04 -> 97.05`) while slightly worsening focused/IoU and increasing candidate-only pixels.
 - Increasing the same scale to `1.1` regressed `color-21` raw to `96.94`.
 - Manager decision: keep expansion scale at `0.9`; the coverage lever is exhausted for the current floor.
+
+Managed side-agent finding: rejected `color.101/color-21` topology/order path
+
+- Focused topology investigation after the current base-carrier ordering baseline found `color-21` at raw `97.3242`, aligned `99.4336`, focused `97.3796`, IoU `98.4591`; reference bounds are `{minX:26,minY:8,maxX:133,maxY:152}` and candidate bounds are `{minX:26,minY:8,maxX:133,maxY:151}`.
+- Residuals are mostly overlap tone/compositing, not missing shape topology: `bothForeground=10671`, `badBothForeground=2746`, `refOnly=43`, and `candidateOnly=124`. Shape diff ranking points at shapes `23`, `21`, and `22`, but recoverable missing pixels are only `33`, `30`, and `30`.
+- Shape/component deletion is rejected: whole-shape removals for shapes `21`, `22`, and `23` regress raw by `-32.0117`, `-6.2813`, and `-0.7969`; best single-component removals are only `+0.015625` and grouped removals regress.
+- Contour/order changes are rejected: shape `21` resolves cleanly with same-paint child details inside the current policy, shape `22` has a support-dominated unresolved dark chain that should remain rejected, shape `23` child details are tiny same-paint islands, and local source-order moves around `21..23` produced exact zero deltas.
+- Manager decision: preserve the current same-paint detail and support-dominated unresolved-chain rules. The remaining `color-21` floor needs a better dense line-fill compositing/tone model, not topology deletion, auto-close relaxation, or local z-order changes.
 
 Managed local bitmap finding: resampling is currently exhausted
 
