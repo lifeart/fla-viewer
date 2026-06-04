@@ -1384,6 +1384,46 @@ describe('video-exporter', () => {
 
       expect(text).toContain('stroke="#0000FF"');
       expect(text).toContain('stroke-width="2"');
+      // Solid stroke (no dash) must NOT emit a dash pattern (regression guard).
+      expect(text).not.toContain('stroke-dasharray');
+    });
+
+    it('should export dashed stroke as stroke-dasharray', async () => {
+      // A <DashedStroke> with no dashLength/spaceLength parses to dash:[4,4]
+      // (fla-parser DEFAULT_DASH_LENGTH/DEFAULT_DASH_SPACE_LENGTH). dash units are
+      // 1:1 with weight (= SVG stroke-width), so they map directly to stroke-dasharray.
+      const doc = createMinimalDoc({
+        width: 100,
+        height: 100,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 1,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [],
+                strokes: [{ type: 'solid', index: 1, color: '#0000FF', weight: 2, dash: [4, 4] }],
+                edges: [{
+                  strokeStyle: 1,
+                  commands: [
+                    { type: 'M', x: 10, y: 10 },
+                    { type: 'L', x: 90, y: 90 },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('stroke="#0000FF"');
+      expect(text).toContain('stroke-width="2"');
+      expect(text).toContain('stroke-dasharray="4 4"');
     });
 
     it('should handle text elements', async () => {
