@@ -1384,6 +1384,293 @@ describe('FLARenderer', () => {
     });
   });
 
+  describe('colorMatrix filter', () => {
+    // Build a doc with a single solid-colored square symbol placed via an
+    // instance carrying the given filters and/or colorTransform. Mirrors the
+    // tint-test harness: 60x60 shape at the symbol origin, placed at (100,100).
+    function makeColorMatrixDoc(opts: {
+      filters?: any[];
+      colorTransform?: any;
+      shapeColor?: string;
+    }) {
+      const symbolTimeline = createTimeline({
+        name: 'Square',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: opts.shapeColor ?? '#00FF00' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 60, y: 0 },
+                  { type: 'L', x: 60, y: 60 },
+                  { type: 'L', x: 0, y: 60 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Square', { name: 'Square', itemID: 'square', symbolType: 'graphic', timeline: symbolTimeline });
+
+      return createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'Square',
+                symbolType: 'graphic',
+                matrix: createMatrix({ tx: 100, ty: 100 }),
+                firstFrame: 0,
+                loop: 'single frame',
+                transformationPoint: { x: 0, y: 0 },
+                ...(opts.filters ? { filters: opts.filters } : {}),
+                ...(opts.colorTransform ? { colorTransform: opts.colorTransform } : {}),
+              }],
+            })],
+          })],
+        })],
+      });
+    }
+
+    // Locate the rendered (non-background) region and average a small interior
+    // window around its centroid. Background is opaque white (#FFFFFF).
+    function sampleCenter(): { r: number; g: number; b: number; a: number } {
+      const ctx = canvas.getContext('2d')!;
+      const w = canvas.width, h = canvas.height;
+      const d = ctx.getImageData(0, 0, w, h).data;
+      let minX = w, minY = h, maxX = -1, maxY = -1;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = (y * w + x) * 4;
+          const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+          if (a > 0 && (r < 250 || g < 250 || b < 250)) {
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+          }
+        }
+      }
+      expect(maxX).toBeGreaterThanOrEqual(0);
+      const cx = Math.round((minX + maxX) / 2), cy = Math.round((minY + maxY) / 2);
+      let sr = 0, sg = 0, sb = 0, sa = 0, n = 0;
+      for (let y = cy - 2; y <= cy + 2; y++) {
+        for (let x = cx - 2; x <= cx + 2; x++) {
+          if (x < 0 || y < 0 || x >= w || y >= h) continue;
+          const i = (y * w + x) * 4;
+          sr += d[i]; sg += d[i + 1]; sb += d[i + 2]; sa += d[i + 3]; n++;
+        }
+      }
+      return { r: sr / n, g: sg / n, b: sb / n, a: sa / n };
+    }
+
+    function nonBackgroundPixelCount(): number {
+      const ctx = canvas.getContext('2d')!;
+      const w = canvas.width, h = canvas.height;
+      const d = ctx.getImageData(0, 0, w, h).data;
+      let count = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+        if (a > 0 && (r < 250 || g < 250 || b < 250)) count++;
+      }
+      return count;
+    }
+
+    it('applies an invert colorMatrix (green -> magenta) via the offscreen pixel pass', async () => {
+      // Invert matrix (SVG convention: -1*c + 1 on 0..1 => -1*c + 255 on 0..255).
+      // Over pure green (0,255,0): r'=255, g'=0, b'=255 (magenta).
+      // BEFORE the fix this was a no-op (ctx.filter does not honor data-URL SVG
+      // feColorMatrix in Chromium) so the pixel stayed green (g~255, r~0). This
+      // assertion FAILS before the fix and PASSES after.
+      const invert = [
+        -1, 0, 0, 0, 255,
+        0, -1, 0, 0, 255,
+        0, 0, -1, 0, 255,
+        0, 0, 0, 1, 0,
+      ];
+      const doc = makeColorMatrixDoc({ filters: [{ type: 'colorMatrix', matrix: invert }] });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const px = sampleCenter();
+      expect(px.a).toBeGreaterThan(200);
+      // Inverted green => magenta: red and blue high, green low.
+      expect(px.r).toBeGreaterThan(200);
+      expect(px.b).toBeGreaterThan(200);
+      expect(px.g).toBeLessThan(60);
+    });
+
+    it('swaps R<->B via a colorMatrix (red square -> blue)', async () => {
+      // R<->B swap: r'=b, g'=g, b'=r. Over pure red (255,0,0) => (0,0,255) blue.
+      // Unambiguous proof the matrix multiplies channels (not just a no-op).
+      const swap = [
+        0, 0, 1, 0, 0,
+        0, 1, 0, 0, 0,
+        1, 0, 0, 0, 0,
+        0, 0, 0, 1, 0,
+      ];
+      const doc = makeColorMatrixDoc({
+        shapeColor: '#FF0000',
+        filters: [{ type: 'colorMatrix', matrix: swap }],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const px = sampleCenter();
+      expect(px.a).toBeGreaterThan(200);
+      expect(px.b).toBeGreaterThan(200); // red moved into blue
+      expect(px.r).toBeLessThan(60);
+    });
+
+    it('applies the p0tatomango AdjustColor matrix (brightness=-18, hue=16): darkens a gray square', async () => {
+      // Grounded in LIBRARY/Backgrounds/Desert_BLUE.xml of "28-21 p0tatomango.fla":
+      //   <AdjustColorFilter brightness="-18" hue="16"/>
+      // buildAdjustColorMatrix(-18,0,0,16) yields offset columns of -45.9 (i.e.
+      // -18*2.55) plus a hue rotation that preserves a neutral gray's hue.
+      // Applied to mid-gray (128,128,128): each channel = ~0.97*128 - 45.9 ~= 82.
+      // So a clearly DARKER but still-neutral gray. (Before the fix: unchanged.)
+      const m = [
+        0.890429, -0.13906, 0.248631, 0, -45.9,
+        0.050999, 1.02259, -0.073589, 0, -45.9,
+        -0.181639, 0.184539, 0.997101, 0, -45.9,
+        0, 0, 0, 1, 0,
+      ];
+      const doc = makeColorMatrixDoc({
+        shapeColor: '#808080', // mid-gray (128,128,128)
+        filters: [{ type: 'colorMatrix', matrix: m }],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const px = sampleCenter();
+      expect(px.a).toBeGreaterThan(200);
+      // Darkened by the brightness offset (~46): well below the original 128.
+      expect(px.r).toBeGreaterThan(60); expect(px.r).toBeLessThan(100);
+      expect(px.g).toBeGreaterThan(60); expect(px.g).toBeLessThan(100);
+      expect(px.b).toBeGreaterThan(60); expect(px.b).toBeLessThan(100);
+      // Stays near-neutral (hue rotation of a gray is ~identity in hue).
+      expect(Math.abs(px.r - px.g)).toBeLessThan(20);
+      expect(Math.abs(px.g - px.b)).toBeLessThan(20);
+    });
+
+    it('composes a color transform AND a colorMatrix filter (both applied, once each)', async () => {
+      // Instance carries BOTH a red tint (color transform) and a colorMatrix.
+      // Order: color transform first, then the colorMatrix.
+      //   Green (0,255,0) --tint--> per-channel c*0.3 + redOff 178.5:
+      //     r = 0*0.3 + 178.5 = 178.5, g = 255*0.3 = 76.5, b = 0  => (178,76,0)
+      //   Then R<->B swap colorMatrix: (b, g, r) = (0, 76, 178) => blue-dominant.
+      // If the tint were dropped: green stays (0,76.5,0)->swap->(0,76,0) (no blue).
+      // If the colorMatrix were dropped: stays red-dominant (178,76,0).
+      // Asserting blue-dominant proves BOTH ran, in order, exactly once.
+      const swap = [
+        0, 0, 1, 0, 0,
+        0, 1, 0, 0, 0,
+        1, 0, 0, 0, 0,
+        0, 0, 0, 1, 0,
+      ];
+      const doc = makeColorMatrixDoc({
+        colorTransform: {
+          alphaMultiplier: 1,
+          redMultiplier: 0.3, greenMultiplier: 0.3, blueMultiplier: 0.3,
+          redOffset: 178.5, greenOffset: 0, blueOffset: 0,
+        },
+        filters: [{ type: 'colorMatrix', matrix: swap }],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const px = sampleCenter();
+      expect(px.a).toBeGreaterThan(200);
+      // Both applied => blue is the dominant channel.
+      expect(px.b).toBeGreaterThan(px.r + 40);
+      expect(px.b).toBeGreaterThan(px.g + 40);
+      // And the red injected by the tint is gone from R (proves swap ran, once).
+      expect(px.r).toBeLessThan(60);
+    });
+
+    it('leaves output unchanged for an identity colorMatrix', async () => {
+      const identity = [
+        1, 0, 0, 0, 0,
+        0, 1, 0, 0, 0,
+        0, 0, 1, 0, 0,
+        0, 0, 0, 1, 0,
+      ];
+      const doc = makeColorMatrixDoc({ filters: [{ type: 'colorMatrix', matrix: identity }] });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const px = sampleCenter();
+      expect(px.g).toBeGreaterThan(200);
+      expect(px.r).toBeLessThan(60);
+      expect(px.b).toBeLessThan(60);
+    });
+
+    it('still applies a blur filter when no colorMatrix is present (regression)', async () => {
+      // Baseline footprint with no blur.
+      const noBlurDoc = makeColorMatrixDoc({});
+      await renderer.setDocument(noBlurDoc);
+      renderer.renderFrame(0);
+      const noBlurArea = nonBackgroundPixelCount();
+
+      // Blur-only instance: must still spread color (offscreen colorMatrix path
+      // is NOT triggered, so the existing blur path is unchanged).
+      const blurDoc = makeColorMatrixDoc({ filters: [{ type: 'blur', blurX: 6, blurY: 6 }] });
+      await renderer.setDocument(blurDoc);
+      renderer.renderFrame(0);
+      const blurArea = nonBackgroundPixelCount();
+
+      expect(blurArea).toBeGreaterThan(noBlurArea);
+      // And the color is still green (no spurious color shift from the blur-only path).
+      const px = sampleCenter();
+      expect(px.g).toBeGreaterThan(px.r);
+      expect(px.g).toBeGreaterThan(px.b);
+    });
+
+    it('applies a colorMatrix together with a blur filter (color shifted AND spread)', async () => {
+      // Invert colorMatrix + blur on a green square. The colorMatrix runs on the
+      // offscreen bitmap (green -> magenta); the blur is set on the main ctx and
+      // applies once at composite, spreading the magenta over a larger footprint.
+      const invert = [
+        -1, 0, 0, 0, 255,
+        0, -1, 0, 0, 255,
+        0, 0, -1, 0, 255,
+        0, 0, 0, 1, 0,
+      ];
+
+      // Baseline: invert, no blur.
+      const noBlurDoc = makeColorMatrixDoc({ filters: [{ type: 'colorMatrix', matrix: invert }] });
+      await renderer.setDocument(noBlurDoc);
+      renderer.renderFrame(0);
+      const noBlurArea = nonBackgroundPixelCount();
+
+      const blurDoc = makeColorMatrixDoc({
+        filters: [
+          { type: 'colorMatrix', matrix: invert },
+          { type: 'blur', blurX: 6, blurY: 6 },
+        ],
+      });
+      await renderer.setDocument(blurDoc);
+      renderer.renderFrame(0);
+
+      // (a) Color still inverted (magenta) even with a blur present.
+      const px = sampleCenter();
+      expect(px.r).toBeGreaterThan(150);
+      expect(px.b).toBeGreaterThan(150);
+      expect(px.g).toBeLessThan(110); // green suppressed by invert (some bleed from blur)
+      // (b) Blur still spreads the (color-adjusted) bitmap over a larger area.
+      const blurArea = nonBackgroundPixelCount();
+      expect(blurArea).toBeGreaterThan(noBlurArea);
+    });
+  });
+
   describe('9-slice scaling', () => {
     it('should render symbol with 9-slice grid', async () => {
       const symbolTimeline = createTimeline({
