@@ -1056,6 +1056,11 @@ export async function exportSVG(
   // Helper to generate unique IDs
   const genId = (prefix: string) => `${prefix}_${defIdCounter++}`;
 
+  // Dedupe cache for <filter> defs, keyed on the serialized filter chain so
+  // reused filter stacks (symbols frequently share the same filters) share one
+  // <filter id> and avoid bloating <defs> (mirrors createFilterDef below).
+  const filterDefCache = new Map<string, string | null>();
+
   // Helper to escape XML
   const escapeXml = (str: string) => str
     .replace(/&/g, '&amp;')
@@ -1181,6 +1186,244 @@ export async function exportSVG(
     return '#000000';
   };
 
+  // Map a Flash blend mode to its CSS mix-blend-mode value, or null when no
+  // blend should be emitted (default 'normal' compositing). This mirrors the
+  // canvas renderer's mapBlendMode (renderer.ts:3673-3693) intent:
+  //   add      -> canvas 'lighter'  -> CSS 'plus-lighter' (the CSS equivalent)
+  //   subtract -> canvas 'difference' (approx) -> CSS 'difference'
+  //   invert   -> canvas 'exclusion' (approx)  -> CSS 'exclusion'
+  // normal/layer/alpha all composite as source-over in the renderer, so they
+  // emit NOTHING here (CSS default). 'erase' is destination-out in canvas and
+  // has NO mix-blend-mode equivalent (it would need destination compositing) —
+  // it is intentionally skipped (returns null, no blend emitted). Unknown
+  // values also fall through to null.
+  const blendModeToCss = (
+    mode: import('./types').BlendMode | undefined
+  ): string | null => {
+    switch (mode) {
+      case 'multiply': return 'multiply';
+      case 'screen': return 'screen';
+      case 'overlay': return 'overlay';
+      case 'darken': return 'darken';
+      case 'lighten': return 'lighten';
+      case 'hardlight': return 'hard-light';
+      case 'difference': return 'difference';
+      case 'add': return 'plus-lighter'; // canvas 'lighter' equivalent
+      case 'subtract': return 'difference'; // mirror renderer's approximation
+      case 'invert': return 'exclusion'; // mirror renderer's approximation
+      // normal / layer / alpha -> source-over (default); erase -> destination-out
+      // (no CSS equivalent); undefined / unknown -> default. All emit nothing.
+      default: return null;
+    }
+  };
+
+  // Create a <filter> def for an instance's filter chain and return a
+  // `filter="url(#...)"` attribute string (with a leading space), or '' when
+  // there's nothing renderable. Mirrors the SUPPORTED set of the canvas
+  // renderer's applyFilters (renderer.ts:3514): blur, glow, dropShadow and
+  // colorMatrix. Other filter types (bevel/gradientGlow/gradientBevel/
+  // convolution) are intentionally UNSUPPORTED in SVG export v1 — they have no
+  // real-file usage and the canvas renderer only crudely approximates them, so
+  // we skip them gracefully (emit no primitive, never throw).
+  const createFilterDef = (
+    filters: import('./types').Filter[] | undefined,
+    colorTransform?: import('./types').ColorTransform
+  ): string => {
+    // Does the color transform have a non-identity RGB part (tint)? Mirrors the
+    // canvas renderer's colorTransformAffectsRGB (renderer.ts:3775) EXACTLY,
+    // including the 1e-6 threshold, so SVG and canvas agree on when a tint is
+    // present. Alpha is intentionally excluded (handled via the <g> opacity).
+    const hasRgbTint = (() => {
+      if (!colorTransform) return false;
+      const rMult = colorTransform.redMultiplier ?? 1;
+      const gMult = colorTransform.greenMultiplier ?? 1;
+      const bMult = colorTransform.blueMultiplier ?? 1;
+      const rOff = colorTransform.redOffset ?? 0;
+      const gOff = colorTransform.greenOffset ?? 0;
+      const bOff = colorTransform.blueOffset ?? 0;
+      return (
+        Math.abs(rMult - 1) > 1e-6 || Math.abs(gMult - 1) > 1e-6 || Math.abs(bMult - 1) > 1e-6 ||
+        Math.abs(rOff) > 1e-6 || Math.abs(gOff) > 1e-6 || Math.abs(bOff) > 1e-6
+      );
+    })();
+
+    const hasFilters = !!filters && filters.length > 0;
+    // Neither filters NOR an RGB tint → no <filter> attribute at all.
+    if (!hasFilters && !hasRgbTint) return '';
+
+    // Dedupe key: the serialized filter chain PLUS the RGB color transform, so a
+    // tinted chain and an untinted-but-otherwise-identical chain don't collide.
+    const cacheKey = JSON.stringify({
+      f: filters ?? null,
+      ct: hasRgbTint
+        ? {
+            rm: colorTransform!.redMultiplier ?? 1,
+            gm: colorTransform!.greenMultiplier ?? 1,
+            bm: colorTransform!.blueMultiplier ?? 1,
+            ro: colorTransform!.redOffset ?? 0,
+            go: colorTransform!.greenOffset ?? 0,
+            bo: colorTransform!.blueOffset ?? 0,
+          }
+        : null,
+    });
+    if (filterDefCache.has(cacheKey)) {
+      const cached = filterDefCache.get(cacheKey)!;
+      return cached ? ` filter="url(#${cached})"` : '';
+    }
+
+    // SVG filter primitives (one entry per supported filter in the chain). Each
+    // produces a result region; we composite shadows BEHIND the source graphic.
+    const primitives: string[] = [];
+    // Track named results so a trailing feMerge can stack shadows then source.
+    const shadowResults: string[] = [];
+    let resultCounter = 0;
+
+    // feFlood flood-opacity must stay within [0,1].
+    const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+
+    // 1) RGB color transform (tint) FIRST — matching the canvas, which renders
+    // the symbol's pixels into an offscreen buffer, applies c' =
+    // clamp(c*mult + offset, 0, 255) per channel (renderer.ts
+    // applyColorTransformToImage), then composites the tinted buffer through any
+    // filters. So the <feColorMatrix> reads SourceGraphic and its tinted result
+    // becomes the input the geometric filters (blur) consume below. Offsets are
+    // stored on the 0..255 scale by the parser (fla-parser.ts
+    // parseColorTransform: redOffset = tintColorR * tintMultiplier) and the
+    // canvas; feColorMatrix uses 0..1 offsets, so each offset is divided by 255.
+    // e.g. #FF0000 @ tint 0.32 -> redOffset 81.6 -> R-offset slot 81.6/255 ≈
+    // 0.32. Alpha row is identity: alphaMultiplier is applied once via the <g>
+    // opacity attribute, so alpha is never doubled.
+    let tintResult: string | null = null;
+    if (hasRgbTint) {
+      const rMult = colorTransform!.redMultiplier ?? 1;
+      const gMult = colorTransform!.greenMultiplier ?? 1;
+      const bMult = colorTransform!.blueMultiplier ?? 1;
+      const rOff = (colorTransform!.redOffset ?? 0) / 255;
+      const gOff = (colorTransform!.greenOffset ?? 0) / 255;
+      const bOff = (colorTransform!.blueOffset ?? 0) / 255;
+      const m = [
+        rMult, 0, 0, 0, rOff,
+        0, gMult, 0, 0, gOff,
+        0, 0, bMult, 0, bOff,
+        0, 0, 0, 1, 0,
+      ];
+      tintResult = `f${resultCounter++}`;
+      primitives.push(
+        `<feColorMatrix in="SourceGraphic" type="matrix" values="${m.join(' ')}" result="${tintResult}"/>`
+      );
+    }
+    // When a tint is prepended, geometric filters must consume the TINTED pixels
+    // (not the raw SourceGraphic), matching the canvas order. These map the
+    // default inputs onto the tint result so the existing primitive emission
+    // below stays unchanged.
+    const sourceGraphicIn = tintResult ?? 'SourceGraphic';
+    const sourceAlphaIn = tintResult ?? 'SourceAlpha';
+
+    for (const filter of filters ?? []) {
+      switch (filter.type) {
+        case 'blur': {
+          // Flash blurX/blurY (px) ≈ 2× SVG stdDeviation; the renderer uses CSS
+          // blur((blurX+blurY)/2 px) which itself ≈ 2× stdDeviation, so divide
+          // each axis by 2 to match the canvas appearance.
+          const sx = filter.blurX / 2;
+          const sy = filter.blurY / 2;
+          primitives.push(
+            `<feGaussianBlur in="${sourceGraphicIn}" stdDeviation="${sx} ${sy}"/>`
+          );
+          break;
+        }
+        case 'glow':
+        case 'dropShadow': {
+          // glow == distance-0 colored shadow; dropShadow offsets it by
+          // distance@angle. The renderer sets shadowBlur = max(blurX,blurY)*
+          // strength and the shadow color = color@alpha; we approximate that
+          // intent: blur radius from max axis (÷2 for stdDeviation), opacity =
+          // alpha×strength clamped.
+          const stdDev = Math.max(filter.blurX, filter.blurY) / 2;
+          const strength = filter.strength ?? 1;
+          const alpha = filter.alpha ?? 1;
+          const floodOpacity = clamp01(alpha * strength);
+
+          const blurResult = `f${resultCounter++}`;
+          const offsetResult = `f${resultCounter++}`;
+          const floodResult = `f${resultCounter++}`;
+          const shadowResult = `f${resultCounter++}`;
+
+          primitives.push(
+            `<feGaussianBlur in="${sourceAlphaIn}" stdDeviation="${stdDev}" result="${blurResult}"/>`
+          );
+
+          let composeIn = blurResult;
+          if (filter.type === 'dropShadow') {
+            const angleRad = ((filter.angle ?? 45) * Math.PI) / 180;
+            const dx = Math.cos(angleRad) * filter.distance;
+            const dy = Math.sin(angleRad) * filter.distance;
+            primitives.push(
+              `<feOffset in="${blurResult}" dx="${dx}" dy="${dy}" result="${offsetResult}"/>`
+            );
+            composeIn = offsetResult;
+          }
+
+          primitives.push(
+            `<feFlood flood-color="${filter.color}" flood-opacity="${floodOpacity}" result="${floodResult}"/>`
+          );
+          primitives.push(
+            `<feComposite in="${floodResult}" in2="${composeIn}" operator="in" result="${shadowResult}"/>`
+          );
+          shadowResults.push(shadowResult);
+          break;
+        }
+        case 'colorMatrix': {
+          // Reuse the EXACT normalization the renderer uses
+          // (renderer.ts:3624-3634): offsets at indices 4,9,14,19 are divided by
+          // 255 so canvas (which builds the same feColorMatrix via a data URL)
+          // and SVG export agree.
+          if (filter.matrix && filter.matrix.length === 20) {
+            const m = [...filter.matrix];
+            m[4] /= 255;
+            m[9] /= 255;
+            m[14] /= 255;
+            m[19] /= 255;
+            primitives.push(
+              `<feColorMatrix in="${sourceGraphicIn}" type="matrix" values="${m.join(' ')}"/>`
+            );
+          }
+          break;
+        }
+        // bevel / gradientGlow / gradientBevel / convolution:
+        // intentionally UNSUPPORTED in SVG export v1 (see header comment).
+        // Skip gracefully — no primitive emitted, no throw.
+      }
+    }
+
+    // If any shadow primitives were produced, stack them behind the source so
+    // the glow/dropShadow shows around the original graphic.
+    if (shadowResults.length > 0) {
+      const merges = shadowResults
+        .map((r) => `<feMergeNode in="${r}"/>`)
+        .join('');
+      primitives.push(
+        `<feMerge>${merges}<feMergeNode in="${sourceGraphicIn}"/></feMerge>`
+      );
+    }
+
+    // Nothing renderable (e.g. only unsupported filters) → cache the miss.
+    if (primitives.length === 0) {
+      filterDefCache.set(cacheKey, null);
+      return '';
+    }
+
+    const filterId = genId('filter');
+    // Explicit oversized region so blur/shadow don't clip at the bbox edge.
+    defs.push(
+      `<filter id="${filterId}" x="-50%" y="-50%" width="200%" height="200%">${primitives.join(
+        ''
+      )}</filter>`
+    );
+    filterDefCache.set(cacheKey, filterId);
+    return ` filter="url(#${filterId})"`;
+  };
+
   // Render a shape element to SVG
   const renderShape = (shape: import('./types').Shape): string => {
     const paths: string[] = [];
@@ -1229,6 +1472,70 @@ export async function exportSVG(
     return `<g${transformAttr}>\n    ${paths.join('\n    ')}\n  </g>`;
   };
 
+  // Emit the FILL geometry of a single mask shape as <path> clip elements,
+  // wrapped in a <g transform> for the shape's matrix so the clip sits in the
+  // same pixel space as the masked content (the masked children render in that
+  // same parent transform). This mirrors the canvas renderer's mask clip
+  // (renderer.ts:933-944): it clips with the shape's FILL paths under the
+  // shape matrix. We use a hard, geometry-only clip (clip-rule nonzero — the
+  // SVG default, matching ctx.clip(path,'nonzero')); no luminance/soft edges.
+  // Only edges that participate in a fill (fillStyle0/fillStyle1) contribute,
+  // exactly like fillPaths in the renderer. clip-path ignores fill/stroke
+  // paint, so we emit pure `d` geometry without paint attributes.
+  const maskShapeToClipPaths = (shape: import('./types').Shape): string => {
+    const paths: string[] = [];
+    for (const edge of shape.edges) {
+      // A mask clips by FILLED regions only (mirror renderer fillPaths).
+      if (edge.fillStyle0 === undefined && edge.fillStyle1 === undefined) {
+        continue;
+      }
+      const pathData = commandsToPath(edge.commands);
+      if (!pathData) continue;
+      paths.push(`<path d="${pathData}"/>`);
+    }
+    if (paths.length === 0) return '';
+    const transform = matrixToTransform(shape.matrix);
+    const transformAttr = transform ? ` transform="${transform}"` : '';
+    if (transformAttr) {
+      return `<g${transformAttr}>${paths.join('')}</g>`;
+    }
+    return paths.join('');
+  };
+
+  // Build a <clipPath> def from a mask layer's frame and return its id, or null
+  // when the mask contributes no clip (so the caller renders the masked children
+  // unclipped — matching renderer.ts:915-928 "no mask content" path). Symbol /
+  // non-shape mask elements fall back to a full-document rect clip, mirroring the
+  // renderer's full-rect fallback (renderer.ts:947-953); real files use shape
+  // masks, so this path is defensive.
+  const buildMaskClipDef = (
+    maskFrame: import('./types').Frame
+  ): string | null => {
+    const clipChildren: string[] = [];
+    let usedSymbolFallback = false;
+    for (const element of maskFrame.elements) {
+      if (element.type === 'shape') {
+        const clipPaths = maskShapeToClipPaths(element);
+        if (clipPaths) clipChildren.push(clipPaths);
+      } else if (element.type === 'symbol') {
+        // Symbol-as-mask: the renderer falls back to a full-rect clip (it does
+        // not rasterize the symbol's geometry). Mirror that — clip to the whole
+        // document so masked content shows everywhere (effectively unclipped),
+        // rather than dropping it. Only one full-rect is needed.
+        usedSymbolFallback = true;
+      }
+      // text / bitmap / video as a mask: no geometry to clip with; skip (the
+      // renderer also only handles shape + symbol in renderMaskGroup).
+    }
+    if (clipChildren.length === 0 && usedSymbolFallback) {
+      clipChildren.push(`<rect x="0" y="0" width="${width}" height="${height}"/>`);
+    }
+    if (clipChildren.length === 0) return null;
+    const clipId = genId('clip');
+    defs.push(`<clipPath id="${clipId}">${clipChildren.join('')}</clipPath>`);
+    return clipId;
+  };
+
   // Render text element to SVG
   const renderText = (text: import('./types').TextInstance): string => {
     const transform = matrixToTransform(text.matrix);
@@ -1257,7 +1564,10 @@ export async function exportSVG(
     }
 
     if (textElements.length === 0) return '';
-    return `<g${transformAttr}>\n    ${textElements.join('\n    ')}\n  </g>`;
+    // TextInstance also carries filters (types.ts:209) — emit the same supported
+    // blur/glow/dropShadow/colorMatrix SVG <filter> on its group.
+    const svgFilterAttr = createFilterDef(text.filters);
+    return `<g${transformAttr}${svgFilterAttr}>\n    ${textElements.join('\n    ')}\n  </g>`;
   };
 
   // Render bitmap instance to SVG
@@ -1347,46 +1657,159 @@ export async function exportSVG(
       symbolFrame = Math.min(firstFrame + frameOffset, effectiveLastFrame);
     }
 
-    // Collect elements from all layers at the symbolFrame
+    // Collect elements from all layers at the symbolFrame, mask-aware (mask
+    // grouping + <clipPath>) just like the main timeline. Symbol timelines
+    // historically did not skip referenceLayers here, so pass an empty set to
+    // preserve that behavior while gaining mask support.
     const elements: string[] = [];
-    const layerIndices = [...Array(symbol.timeline.layers.length).keys()].reverse();
-
-    for (const layerIndex of layerIndices) {
-      const layer = symbol.timeline.layers[layerIndex];
-      // Honor FLA layer visibility with the folder/parent cascade so SVG/video
-      // export agrees with the canvas renderer (shared helper, src/layer-utils.ts).
-      if (!isLayerVisibleInFla(symbol.timeline.layers, layerIndex) ||
-          layer.layerType === 'guide' || layer.layerType === 'folder') continue;
-
-      // Find frame at symbolFrame
-      let currentFrame: import('./types').Frame | null = null;
-      for (const frame of layer.frames) {
-        if (symbolFrame >= frame.index && symbolFrame < frame.index + frame.duration) {
-          currentFrame = frame;
-          break;
-        }
-      }
-
-      if (currentFrame) {
-        for (const elem of currentFrame.elements) {
-          const rendered = renderElementWithKeyframe(elem, depth + 1, currentFrame.index);
-          if (rendered) elements.push(rendered);
-        }
-      }
-    }
+    renderLayerStack(
+      symbol.timeline.layers,
+      symbolFrame,
+      depth + 1,
+      new Set<number>(),
+      elements
+    );
 
     if (elements.length === 0) return '';
 
-    // Apply color transform as filter if needed
-    let filterAttr = '';
+    // Apply color transform's alphaMultiplier as group opacity if needed.
+    let opacityAttr = '';
     if (instance.colorTransform) {
       const ct = instance.colorTransform;
       if (ct.alphaMultiplier !== undefined && ct.alphaMultiplier !== 1) {
-        filterAttr = ` opacity="${ct.alphaMultiplier}"`;
+        opacityAttr = ` opacity="${ct.alphaMultiplier}"`;
       }
     }
 
-    return `<g${transformAttr}${filterAttr}>\n    ${elements.join('\n    ')}\n  </g>`;
+    // Emit blur/glow/dropShadow/colorMatrix AND the instance's per-channel RGB
+    // color transform (tint) as a single SVG <filter> on this group: the tint
+    // <feColorMatrix> is prepended FIRST so geometric filters operate on the
+    // tinted pixels, matching the canvas. Coexists with opacity (alphaMultiplier
+    // is applied once on the <g>; the matrix alpha row is identity) — both
+    // attributes are kept.
+    const svgFilterAttr = createFilterDef(instance.filters, instance.colorTransform);
+
+    // Emit the instance blend mode as a CSS mix-blend-mode on this group, with
+    // isolation:isolate so it composites against its sibling stack (the symbol's
+    // own children) rather than the whole document. null -> no blend (normal /
+    // erase / unknown). This coexists with transform/opacity/filter — it is a
+    // separate `style` attribute, so there's no attribute collision.
+    const cssBlend = blendModeToCss(instance.blendMode);
+    const blendStyleAttr = cssBlend
+      ? ` style="mix-blend-mode:${cssBlend};isolation:isolate"`
+      : '';
+
+    return `<g${transformAttr}${opacityAttr}${svgFilterAttr}${blendStyleAttr}>\n    ${elements.join('\n    ')}\n  </g>`;
+  };
+
+  // Find the frame active at a given frame index for a layer (same scan the
+  // renderer uses: index <= frame.index < index + duration).
+  const findActiveFrame = (
+    layer: import('./types').Layer,
+    atFrameIndex: number
+  ): import('./types').Frame | null => {
+    for (const frame of layer.frames) {
+      if (atFrameIndex >= frame.index && atFrameIndex < frame.index + frame.duration) {
+        return frame;
+      }
+    }
+    return null;
+  };
+
+  // Render one layer's active-frame elements into SVG strings.
+  const renderLayerElements = (
+    layer: import('./types').Layer,
+    atFrameIndex: number,
+    depth: number,
+    out: string[]
+  ): void => {
+    const currentFrame = findActiveFrame(layer, atFrameIndex);
+    if (!currentFrame) return;
+    for (const element of currentFrame.elements) {
+      const rendered = renderElementWithKeyframe(element, depth, currentFrame.index);
+      if (rendered) out.push(rendered);
+    }
+  };
+
+  // Render a stack of timeline layers (main timeline or a symbol's timeline)
+  // with MASK support, mirroring renderer.ts renderTimelineLayers/renderMaskGroup
+  // (renderer.ts:832-968). Layers are iterated in reverse (bottom first, top
+  // last) to match the renderer and the prior export behavior.
+  //
+  // Mask handling:
+  //  - Build masked-layer -> mask-layer grouping from layer.maskLayerIndex
+  //    (renderer.ts:833-837).
+  //  - A `mask` layer: if hidden, the WHOLE group is omitted (renderer.ts:874-
+  //    875). Otherwise its shape geometry becomes a <clipPath> and its masked
+  //    children render inside one <g clip-path="url(#...)">.
+  //  - Each masked child still honors isLayerVisibleInFla on its own (the shared
+  //    cascade helper). Because a masked child's parentLayerIndex points at the
+  //    mask, isLayerVisibleInFla already returns false when the mask is hidden —
+  //    but the mask block returns first, so there is no double-hide.
+  //  - Masked children are NOT rendered again when their index comes up in the
+  //    normal loop (tracked via maskedLayers).
+  const renderLayerStack = (
+    layers: import('./types').Layer[],
+    atFrameIndex: number,
+    depth: number,
+    referenceLayers: Set<number>,
+    out: string[]
+  ): void => {
+    // masked layer index -> mask layer index (renderer.ts:833-837)
+    const maskedLayers = new Map<number, number>();
+    for (let i = 0; i < layers.length; i++) {
+      if (layers[i].maskLayerIndex !== undefined) {
+        maskedLayers.set(i, layers[i].maskLayerIndex!);
+      }
+    }
+
+    const indices = [...Array(layers.length).keys()].reverse();
+    for (const layerIndex of indices) {
+      const layer = layers[layerIndex];
+
+      if (referenceLayers.has(layerIndex)) continue;
+      if (layer.layerType === 'guide' || layer.layerType === 'folder') continue;
+
+      // Mask layer: its own visibility gates the whole group (renderer.ts:874).
+      if (layer.layerType === 'mask') {
+        if (!isLayerVisibleInFla(layers, layerIndex)) continue; // hidden mask hides group
+
+        // Collect the layers masked by this mask (renderer.ts:878-884).
+        const maskedByThis: number[] = [];
+        for (const [maskedIdx, maskIdx] of maskedLayers) {
+          if (maskIdx === layerIndex) maskedByThis.push(maskedIdx);
+        }
+        if (maskedByThis.length === 0) continue; // mask with no children: nothing to draw
+
+        // Render the masked children (bottom first, top last) honoring each
+        // child's own visibility. No double-hide: isLayerVisibleInFla here is
+        // the child's check; the mask gate above is separate.
+        const childOut: string[] = [];
+        for (const maskedIdx of [...maskedByThis].sort((a, b) => b - a)) {
+          if (!isLayerVisibleInFla(layers, maskedIdx)) continue;
+          renderLayerElements(layers[maskedIdx], atFrameIndex, depth, childOut);
+        }
+        if (childOut.length === 0) continue; // nothing visible to clip
+
+        // Build the clip from the mask layer's frame geometry. null clip =>
+        // no mask content; render children unclipped (renderer.ts:915-928).
+        const maskFrame = findActiveFrame(layer, atFrameIndex);
+        const clipId = maskFrame ? buildMaskClipDef(maskFrame) : null;
+        if (clipId) {
+          out.push(`<g clip-path="url(#${clipId})">\n    ${childOut.join('\n    ')}\n  </g>`);
+        } else {
+          out.push(...childOut);
+        }
+        continue;
+      }
+
+      // Masked children are drawn by their mask block above; skip here.
+      if (maskedLayers.has(layerIndex)) continue;
+
+      // Normal layer: honor visibility cascade.
+      if (!isLayerVisibleInFla(layers, layerIndex)) continue;
+      renderLayerElements(layer, atFrameIndex, depth, out);
+    }
   };
 
   // Render the frame
@@ -1396,33 +1819,15 @@ export async function exportSVG(
   }
 
   const renderedElements: string[] = [];
-  // Use reversed indices like the renderer (bottom layers rendered first, top layers last)
-  const layerIndices = [...Array(timeline.layers.length).keys()].reverse();
-
-  for (const layerIndex of layerIndices) {
-    const layer = timeline.layers[layerIndex];
-    // Honor FLA layer visibility with the folder/parent cascade so SVG/video
-    // export agrees with the canvas renderer (shared helper, src/layer-utils.ts).
-    if (!isLayerVisibleInFla(timeline.layers, layerIndex) ||
-        layer.layerType === 'guide' || layer.layerType === 'folder') continue;
-    if (timeline.referenceLayers.has(layerIndex)) continue;
-
-    // Find frame at frameIndex
-    let currentFrame: import('./types').Frame | null = null;
-    for (const frame of layer.frames) {
-      if (frameIndex >= frame.index && frameIndex < frame.index + frame.duration) {
-        currentFrame = frame;
-        break;
-      }
-    }
-
-    if (currentFrame) {
-      for (const element of currentFrame.elements) {
-        const rendered = renderElementWithKeyframe(element, 0, currentFrame.index);
-        if (rendered) renderedElements.push(rendered);
-      }
-    }
-  }
+  // Mask-aware reverse-order layer rendering (mask grouping + <clipPath>),
+  // mirroring the canvas renderer. Reference layers are skipped (as before).
+  renderLayerStack(
+    timeline.layers,
+    frameIndex,
+    0,
+    timeline.referenceLayers,
+    renderedElements
+  );
 
   // Build SVG
   const defsSection = defs.length > 0 ? `\n  <defs>\n    ${defs.join('\n    ')}\n  </defs>` : '';

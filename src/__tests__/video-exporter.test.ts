@@ -1953,5 +1953,687 @@ describe('video-exporter', () => {
       // The raw twip-space matrix must NOT be emitted (the ~20x over-scale bug).
       expect(text).not.toContain('matrix(20 0 0 20 200 200)');
     });
+
+    // --- Filter export (blur / glow / dropShadow / colorMatrix) ---------------
+    // Build a doc with ONE graphic symbol (a red shape) carrying `filters`, plus
+    // an optional SECOND identical instance to exercise the dedupe cache. These
+    // mirror the symbol fixtures above but focus on the <filter> emission.
+    const buildFilteredSymbolDoc = (
+      filters: import('../types').Filter[],
+      instanceCount = 1
+    ): import('../types').FLADocument => {
+      const symbols = new Map();
+      symbols.set('Filtered', {
+        name: 'Filtered',
+        itemID: 'filt-1',
+        symbolType: 'graphic' as const,
+        timeline: {
+          name: 'Filtered',
+          layers: [{
+            name: 'Layer 1',
+            color: '#000000',
+            visible: true,
+            locked: false,
+            outline: false,
+            frames: [{
+              index: 0,
+              duration: 1,
+              keyMode: 9728,
+              elements: [{
+                type: 'shape' as const,
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid' as const, color: '#FF0000' }],
+                strokes: [],
+                edges: [{ fillStyle0: 1, commands: [
+                  { type: 'M' as const, x: 0, y: 0 },
+                  { type: 'L' as const, x: 10, y: 10 },
+                  { type: 'Z' as const },
+                ] }],
+              }],
+            }],
+          }],
+          totalFrames: 1,
+          referenceLayers: new Set<number>(),
+        },
+      });
+
+      const instances = Array.from({ length: instanceCount }, () => ({
+        type: 'symbol' as const,
+        libraryItemName: 'Filtered',
+        symbolType: 'graphic' as const,
+        matrix: createMatrix(),
+        transformationPoint: { x: 0, y: 0 },
+        loop: 'single frame' as const,
+        firstFrame: 0,
+        filters,
+      }));
+
+      return createMinimalDoc({
+        width: 100,
+        height: 100,
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({ index: 0, duration: 1, elements: instances })],
+          })],
+        })],
+      });
+    };
+
+    it('emits a blur <filter> with halved stdDeviation on the symbol group', async () => {
+      const doc = buildFilteredSymbolDoc([
+        { type: 'blur', blurX: 4, blurY: 4 },
+      ]);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // The symbol <g> references the filter.
+      expect(text).toMatch(/<g[^>]*filter="url\(#filter_\d+\)"/);
+      // A <filter> def exists.
+      expect(text).toContain('<filter id="filter_');
+      // Flash blurX=4 -> SVG stdDeviation 2 per axis (÷2 to match CSS blur()).
+      expect(text).toContain('<feGaussianBlur in="SourceGraphic" stdDeviation="2 2"/>');
+      // Oversized region so blur doesn't clip.
+      expect(text).toContain('x="-50%" y="-50%" width="200%" height="200%"');
+    });
+
+    it('emits a dropShadow <filter> with offset from distance/angle', async () => {
+      const doc = buildFilteredSymbolDoc([
+        { type: 'dropShadow', blurX: 6, blurY: 6, color: '#000000', strength: 1, alpha: 1, distance: 4, angle: 45 },
+      ]);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toMatch(/<g[^>]*filter="url\(#filter_\d+\)"/);
+      // Shadow blur uses max(blurX,blurY)/2 = 3 off SourceAlpha.
+      expect(text).toContain('<feGaussianBlur in="SourceAlpha" stdDeviation="3"');
+      // distance=4 @ 45deg -> dx=cos(45)*4, dy=sin(45)*4 (both ≈ 2.83; they
+      // differ only in the last fp ULP, so compute each separately).
+      const angleRad = (45 * Math.PI) / 180;
+      const dx = Math.cos(angleRad) * 4; // ~2.8284271247461903
+      const dy = Math.sin(angleRad) * 4; // ~2.82842712474619
+      expect(dx).toBeCloseTo(2.8284271247461903, 10);
+      expect(text).toContain(`<feOffset in="f0" dx="${dx}" dy="${dy}"`);
+      // Colored flood composited "in" the shadow alpha, then merged with source.
+      expect(text).toContain('flood-color="#000000"');
+      expect(text).toContain('operator="in"');
+      expect(text).toContain('<feMerge>');
+      expect(text).toContain('<feMergeNode in="SourceGraphic"/>');
+    });
+
+    it('emits a colorMatrix <filter> with renderer-normalized offsets (÷255)', async () => {
+      // AdjustColor-equivalent matrix: identity RGB with a brightness offset of
+      // 51 (0-255 scale) on each RGB row. The exporter must divide offsets at
+      // indices 4,9,14,19 by 255 (renderer.ts:3624-3634) -> 51/255 = 0.2.
+      const matrix = [
+        1, 0, 0, 0, 51,
+        0, 1, 0, 0, 51,
+        0, 0, 1, 0, 51,
+        0, 0, 0, 1, 0,
+      ];
+      const doc = buildFilteredSymbolDoc([{ type: 'colorMatrix', matrix }]);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toMatch(/<g[^>]*filter="url\(#filter_\d+\)"/);
+      // Normalized values: offsets 51 -> 0.2, alpha-row offset 0 stays 0.
+      expect(text).toContain(
+        '<feColorMatrix in="SourceGraphic" type="matrix" values="1 0 0 0 0.2 0 1 0 0 0.2 0 0 1 0 0.2 0 0 0 1 0"/>'
+      );
+    });
+
+    it('dedupes identical filter chains into a single <filter> def', async () => {
+      // Two instances with the SAME filter chain must share ONE def.
+      const doc = buildFilteredSymbolDoc(
+        [{ type: 'blur', blurX: 4, blurY: 4 }],
+        2
+      );
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // Two group references...
+      const refs = text.match(/filter="url\(#filter_\d+\)"/g) || [];
+      expect(refs.length).toBe(2);
+      // ...but only ONE <filter> def.
+      const defsMatched = text.match(/<filter id="filter_\d+"/g) || [];
+      expect(defsMatched.length).toBe(1);
+      // Both references point at the same id.
+      expect(refs[0]).toBe(refs[1]);
+    });
+
+    it('skips unsupported filters (bevel) gracefully without throwing', async () => {
+      // bevel is intentionally unsupported in SVG export v1 — no primitive, no
+      // throw, and (when it is the ONLY filter) no filter attr at all.
+      const doc = buildFilteredSymbolDoc([
+        {
+          type: 'bevel', blurX: 4, blurY: 4, strength: 1,
+          highlightColor: '#FFFFFF', shadowColor: '#000000',
+          distance: 4, angle: 45,
+        },
+      ]);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // The shape still renders.
+      expect(text).toContain('#FF0000');
+      // No filter emitted for the unsupported bevel.
+      expect(text).not.toContain('<filter id="filter_');
+      expect(text).not.toMatch(/filter="url\(#filter_\d+\)"/);
+    });
+
+    // Build a doc with a single symbol instance carrying an optional blendMode
+    // (and optional filters) so we can assert the emitted mix-blend-mode/filter
+    // on the symbol <g>. Mirrors buildFilteredSymbolDoc's fixture shape.
+    const buildBlendSymbolDoc = (
+      blendMode: import('../types').BlendMode | undefined,
+      filters?: import('../types').Filter[]
+    ): import('../types').FLADocument => {
+      const symbols = new Map();
+      symbols.set('Blended', {
+        name: 'Blended',
+        itemID: 'blend-1',
+        symbolType: 'graphic' as const,
+        timeline: {
+          name: 'Blended',
+          layers: [{
+            name: 'Layer 1',
+            color: '#000000',
+            visible: true,
+            locked: false,
+            outline: false,
+            frames: [{
+              index: 0,
+              duration: 1,
+              keyMode: 9728,
+              elements: [{
+                type: 'shape' as const,
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid' as const, color: '#FF0000' }],
+                strokes: [],
+                edges: [{ fillStyle0: 1, commands: [
+                  { type: 'M' as const, x: 0, y: 0 },
+                  { type: 'L' as const, x: 10, y: 10 },
+                  { type: 'Z' as const },
+                ] }],
+              }],
+            }],
+          }],
+          totalFrames: 1,
+          referenceLayers: new Set<number>(),
+        },
+      });
+
+      const instance: import('../types').SymbolInstance = {
+        type: 'symbol' as const,
+        libraryItemName: 'Blended',
+        symbolType: 'graphic' as const,
+        matrix: createMatrix(),
+        transformationPoint: { x: 0, y: 0 },
+        loop: 'single frame' as const,
+        firstFrame: 0,
+        ...(blendMode !== undefined ? { blendMode } : {}),
+        ...(filters ? { filters } : {}),
+      };
+
+      return createMinimalDoc({
+        width: 100,
+        height: 100,
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({ index: 0, duration: 1, elements: [instance] })],
+          })],
+        })],
+      });
+    };
+
+    it('emits mix-blend-mode:overlay with isolation on the symbol group', async () => {
+      const doc = buildBlendSymbolDoc('overlay');
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // The symbol <g> carries the blend style.
+      expect(text).toMatch(/<g[^>]*style="mix-blend-mode:overlay;isolation:isolate"/);
+      expect(text).toContain('mix-blend-mode:overlay');
+      // isolation:isolate is required so it blends against the sibling stack.
+      expect(text).toContain('isolation:isolate');
+    });
+
+    it("maps Flash 'add' to CSS plus-lighter (canvas 'lighter' equivalent)", async () => {
+      const doc = buildBlendSymbolDoc('add');
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('mix-blend-mode:plus-lighter');
+      expect(text).toMatch(/<g[^>]*style="mix-blend-mode:plus-lighter;isolation:isolate"/);
+    });
+
+    it("maps Flash 'lighten' to CSS lighten (real-file value from p0tatomango)", async () => {
+      const doc = buildBlendSymbolDoc('lighten');
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('mix-blend-mode:lighten');
+    });
+
+    it("emits NO mix-blend-mode for blendMode='normal'", async () => {
+      const doc = buildBlendSymbolDoc('normal');
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // The shape still renders, but no blend style is emitted (default normal).
+      expect(text).toContain('#FF0000');
+      expect(text).not.toContain('mix-blend-mode');
+    });
+
+    it('emits NO mix-blend-mode when blendMode is unset', async () => {
+      const doc = buildBlendSymbolDoc(undefined);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('#FF0000');
+      expect(text).not.toContain('mix-blend-mode');
+    });
+
+    it("skips blendMode='erase' gracefully (no destination-out equivalent)", async () => {
+      // erase maps to canvas destination-out — no CSS mix-blend-mode equivalent.
+      // It must be skipped: shape still renders, no blend style emitted, no throw.
+      const doc = buildBlendSymbolDoc('erase');
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('#FF0000');
+      expect(text).not.toContain('mix-blend-mode');
+    });
+
+    it('emits BOTH a filter and a blend style without attribute collision', async () => {
+      // A symbol with a supported filter AND a blendMode must carry both the
+      // filter="url(#...)" attr and the style="mix-blend-mode:..." attr on the
+      // same <g> — distinct attributes, no merge/collision.
+      const doc = buildBlendSymbolDoc('multiply', [
+        { type: 'blur', blurX: 4, blurY: 4 },
+      ]);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // Both attributes present on the symbol group.
+      expect(text).toMatch(
+        /<g[^>]*filter="url\(#filter_\d+\)"[^>]*style="mix-blend-mode:multiply;isolation:isolate"/
+      );
+      expect(text).toContain('<filter id="filter_');
+      // Exactly one style attribute on that group (no duplicate style= attrs).
+      const gTag = text.match(/<g[^>]*filter="url\(#filter_\d+\)"[^>]*>/)?.[0] ?? '';
+      expect((gTag.match(/style=/g) || []).length).toBe(1);
+    });
+
+    // ---- Mask layer support (shape masks) ----------------------------------
+    //
+    // Mirrors the parser: a `mask` layer's child layers carry
+    // parentLayerIndex = mask index and are reclassified as `masked` with
+    // maskLayerIndex = mask index (fla-parser.ts:620-627). The export must emit
+    // a <clipPath> from the mask's shape geometry and wrap the masked children
+    // in a <g clip-path="url(#...)"> (mirroring renderer.ts:903-968 renderMaskGroup
+    // hard nonzero clip). A hidden mask hides the whole group (renderer.ts:874-875).
+
+    // Build a doc: a mask layer (small rect, the clip) above a masked child
+    // layer (larger rect, the clipped content). `maskHidden` toggles the cascade
+    // case (a hidden mask => whole group omitted).
+    const buildMaskDoc = (maskHidden = false) =>
+      createMinimalDoc({
+        width: 200,
+        height: 200,
+        timelines: [
+          createTimeline({
+            totalFrames: 1,
+            layers: [
+              // index 0: the MASK layer (small 50x50 rect clip in the corner)
+              createLayer({
+                name: 'MaskLayer',
+                layerType: 'mask',
+                visible: !maskHidden,
+                frames: [
+                  createFrame({
+                    duration: 1,
+                    elements: [
+                      {
+                        type: 'shape',
+                        matrix: createMatrix(),
+                        fills: [{ index: 1, type: 'solid', color: '#000000' }],
+                        strokes: [],
+                        edges: [
+                          {
+                            fillStyle0: 1,
+                            commands: [
+                              { type: 'M', x: 0, y: 0 },
+                              { type: 'L', x: 50, y: 0 },
+                              { type: 'L', x: 50, y: 50 },
+                              { type: 'L', x: 0, y: 50 },
+                              { type: 'Z' },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  }),
+                ],
+              }),
+              // index 1: the MASKED child layer (large 150x150 red rect)
+              createLayer({
+                name: 'MaskedChild',
+                layerType: 'masked',
+                parentLayerIndex: 0,
+                maskLayerIndex: 0,
+                frames: [
+                  createFrame({
+                    duration: 1,
+                    elements: [
+                      {
+                        type: 'shape',
+                        matrix: createMatrix(),
+                        fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+                        strokes: [],
+                        edges: [
+                          {
+                            fillStyle0: 1,
+                            commands: [
+                              { type: 'M', x: 10, y: 10 },
+                              { type: 'L', x: 160, y: 10 },
+                              { type: 'L', x: 160, y: 160 },
+                              { type: 'L', x: 10, y: 160 },
+                              { type: 'Z' },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  }),
+                ],
+              }),
+            ],
+          }),
+        ],
+      });
+
+    it('emits a <clipPath> from the mask shape and wraps masked children in <g clip-path>', async () => {
+      const doc = buildMaskDoc();
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // A clipPath def exists, containing the mask shape's 50x50 geometry.
+      const clipMatch = text.match(/<clipPath id="(clip_\d+)">([\s\S]*?)<\/clipPath>/);
+      expect(clipMatch).not.toBeNull();
+      const clipId = clipMatch![1];
+      const clipBody = clipMatch![2];
+      // The mask geometry (the 50x50 rect path) is inside the clipPath.
+      expect(clipBody).toContain('<path');
+      expect(clipBody).toContain('M0 0');
+      expect(clipBody).toContain('L50 0');
+      // clipPath holds pure geometry — no paint attributes leak in.
+      expect(clipBody).not.toContain('fill=');
+      expect(clipBody).not.toContain('stroke=');
+
+      // The masked child is wrapped in a <g clip-path="url(#clip_N)"> that
+      // references that exact clip, and the red child content lives inside it.
+      const wrapMatch = text.match(
+        new RegExp(`<g clip-path="url\\(#${clipId}\\)">([\\s\\S]*?)</g>`)
+      );
+      expect(wrapMatch).not.toBeNull();
+      expect(wrapMatch![1]).toContain('#FF0000');
+
+      // The clip-path wrapper is what carries the masked child (load-bearing).
+      expect(text).toContain(`clip-path="url(#${clipId})"`);
+    });
+
+    it('omits the whole masked group when the mask layer is hidden (cascade)', async () => {
+      const doc = buildMaskDoc(/* maskHidden */ true);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // Hidden mask => no clip emitted and the masked child (#FF0000) is gone.
+      expect(text).not.toContain('clip-path');
+      expect(text).not.toContain('<clipPath');
+      expect(text).not.toContain('#FF0000');
+    });
+
+    it('rasterizes the masked child clipped to the mask geometry (pixels)', async () => {
+      // Render confirmation: load the exported SVG into an <img>, draw to a
+      // canvas, and read pixels. A pixel INSIDE the 50x50 mask shows the red
+      // child; a pixel OUTSIDE the mask (but inside the red child) is clipped
+      // away (transparent) — matching the renderer's hard nonzero clip.
+      const doc = buildMaskDoc();
+      // Suppress the opaque white background rect so an OUTSIDE-mask pixel reads
+      // as transparent (proving the clip) rather than white background.
+      doc.backgroundColor = 'transparent';
+      const blob = await exportSVG(doc, 0);
+      const svgText = await blob.text();
+
+      const dataUrl =
+        'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);
+      const img = new Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('SVG image failed to load'));
+        img.src = dataUrl;
+      });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 200;
+      canvas.height = 200;
+      const c = canvas.getContext('2d')!;
+      c.clearRect(0, 0, 200, 200);
+      c.drawImage(img, 0, 0, 200, 200);
+
+      // Inside the 50x50 mask (and inside the red child) => opaque red.
+      const inside = c.getImageData(25, 25, 1, 1).data;
+      // Outside the mask (100,100) but inside the red child => clipped away.
+      const outside = c.getImageData(100, 100, 1, 1).data;
+
+      expect(inside[0]).toBeGreaterThan(200); // red channel high
+      expect(inside[3]).toBeGreaterThan(200); // opaque
+      expect(outside[3]).toBeLessThan(20);    // clipped => transparent
+    });
+
+    // --- Color-transform (tint) parity with the canvas renderer -------------
+    // The instance RGB color transform (tint) is emitted as a <feColorMatrix>
+    // PREPENDED into the SAME instance <filter> chain as blur/glow/etc. (see
+    // createFilterDef in video-exporter.ts), so SVG export matches the canvas,
+    // which renders the subtree to an offscreen buffer, applies
+    // c' = clamp(c*mult + offset, 0, 255) per channel, then composites it
+    // through any filters. Build a doc with a single graphic-symbol instance
+    // carrying the given colorTransform (and optional filters), so we can assert
+    // how exportSVG emits the instance <g> / <filter>. The symbol is a solid
+    // (white) square.
+    const createTintInstanceDoc = (
+      instanceProps: Partial<import('../types').SymbolInstance>
+    ): import('../types').FLADocument => {
+      const symbols = new Map();
+      symbols.set('TintSymbol', {
+        name: 'TintSymbol',
+        itemID: 'tint-1',
+        symbolType: 'graphic' as const,
+        timeline: {
+          name: 'TintSymbol',
+          layers: [{
+            name: 'Layer 1',
+            color: '#000000',
+            visible: true,
+            locked: false,
+            outline: false,
+            frames: [{
+              index: 0,
+              duration: 1,
+              keyMode: 9728,
+              elements: [{
+                type: 'shape' as const,
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid' as const, color: '#FFFFFF' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M' as const, x: 0, y: 0 },
+                    { type: 'L' as const, x: 20, y: 0 },
+                    { type: 'L' as const, x: 20, y: 20 },
+                    { type: 'L' as const, x: 0, y: 20 },
+                    { type: 'Z' as const },
+                  ],
+                }],
+              }],
+            }],
+          }],
+          totalFrames: 1,
+          referenceLayers: new Set<number>(),
+        },
+      });
+
+      return createMinimalDoc({
+        width: 100,
+        height: 100,
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              index: 0,
+              duration: 1,
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'TintSymbol',
+                symbolType: 'graphic',
+                matrix: createMatrix(),
+                transformationPoint: { x: 0, y: 0 },
+                loop: 'single frame',
+                firstFrame: 0,
+                ...instanceProps,
+              }],
+            })],
+          })],
+        })],
+      });
+    };
+
+    it('emits a feColorMatrix for an RGB color-transform (tint) and references it from the instance <g>', async () => {
+      // #FF0000 @ tint 0.32 -> redMultiplier 0.68, redOffset 81.6 (0..255 scale,
+      // matching the canvas / parser convention). feColorMatrix offsets are 0..1,
+      // so the R-offset slot must be 81.6/255 = 0.32.
+      const doc = createTintInstanceDoc({
+        colorTransform: {
+          redMultiplier: 0.68,
+          greenMultiplier: 0.68,
+          blueMultiplier: 0.68,
+          redOffset: 81.6,
+          greenOffset: 0,
+          blueOffset: 0,
+        },
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // A feColorMatrix is emitted...
+      expect(text).toContain('<feColorMatrix');
+      // ...with the R/G/B multipliers and the R-offset = 81.6/255 ≈ 0.32 in the
+      // R-offset slot (5th value). Parse the matrix and assert numerically so
+      // we don't depend on float formatting (0.31999999999999995).
+      const matrixMatch = text.match(/<feColorMatrix[^>]* type="matrix" values="([^"]+)"/);
+      expect(matrixMatch).not.toBeNull();
+      const values = matrixMatch![1].trim().split(/\s+/).map(Number);
+      // Row-major 4x5: R row = indices 0..4.
+      expect(values[0]).toBeCloseTo(0.68, 6); // redMultiplier
+      expect(values[4]).toBeCloseTo(0.32, 6); // redOffset/255
+      expect(values[6]).toBeCloseTo(0.68, 6); // greenMultiplier
+      expect(values[9]).toBeCloseTo(0, 6);    // greenOffset/255
+      expect(values[12]).toBeCloseTo(0.68, 6); // blueMultiplier
+      expect(values[14]).toBeCloseTo(0, 6);   // blueOffset/255
+      // ...wrapped in a <filter> the instance <g> references.
+      const filterMatch = text.match(/<filter id="(filter_\d+)"/);
+      expect(filterMatch).not.toBeNull();
+      const filterId = filterMatch![1];
+      expect(text).toContain(`filter="url(#${filterId})"`);
+    });
+
+    it('keeps a blur filter AND the tint color-matrix in the same chain (no clobber)', async () => {
+      const doc = createTintInstanceDoc({
+        colorTransform: {
+          redMultiplier: 0.68,
+          greenMultiplier: 0.68,
+          blueMultiplier: 0.68,
+          redOffset: 81.6,
+        },
+        filters: [{ type: 'blur', blurX: 8, blurY: 8 }],
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // Both primitives are present...
+      expect(text).toContain('<feColorMatrix');
+      expect(text).toContain('<feGaussianBlur');
+      // ...in the SAME <filter> (single id referenced by the <g>).
+      const filterBlock = text.match(/<filter id="filter_\d+"[^>]*>(.*?)<\/filter>/s);
+      expect(filterBlock).not.toBeNull();
+      const inner = filterBlock![1];
+      expect(inner).toContain('<feColorMatrix');
+      expect(inner).toContain('<feGaussianBlur');
+      // Order: color-transform first (applied to pixels), then blur — matches the
+      // canvas, where the tinted buffer is composited through the blur filter.
+      expect(inner.indexOf('<feColorMatrix')).toBeLessThan(inner.indexOf('<feGaussianBlur'));
+      // The blur consumes the tinted result (not the raw SourceGraphic), so the
+      // tint is not bypassed: the feColorMatrix names a result the blur reads.
+      const ctResultMatch = inner.match(/<feColorMatrix[^>]* result="(f\d+)"/);
+      expect(ctResultMatch).not.toBeNull();
+      expect(inner).toContain(`<feGaussianBlur in="${ctResultMatch![1]}"`);
+      // blurX/blurY 8 -> stdDeviation 4 4 (diameter -> radius sigma).
+      expect(inner).toContain('stdDeviation="4 4"');
+    });
+
+    it('applies alphaMultiplier via opacity once, keeping the feColorMatrix alpha row identity (not doubled)', async () => {
+      const doc = createTintInstanceDoc({
+        colorTransform: {
+          alphaMultiplier: 0.5,
+          redMultiplier: 0.68,
+          greenMultiplier: 0.68,
+          blueMultiplier: 0.68,
+          redOffset: 81.6,
+        },
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // Alpha is on the <g> as opacity...
+      expect(text).toContain('opacity="0.5"');
+      // ...and the feColorMatrix alpha row is identity (0 0 0 1 0), so alpha is
+      // applied exactly once and never doubled.
+      const matrixMatch = text.match(/<feColorMatrix[^>]* type="matrix" values="([^"]+)"/);
+      expect(matrixMatch).not.toBeNull();
+      const values = matrixMatch![1].trim().split(/\s+/).map(Number);
+      // 4x5 row-major; the alpha (4th) row is the last 5 entries.
+      const alphaRow = values.slice(15, 20);
+      expect(alphaRow).toEqual([0, 0, 0, 1, 0]);
+      // No 0.5 leaked into the matrix.
+      expect(values).not.toContain(0.5);
+    });
+
+    it('emits NO feColorMatrix or filter for an identity color-transform (mults=1, offsets=0)', async () => {
+      const doc = createTintInstanceDoc({
+        colorTransform: {
+          redMultiplier: 1,
+          greenMultiplier: 1,
+          blueMultiplier: 1,
+          redOffset: 0,
+          greenOffset: 0,
+          blueOffset: 0,
+        },
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).not.toContain('<feColorMatrix');
+      expect(text).not.toContain('filter="url(#');
+    });
   });
 });
