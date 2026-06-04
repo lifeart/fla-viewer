@@ -1186,6 +1186,37 @@ export async function exportSVG(
     return '#000000';
   };
 
+  // Map a Flash blend mode to its CSS mix-blend-mode value, or null when no
+  // blend should be emitted (default 'normal' compositing). This mirrors the
+  // canvas renderer's mapBlendMode (renderer.ts:3673-3693) intent:
+  //   add      -> canvas 'lighter'  -> CSS 'plus-lighter' (the CSS equivalent)
+  //   subtract -> canvas 'difference' (approx) -> CSS 'difference'
+  //   invert   -> canvas 'exclusion' (approx)  -> CSS 'exclusion'
+  // normal/layer/alpha all composite as source-over in the renderer, so they
+  // emit NOTHING here (CSS default). 'erase' is destination-out in canvas and
+  // has NO mix-blend-mode equivalent (it would need destination compositing) —
+  // it is intentionally skipped (returns null, no blend emitted). Unknown
+  // values also fall through to null.
+  const blendModeToCss = (
+    mode: import('./types').BlendMode | undefined
+  ): string | null => {
+    switch (mode) {
+      case 'multiply': return 'multiply';
+      case 'screen': return 'screen';
+      case 'overlay': return 'overlay';
+      case 'darken': return 'darken';
+      case 'lighten': return 'lighten';
+      case 'hardlight': return 'hard-light';
+      case 'difference': return 'difference';
+      case 'add': return 'plus-lighter'; // canvas 'lighter' equivalent
+      case 'subtract': return 'difference'; // mirror renderer's approximation
+      case 'invert': return 'exclusion'; // mirror renderer's approximation
+      // normal / layer / alpha -> source-over (default); erase -> destination-out
+      // (no CSS equivalent); undefined / unknown -> default. All emit nothing.
+      default: return null;
+    }
+  };
+
   // Create a <filter> def for an instance's filter chain and return a
   // `filter="url(#...)"` attribute string (with a leading space), or '' when
   // there's nothing renderable. Mirrors the SUPPORTED set of the canvas
@@ -1533,7 +1564,17 @@ export async function exportSVG(
     // Coexists with opacity (alphaMultiplier) — both attributes are kept.
     const svgFilterAttr = createFilterDef(instance.filters);
 
-    return `<g${transformAttr}${opacityAttr}${svgFilterAttr}>\n    ${elements.join('\n    ')}\n  </g>`;
+    // Emit the instance blend mode as a CSS mix-blend-mode on this group, with
+    // isolation:isolate so it composites against its sibling stack (the symbol's
+    // own children) rather than the whole document. null -> no blend (normal /
+    // erase / unknown). This coexists with transform/opacity/filter — it is a
+    // separate `style` attribute, so there's no attribute collision.
+    const cssBlend = blendModeToCss(instance.blendMode);
+    const blendStyleAttr = cssBlend
+      ? ` style="mix-blend-mode:${cssBlend};isolation:isolate"`
+      : '';
+
+    return `<g${transformAttr}${opacityAttr}${svgFilterAttr}${blendStyleAttr}>\n    ${elements.join('\n    ')}\n  </g>`;
   };
 
   // Render the frame

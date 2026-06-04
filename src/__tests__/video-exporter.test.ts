@@ -2121,5 +2121,151 @@ describe('video-exporter', () => {
       expect(text).not.toContain('<filter id="filter_');
       expect(text).not.toMatch(/filter="url\(#filter_\d+\)"/);
     });
+
+    // Build a doc with a single symbol instance carrying an optional blendMode
+    // (and optional filters) so we can assert the emitted mix-blend-mode/filter
+    // on the symbol <g>. Mirrors buildFilteredSymbolDoc's fixture shape.
+    const buildBlendSymbolDoc = (
+      blendMode: import('../types').BlendMode | undefined,
+      filters?: import('../types').Filter[]
+    ): import('../types').FLADocument => {
+      const symbols = new Map();
+      symbols.set('Blended', {
+        name: 'Blended',
+        itemID: 'blend-1',
+        symbolType: 'graphic' as const,
+        timeline: {
+          name: 'Blended',
+          layers: [{
+            name: 'Layer 1',
+            color: '#000000',
+            visible: true,
+            locked: false,
+            outline: false,
+            frames: [{
+              index: 0,
+              duration: 1,
+              keyMode: 9728,
+              elements: [{
+                type: 'shape' as const,
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid' as const, color: '#FF0000' }],
+                strokes: [],
+                edges: [{ fillStyle0: 1, commands: [
+                  { type: 'M' as const, x: 0, y: 0 },
+                  { type: 'L' as const, x: 10, y: 10 },
+                  { type: 'Z' as const },
+                ] }],
+              }],
+            }],
+          }],
+          totalFrames: 1,
+          referenceLayers: new Set<number>(),
+        },
+      });
+
+      const instance: import('../types').SymbolInstance = {
+        type: 'symbol' as const,
+        libraryItemName: 'Blended',
+        symbolType: 'graphic' as const,
+        matrix: createMatrix(),
+        transformationPoint: { x: 0, y: 0 },
+        loop: 'single frame' as const,
+        firstFrame: 0,
+        ...(blendMode !== undefined ? { blendMode } : {}),
+        ...(filters ? { filters } : {}),
+      };
+
+      return createMinimalDoc({
+        width: 100,
+        height: 100,
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({ index: 0, duration: 1, elements: [instance] })],
+          })],
+        })],
+      });
+    };
+
+    it('emits mix-blend-mode:overlay with isolation on the symbol group', async () => {
+      const doc = buildBlendSymbolDoc('overlay');
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // The symbol <g> carries the blend style.
+      expect(text).toMatch(/<g[^>]*style="mix-blend-mode:overlay;isolation:isolate"/);
+      expect(text).toContain('mix-blend-mode:overlay');
+      // isolation:isolate is required so it blends against the sibling stack.
+      expect(text).toContain('isolation:isolate');
+    });
+
+    it("maps Flash 'add' to CSS plus-lighter (canvas 'lighter' equivalent)", async () => {
+      const doc = buildBlendSymbolDoc('add');
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('mix-blend-mode:plus-lighter');
+      expect(text).toMatch(/<g[^>]*style="mix-blend-mode:plus-lighter;isolation:isolate"/);
+    });
+
+    it("maps Flash 'lighten' to CSS lighten (real-file value from p0tatomango)", async () => {
+      const doc = buildBlendSymbolDoc('lighten');
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('mix-blend-mode:lighten');
+    });
+
+    it("emits NO mix-blend-mode for blendMode='normal'", async () => {
+      const doc = buildBlendSymbolDoc('normal');
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // The shape still renders, but no blend style is emitted (default normal).
+      expect(text).toContain('#FF0000');
+      expect(text).not.toContain('mix-blend-mode');
+    });
+
+    it('emits NO mix-blend-mode when blendMode is unset', async () => {
+      const doc = buildBlendSymbolDoc(undefined);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('#FF0000');
+      expect(text).not.toContain('mix-blend-mode');
+    });
+
+    it("skips blendMode='erase' gracefully (no destination-out equivalent)", async () => {
+      // erase maps to canvas destination-out — no CSS mix-blend-mode equivalent.
+      // It must be skipped: shape still renders, no blend style emitted, no throw.
+      const doc = buildBlendSymbolDoc('erase');
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('#FF0000');
+      expect(text).not.toContain('mix-blend-mode');
+    });
+
+    it('emits BOTH a filter and a blend style without attribute collision', async () => {
+      // A symbol with a supported filter AND a blendMode must carry both the
+      // filter="url(#...)" attr and the style="mix-blend-mode:..." attr on the
+      // same <g> — distinct attributes, no merge/collision.
+      const doc = buildBlendSymbolDoc('multiply', [
+        { type: 'blur', blurX: 4, blurY: 4 },
+      ]);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // Both attributes present on the symbol group.
+      expect(text).toMatch(
+        /<g[^>]*filter="url\(#filter_\d+\)"[^>]*style="mix-blend-mode:multiply;isolation:isolate"/
+      );
+      expect(text).toContain('<filter id="filter_');
+      // Exactly one style attribute on that group (no duplicate style= attrs).
+      const gTag = text.match(/<g[^>]*filter="url\(#filter_\d+\)"[^>]*>/)?.[0] ?? '';
+      expect((gTag.match(/style=/g) || []).length).toBe(1);
+    });
   });
 });
