@@ -1835,5 +1835,123 @@ describe('video-exporter', () => {
         expect(text).not.toContain('#00FF00');
       }
     });
+
+    it('should clamp radial gradient focalPointRatio to keep focus inside the disc', async () => {
+      // focalPointRatio=-1 is degenerate (focus on the rim). The SVG export must
+      // clamp to -0.98 and emit fx in the gradient's LOCAL (pre-transform) space:
+      // -0.98 * 819.2 = -802.816. This mirrors the canvas renderer clamp
+      // (renderer.ts createRadialGradient), whose net focal position matches
+      // because the SVG <radialGradient> carries gradientTransform = fill matrix.
+      const doc = createMinimalDoc({
+        width: 100,
+        height: 100,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 1,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  type: 'radial',
+                  focalPointRatio: -1,
+                  gradient: [
+                    { color: '#FFFFFF', alpha: 1, ratio: 0 },
+                    { color: '#000000', alpha: 1, ratio: 1 },
+                  ],
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 100, y: 0 },
+                    { type: 'L', x: 100, y: 100 },
+                    { type: 'L', x: 0, y: 100 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('<radialGradient');
+      // Clamped focal point (-0.98 * 819.2), NOT the raw degenerate -819.2.
+      expect(text).toContain('fx="-802.816"');
+      expect(text).not.toContain('fx="-819.2"');
+      // fy stays 0; the fill matrix (gradientTransform) maps fx/fy into shape space.
+      expect(text).toContain('fy="0"');
+    });
+
+    it('should convert bitmap-fill matrix from twip-space to pixel-space (÷20)', async () => {
+      // XFL bitmap-fill matrices are twip-space (1:1 fill a=d=20, tx/ty twips), but
+      // the SVG path draws geometry in pixel space. The patternTransform must be
+      // pre-divided by 20: a=d=20,tx=ty=200 -> matrix(1 0 0 1 10 10).
+      const png2x2 =
+        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGNkYPhfz8DAwAAACAYBAAF1GxgAAAAASUVORK5CYII=';
+      const img = new Image();
+      img.src = png2x2;
+      await img.decode();
+
+      const bitmaps = new Map();
+      bitmaps.set('tile.png', {
+        name: 'tile.png',
+        href: 'tile.png',
+        imageData: img,
+        width: 2,
+        height: 2,
+      });
+
+      const doc = createMinimalDoc({
+        width: 100,
+        height: 100,
+        bitmaps,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              duration: 1,
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  type: 'bitmap',
+                  bitmapPath: 'tile.png',
+                  matrix: { a: 20, b: 0, c: 0, d: 20, tx: 200, ty: 200 },
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 100, y: 0 },
+                    { type: 'L', x: 100, y: 100 },
+                    { type: 'L', x: 0, y: 100 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toContain('<pattern');
+      // Twip->pixel converted matrix.
+      expect(text).toContain('patternTransform="matrix(1 0 0 1 10 10)"');
+      // The raw twip-space matrix must NOT be emitted (the ~20x over-scale bug).
+      expect(text).not.toContain('matrix(20 0 0 20 200 200)');
+    });
   });
 });

@@ -3207,12 +3207,31 @@ export class FLARenderer {
 
     // Apply the bitmap matrix transform
     if (matrix) {
-      // Flash bitmap fills use a matrix to position and scale the bitmap
-      // The matrix transforms from bitmap space to shape-local space
+      // Flash bitmap fills use a matrix to position and scale the bitmap.
+      // The matrix transforms from bitmap (image-pixel) space to shape-local space.
+      //
+      // XFL stores this matrix in TWIP space: a typical 1:1 fill is a=20,d=20
+      // (1 image-pixel == 20 twips), with tx/ty also in twips. But this renderer
+      // draws edge geometry in PIXEL space because edge-decoder.ts converts
+      // twips->pixels at parse time (COORD_SCALE=20). There is NO global 1/20
+      // viewbox/context scale here, so the raw twip-space matrix would over-scale
+      // the bitmap ~20x and mis-translate it ~20x.
+      //
+      // Ruffle applies the same matrix raw, but it draws geometry in twips under a
+      // bounds_viewbox_matrix with a=1/20 (set_a(1.0/20.0)); that 1/20 context
+      // cancels the 20. We lack that context, so we must pre-divide the whole
+      // matrix (scale AND translation) by 20 to convert it into the pixel space the
+      // rest of the geometry uses.
+      //
+      // NOTE: gradient fills are unaffected and use a different code path
+      // (createLinearGradient/createRadialGradient) whose matrices are already
+      // pixel-space (e.g. a~=0.0087) and multiply the GRADIENT_SIZE box. Do not
+      // apply this twip correction there.
+      const TWIPS_PER_PIXEL = 20;
       pattern.setTransform(new DOMMatrix([
-        matrix.a, matrix.b,
-        matrix.c, matrix.d,
-        matrix.tx, matrix.ty
+        matrix.a / TWIPS_PER_PIXEL, matrix.b / TWIPS_PER_PIXEL,
+        matrix.c / TWIPS_PER_PIXEL, matrix.d / TWIPS_PER_PIXEL,
+        matrix.tx / TWIPS_PER_PIXEL, matrix.ty / TWIPS_PER_PIXEL
       ]));
     }
 
@@ -3282,16 +3301,27 @@ export class FLARenderer {
       const scaleY = Math.sqrt(m.c * m.c + m.d * m.d);
       radius = GRADIENT_SIZE * ((scaleX + scaleY) / 2);
 
-      // Apply focal point ratio if specified
-      // focalPointRatio is -1 to 1, where 0 is centered, negative is left/up, positive is right/down
+      // Apply focal point ratio if specified.
+      // focalPointRatio is -1..1 (0 centered, negative left/up, positive right/down).
+      //
+      // Ruffle (canonical) places the focal point at
+      //   matrix * (clamp(focalPointRatio, -0.98, 0.98) * 16384 twips, 0)
+      // i.e. clamp(-0.98,0.98) * 819.2px along the gradient-box X axis, then
+      // transformed by the SAME gradient matrix that defines the outer circle
+      // (outer center = matrix*(0,0), rim reached at matrix*(819.2,0)). The clamp
+      // keeps the focus strictly inside the disc; without it focalPointRatio=-1
+      // lands the focus exactly on the outer rim, which degenerates the canvas
+      // radial gradient into a hard edge (the off-center highlight vanishes).
+      //
+      // NOTE: focal==0 (or absent) is a strict no-op — fx/fy stay at the center
+      // (cx, cy), so the common centered radial is byte-identical to before.
       if (fill.focalPointRatio !== undefined && fill.focalPointRatio !== 0) {
-        // Focal point is offset along the gradient's primary axis (transformed by matrix)
-        const focalOffset = fill.focalPointRatio * radius;
-        // Apply the focal point offset using the matrix's primary direction
-        const normX = m.a / scaleX;
-        const normY = m.b / scaleX;
-        fx = cx + normX * focalOffset;
-        fy = cy + normY * focalOffset;
+        const clampedFocal = Math.max(-0.98, Math.min(0.98, fill.focalPointRatio));
+        const focalLocalX = clampedFocal * GRADIENT_SIZE;
+        // Transform the focal point through the full gradient matrix (same space
+        // as the outer circle), matching the SVG export path (video-exporter.ts).
+        fx = m.a * focalLocalX + m.tx;
+        fy = m.b * focalLocalX + m.ty;
       } else {
         fx = cx;
         fy = cy;
