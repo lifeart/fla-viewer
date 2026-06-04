@@ -1019,6 +1019,371 @@ describe('FLARenderer', () => {
     });
   });
 
+  describe('color transform (tint)', () => {
+    // Build a doc with a single green (#00FF00) square symbol placed via an
+    // instance carrying the given colorTransform/filters. The square is a
+    // 60x60 shape at the symbol origin, placed so its center lands at a known
+    // canvas pixel that we can sample with getImageData.
+    function makeTintedDoc(opts: {
+      colorTransform?: any;
+      filters?: any[];
+      shapeColor?: string;
+    }) {
+      const symbolTimeline = createTimeline({
+        name: 'GreenSquare',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: opts.shapeColor ?? '#00FF00' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 60, y: 0 },
+                  { type: 'L', x: 60, y: 60 },
+                  { type: 'L', x: 0, y: 60 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('GreenSquare', {
+        name: 'GreenSquare',
+        itemID: 'green-square',
+        symbolType: 'graphic',
+        timeline: symbolTimeline,
+      });
+
+      return createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'GreenSquare',
+                symbolType: 'graphic',
+                matrix: createMatrix({ tx: 100, ty: 100 }),
+                firstFrame: 0,
+                loop: 'single frame',
+                transformationPoint: { x: 0, y: 0 },
+                ...(opts.colorTransform ? { colorTransform: opts.colorTransform } : {}),
+                ...(opts.filters ? { filters: opts.filters } : {}),
+              }],
+            })],
+          })],
+        })],
+      });
+    }
+
+    // The renderer fits/scales document content into the canvas (and may
+    // resize the backing canvas), so the square's on-screen position/size is
+    // not 1:1 with document coordinates. Locate the rendered region by scanning
+    // for non-background pixels, then average the interior so the sample is
+    // robust to scale/DPR. The background is opaque white (#FFFFFF).
+    function sampledShapePixel(): { r: number; g: number; b: number; a: number } {
+      const ctx = canvas.getContext('2d')!;
+      const w = canvas.width;
+      const h = canvas.height;
+      const img = ctx.getImageData(0, 0, w, h);
+      const d = img.data;
+      let minX = w, minY = h, maxX = -1, maxY = -1;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = (y * w + x) * 4;
+          const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+          // A pixel differs from the opaque-white background if it's not white
+          // (covers tint/alpha-blended shapes; alpha is composited onto white).
+          if (a > 0 && (r < 250 || g < 250 || b < 250)) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+      expect(maxX).toBeGreaterThanOrEqual(0); // something was rendered
+      // Average a small interior window around the centroid to avoid edge
+      // antialiasing/blur artifacts.
+      const cx = Math.round((minX + maxX) / 2);
+      const cy = Math.round((minY + maxY) / 2);
+      let sr = 0, sg = 0, sb = 0, sa = 0, n = 0;
+      for (let y = cy - 2; y <= cy + 2; y++) {
+        for (let x = cx - 2; x <= cx + 2; x++) {
+          if (x < 0 || y < 0 || x >= w || y >= h) continue;
+          const i = (y * w + x) * 4;
+          sr += d[i]; sg += d[i + 1]; sb += d[i + 2]; sa += d[i + 3];
+          n++;
+        }
+      }
+      return { r: sr / n, g: sg / n, b: sb / n, a: sa / n };
+    }
+
+    it('renders a #FF0000 tint as red-tinted (per-channel c*mult+offset), not darkened green', async () => {
+      // #FF0000 tint at strength 0.7 over a green symbol.
+      // Parser converts tint -> per-channel: rMult=gMult=bMult=0.3,
+      // rOff=255*0.7=178.5, gOff=bOff=0.
+      // Correct per-channel result for green (0,255,0):
+      //   r' = 0*0.3 + 178.5 = 178.5
+      //   g' = 255*0.3 + 0   = 76.5
+      //   b' = 0*0.3 + 0     = 0
+      // => red dominant. The OLD renderer only applied brightness(0.3) and
+      // dropped the non-uniform red offset entirely => r'=0 (green stayed
+      // dominant). This assertion fails before the fix and passes after.
+      const doc = makeTintedDoc({
+        colorTransform: {
+          alphaMultiplier: 1,
+          redMultiplier: 0.3,
+          greenMultiplier: 0.3,
+          blueMultiplier: 0.3,
+          redOffset: 178.5,
+          greenOffset: 0,
+          blueOffset: 0,
+        },
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const px = sampledShapePixel();
+      expect(px.a).toBeGreaterThan(200); // shape is present
+      expect(px.r).toBeGreaterThan(px.g + 40);
+      expect(px.r).toBeGreaterThan(px.b + 40);
+    });
+
+    it('injects the red offset for the grounded #FF0000@0.32 tint (dropped by old renderer)', async () => {
+      // The exact ZEMLYA-grounded value: #FF0000 @ 0.32 over green parses to
+      // {rMult=gMult=bMult=0.68, rOff=81.6, gOff=bOff=0}.
+      // Correct per-channel for green: r'=0*0.68+81.6=81.6, g'=173.4, b'=0.
+      // This is a weak (32%) tint so green stays the largest channel (matching
+      // Flash), but the defining defect is that the OLD renderer dropped the
+      // red offset (r'=0). Assert the red channel is genuinely injected.
+      const doc = makeTintedDoc({
+        colorTransform: {
+          alphaMultiplier: 1,
+          redMultiplier: 0.68,
+          greenMultiplier: 0.68,
+          blueMultiplier: 0.68,
+          redOffset: 81.6,
+          greenOffset: 0,
+          blueOffset: 0,
+        },
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const px = sampledShapePixel();
+      expect(px.a).toBeGreaterThan(200);
+      // Old renderer (brightness only, offset dropped) => r ~= 0.
+      expect(px.r).toBeGreaterThan(40);
+      // Sanity: still roughly the expected per-channel values.
+      expect(px.r).toBeGreaterThan(50);
+      expect(px.r).toBeLessThan(120);
+      expect(px.g).toBeGreaterThan(140);
+      expect(px.g).toBeLessThan(210);
+    });
+
+    it('applies alpha exactly once (0.5 alphaMultiplier => ~50% opacity, not 25%)', async () => {
+      // Green square over a white background with alphaMultiplier 0.5.
+      // Composited center pixel green channel:
+      //   0.5 opacity: 0.5*255 + 0.5*255 = 255 (green stays 255 either way here),
+      // so instead measure the RED channel which background contributes:
+      //   bg white R=255, shape R=0.
+      //   0.5 alpha => R = 0.5*0 + 0.5*255 = ~128 (half)
+      //   0.25 (doubled) => R = 0.75*255 = ~191
+      // A correctly single-applied alpha yields ~128, not ~191.
+      const doc = makeTintedDoc({
+        colorTransform: {
+          alphaMultiplier: 0.5,
+          redMultiplier: 1,
+          greenMultiplier: 1,
+          blueMultiplier: 1,
+          redOffset: 0,
+          greenOffset: 0,
+          blueOffset: 0,
+        },
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const px = sampledShapePixel();
+      // Half-alpha green over white: R ~= 128. Doubled alpha would give ~191.
+      expect(px.r).toBeGreaterThan(105);
+      expect(px.r).toBeLessThan(150);
+    });
+
+    it('does not alter output for an identity color transform', async () => {
+      const doc = makeTintedDoc({
+        colorTransform: {
+          alphaMultiplier: 1,
+          redMultiplier: 1,
+          greenMultiplier: 1,
+          blueMultiplier: 1,
+          redOffset: 0,
+          greenOffset: 0,
+          blueOffset: 0,
+        },
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const px = sampledShapePixel();
+      // Pure green, unchanged.
+      expect(px.g).toBeGreaterThan(200);
+      expect(px.r).toBeLessThan(60);
+      expect(px.b).toBeLessThan(60);
+    });
+
+    it('nests offscreen tint passes (tinted symbol inside a tinted symbol)', async () => {
+      // Inner symbol: green square, tinted toward red.
+      // Outer symbol: contains the inner symbol instance (itself tinted red),
+      // and is ALSO placed with a red tint. Both offscreen passes must nest
+      // without leaking this.ctx, and both tints must compound toward red.
+      const innerTimeline = createTimeline({
+        name: 'Inner',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'shape',
+              matrix: createMatrix(),
+              fills: [{ index: 1, type: 'solid', color: '#00FF00' }],
+              strokes: [],
+              edges: [{
+                fillStyle0: 1,
+                commands: [
+                  { type: 'M', x: 0, y: 0 },
+                  { type: 'L', x: 60, y: 0 },
+                  { type: 'L', x: 60, y: 60 },
+                  { type: 'L', x: 0, y: 60 },
+                  { type: 'Z' },
+                ],
+              }],
+            }],
+          })],
+        })],
+      });
+      const outerTimeline = createTimeline({
+        name: 'Outer',
+        layers: [createLayer({
+          frames: [createFrame({
+            elements: [{
+              type: 'symbol',
+              libraryItemName: 'Inner',
+              symbolType: 'graphic',
+              matrix: createMatrix(),
+              firstFrame: 0,
+              loop: 'single frame',
+              transformationPoint: { x: 0, y: 0 },
+              colorTransform: {
+                alphaMultiplier: 1,
+                redMultiplier: 0.5, greenMultiplier: 0.5, blueMultiplier: 0.5,
+                redOffset: 120, greenOffset: 0, blueOffset: 0,
+              },
+            }],
+          })],
+        })],
+      });
+
+      const symbols = new Map();
+      symbols.set('Inner', { name: 'Inner', itemID: 'inner', symbolType: 'graphic', timeline: innerTimeline });
+      symbols.set('Outer', { name: 'Outer', itemID: 'outer', symbolType: 'graphic', timeline: outerTimeline });
+
+      const doc = createMinimalDoc({
+        symbols,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'Outer',
+                symbolType: 'graphic',
+                matrix: createMatrix({ tx: 100, ty: 100 }),
+                firstFrame: 0,
+                loop: 'single frame',
+                transformationPoint: { x: 0, y: 0 },
+                colorTransform: {
+                  alphaMultiplier: 1,
+                  redMultiplier: 0.5, greenMultiplier: 0.5, blueMultiplier: 0.5,
+                  redOffset: 120, greenOffset: 0, blueOffset: 0,
+                },
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const px = sampledShapePixel();
+      // Two compounding red tints over green -> red clearly dominant.
+      expect(px.a).toBeGreaterThan(200);
+      expect(px.r).toBeGreaterThan(px.g + 40);
+      expect(px.r).toBeGreaterThan(px.b + 40);
+    });
+
+    // Count pixels that differ from the opaque-white background (alpha>0 and
+    // not white). Used to detect blur, which spreads color into a larger area.
+    function nonBackgroundPixelCount(): number {
+      const ctx = canvas.getContext('2d')!;
+      const w = canvas.width, h = canvas.height;
+      const d = ctx.getImageData(0, 0, w, h).data;
+      let count = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+        if (a > 0 && (r < 250 || g < 250 || b < 250)) count++;
+      }
+      return count;
+    }
+
+    it('composes a tint color transform together with a blur filter (both applied)', async () => {
+      // Instance carries BOTH a blur filter and a red tint. applyFilters sets
+      // ctx.filter for the blur; applyColorTransform must APPEND its
+      // feColorMatrix url() rather than clobber it. We verify (a) the tint is
+      // still applied (red injected at the center) AND (b) the blur is still
+      // applied (it spreads color over a larger footprint than the unblurred
+      // square). If applyColorTransform clobbered the filter, blur would be
+      // lost; if the filter clobbered the color transform, the tint would be lost.
+      const redTint = {
+        alphaMultiplier: 1,
+        redMultiplier: 0.3,
+        greenMultiplier: 0.3,
+        blueMultiplier: 0.3,
+        redOffset: 178.5,
+        greenOffset: 0,
+        blueOffset: 0,
+      };
+
+      // Baseline: same tint, no blur -> footprint area without spread.
+      const noBlurDoc = makeTintedDoc({ colorTransform: redTint });
+      await renderer.setDocument(noBlurDoc);
+      renderer.renderFrame(0);
+      const noBlurArea = nonBackgroundPixelCount();
+
+      // Now with blur + tint.
+      const blurDoc = makeTintedDoc({
+        filters: [{ type: 'blur', blurX: 6, blurY: 6 }],
+        colorTransform: redTint,
+      });
+      await renderer.setDocument(blurDoc);
+      renderer.renderFrame(0);
+
+      // (a) Tint still applied even though a filter is present.
+      const px = sampledShapePixel();
+      expect(px.r).toBeGreaterThan(px.g + 30);
+      expect(px.r).toBeGreaterThan(px.b + 30);
+
+      // (b) Blur still applied: spreads color over a strictly larger footprint.
+      const blurArea = nonBackgroundPixelCount();
+      expect(blurArea).toBeGreaterThan(noBlurArea);
+    });
+  });
+
   describe('9-slice scaling', () => {
     it('should render symbol with 9-slice grid', async () => {
       const symbolTimeline = createTimeline({

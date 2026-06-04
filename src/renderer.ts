@@ -1835,6 +1835,34 @@ export class FLARenderer {
                            instance.rotationZ !== undefined ||
                            instance.z !== undefined;
 
+    // Per-channel RGB color transform (covers tint) cannot be expressed with
+    // CSS/canvas filters reliably, so when present we render the symbol's
+    // subtree into an offscreen buffer, apply c' = clamp(c*mult + offset, 0, 255)
+    // per pixel, then composite the tinted buffer back onto the main context.
+    // Alpha (globalAlpha), blend mode, and any filters were already configured
+    // on the main `ctx` above and are applied exactly once at composite time.
+    const needsRgbColorTransform =
+      !!instance.colorTransform && this.colorTransformAffectsRGB(instance.colorTransform);
+    let colorTransformOffscreen: HTMLCanvasElement | null = null;
+    let mainCtxForColorTransform: CanvasRenderingContext2D | null = null;
+    if (needsRgbColorTransform) {
+      const offscreen = document.createElement('canvas');
+      offscreen.width = this.canvas.width;
+      offscreen.height = this.canvas.height;
+      const offCtx = offscreen.getContext('2d');
+      if (offCtx) {
+        // Render the subtree at the SAME on-screen transform as the main
+        // context currently has (parent transforms + document scale), so the
+        // tinted buffer lines up pixel-for-pixel when composited at identity.
+        offCtx.setTransform(ctx.getTransform());
+        colorTransformOffscreen = offscreen;
+        mainCtxForColorTransform = ctx;
+        this.ctx = offCtx;
+      }
+      // If 2D context is unavailable, fall through and render normally (the
+      // alpha part of the transform is still applied; RGB tint is skipped).
+    }
+
     // Apply transformation matrix (skip if using 9-slice, handled separately)
     // Note: The matrix tx/ty already positions the symbol correctly
     // The transformationPoint is metadata about the pivot, but it's already
@@ -1937,6 +1965,33 @@ export class FLARenderer {
       this.renderSymbolFromCache(symbol, instance, depth);
     } else {
       this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
+    }
+
+    // If we diverted the subtree to an offscreen buffer for an RGB color
+    // transform, apply the per-channel c*mult+offset tint to that buffer and
+    // composite it back onto the main context. The composite uses the main
+    // context's globalAlpha (alpha applied once), filters, and blend mode.
+    if (colorTransformOffscreen && mainCtxForColorTransform && instance.colorTransform) {
+      // Restore the main context as the active drawing target.
+      this.ctx = mainCtxForColorTransform;
+      const offCtx = colorTransformOffscreen.getContext('2d');
+      if (offCtx) {
+        this.applyColorTransformToImage(
+          offCtx,
+          instance.colorTransform,
+          0, 0,
+          colorTransformOffscreen.width,
+          colorTransformOffscreen.height
+        );
+      }
+      // Composite at identity transform: the offscreen already baked in the
+      // parent transform + instance matrix, so draw 1:1. globalAlpha / filter /
+      // blend mode currently on the main ctx are honored here (once).
+      const mainCtx = mainCtxForColorTransform;
+      mainCtx.save();
+      mainCtx.setTransform(1, 0, 0, 1, 0, 0);
+      mainCtx.drawImage(colorTransformOffscreen, 0, 0);
+      mainCtx.restore();
     }
 
     // Draw hit area indicator for buttons in debug mode
@@ -3693,50 +3748,73 @@ export class FLARenderer {
     return blendModeMap[blendMode] || 'source-over';
   }
 
-  // Apply color transform to context
+  // Apply the ALPHA part of a color transform to the context.
+  //
+  // Flash color transforms are per-channel affine maps; alpha is
+  //   a' = clamp(a * alphaMultiplier + alphaOffset, 0, 255).
+  // The alpha multiplier maps cleanly onto ctx.globalAlpha (applied exactly
+  // once here). The RGB part (c' = clamp(c*mult + offset)) is handled
+  // separately via an offscreen per-pixel pass — see applyColorTransformToImage
+  // and the offscreen branch in renderSymbolInstance — because Chromium's 2D
+  // canvas ctx.filter does not reliably honor data-URL SVG feColorMatrix
+  // filters. Any alphaOffset is folded into globalAlpha approximately (rare in
+  // practice; tint never sets it).
   private applyColorTransform(ctx: CanvasRenderingContext2D, transform: ColorTransform): void {
-    // Apply alpha multiplier
     if (transform.alphaMultiplier !== undefined) {
       ctx.globalAlpha *= transform.alphaMultiplier;
     }
+    const aOff = transform.alphaOffset ?? 0;
+    if (aOff !== 0) {
+      // alphaOffset is in 0..255 scale; approximate as an additive opacity bump.
+      ctx.globalAlpha = Math.max(0, Math.min(1, ctx.globalAlpha + aOff / 255));
+    }
+  }
 
-    // Build CSS filter string for color transforms
-    const filters: string[] = [];
-
-    // Calculate brightness adjustment from color multipliers
-    // Average of RGB multipliers gives us an approximate brightness
+  // True when the RGB part of the transform is non-identity (i.e. needs the
+  // per-channel c*mult+offset pass, which covers tint).
+  private colorTransformAffectsRGB(transform: ColorTransform): boolean {
     const rMult = transform.redMultiplier ?? 1;
     const gMult = transform.greenMultiplier ?? 1;
     const bMult = transform.blueMultiplier ?? 1;
-    const avgMult = (rMult + gMult + bMult) / 3;
-
-    // If multipliers are uniform, we can use brightness filter
-    if (Math.abs(rMult - gMult) < 0.01 && Math.abs(gMult - bMult) < 0.01) {
-      if (avgMult !== 1) {
-        filters.push(`brightness(${avgMult})`);
-      }
-    }
-
-    // Apply offsets as contrast/brightness if uniform
     const rOff = transform.redOffset ?? 0;
     const gOff = transform.greenOffset ?? 0;
     const bOff = transform.blueOffset ?? 0;
-    const avgOff = (rOff + gOff + bOff) / 3;
+    return (
+      Math.abs(rMult - 1) > 1e-6 || Math.abs(gMult - 1) > 1e-6 || Math.abs(bMult - 1) > 1e-6 ||
+      Math.abs(rOff) > 1e-6 || Math.abs(gOff) > 1e-6 || Math.abs(bOff) > 1e-6
+    );
+  }
 
-    if (Math.abs(rOff - gOff) < 1 && Math.abs(gOff - bOff) < 1 && avgOff !== 0) {
-      // Offset adds to all channels - simulate with brightness
-      // 255 offset = double brightness, -255 = black
-      const offsetBrightness = 1 + (avgOff / 255);
-      if (offsetBrightness > 0) {
-        filters.push(`brightness(${offsetBrightness})`);
-      }
-    }
+  // Apply the per-channel RGB color transform c' = clamp(c*mult + offset, 0, 255)
+  // in place over the given region of a canvas's pixels. Only touches pixels with
+  // non-zero alpha so fully transparent areas stay transparent. Offsets are in
+  // the 0..255 scale (matching Flash and the parser's tint conversion).
+  private applyColorTransformToImage(
+    offCtx: CanvasRenderingContext2D,
+    transform: ColorTransform,
+    x: number,
+    y: number,
+    w: number,
+    h: number
+  ): void {
+    if (w <= 0 || h <= 0) return;
+    const rMult = transform.redMultiplier ?? 1;
+    const gMult = transform.greenMultiplier ?? 1;
+    const bMult = transform.blueMultiplier ?? 1;
+    const rOff = transform.redOffset ?? 0;
+    const gOff = transform.greenOffset ?? 0;
+    const bOff = transform.blueOffset ?? 0;
 
-    // Apply the combined filter
-    if (filters.length > 0) {
-      const existingFilter = ctx.filter !== 'none' ? ctx.filter + ' ' : '';
-      ctx.filter = existingFilter + filters.join(' ');
+    const image = offCtx.getImageData(x, y, w, h);
+    const d = image.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i + 3];
+      if (a === 0) continue; // leave fully-transparent pixels untouched
+      d[i] = Math.max(0, Math.min(255, d[i] * rMult + rOff));
+      d[i + 1] = Math.max(0, Math.min(255, d[i + 1] * gMult + gOff));
+      d[i + 2] = Math.max(0, Math.min(255, d[i + 2] * bMult + bOff));
     }
+    offCtx.putImageData(image, x, y);
   }
 
   // Render a morph shape (shape tween) at the given progress
