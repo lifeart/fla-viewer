@@ -52,6 +52,22 @@ const allVariants = [
   { name: 'dense-edge-tone-24', renderOptions: { denseLineFillTuning: { edgeToneSubtract: 24 } } },
   { name: 'dense-edge-tone-40', renderOptions: { denseLineFillTuning: { edgeToneSubtract: 40 } } },
   {
+    name: 'dense-sat-relief-all-24',
+    renderOptions: { denseLineFillTuning: { saturatedFillReliefMaxFractionalAlphaPixels: 100000, saturatedFillDensitySubtract: 24 } },
+  },
+  {
+    name: 'dense-sat-relief-all-20',
+    renderOptions: { denseLineFillTuning: { saturatedFillReliefMaxFractionalAlphaPixels: 100000, saturatedFillDensitySubtract: 20 } },
+  },
+  {
+    name: 'dense-sat-relief-all-16',
+    renderOptions: { denseLineFillTuning: { saturatedFillReliefMaxFractionalAlphaPixels: 100000, saturatedFillDensitySubtract: 16 } },
+  },
+  {
+    name: 'dense-ink-28',
+    renderOptions: { denseLineFillTuning: { inkDensitySubtract: 28 } },
+  },
+  {
     name: 'dense-alpha1.05-tone24',
     renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.05, edgeToneSubtract: 24 } },
   },
