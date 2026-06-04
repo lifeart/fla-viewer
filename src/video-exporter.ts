@@ -1119,7 +1119,20 @@ export async function exportSVG(
         if (m) {
           gradientTransform = ` gradientTransform="matrix(${m.a} ${m.b} ${m.c} ${m.d} ${m.tx} ${m.ty})"`;
         }
-        const fx = fill.focalPointRatio !== undefined ? fill.focalPointRatio * 819.2 : 0;
+        // Place the focal point in the gradient's LOCAL (pre-transform) space:
+        // fx is along the gradient-box X axis (radius 819.2 = 16384 twips / 20),
+        // fy stays 0. The gradientTransform (fill matrix) then maps it into shape
+        // space, so the NET focal position matches the canvas renderer, which bakes
+        // the same matrix into fx/fy (renderer.ts createRadialGradient).
+        //
+        // Clamp focalPointRatio to [-0.98, 0.98] (same as renderer.ts:3318): the
+        // raw range is -1..1, but focalPointRatio=-1 would land the focus exactly
+        // on the outer rim, degenerating the radial gradient into a hard edge. The
+        // clamp keeps the focus strictly inside the disc. focal==0/absent => fx=0
+        // (centered), a strict no-op vs. before.
+        const focalRatio = fill.focalPointRatio ?? 0;
+        const clampedFocal = Math.max(-0.98, Math.min(0.98, focalRatio));
+        const fx = clampedFocal * 819.2;
         defs.push(`<radialGradient id="${gradId}" cx="0" cy="0" r="819.2" fx="${fx}" fy="0" gradientUnits="userSpaceOnUse"${gradientTransform}>
       ${stops}
     </radialGradient>`);
@@ -1144,7 +1157,17 @@ export async function exportSVG(
         const m = fill.matrix;
         let patternTransform = '';
         if (m) {
-          patternTransform = ` patternTransform="matrix(${m.a} ${m.b} ${m.c} ${m.d} ${m.tx} ${m.ty})"`;
+          // XFL bitmap-fill matrices are in TWIP space (a typical 1:1 fill is
+          // a=20,d=20, tx/ty in twips). But this SVG path draws geometry in PIXEL
+          // space: commandsToPath emits raw cmd.x/cmd.y and viewBox is document
+          // pixels, with no global 1/20 scale to cancel the twips. Emitting the raw
+          // matrix as patternTransform over-scales/mis-translates the bitmap ~20x.
+          // Pre-divide every component (scale AND translation) by 20 to convert into
+          // pixel space (same twip->pixel rationale as renderer.ts:3229 and
+          // edge-decoder.ts COORD_SCALE=20). Gradient gradientTransform matrices are
+          // already pixel-space and are NOT touched (see renderer.ts:3225-3228).
+          const TWIPS_PER_PIXEL = 20;
+          patternTransform = ` patternTransform="matrix(${m.a / TWIPS_PER_PIXEL} ${m.b / TWIPS_PER_PIXEL} ${m.c / TWIPS_PER_PIXEL} ${m.d / TWIPS_PER_PIXEL} ${m.tx / TWIPS_PER_PIXEL} ${m.ty / TWIPS_PER_PIXEL})"`;
         }
 
         defs.push(`<pattern id="${patternId}" width="${bitmap.width}" height="${bitmap.height}" patternUnits="userSpaceOnUse"${patternTransform}>
