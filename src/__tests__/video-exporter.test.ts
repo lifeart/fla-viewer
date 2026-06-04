@@ -2267,5 +2267,172 @@ describe('video-exporter', () => {
       const gTag = text.match(/<g[^>]*filter="url\(#filter_\d+\)"[^>]*>/)?.[0] ?? '';
       expect((gTag.match(/style=/g) || []).length).toBe(1);
     });
+
+    // ---- Mask layer support (shape masks) ----------------------------------
+    //
+    // Mirrors the parser: a `mask` layer's child layers carry
+    // parentLayerIndex = mask index and are reclassified as `masked` with
+    // maskLayerIndex = mask index (fla-parser.ts:620-627). The export must emit
+    // a <clipPath> from the mask's shape geometry and wrap the masked children
+    // in a <g clip-path="url(#...)"> (mirroring renderer.ts:903-968 renderMaskGroup
+    // hard nonzero clip). A hidden mask hides the whole group (renderer.ts:874-875).
+
+    // Build a doc: a mask layer (small rect, the clip) above a masked child
+    // layer (larger rect, the clipped content). `maskHidden` toggles the cascade
+    // case (a hidden mask => whole group omitted).
+    const buildMaskDoc = (maskHidden = false) =>
+      createMinimalDoc({
+        width: 200,
+        height: 200,
+        timelines: [
+          createTimeline({
+            totalFrames: 1,
+            layers: [
+              // index 0: the MASK layer (small 50x50 rect clip in the corner)
+              createLayer({
+                name: 'MaskLayer',
+                layerType: 'mask',
+                visible: !maskHidden,
+                frames: [
+                  createFrame({
+                    duration: 1,
+                    elements: [
+                      {
+                        type: 'shape',
+                        matrix: createMatrix(),
+                        fills: [{ index: 1, type: 'solid', color: '#000000' }],
+                        strokes: [],
+                        edges: [
+                          {
+                            fillStyle0: 1,
+                            commands: [
+                              { type: 'M', x: 0, y: 0 },
+                              { type: 'L', x: 50, y: 0 },
+                              { type: 'L', x: 50, y: 50 },
+                              { type: 'L', x: 0, y: 50 },
+                              { type: 'Z' },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  }),
+                ],
+              }),
+              // index 1: the MASKED child layer (large 150x150 red rect)
+              createLayer({
+                name: 'MaskedChild',
+                layerType: 'masked',
+                parentLayerIndex: 0,
+                maskLayerIndex: 0,
+                frames: [
+                  createFrame({
+                    duration: 1,
+                    elements: [
+                      {
+                        type: 'shape',
+                        matrix: createMatrix(),
+                        fills: [{ index: 1, type: 'solid', color: '#FF0000' }],
+                        strokes: [],
+                        edges: [
+                          {
+                            fillStyle0: 1,
+                            commands: [
+                              { type: 'M', x: 10, y: 10 },
+                              { type: 'L', x: 160, y: 10 },
+                              { type: 'L', x: 160, y: 160 },
+                              { type: 'L', x: 10, y: 160 },
+                              { type: 'Z' },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  }),
+                ],
+              }),
+            ],
+          }),
+        ],
+      });
+
+    it('emits a <clipPath> from the mask shape and wraps masked children in <g clip-path>', async () => {
+      const doc = buildMaskDoc();
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // A clipPath def exists, containing the mask shape's 50x50 geometry.
+      const clipMatch = text.match(/<clipPath id="(clip_\d+)">([\s\S]*?)<\/clipPath>/);
+      expect(clipMatch).not.toBeNull();
+      const clipId = clipMatch![1];
+      const clipBody = clipMatch![2];
+      // The mask geometry (the 50x50 rect path) is inside the clipPath.
+      expect(clipBody).toContain('<path');
+      expect(clipBody).toContain('M0 0');
+      expect(clipBody).toContain('L50 0');
+      // clipPath holds pure geometry — no paint attributes leak in.
+      expect(clipBody).not.toContain('fill=');
+      expect(clipBody).not.toContain('stroke=');
+
+      // The masked child is wrapped in a <g clip-path="url(#clip_N)"> that
+      // references that exact clip, and the red child content lives inside it.
+      const wrapMatch = text.match(
+        new RegExp(`<g clip-path="url\\(#${clipId}\\)">([\\s\\S]*?)</g>`)
+      );
+      expect(wrapMatch).not.toBeNull();
+      expect(wrapMatch![1]).toContain('#FF0000');
+
+      // The clip-path wrapper is what carries the masked child (load-bearing).
+      expect(text).toContain(`clip-path="url(#${clipId})"`);
+    });
+
+    it('omits the whole masked group when the mask layer is hidden (cascade)', async () => {
+      const doc = buildMaskDoc(/* maskHidden */ true);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // Hidden mask => no clip emitted and the masked child (#FF0000) is gone.
+      expect(text).not.toContain('clip-path');
+      expect(text).not.toContain('<clipPath');
+      expect(text).not.toContain('#FF0000');
+    });
+
+    it('rasterizes the masked child clipped to the mask geometry (pixels)', async () => {
+      // Render confirmation: load the exported SVG into an <img>, draw to a
+      // canvas, and read pixels. A pixel INSIDE the 50x50 mask shows the red
+      // child; a pixel OUTSIDE the mask (but inside the red child) is clipped
+      // away (transparent) — matching the renderer's hard nonzero clip.
+      const doc = buildMaskDoc();
+      // Suppress the opaque white background rect so an OUTSIDE-mask pixel reads
+      // as transparent (proving the clip) rather than white background.
+      doc.backgroundColor = 'transparent';
+      const blob = await exportSVG(doc, 0);
+      const svgText = await blob.text();
+
+      const dataUrl =
+        'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);
+      const img = new Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('SVG image failed to load'));
+        img.src = dataUrl;
+      });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 200;
+      canvas.height = 200;
+      const c = canvas.getContext('2d')!;
+      c.clearRect(0, 0, 200, 200);
+      c.drawImage(img, 0, 0, 200, 200);
+
+      // Inside the 50x50 mask (and inside the red child) => opaque red.
+      const inside = c.getImageData(25, 25, 1, 1).data;
+      // Outside the mask (100,100) but inside the red child => clipped away.
+      const outside = c.getImageData(100, 100, 1, 1).data;
+
+      expect(inside[0]).toBeGreaterThan(200); // red channel high
+      expect(inside[3]).toBeGreaterThan(200); // opaque
+      expect(outside[3]).toBeLessThan(20);    // clipped => transparent
+    });
   });
 });

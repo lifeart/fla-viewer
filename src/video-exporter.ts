@@ -1400,6 +1400,70 @@ export async function exportSVG(
     return `<g${transformAttr}>\n    ${paths.join('\n    ')}\n  </g>`;
   };
 
+  // Emit the FILL geometry of a single mask shape as <path> clip elements,
+  // wrapped in a <g transform> for the shape's matrix so the clip sits in the
+  // same pixel space as the masked content (the masked children render in that
+  // same parent transform). This mirrors the canvas renderer's mask clip
+  // (renderer.ts:933-944): it clips with the shape's FILL paths under the
+  // shape matrix. We use a hard, geometry-only clip (clip-rule nonzero — the
+  // SVG default, matching ctx.clip(path,'nonzero')); no luminance/soft edges.
+  // Only edges that participate in a fill (fillStyle0/fillStyle1) contribute,
+  // exactly like fillPaths in the renderer. clip-path ignores fill/stroke
+  // paint, so we emit pure `d` geometry without paint attributes.
+  const maskShapeToClipPaths = (shape: import('./types').Shape): string => {
+    const paths: string[] = [];
+    for (const edge of shape.edges) {
+      // A mask clips by FILLED regions only (mirror renderer fillPaths).
+      if (edge.fillStyle0 === undefined && edge.fillStyle1 === undefined) {
+        continue;
+      }
+      const pathData = commandsToPath(edge.commands);
+      if (!pathData) continue;
+      paths.push(`<path d="${pathData}"/>`);
+    }
+    if (paths.length === 0) return '';
+    const transform = matrixToTransform(shape.matrix);
+    const transformAttr = transform ? ` transform="${transform}"` : '';
+    if (transformAttr) {
+      return `<g${transformAttr}>${paths.join('')}</g>`;
+    }
+    return paths.join('');
+  };
+
+  // Build a <clipPath> def from a mask layer's frame and return its id, or null
+  // when the mask contributes no clip (so the caller renders the masked children
+  // unclipped — matching renderer.ts:915-928 "no mask content" path). Symbol /
+  // non-shape mask elements fall back to a full-document rect clip, mirroring the
+  // renderer's full-rect fallback (renderer.ts:947-953); real files use shape
+  // masks, so this path is defensive.
+  const buildMaskClipDef = (
+    maskFrame: import('./types').Frame
+  ): string | null => {
+    const clipChildren: string[] = [];
+    let usedSymbolFallback = false;
+    for (const element of maskFrame.elements) {
+      if (element.type === 'shape') {
+        const clipPaths = maskShapeToClipPaths(element);
+        if (clipPaths) clipChildren.push(clipPaths);
+      } else if (element.type === 'symbol') {
+        // Symbol-as-mask: the renderer falls back to a full-rect clip (it does
+        // not rasterize the symbol's geometry). Mirror that — clip to the whole
+        // document so masked content shows everywhere (effectively unclipped),
+        // rather than dropping it. Only one full-rect is needed.
+        usedSymbolFallback = true;
+      }
+      // text / bitmap / video as a mask: no geometry to clip with; skip (the
+      // renderer also only handles shape + symbol in renderMaskGroup).
+    }
+    if (clipChildren.length === 0 && usedSymbolFallback) {
+      clipChildren.push(`<rect x="0" y="0" width="${width}" height="${height}"/>`);
+    }
+    if (clipChildren.length === 0) return null;
+    const clipId = genId('clip');
+    defs.push(`<clipPath id="${clipId}">${clipChildren.join('')}</clipPath>`);
+    return clipId;
+  };
+
   // Render text element to SVG
   const renderText = (text: import('./types').TextInstance): string => {
     const transform = matrixToTransform(text.matrix);
@@ -1521,33 +1585,18 @@ export async function exportSVG(
       symbolFrame = Math.min(firstFrame + frameOffset, effectiveLastFrame);
     }
 
-    // Collect elements from all layers at the symbolFrame
+    // Collect elements from all layers at the symbolFrame, mask-aware (mask
+    // grouping + <clipPath>) just like the main timeline. Symbol timelines
+    // historically did not skip referenceLayers here, so pass an empty set to
+    // preserve that behavior while gaining mask support.
     const elements: string[] = [];
-    const layerIndices = [...Array(symbol.timeline.layers.length).keys()].reverse();
-
-    for (const layerIndex of layerIndices) {
-      const layer = symbol.timeline.layers[layerIndex];
-      // Honor FLA layer visibility with the folder/parent cascade so SVG/video
-      // export agrees with the canvas renderer (shared helper, src/layer-utils.ts).
-      if (!isLayerVisibleInFla(symbol.timeline.layers, layerIndex) ||
-          layer.layerType === 'guide' || layer.layerType === 'folder') continue;
-
-      // Find frame at symbolFrame
-      let currentFrame: import('./types').Frame | null = null;
-      for (const frame of layer.frames) {
-        if (symbolFrame >= frame.index && symbolFrame < frame.index + frame.duration) {
-          currentFrame = frame;
-          break;
-        }
-      }
-
-      if (currentFrame) {
-        for (const elem of currentFrame.elements) {
-          const rendered = renderElementWithKeyframe(elem, depth + 1, currentFrame.index);
-          if (rendered) elements.push(rendered);
-        }
-      }
-    }
+    renderLayerStack(
+      symbol.timeline.layers,
+      symbolFrame,
+      depth + 1,
+      new Set<number>(),
+      elements
+    );
 
     if (elements.length === 0) return '';
 
@@ -1577,6 +1626,116 @@ export async function exportSVG(
     return `<g${transformAttr}${opacityAttr}${svgFilterAttr}${blendStyleAttr}>\n    ${elements.join('\n    ')}\n  </g>`;
   };
 
+  // Find the frame active at a given frame index for a layer (same scan the
+  // renderer uses: index <= frame.index < index + duration).
+  const findActiveFrame = (
+    layer: import('./types').Layer,
+    atFrameIndex: number
+  ): import('./types').Frame | null => {
+    for (const frame of layer.frames) {
+      if (atFrameIndex >= frame.index && atFrameIndex < frame.index + frame.duration) {
+        return frame;
+      }
+    }
+    return null;
+  };
+
+  // Render one layer's active-frame elements into SVG strings.
+  const renderLayerElements = (
+    layer: import('./types').Layer,
+    atFrameIndex: number,
+    depth: number,
+    out: string[]
+  ): void => {
+    const currentFrame = findActiveFrame(layer, atFrameIndex);
+    if (!currentFrame) return;
+    for (const element of currentFrame.elements) {
+      const rendered = renderElementWithKeyframe(element, depth, currentFrame.index);
+      if (rendered) out.push(rendered);
+    }
+  };
+
+  // Render a stack of timeline layers (main timeline or a symbol's timeline)
+  // with MASK support, mirroring renderer.ts renderTimelineLayers/renderMaskGroup
+  // (renderer.ts:832-968). Layers are iterated in reverse (bottom first, top
+  // last) to match the renderer and the prior export behavior.
+  //
+  // Mask handling:
+  //  - Build masked-layer -> mask-layer grouping from layer.maskLayerIndex
+  //    (renderer.ts:833-837).
+  //  - A `mask` layer: if hidden, the WHOLE group is omitted (renderer.ts:874-
+  //    875). Otherwise its shape geometry becomes a <clipPath> and its masked
+  //    children render inside one <g clip-path="url(#...)">.
+  //  - Each masked child still honors isLayerVisibleInFla on its own (the shared
+  //    cascade helper). Because a masked child's parentLayerIndex points at the
+  //    mask, isLayerVisibleInFla already returns false when the mask is hidden —
+  //    but the mask block returns first, so there is no double-hide.
+  //  - Masked children are NOT rendered again when their index comes up in the
+  //    normal loop (tracked via maskedLayers).
+  const renderLayerStack = (
+    layers: import('./types').Layer[],
+    atFrameIndex: number,
+    depth: number,
+    referenceLayers: Set<number>,
+    out: string[]
+  ): void => {
+    // masked layer index -> mask layer index (renderer.ts:833-837)
+    const maskedLayers = new Map<number, number>();
+    for (let i = 0; i < layers.length; i++) {
+      if (layers[i].maskLayerIndex !== undefined) {
+        maskedLayers.set(i, layers[i].maskLayerIndex!);
+      }
+    }
+
+    const indices = [...Array(layers.length).keys()].reverse();
+    for (const layerIndex of indices) {
+      const layer = layers[layerIndex];
+
+      if (referenceLayers.has(layerIndex)) continue;
+      if (layer.layerType === 'guide' || layer.layerType === 'folder') continue;
+
+      // Mask layer: its own visibility gates the whole group (renderer.ts:874).
+      if (layer.layerType === 'mask') {
+        if (!isLayerVisibleInFla(layers, layerIndex)) continue; // hidden mask hides group
+
+        // Collect the layers masked by this mask (renderer.ts:878-884).
+        const maskedByThis: number[] = [];
+        for (const [maskedIdx, maskIdx] of maskedLayers) {
+          if (maskIdx === layerIndex) maskedByThis.push(maskedIdx);
+        }
+        if (maskedByThis.length === 0) continue; // mask with no children: nothing to draw
+
+        // Render the masked children (bottom first, top last) honoring each
+        // child's own visibility. No double-hide: isLayerVisibleInFla here is
+        // the child's check; the mask gate above is separate.
+        const childOut: string[] = [];
+        for (const maskedIdx of [...maskedByThis].sort((a, b) => b - a)) {
+          if (!isLayerVisibleInFla(layers, maskedIdx)) continue;
+          renderLayerElements(layers[maskedIdx], atFrameIndex, depth, childOut);
+        }
+        if (childOut.length === 0) continue; // nothing visible to clip
+
+        // Build the clip from the mask layer's frame geometry. null clip =>
+        // no mask content; render children unclipped (renderer.ts:915-928).
+        const maskFrame = findActiveFrame(layer, atFrameIndex);
+        const clipId = maskFrame ? buildMaskClipDef(maskFrame) : null;
+        if (clipId) {
+          out.push(`<g clip-path="url(#${clipId})">\n    ${childOut.join('\n    ')}\n  </g>`);
+        } else {
+          out.push(...childOut);
+        }
+        continue;
+      }
+
+      // Masked children are drawn by their mask block above; skip here.
+      if (maskedLayers.has(layerIndex)) continue;
+
+      // Normal layer: honor visibility cascade.
+      if (!isLayerVisibleInFla(layers, layerIndex)) continue;
+      renderLayerElements(layer, atFrameIndex, depth, out);
+    }
+  };
+
   // Render the frame
   const timeline = doc.timelines[0];
   if (!timeline) {
@@ -1584,33 +1743,15 @@ export async function exportSVG(
   }
 
   const renderedElements: string[] = [];
-  // Use reversed indices like the renderer (bottom layers rendered first, top layers last)
-  const layerIndices = [...Array(timeline.layers.length).keys()].reverse();
-
-  for (const layerIndex of layerIndices) {
-    const layer = timeline.layers[layerIndex];
-    // Honor FLA layer visibility with the folder/parent cascade so SVG/video
-    // export agrees with the canvas renderer (shared helper, src/layer-utils.ts).
-    if (!isLayerVisibleInFla(timeline.layers, layerIndex) ||
-        layer.layerType === 'guide' || layer.layerType === 'folder') continue;
-    if (timeline.referenceLayers.has(layerIndex)) continue;
-
-    // Find frame at frameIndex
-    let currentFrame: import('./types').Frame | null = null;
-    for (const frame of layer.frames) {
-      if (frameIndex >= frame.index && frameIndex < frame.index + frame.duration) {
-        currentFrame = frame;
-        break;
-      }
-    }
-
-    if (currentFrame) {
-      for (const element of currentFrame.elements) {
-        const rendered = renderElementWithKeyframe(element, 0, currentFrame.index);
-        if (rendered) renderedElements.push(rendered);
-      }
-    }
-  }
+  // Mask-aware reverse-order layer rendering (mask grouping + <clipPath>),
+  // mirroring the canvas renderer. Reference layers are skipped (as before).
+  renderLayerStack(
+    timeline.layers,
+    frameIndex,
+    0,
+    timeline.referenceLayers,
+    renderedElements
+  );
 
   // Build SVG
   const defsSection = defs.length > 0 ? `\n  <defs>\n    ${defs.join('\n    ')}\n  </defs>` : '';
