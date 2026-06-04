@@ -1953,5 +1953,173 @@ describe('video-exporter', () => {
       // The raw twip-space matrix must NOT be emitted (the ~20x over-scale bug).
       expect(text).not.toContain('matrix(20 0 0 20 200 200)');
     });
+
+    // --- Filter export (blur / glow / dropShadow / colorMatrix) ---------------
+    // Build a doc with ONE graphic symbol (a red shape) carrying `filters`, plus
+    // an optional SECOND identical instance to exercise the dedupe cache. These
+    // mirror the symbol fixtures above but focus on the <filter> emission.
+    const buildFilteredSymbolDoc = (
+      filters: import('../types').Filter[],
+      instanceCount = 1
+    ): import('../types').FLADocument => {
+      const symbols = new Map();
+      symbols.set('Filtered', {
+        name: 'Filtered',
+        itemID: 'filt-1',
+        symbolType: 'graphic' as const,
+        timeline: {
+          name: 'Filtered',
+          layers: [{
+            name: 'Layer 1',
+            color: '#000000',
+            visible: true,
+            locked: false,
+            outline: false,
+            frames: [{
+              index: 0,
+              duration: 1,
+              keyMode: 9728,
+              elements: [{
+                type: 'shape' as const,
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid' as const, color: '#FF0000' }],
+                strokes: [],
+                edges: [{ fillStyle0: 1, commands: [
+                  { type: 'M' as const, x: 0, y: 0 },
+                  { type: 'L' as const, x: 10, y: 10 },
+                  { type: 'Z' as const },
+                ] }],
+              }],
+            }],
+          }],
+          totalFrames: 1,
+          referenceLayers: new Set<number>(),
+        },
+      });
+
+      const instances = Array.from({ length: instanceCount }, () => ({
+        type: 'symbol' as const,
+        libraryItemName: 'Filtered',
+        symbolType: 'graphic' as const,
+        matrix: createMatrix(),
+        transformationPoint: { x: 0, y: 0 },
+        loop: 'single frame' as const,
+        firstFrame: 0,
+        filters,
+      }));
+
+      return createMinimalDoc({
+        width: 100,
+        height: 100,
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({ index: 0, duration: 1, elements: instances })],
+          })],
+        })],
+      });
+    };
+
+    it('emits a blur <filter> with halved stdDeviation on the symbol group', async () => {
+      const doc = buildFilteredSymbolDoc([
+        { type: 'blur', blurX: 4, blurY: 4 },
+      ]);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // The symbol <g> references the filter.
+      expect(text).toMatch(/<g[^>]*filter="url\(#filter_\d+\)"/);
+      // A <filter> def exists.
+      expect(text).toContain('<filter id="filter_');
+      // Flash blurX=4 -> SVG stdDeviation 2 per axis (÷2 to match CSS blur()).
+      expect(text).toContain('<feGaussianBlur in="SourceGraphic" stdDeviation="2 2"/>');
+      // Oversized region so blur doesn't clip.
+      expect(text).toContain('x="-50%" y="-50%" width="200%" height="200%"');
+    });
+
+    it('emits a dropShadow <filter> with offset from distance/angle', async () => {
+      const doc = buildFilteredSymbolDoc([
+        { type: 'dropShadow', blurX: 6, blurY: 6, color: '#000000', strength: 1, alpha: 1, distance: 4, angle: 45 },
+      ]);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toMatch(/<g[^>]*filter="url\(#filter_\d+\)"/);
+      // Shadow blur uses max(blurX,blurY)/2 = 3 off SourceAlpha.
+      expect(text).toContain('<feGaussianBlur in="SourceAlpha" stdDeviation="3"');
+      // distance=4 @ 45deg -> dx=cos(45)*4, dy=sin(45)*4 (both ≈ 2.83; they
+      // differ only in the last fp ULP, so compute each separately).
+      const angleRad = (45 * Math.PI) / 180;
+      const dx = Math.cos(angleRad) * 4; // ~2.8284271247461903
+      const dy = Math.sin(angleRad) * 4; // ~2.82842712474619
+      expect(dx).toBeCloseTo(2.8284271247461903, 10);
+      expect(text).toContain(`<feOffset in="f0" dx="${dx}" dy="${dy}"`);
+      // Colored flood composited "in" the shadow alpha, then merged with source.
+      expect(text).toContain('flood-color="#000000"');
+      expect(text).toContain('operator="in"');
+      expect(text).toContain('<feMerge>');
+      expect(text).toContain('<feMergeNode in="SourceGraphic"/>');
+    });
+
+    it('emits a colorMatrix <filter> with renderer-normalized offsets (÷255)', async () => {
+      // AdjustColor-equivalent matrix: identity RGB with a brightness offset of
+      // 51 (0-255 scale) on each RGB row. The exporter must divide offsets at
+      // indices 4,9,14,19 by 255 (renderer.ts:3624-3634) -> 51/255 = 0.2.
+      const matrix = [
+        1, 0, 0, 0, 51,
+        0, 1, 0, 0, 51,
+        0, 0, 1, 0, 51,
+        0, 0, 0, 1, 0,
+      ];
+      const doc = buildFilteredSymbolDoc([{ type: 'colorMatrix', matrix }]);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).toMatch(/<g[^>]*filter="url\(#filter_\d+\)"/);
+      // Normalized values: offsets 51 -> 0.2, alpha-row offset 0 stays 0.
+      expect(text).toContain(
+        '<feColorMatrix in="SourceGraphic" type="matrix" values="1 0 0 0 0.2 0 1 0 0 0.2 0 0 1 0 0.2 0 0 0 1 0"/>'
+      );
+    });
+
+    it('dedupes identical filter chains into a single <filter> def', async () => {
+      // Two instances with the SAME filter chain must share ONE def.
+      const doc = buildFilteredSymbolDoc(
+        [{ type: 'blur', blurX: 4, blurY: 4 }],
+        2
+      );
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // Two group references...
+      const refs = text.match(/filter="url\(#filter_\d+\)"/g) || [];
+      expect(refs.length).toBe(2);
+      // ...but only ONE <filter> def.
+      const defsMatched = text.match(/<filter id="filter_\d+"/g) || [];
+      expect(defsMatched.length).toBe(1);
+      // Both references point at the same id.
+      expect(refs[0]).toBe(refs[1]);
+    });
+
+    it('skips unsupported filters (bevel) gracefully without throwing', async () => {
+      // bevel is intentionally unsupported in SVG export v1 — no primitive, no
+      // throw, and (when it is the ONLY filter) no filter attr at all.
+      const doc = buildFilteredSymbolDoc([
+        {
+          type: 'bevel', blurX: 4, blurY: 4, strength: 1,
+          highlightColor: '#FFFFFF', shadowColor: '#000000',
+          distance: 4, angle: 45,
+        },
+      ]);
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // The shape still renders.
+      expect(text).toContain('#FF0000');
+      // No filter emitted for the unsupported bevel.
+      expect(text).not.toContain('<filter id="filter_');
+      expect(text).not.toMatch(/filter="url\(#filter_\d+\)"/);
+    });
   });
 });

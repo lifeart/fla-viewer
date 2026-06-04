@@ -1056,6 +1056,11 @@ export async function exportSVG(
   // Helper to generate unique IDs
   const genId = (prefix: string) => `${prefix}_${defIdCounter++}`;
 
+  // Dedupe cache for <filter> defs, keyed on the serialized filter chain so
+  // reused filter stacks (symbols frequently share the same filters) share one
+  // <filter id> and avoid bloating <defs> (mirrors createFilterDef below).
+  const filterDefCache = new Map<string, string | null>();
+
   // Helper to escape XML
   const escapeXml = (str: string) => str
     .replace(/&/g, '&amp;')
@@ -1181,6 +1186,141 @@ export async function exportSVG(
     return '#000000';
   };
 
+  // Create a <filter> def for an instance's filter chain and return a
+  // `filter="url(#...)"` attribute string (with a leading space), or '' when
+  // there's nothing renderable. Mirrors the SUPPORTED set of the canvas
+  // renderer's applyFilters (renderer.ts:3514): blur, glow, dropShadow and
+  // colorMatrix. Other filter types (bevel/gradientGlow/gradientBevel/
+  // convolution) are intentionally UNSUPPORTED in SVG export v1 — they have no
+  // real-file usage and the canvas renderer only crudely approximates them, so
+  // we skip them gracefully (emit no primitive, never throw).
+  const createFilterDef = (
+    filters: import('./types').Filter[] | undefined
+  ): string => {
+    if (!filters || filters.length === 0) return '';
+
+    // Dedupe key: the serialized filter chain. Identical chains reuse one def.
+    const cacheKey = JSON.stringify(filters);
+    if (filterDefCache.has(cacheKey)) {
+      const cached = filterDefCache.get(cacheKey)!;
+      return cached ? ` filter="url(#${cached})"` : '';
+    }
+
+    // SVG filter primitives (one entry per supported filter in the chain). Each
+    // produces a result region; we composite shadows BEHIND the source graphic.
+    const primitives: string[] = [];
+    // Track named results so a trailing feMerge can stack shadows then source.
+    const shadowResults: string[] = [];
+    let resultCounter = 0;
+
+    // feFlood flood-opacity must stay within [0,1].
+    const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+
+    for (const filter of filters) {
+      switch (filter.type) {
+        case 'blur': {
+          // Flash blurX/blurY (px) ≈ 2× SVG stdDeviation; the renderer uses CSS
+          // blur((blurX+blurY)/2 px) which itself ≈ 2× stdDeviation, so divide
+          // each axis by 2 to match the canvas appearance.
+          const sx = filter.blurX / 2;
+          const sy = filter.blurY / 2;
+          primitives.push(
+            `<feGaussianBlur in="SourceGraphic" stdDeviation="${sx} ${sy}"/>`
+          );
+          break;
+        }
+        case 'glow':
+        case 'dropShadow': {
+          // glow == distance-0 colored shadow; dropShadow offsets it by
+          // distance@angle. The renderer sets shadowBlur = max(blurX,blurY)*
+          // strength and the shadow color = color@alpha; we approximate that
+          // intent: blur radius from max axis (÷2 for stdDeviation), opacity =
+          // alpha×strength clamped.
+          const stdDev = Math.max(filter.blurX, filter.blurY) / 2;
+          const strength = filter.strength ?? 1;
+          const alpha = filter.alpha ?? 1;
+          const floodOpacity = clamp01(alpha * strength);
+
+          const blurResult = `f${resultCounter++}`;
+          const offsetResult = `f${resultCounter++}`;
+          const floodResult = `f${resultCounter++}`;
+          const shadowResult = `f${resultCounter++}`;
+
+          primitives.push(
+            `<feGaussianBlur in="SourceAlpha" stdDeviation="${stdDev}" result="${blurResult}"/>`
+          );
+
+          let composeIn = blurResult;
+          if (filter.type === 'dropShadow') {
+            const angleRad = ((filter.angle ?? 45) * Math.PI) / 180;
+            const dx = Math.cos(angleRad) * filter.distance;
+            const dy = Math.sin(angleRad) * filter.distance;
+            primitives.push(
+              `<feOffset in="${blurResult}" dx="${dx}" dy="${dy}" result="${offsetResult}"/>`
+            );
+            composeIn = offsetResult;
+          }
+
+          primitives.push(
+            `<feFlood flood-color="${filter.color}" flood-opacity="${floodOpacity}" result="${floodResult}"/>`
+          );
+          primitives.push(
+            `<feComposite in="${floodResult}" in2="${composeIn}" operator="in" result="${shadowResult}"/>`
+          );
+          shadowResults.push(shadowResult);
+          break;
+        }
+        case 'colorMatrix': {
+          // Reuse the EXACT normalization the renderer uses
+          // (renderer.ts:3624-3634): offsets at indices 4,9,14,19 are divided by
+          // 255 so canvas (which builds the same feColorMatrix via a data URL)
+          // and SVG export agree.
+          if (filter.matrix && filter.matrix.length === 20) {
+            const m = [...filter.matrix];
+            m[4] /= 255;
+            m[9] /= 255;
+            m[14] /= 255;
+            m[19] /= 255;
+            primitives.push(
+              `<feColorMatrix in="SourceGraphic" type="matrix" values="${m.join(' ')}"/>`
+            );
+          }
+          break;
+        }
+        // bevel / gradientGlow / gradientBevel / convolution:
+        // intentionally UNSUPPORTED in SVG export v1 (see header comment).
+        // Skip gracefully — no primitive emitted, no throw.
+      }
+    }
+
+    // If any shadow primitives were produced, stack them behind the source so
+    // the glow/dropShadow shows around the original graphic.
+    if (shadowResults.length > 0) {
+      const merges = shadowResults
+        .map((r) => `<feMergeNode in="${r}"/>`)
+        .join('');
+      primitives.push(
+        `<feMerge>${merges}<feMergeNode in="SourceGraphic"/></feMerge>`
+      );
+    }
+
+    // Nothing renderable (e.g. only unsupported filters) → cache the miss.
+    if (primitives.length === 0) {
+      filterDefCache.set(cacheKey, null);
+      return '';
+    }
+
+    const filterId = genId('filter');
+    // Explicit oversized region so blur/shadow don't clip at the bbox edge.
+    defs.push(
+      `<filter id="${filterId}" x="-50%" y="-50%" width="200%" height="200%">${primitives.join(
+        ''
+      )}</filter>`
+    );
+    filterDefCache.set(cacheKey, filterId);
+    return ` filter="url(#${filterId})"`;
+  };
+
   // Render a shape element to SVG
   const renderShape = (shape: import('./types').Shape): string => {
     const paths: string[] = [];
@@ -1257,7 +1397,10 @@ export async function exportSVG(
     }
 
     if (textElements.length === 0) return '';
-    return `<g${transformAttr}>\n    ${textElements.join('\n    ')}\n  </g>`;
+    // TextInstance also carries filters (types.ts:209) — emit the same supported
+    // blur/glow/dropShadow/colorMatrix SVG <filter> on its group.
+    const svgFilterAttr = createFilterDef(text.filters);
+    return `<g${transformAttr}${svgFilterAttr}>\n    ${textElements.join('\n    ')}\n  </g>`;
   };
 
   // Render bitmap instance to SVG
@@ -1377,16 +1520,20 @@ export async function exportSVG(
 
     if (elements.length === 0) return '';
 
-    // Apply color transform as filter if needed
-    let filterAttr = '';
+    // Apply color transform's alphaMultiplier as group opacity if needed.
+    let opacityAttr = '';
     if (instance.colorTransform) {
       const ct = instance.colorTransform;
       if (ct.alphaMultiplier !== undefined && ct.alphaMultiplier !== 1) {
-        filterAttr = ` opacity="${ct.alphaMultiplier}"`;
+        opacityAttr = ` opacity="${ct.alphaMultiplier}"`;
       }
     }
 
-    return `<g${transformAttr}${filterAttr}>\n    ${elements.join('\n    ')}\n  </g>`;
+    // Emit blur/glow/dropShadow/colorMatrix as an SVG <filter> on this group.
+    // Coexists with opacity (alphaMultiplier) — both attributes are kept.
+    const svgFilterAttr = createFilterDef(instance.filters);
+
+    return `<g${transformAttr}${opacityAttr}${svgFilterAttr}>\n    ${elements.join('\n    ')}\n  </g>`;
   };
 
   // Render the frame
