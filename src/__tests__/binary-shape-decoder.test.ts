@@ -14,6 +14,7 @@ import {
   colorFromU32,
   decodeStreamShapes,
   scanForShapes,
+  recoverFillStyle0FromGeometry,
   ULTRA_TWIPS_PER_PX,
   type RawEdge,
 } from '../binary-shape-decoder';
@@ -214,6 +215,97 @@ describe('binary-shape-decoder: style-change records', () => {
   });
 });
 
+describe('binary-shape-decoder: recoverFillStyle0FromGeometry', () => {
+  // A unit square split by its main diagonal P0(0,0)–P2(S,S) into two triangles
+  // that SHARE that diagonal:
+  //   • Lower-left triangle (fill 1): {P0, P3(0,S), P2}
+  //   • Upper-right triangle (fill 2): {P0, P1(S,0), P2}
+  // Flash stores ONLY fillStyle1 per edge (fill1 = the fill on the LEFT of
+  // from→to, +y-down screen coords). The shared diagonal is owned by the
+  // lower-left triangle via fillStyle1 = 1 (walked P2→P0, interior on its left);
+  // the upper-right triangle sees that diagonal only through the (unstored)
+  // fillStyle0. Without recovery, fill 2's boundary is OPEN (just its two outer
+  // legs); recovery reconstructs the planar faces and sets the diagonal's
+  // fill0 = 2 so region 2 closes. The interior-left winding below was computed
+  // from the cross-product convention (see the btnstrob real-file test).
+  function mkEdge(
+    from: [number, number],
+    to: [number, number],
+    fill1: number,
+    fill0 = 0
+  ): RawEdge {
+    return {
+      fill0,
+      fill1,
+      lineStyle: 0,
+      fromX: from[0],
+      fromY: from[1],
+      ctrlX: (from[0] + to[0]) >> 1,
+      ctrlY: (from[1] + to[1]) >> 1,
+      toX: to[0],
+      toY: to[1],
+      kind: 'line',
+    };
+  }
+
+  it('assigns fill0 to a shared edge so the neighbouring region can close', () => {
+    const S = 1000;
+    // Lower-left triangle (fill 1), each edge interior-on-left:
+    //   P0->P3, P3->P2, P2->P0 (the shared DIAGONAL, owned by fill1=1).
+    // Upper-right triangle (fill 2), outer legs only (NOT the diagonal):
+    //   P1->P0, P2->P1 (each interior-on-left, fill1=2).
+    const edges: RawEdge[] = [
+      mkEdge([S, S], [0, 0], 1), // shared diagonal P2->P0, owned by fill1=1
+      mkEdge([0, 0], [0, S], 1), // LL: P0->P3 (left leg)
+      mkEdge([0, S], [S, S], 1), // LL: P3->P2 (bottom leg)
+      mkEdge([S, 0], [0, 0], 2), // UR: P1->P0 (bottom leg)
+      mkEdge([S, S], [S, 0], 2), // UR: P2->P1 (right leg)
+    ];
+
+    recoverFillStyle0FromGeometry(edges);
+
+    // The shared diagonal now also borders region 2 on its RIGHT side.
+    const diag = edges[0];
+    expect(diag.fill1).toBe(1); // unchanged: still owned by fill 1 on the left
+    expect(diag.fill0).toBe(2); // recovered: region 2 lies on its right
+
+    // The outer legs (already owned by their region via fill1) keep fill0 === 0.
+    expect(edges[1].fill0).toBe(0);
+    expect(edges[3].fill0).toBe(0);
+
+    // Region 2's boundary is now closeable: the diagonal (fill0=2, contributes
+    // reversed) + its two outer legs (fill1=2) form the triangle.
+    const refFill0 = new Set(edges.map((e) => e.fill0).filter((f) => f !== 0));
+    expect([...refFill0]).toEqual([2]);
+  });
+
+  it('leaves a lone single-fill loop untouched (no spurious fill0)', () => {
+    const S = 1000;
+    // A simple closed square, all four edges fill1 = 1. The interior face is
+    // owned by fill1; the only other face is the unbounded outer face (skipped).
+    const edges: RawEdge[] = [
+      mkEdge([0, 0], [S, 0], 1),
+      mkEdge([S, 0], [S, S], 1),
+      mkEdge([S, S], [0, S], 1),
+      mkEdge([0, S], [0, 0], 1),
+    ];
+    recoverFillStyle0FromGeometry(edges);
+    for (const e of edges) expect(e.fill0).toBe(0);
+  });
+
+  it('never overwrites an existing fill0', () => {
+    const S = 1000;
+    const edges: RawEdge[] = [
+      mkEdge([0, 0], [S, 0], 1, 7), // pre-set fill0 = 7
+      mkEdge([S, 0], [S, S], 1),
+      mkEdge([S, S], [0, S], 1),
+      mkEdge([0, S], [0, 0], 1),
+    ];
+    recoverFillStyle0FromGeometry(edges);
+    expect(edges[0].fill0).toBe(7); // untouched
+  });
+});
+
 describe('binary-shape-decoder: colorFromU32', () => {
   it('reads R,G,B,A from LE byte order', () => {
     // 0xff00ff66 LE bytes = 66 ff 00 ff → R=0x66 G=0xff B=0x00 A=0xff.
@@ -375,14 +467,33 @@ describe('binary-shape-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () => {
       { index: 1, type: 'solid', color: '#66ff00', alpha: 1 },
     ]);
     expect(shape.strokes[0]).toMatchObject({ index: 1, color: '#ff0000' });
-    // One grouped edge: the closed 180×180 square path.
-    expect(shape.edges).toHaveLength(1);
-    expect(shape.edges[0].commands).toEqual([
-      { type: 'M', x: 180, y: 180 },
-      { type: 'L', x: 0, y: 180 },
-      { type: 'L', x: 0, y: 0 },
-      { type: 'L', x: 180, y: 0 },
-      { type: 'L', x: 180, y: 180 },
+    // ONE Edge PER RawEdge (Ruffle/SWF edge-soup contract): the 180×180 square
+    // is four straight edges, each `[M(from), L(to)]`, each carrying its OWN
+    // per-edge fill/stroke refs (fillStyle0=1 RIGHT side, strokeStyle=1). The
+    // decoder no longer pre-concatenates them into one grouped path — the
+    // renderer stitches the soup into a closed contour itself.
+    expect(shape.edges).toHaveLength(4);
+    for (const edge of shape.edges) {
+      expect(edge.commands).toHaveLength(2);
+      expect(edge.commands[0].type).toBe('M');
+      expect(edge.commands[1].type).toBe('L');
+      // Each square side borders fill 1 on its RIGHT (fillStyle0) and carries
+      // the red stroke; fillStyle1 is unset (the outside).
+      expect(edge.fillStyle0).toBe(1);
+      expect(edge.fillStyle1).toBeUndefined();
+      expect(edge.strokeStyle).toBe(1);
+    }
+    // The four edges, walked head-to-tail, still trace the closed square.
+    const verts = shape.edges.map((e) => {
+      const m = e.commands[0] as { type: 'M'; x: number; y: number };
+      const l = e.commands[1] as { type: 'L'; x: number; y: number };
+      return { from: [m.x, m.y], to: [l.x, l.y] };
+    });
+    expect(verts).toEqual([
+      { from: [180, 180], to: [0, 180] },
+      { from: [0, 180], to: [0, 0] },
+      { from: [0, 0], to: [180, 0] },
+      { from: [180, 0], to: [180, 180] },
     ]);
   });
 
@@ -392,6 +503,105 @@ describe('binary-shape-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () => {
     const res = decodeStreamShapes(ole.readStream('Symbol 2'));
     expect(res.shapes.length).toBeGreaterThanOrEqual(2);
     expect(res.totalEdges).toBeGreaterThanOrEqual(16);
+  });
+
+  // ── Load-bearing regression for the un-grouping fix ───────────────────────
+  // Symbol 2 shape[1] is a 4-fill bordered frame (#ffffff ×2, #000000 ×2). The
+  // OLD decoder grouped raw edges by (fill0,fill1,lineStyle), producing 10
+  // Edges, two of which CONCATENATED disjoint raw edges with an internal `M`
+  // (e.g. outer-top + inner-top under fill1=1). The NEW decoder emits ONE Edge
+  // per RawEdge (12 single-segment `[M, L]` edges, zero internal moves), each
+  // carrying its own fill ref — the Ruffle/SWF edge-soup contract the renderer
+  // expects. This pins that contract: it FAILS against the grouped decoder
+  // (which gave 10 edges / 2 multi-segment) and PASSES against the per-edge one.
+  it('emits one Edge per RawEdge for the 4-fill bordered frame (no grouping)', async () => {
+    const bytes = await loadBtnstrob();
+    const ole = new OLE2File(bytes);
+    const res = decodeStreamShapes(ole.readStream('Symbol 2'));
+    const shape = res.shapes[1];
+
+    // Four declared solid fills (two white bevels, two black bevels).
+    expect(shape.fills.map((f) => f.index)).toEqual([1, 2, 3, 4]);
+
+    // Exactly one Edge per raw edge: 12 single-segment edges, each a `[M, L]`.
+    expect(shape.edges).toHaveLength(12);
+    let internalMoves = 0;
+    for (const edge of shape.edges) {
+      expect(edge.commands).toHaveLength(2);
+      expect(edge.commands[0].type).toBe('M');
+      // No edge concatenates a second subpath via an internal MoveTo.
+      internalMoves += edge.commands.filter((c) => c.type === 'M').length - 1;
+    }
+    expect(internalMoves).toBe(0);
+
+    // Every declared fill is referenced as some edge's LEFT side (fillStyle1) —
+    // the frame's four bevel regions each have a boundary contribution, so the
+    // renderer can stitch all four (none is silently dropped by grouping).
+    const refFill1 = new Set<number>();
+    for (const edge of shape.edges) {
+      if (edge.fillStyle1 !== undefined) refFill1.add(edge.fillStyle1);
+    }
+    expect([...refFill1].sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
+  });
+
+  // ── Load-bearing regression: fillStyle0 recovery (side bevels paint) ───────
+  // The binary edge stream stores ONLY fillStyle1 per edge — hand-decoding
+  // btnstrob Symbol 2 shape[1] shows every style-change record is
+  // `f3/f0 00 XX YY` with byte0 (fill0) ALWAYS 0x00 (no desync, no presence
+  // mask: the source genuinely omits fill0). The TOP (fill 1) and BOTTOM
+  // (fill 3) bevels each have four fillStyle1 edges and close on their own, but
+  // the LEFT (fill 2) and RIGHT (fill 4) side bevels each have only ONE
+  // fillStyle1 edge (the inner vertical) and CANNOT close — so they rendered
+  // blank. `recoverFillStyle0FromGeometry` reconstructs the planar faces and
+  // assigns the missing fill0 to the shared corner diagonals + outer verticals.
+  //
+  // This pins the recovered fill0: it FAILS against the pre-fix decoder (every
+  // edge had fill0 === 0 / undefined) and PASSES after. The geometry:
+  //   • RIGHT bevel = fill 4: inner-right vertical owns it via fillStyle1=4;
+  //     the two right corner diagonals + outer-right vertical must carry fill0=4
+  //   • LEFT bevel = fill 2: inner-left vertical owns it via fillStyle1=2;
+  //     the two left corner diagonals + outer-left vertical must carry fill0=2
+  it('recovers fillStyle0 on the side-bevel boundary edges so fills 2 & 4 close', async () => {
+    const bytes = await loadBtnstrob();
+    const ole = new OLE2File(bytes);
+    const res = decodeStreamShapes(ole.readStream('Symbol 2'));
+    const shape = res.shapes[1];
+    expect(shape.edges).toHaveLength(12);
+
+    // Index the 12 edges by their (from→to) endpoints in px (stable identity).
+    const byEnds = new Map<string, (typeof shape.edges)[number]>();
+    for (const e of shape.edges) {
+      const m = e.commands[0] as { type: 'M'; x: number; y: number };
+      const l = e.commands[1] as { type: 'L'; x: number; y: number };
+      byEnds.set(`${m.x},${m.y}->${l.x},${l.y}`, e);
+    }
+    const get = (k: string) => {
+      const e = byEnds.get(k);
+      if (!e) throw new Error(`edge ${k} not found`);
+      return e;
+    };
+
+    // RIGHT bevel (fill 4): top-right diag, bottom-right diag, outer-right vert
+    // all border fill 4 on their RIGHT (fillStyle0). Inner-right vert owns it.
+    expect(get('120,-40->140,-60').fillStyle0).toBe(4); // top-right diagonal
+    expect(get('140,60->120,40').fillStyle0).toBe(4); // bottom-right diagonal
+    expect(get('140,-60->140,60').fillStyle0).toBe(4); // outer-right vertical
+    expect(get('120,-40->120,40').fillStyle1).toBe(4); // inner-right (owner)
+
+    // LEFT bevel (fill 2): top-left diag, bottom-left diag, outer-left vert.
+    expect(get('-140,-60->-120,-40').fillStyle0).toBe(2); // top-left diagonal
+    expect(get('-120,40->-140,60').fillStyle0).toBe(2); // bottom-left diagonal
+    expect(get('-140,60->-140,-60').fillStyle0).toBe(2); // outer-left vertical
+    expect(get('-120,40->-120,-40').fillStyle1).toBe(2); // inner-left (owner)
+
+    // Now EVERY declared fill is the LEFT (fillStyle1) of some edge AND every
+    // side fill (2,4) is also the RIGHT (fillStyle0) of ≥3 edges — i.e. all four
+    // bevel regions have a closeable boundary. Pre-fix, fillStyle0 was never set.
+    const refFill0 = new Set<number>();
+    for (const edge of shape.edges) {
+      if (edge.fillStyle0 !== undefined) refFill0.add(edge.fillStyle0);
+    }
+    expect([...refFill0].sort((a, b) => a - b)).toEqual([2, 4]);
   });
 });
 

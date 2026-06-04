@@ -483,6 +483,199 @@ export function readEdgeStream(r: ByteReader): RawEdge[] {
   return edges;
 }
 
+/**
+ * Recover the missing `fillStyle0` (RIGHT-side fill) on edges that border a
+ * fill region only via a NEIGHBOUR's `fillStyle1`.
+ *
+ * ── Why this is needed ──────────────────────────────────────────────────────
+ * The binary-FLA edge stream stores, per edge, only `fillStyle1` (the fill on
+ * the LEFT of from→to) plus the line style; the `fillStyle0` slot is ALWAYS 0
+ * in the records (confirmed by hand-decoding btnstrob.fla Symbol 2 shape[1] —
+ * every `f3 00 XX YY` / `f0 00 XX YY` record has byte0 = 0x00; there is NO
+ * desync or presence-mask misread, the source genuinely omits fill0). This
+ * matches Flash's editor model: an internal region only labels its own boundary
+ * via fill1, leaving the player to infer fill0 from adjacency.
+ *
+ * A region whose boundary is wholly its OWN fill1 edges (e.g. a lone filled
+ * square, or the top/bottom bevels of a frame) closes fine. But a region that
+ * SHARES boundary edges with neighbours — a bevel-frame side trapezoid bounded
+ * by two corner diagonals (owned by the top/bottom bevels' fill1) and one outer
+ * edge (fill1 = 0, the outside) — has only ONE edge declaring it. The renderer
+ * cannot close a single-edge boundary, so the region renders blank. In
+ * btnstrob's 4-fill bevel frame this drops the LEFT (fill 2) and RIGHT (fill 4)
+ * side bevels entirely.
+ *
+ * ── What this does ──────────────────────────────────────────────────────────
+ * We reconstruct the shape's planar subdivision from the edge endpoints (the
+ * coordinates are exact integer ultra-twips, so vertex matching is exact) and
+ * walk each bounded face with the standard "smallest clockwise turn" rule. A
+ * face's fill is read from any boundary edge whose fill1 (LEFT) side faces the
+ * face interior; every boundary edge whose fill0 (RIGHT) side faces that face
+ * and is still 0 gets `fill0 = faceFill`. This is conservative: it only ever
+ * fills a 0 fill0, never overwrites an existing style, and skips the unbounded
+ * outer face. A lone closed region (square) is unaffected (its only face is the
+ * interior, already labelled by its own fill1; the outer face is skipped).
+ *
+ * Edges are matched by their straight-line endpoints; quadratic control points
+ * do not change the topology and are ignored here.
+ */
+export function recoverFillStyle0FromGeometry(edges: RawEdge[]): void {
+  if (edges.length < 3) return;
+  // Bail out if every edge already carries an explicit fill0 (nothing to do)
+  // or if NO edge carries a fill1 (no region labels to propagate).
+  const anyMissingFill0 = edges.some((e) => e.fill0 === 0 && e.fill1 !== 0);
+  if (!anyMissingFill0) return;
+
+  type Half = {
+    edge: number;
+    fromX: number;
+    fromY: number;
+    toX: number;
+    toY: number;
+    reversed: boolean;
+    id: number;
+  };
+  const key = (x: number, y: number) => `${x},${y}`;
+  const halves: Half[] = [];
+  edges.forEach((e, i) => {
+    halves.push({
+      edge: i,
+      fromX: e.fromX,
+      fromY: e.fromY,
+      toX: e.toX,
+      toY: e.toY,
+      reversed: false,
+      id: halves.length,
+    });
+    halves.push({
+      edge: i,
+      fromX: e.toX,
+      fromY: e.toY,
+      toX: e.fromX,
+      toY: e.fromY,
+      reversed: true,
+      id: halves.length,
+    });
+  });
+  // Degenerate (zero-length) edges break the angular walk; if any exist, skip
+  // recovery rather than risk an infinite/incorrect traversal.
+  for (const h of halves) {
+    if (h.fromX === h.toX && h.fromY === h.toY) return;
+  }
+
+  // Outgoing half-edges per vertex.
+  const out = new Map<string, Half[]>();
+  for (const h of halves) {
+    const k = key(h.fromX, h.fromY);
+    let arr = out.get(k);
+    if (!arr) {
+      arr = [];
+      out.set(k, arr);
+    }
+    arr.push(h);
+  }
+  const angle = (h: Half) => Math.atan2(h.toY - h.fromY, h.toX - h.fromX);
+  // Next half-edge around a face: at the arrival vertex, pick the outgoing
+  // half-edge with the smallest clockwise turn from the reverse of the incoming
+  // direction (standard planar face traversal).
+  const nextHalf = (h: Half): Half | null => {
+    const cands = out.get(key(h.toX, h.toY));
+    if (!cands || cands.length === 0) return null;
+    const incomingDir = Math.atan2(h.fromY - h.toY, h.fromX - h.toX);
+    let best: Half | null = null;
+    let bestDelta = Infinity;
+    for (const c of cands) {
+      let delta = incomingDir - angle(c);
+      while (delta <= 1e-9) delta += Math.PI * 2;
+      while (delta > Math.PI * 2) delta -= Math.PI * 2;
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        best = c;
+      }
+    }
+    return best;
+  };
+
+  // Walk every face.
+  const visited = new Set<number>();
+  const faces: Half[][] = [];
+  for (const h0 of halves) {
+    if (visited.has(h0.id)) continue;
+    const loop: Half[] = [];
+    let h: Half | null = h0;
+    let guard = 0;
+    while (h && !visited.has(h.id) && guard++ < halves.length + 1) {
+      visited.add(h.id);
+      loop.push(h);
+      h = nextHalf(h);
+    }
+    if (loop.length > 0) faces.push(loop);
+  }
+
+  // Signed area in screen coords (+y down): the single most-negative face is the
+  // unbounded outer face.
+  const signedArea = (loop: Half[]) => {
+    let s = 0;
+    for (const h of loop) s += h.fromX * h.toY - h.toX * h.fromY;
+    return s / 2;
+  };
+  const centroid = (loop: Half[]): [number, number] => {
+    let x = 0;
+    let y = 0;
+    for (const h of loop) {
+      x += h.fromX;
+      y += h.fromY;
+    }
+    return [x / loop.length, y / loop.length];
+  };
+  // Is point P strictly LEFT of the original (a→b) direction of edge e?
+  // Screen coords (+y down) → left side has a negative z-cross.
+  const isLeftOfEdge = (e: RawEdge, px: number, py: number): boolean => {
+    const cross =
+      (e.toX - e.fromX) * (py - e.fromY) - (e.toY - e.fromY) * (px - e.fromX);
+    return cross < 0;
+  };
+
+  if (faces.length === 0) return;
+  let outer = faces[0];
+  let outerArea = signedArea(outer);
+  for (const f of faces) {
+    const a = signedArea(f);
+    if (a < outerArea) {
+      outerArea = a;
+      outer = f;
+    }
+  }
+
+  for (const loop of faces) {
+    if (loop === outer) continue;
+    const [cx, cy] = centroid(loop);
+    // Determine this face's fill: the fill1 of any boundary edge whose LEFT
+    // (fill1) side faces the centroid.
+    let faceFill = 0;
+    for (const h of loop) {
+      const e = edges[h.edge];
+      if (e.fill1 !== 0 && isLeftOfEdge(e, cx, cy)) {
+        faceFill = e.fill1;
+        break;
+      }
+    }
+    if (faceFill === 0) continue;
+    // Assign fill0 to boundary edges whose RIGHT side faces this face and that
+    // do not already carry a fill (never overwrite, never set fill0 == fill1).
+    for (const h of loop) {
+      const e = edges[h.edge];
+      if (
+        e.fill0 === 0 &&
+        e.fill1 !== faceFill &&
+        !isLeftOfEdge(e, cx, cy)
+      ) {
+        e.fill0 = faceFill;
+      }
+    }
+  }
+}
+
 /** Decoded shape data: fills, strokes and edges (still in ultra-twips). */
 export interface DecodedShapeData {
   shapeDataSchema: number;
@@ -521,6 +714,19 @@ export function readShapeData(
   let rawEdges: RawEdge[] = [];
   if (shapeDataSchema >= 2) {
     rawEdges = readEdgeStream(r);
+    // The edge stream stores only fillStyle1 per edge; recover the implicit
+    // fillStyle0 of regions that share boundary edges with neighbours so they
+    // can close (e.g. the side bevels of a multi-fill frame). See
+    // {@link recoverFillStyle0FromGeometry}. This is a geometric heuristic run
+    // on untrusted real files; if it throws on malformed/degenerate geometry,
+    // degrade to the un-recovered edges (the prior, blank-but-safe behaviour)
+    // rather than failing the whole shape decode. Surfaced as a warning so the
+    // skipped recovery is visible, not silently swallowed.
+    try {
+      recoverFillStyle0FromGeometry(rawEdges);
+    } catch (err) {
+      console.warn('binary-shape-decoder: fillStyle0 recovery skipped —', err);
+    }
   }
   return { shapeDataSchema, fills, strokes, rawEdges };
 }
@@ -529,57 +735,47 @@ export function readShapeData(
 
 /**
  * Convert decoded raw edges (ultra-twips) into viewer {@link Edge}s with
- * pixel-space {@link PathCommand}s. Contiguous edges sharing the same
- * fill/line indices are grouped into one path so the renderer can fill them
- * as a single region; an `M` is emitted whenever the start of an edge does
- * not continue the previous endpoint.
+ * pixel-space {@link PathCommand}s.
+ *
+ * One {@link Edge} is emitted PER {@link RawEdge}: `[M(from), L|Q(to)]`. This is
+ * the canonical SWF/Ruffle "edge soup" contract — each edge carries its own
+ * `fillStyle0` (RIGHT side, reversed at render) and `fillStyle1` (LEFT side,
+ * forward), and the renderer (`getOrComputeShapePaths`) is responsible for
+ * stitching the per-edge contributions into closed contours per fill index.
+ *
+ * We deliberately do NOT pre-group contiguous same-style edges into one path:
+ * grouping by `(fill0, fill1, lineStyle)` scatters the boundary edges of a
+ * single fill region across different groups whenever those edges happen to
+ * carry a different style on their OTHER side (e.g. a bevel quad whose four
+ * sides each border a different neighbour), which defeats the renderer's
+ * per-edge fill model and leaves regions unable to close (missing fills).
+ * Emitting raw edges hands the renderer exactly the soup it expects.
+ *
+ * `fillStyle0/1`/`strokeStyle` are kept undefined when their index is 0 (the
+ * "no style" sentinel), matching the previous contract.
  */
 export function rawEdgesToEdges(rawEdges: RawEdge[]): Edge[] {
-  const out: Edge[] = [];
-  // Group by (fill0, fill1, lineStyle) preserving first-seen order.
-  const groups = new Map<string, RawEdge[]>();
-  const order: string[] = [];
-  for (const e of rawEdges) {
-    const key = `${e.fill0}|${e.fill1}|${e.lineStyle}`;
-    let g = groups.get(key);
-    if (!g) {
-      g = [];
-      groups.set(key, g);
-      order.push(key);
-    }
-    g.push(e);
-  }
   const px = (v: number) => v / ULTRA_TWIPS_PER_PX;
-  for (const key of order) {
-    const group = groups.get(key)!;
-    const [f0, f1, ls] = key.split('|').map((n) => parseInt(n, 10));
-    const commands: PathCommand[] = [];
-    let cur: [number, number] | null = null;
-    for (const e of group) {
-      const fx = px(e.fromX);
-      const fy = px(e.fromY);
-      const tx = px(e.toX);
-      const ty = px(e.toY);
-      if (cur === null || cur[0] !== fx || cur[1] !== fy) {
-        commands.push({ type: 'M', x: fx, y: fy });
-      }
-      if (e.kind === 'line') {
-        commands.push({ type: 'L', x: tx, y: ty });
-      } else {
-        commands.push({
-          type: 'Q',
-          cx: px(e.ctrlX),
-          cy: px(e.ctrlY),
-          x: tx,
-          y: ty,
-        });
-      }
-      cur = [tx, ty];
+  const out: Edge[] = [];
+  for (const e of rawEdges) {
+    const commands: PathCommand[] = [
+      { type: 'M', x: px(e.fromX), y: px(e.fromY) },
+    ];
+    if (e.kind === 'line') {
+      commands.push({ type: 'L', x: px(e.toX), y: px(e.toY) });
+    } else {
+      commands.push({
+        type: 'Q',
+        cx: px(e.ctrlX),
+        cy: px(e.ctrlY),
+        x: px(e.toX),
+        y: px(e.toY),
+      });
     }
     const edge: Edge = { commands };
-    if (f0) edge.fillStyle0 = f0;
-    if (f1) edge.fillStyle1 = f1;
-    if (ls) edge.strokeStyle = ls;
+    if (e.fill0) edge.fillStyle0 = e.fill0;
+    if (e.fill1) edge.fillStyle1 = e.fill1;
+    if (e.lineStyle) edge.strokeStyle = e.lineStyle;
     out.push(edge);
   }
   return out;
