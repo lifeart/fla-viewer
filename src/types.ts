@@ -289,6 +289,9 @@ export interface StrokeStyle {
   miterLimit?: number; // Maximum miter length (default: 3 in Flash)
   scaleMode?: 'normal' | 'horizontal' | 'vertical' | 'none'; // Stroke scaling behavior
   pixelHinting?: boolean; // Snap stroke to pixel boundaries
+  // Dashed stroke pattern: [dashLength, gapLength] in user-space units (same scale as weight/lineWidth).
+  // Present only for <DashedStroke>; absent means a continuous (solid) line.
+  dash?: number[];
   // Gradient properties (for linear/radial strokes)
   gradient?: GradientEntry[];
   matrix?: Matrix;

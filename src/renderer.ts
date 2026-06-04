@@ -2716,10 +2716,16 @@ export class FLARenderer {
         ctx.lineJoin = stroke.joints || 'round';
         // Apply miter limit (Flash default is 3)
         ctx.miterLimit = stroke.miterLimit ?? 3;
+        // Dashed strokes carry a [dash, gap] pattern (user-space units, 1:1 with lineWidth).
+        // Always set the dash explicitly (empty array = solid) so a dashed stroke never leaks
+        // its pattern onto a later solid stroke in the same shape.
+        ctx.setLineDash(stroke.dash ?? []);
         ctx.stroke(path);
       }
     }
 
+    // Reset dash so it cannot leak past this shape (defensive; ctx.restore() also clears it).
+    ctx.setLineDash([]);
     ctx.restore();
   }
 
