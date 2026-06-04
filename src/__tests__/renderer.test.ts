@@ -4032,6 +4032,147 @@ describe('FLARenderer', () => {
 
       renderer.renderFrame(0);
     });
+
+    // Regression: radial gradient focalPointRatio placement (XFL fill fidelity).
+    //
+    // Renders a centered white(center)->black(rim) radial disc and inspects the
+    // luminance along the rendered disc's horizontal centerline. The renderer
+    // applies its own fit/scale transform, so we don't hard-code screen coords:
+    // we first render a focal=0 disc (symmetric) to locate the rendered center,
+    // then assert the focal=-1 highlight lands off-center on the focal (-X) side.
+    describe('focalPointRatio placement', () => {
+      const GS = 819.2;
+      const sc = 80 / GS; // ~80px gradient radius in shape space
+      const SHAPE_TX = 200;
+      const SHAPE_TY = 150;
+
+      async function renderFocalDisc(focal?: number): Promise<{ data: Uint8ClampedArray; width: number; height: number }> {
+        const fill = {
+          index: 1,
+          type: 'radial' as const,
+          gradient: [
+            { ratio: 0, color: '#FFFFFF', alpha: 1 },
+            { ratio: 1, color: '#000000', alpha: 1 },
+          ],
+          matrix: createMatrix({ a: sc, d: sc, tx: SHAPE_TX, ty: SHAPE_TY }),
+          ...(focal !== undefined ? { focalPointRatio: focal } : {}),
+        };
+        const doc = createMinimalDoc({
+          timelines: [createTimeline({
+            layers: [createLayer({
+              frames: [createFrame({
+                elements: [{
+                  type: 'shape',
+                  matrix: createMatrix(),
+                  fills: [fill],
+                  strokes: [],
+                  edges: [{
+                    fillStyle1: 1,
+                    commands: [
+                      { type: 'M', x: SHAPE_TX - 90, y: SHAPE_TY - 90 },
+                      { type: 'L', x: SHAPE_TX + 90, y: SHAPE_TY - 90 },
+                      { type: 'L', x: SHAPE_TX + 90, y: SHAPE_TY + 90 },
+                      { type: 'L', x: SHAPE_TX - 90, y: SHAPE_TY + 90 },
+                      { type: 'Z' },
+                    ],
+                  }],
+                }],
+              })],
+            })],
+          })],
+        });
+        await renderer.setDocument(doc);
+        renderer.renderFrame(0);
+        const ctx = canvas.getContext('2d')!;
+        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        return { data: img.data, width: img.width, height: img.height };
+      }
+
+      const lumAt = (d: Uint8ClampedArray, w: number, x: number, y: number) =>
+        (d[(y * w + x) * 4] + d[(y * w + x) * 4 + 1] + d[(y * w + x) * 4 + 2]) / 3;
+
+      // Locate the rendered disc center from a symmetric (focal=0) render by
+      // finding the row with the longest run of "inside the disc" pixels (lum<255
+      // at the rim, but the disc interior dips toward black at center then rises).
+      // Simpler & robust: scan for the brightest interior pixel of the symmetric
+      // disc (the white center) and use its location as the rendered center.
+      function findBrightest(d: Uint8ClampedArray, w: number, h: number) {
+        let best = -1, bx = -1, by = -1;
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const v = lumAt(d, w, x, y);
+            // Exclude pure-white background (255) outside the square.
+            if (v < 255 && v > best) { best = v; bx = x; by = y; }
+          }
+        }
+        return { bx, by, best };
+      }
+
+      it('(b) focal=0 is a no-op: identical to focalPointRatio absent, and symmetric', async () => {
+        const zero = await renderFocalDisc(0);
+        const absent = await renderFocalDisc(undefined);
+        // focal=0 must produce byte-identical output to no focal at all: this is
+        // the common centered-radial path and must never change.
+        expect(zero.data.length).toBe(absent.data.length);
+        let firstDiff = -1;
+        for (let i = 0; i < zero.data.length; i++) {
+          if (zero.data[i] !== absent.data[i]) { firstDiff = i; break; }
+        }
+        expect(firstDiff).toBe(-1);
+
+        // And the disc must be left/right symmetric about its rendered center.
+        const c = findBrightest(zero.data, zero.width, zero.height);
+        expect(c.best).toBeGreaterThan(200); // a bright white center exists
+        let asym = 0;
+        for (let dx = 1; dx <= 30; dx++) {
+          asym += Math.abs(
+            lumAt(zero.data, zero.width, c.bx - dx, c.by) -
+            lumAt(zero.data, zero.width, c.bx + dx, c.by)
+          );
+        }
+        expect(asym / 30).toBeLessThan(8); // near-symmetric (allow AA noise)
+      });
+
+      it('(a) focal=-1 places a bright off-center highlight on the focal side', async () => {
+        // Reference center from the symmetric focal=0 disc.
+        const zero = await renderFocalDisc(0);
+        const c = findBrightest(zero.data, zero.width, zero.height);
+        const cyRow = c.by;
+        const cxCenter = c.bx;
+
+        const neg = await renderFocalDisc(-1);
+
+        // Scan the disc centerline. The focal (left, -X) side must contain a
+        // bright near-white highlight pixel AND a sharp luminance step (the
+        // off-center focus). The far (right) side must NOT have such a spike.
+        let leftPeak = 0, leftStep = 0;
+        let rightPeak = 0;
+        for (let x = cxCenter - 60; x < cxCenter; x++) {
+          if (x < 1) continue;
+          const v = lumAt(neg.data, neg.width, x, cyRow);
+          const vPrev = lumAt(neg.data, neg.width, x - 1, cyRow);
+          // ignore the outer square edge / background (255)
+          if (v < 255) leftPeak = Math.max(leftPeak, v);
+          if (v < 255 && vPrev < 255) leftStep = Math.max(leftStep, Math.abs(v - vPrev));
+        }
+        for (let x = cxCenter + 1; x <= cxCenter + 60; x++) {
+          const v = lumAt(neg.data, neg.width, x, cyRow);
+          if (v < 255) rightPeak = Math.max(rightPeak, v);
+        }
+
+        // FAILS BEFORE FIX: with the buggy `focal*radius` offset the focus lands
+        // on the outer rim, so the focal-side highlight collapses (leftPeak stays
+        // a washed ~250 ramp with leftStep ~ a few units, no bright spike).
+        // PASSES AFTER FIX: the clamped matrix*(focal*819.2,0) focus yields a
+        // crisp ~255 white highlight with a large step on the focal side.
+        expect(leftPeak).toBeGreaterThanOrEqual(254);
+        expect(leftStep).toBeGreaterThan(60);
+
+        // The bright focal highlight is on the LEFT (focal -X) side, not the
+        // right far side, which should ramp smoothly toward the rim.
+        expect(leftPeak).toBeGreaterThan(rightPeak);
+      });
+    });
   });
 
   describe('stroke rendering', () => {

@@ -3300,16 +3300,27 @@ export class FLARenderer {
       const scaleY = Math.sqrt(m.c * m.c + m.d * m.d);
       radius = GRADIENT_SIZE * ((scaleX + scaleY) / 2);
 
-      // Apply focal point ratio if specified
-      // focalPointRatio is -1 to 1, where 0 is centered, negative is left/up, positive is right/down
+      // Apply focal point ratio if specified.
+      // focalPointRatio is -1..1 (0 centered, negative left/up, positive right/down).
+      //
+      // Ruffle (canonical) places the focal point at
+      //   matrix * (clamp(focalPointRatio, -0.98, 0.98) * 16384 twips, 0)
+      // i.e. clamp(-0.98,0.98) * 819.2px along the gradient-box X axis, then
+      // transformed by the SAME gradient matrix that defines the outer circle
+      // (outer center = matrix*(0,0), rim reached at matrix*(819.2,0)). The clamp
+      // keeps the focus strictly inside the disc; without it focalPointRatio=-1
+      // lands the focus exactly on the outer rim, which degenerates the canvas
+      // radial gradient into a hard edge (the off-center highlight vanishes).
+      //
+      // NOTE: focal==0 (or absent) is a strict no-op — fx/fy stay at the center
+      // (cx, cy), so the common centered radial is byte-identical to before.
       if (fill.focalPointRatio !== undefined && fill.focalPointRatio !== 0) {
-        // Focal point is offset along the gradient's primary axis (transformed by matrix)
-        const focalOffset = fill.focalPointRatio * radius;
-        // Apply the focal point offset using the matrix's primary direction
-        const normX = m.a / scaleX;
-        const normY = m.b / scaleX;
-        fx = cx + normX * focalOffset;
-        fy = cy + normY * focalOffset;
+        const clampedFocal = Math.max(-0.98, Math.min(0.98, fill.focalPointRatio));
+        const focalLocalX = clampedFocal * GRADIENT_SIZE;
+        // Transform the focal point through the full gradient matrix (same space
+        // as the outer circle), matching the SVG export path (video-exporter.ts).
+        fx = m.a * focalLocalX + m.tx;
+        fy = m.b * focalLocalX + m.ty;
       } else {
         fx = cx;
         fy = cy;
