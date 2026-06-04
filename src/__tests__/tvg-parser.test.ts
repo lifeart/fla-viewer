@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
 import { flattenExternalPaletteColors, loadPalettes, parsePLT } from '../tpl-palette';
+import { parseElements, TVG_UNITS_PER_FIELD } from '../tpl-parser';
 import { scoreCanvasSources } from '../tvg-benchmark';
 import type { TVGArtLayer, TVGComponent, TVGDrawing, TVGPath } from '../tvg-parser';
 import {
@@ -14,6 +15,7 @@ import {
   __debugTraceLegacyChainSelectionsForShape,
   __computeTextLabelRenderLayoutForTests,
   __repairForwardPencilPathRefsForTests,
+  __shouldApplyBitmapAtlasEdgeToneForTests,
   __shouldInsetViewportForColorGuideGridDrawingForTests,
   __shouldInsetViewportForLineFillDrawingForTests,
   loadBitmapTiles,
@@ -376,6 +378,16 @@ describe('tvg rendering', () => {
     expect(__computeBitmapFitPaddingForTests(false, true, 8, 0.75)).toBe(8.5);
   });
 
+  it('uses source-stable eligibility for clipped bitmap atlas edge tone', () => {
+    expect(__shouldApplyBitmapAtlasEdgeToneForTests(false, true, 8, 1.47)).toBe(false);
+    expect(__shouldApplyBitmapAtlasEdgeToneForTests(false, true, 8, 2.01)).toBe(true);
+    expect(__shouldApplyBitmapAtlasEdgeToneForTests(false, true, 12, 2.1)).toBe(false);
+    expect(__shouldApplyBitmapAtlasEdgeToneForTests(false, true, 12, 2.38)).toBe(true);
+    expect(__shouldApplyBitmapAtlasEdgeToneForTests(false, true, 16, 1.08)).toBe(true);
+    expect(__shouldApplyBitmapAtlasEdgeToneForTests(true, true, 16, 1.8)).toBe(false);
+    expect(__shouldApplyBitmapAtlasEdgeToneForTests(false, false, 16, 1.8)).toBe(false);
+  });
+
   it('uses a tighter fit for dense portrait clipped bitmap atlases', async () => {
     const tileCanvas = document.createElement('canvas');
     tileCanvas.width = 10;
@@ -542,11 +554,17 @@ describe('tvg rendering', () => {
     const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
     const zip = await JSZip.loadAsync(await response.arrayBuffer());
     const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const xstageXml = new DOMParser().parseFromString(
+      await zip.file('CH_Anna_rig_football_suit_V001_V07/scene.xstage')!.async('text'),
+      'text/xml',
+    );
+    const elements = parseElements(xstageXml);
 
     const cases = [
       { elementName: '4bf5', drawingName: '4bf5-1', minRaw: 97.7, minGate: 98.3 },
       { elementName: '3255', drawingName: '3255-1', minRaw: 97.6, minGate: 98.6 },
       { elementName: '7f81', drawingName: '7f81-1', minRaw: 98.2, minGate: 99.2 },
+      { elementName: '84fe', drawingName: '84fe-1', minRaw: 98.4, minGate: 99.2 },
       { elementName: 'cc62', drawingName: 'cc62-1', minRaw: 98.4, minGate: 99.2 },
       { elementName: 'Screenshot_2022', drawingName: 'Screenshot_2022-1', minRaw: 99.6, minGate: 99.9 },
     ];
@@ -557,8 +575,10 @@ describe('tvg rendering', () => {
       const thumbData = await zip.file(`${base}/.thumbnails/.${testCase.drawingName}.tvg.png`)!.async('arraybuffer');
       const drawing = parseTVG(tvgData);
       resolveExternalPalette(drawing, externalColors);
+      const element = elements.find((entry) => entry.name === testCase.elementName);
+      const viewport = ((element?.fieldChart ?? 12) * TVG_UNITS_PER_FIELD) || 336;
 
-      const canvas = renderTVGToCanvas(drawing, 160, 160, 336, { supersample: 2 });
+      const canvas = renderTVGToCanvas(drawing, 160, 160, viewport, { supersample: 2 });
       expect(canvas).not.toBeNull();
       expect(await loadBitmapTiles(canvas!, drawing.diagnostics)).toBe(true);
       const reference = await loadImageFromArrayBuffer(thumbData);

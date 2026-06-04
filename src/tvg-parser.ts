@@ -207,6 +207,7 @@ interface TVGBitmapRenderState {
   viewport?: number;
   centerOnOrigin: boolean;
   backgroundComposite: boolean;
+  disableBitmapAtlasEdgeTone: boolean;
   diagnostics?: TVGDiagnostics;
 }
 
@@ -2993,6 +2994,8 @@ export interface TVGRenderOptions {
   denseEdgeCoverageTiming?: 'pre-downsample' | 'post-downsample';
   /** Experimental: override dense line-fill post-processing constants for local score probes. */
   denseLineFillTuning?: TVGDenseLineFillTuning;
+  /** Experimental: bypass clipped bitmap-atlas edge tone in local score probes. */
+  disableBitmapAtlasEdgeTone?: boolean;
 }
 
 export interface TVGDenseLineFillTuning {
@@ -3030,6 +3033,7 @@ const BITMAP_ATLAS_EDGE_TONE_MIN_ALPHA = 32;
 const BITMAP_ATLAS_EDGE_TONE_MAX_ALPHA = 223;
 const BITMAP_ATLAS_EDGE_TONE_MIN_PIXELS = 400;
 const BITMAP_ATLAS_EDGE_TONE_WIDE_ASPECT_MIN = 1.6;
+const BITMAP_ATLAS_EDGE_TONE_TWELVE_TILE_WIDE_ASPECT_MIN = 2.3;
 const BITMAP_ATLAS_EDGE_TONE_MULTI_TILE_MIN = 16;
 const BITMAP_ATLAS_EDGE_TONE_MAX_TILES = 32;
 const TVG_VIEWPORT_CONTENT_PADDING = 227;
@@ -4563,12 +4567,23 @@ function shouldApplyBitmapAtlasEdgeTone(
   loadedCount: number,
   aspectRatio: number,
 ): boolean {
+  const wideAtlasEligible = aspectRatio >= BITMAP_ATLAS_EDGE_TONE_WIDE_ASPECT_MIN
+    && (loadedCount !== 12 || aspectRatio >= BITMAP_ATLAS_EDGE_TONE_TWELVE_TILE_WIDE_ASPECT_MIN);
   return !fallbackScanUsed
     && hasClipRects
     && loadedCount >= 8
     && loadedCount < BITMAP_ATLAS_EDGE_TONE_MAX_TILES
     && (loadedCount >= BITMAP_ATLAS_EDGE_TONE_MULTI_TILE_MIN
-      || aspectRatio >= BITMAP_ATLAS_EDGE_TONE_WIDE_ASPECT_MIN);
+      || wideAtlasEligible);
+}
+
+export function __shouldApplyBitmapAtlasEdgeToneForTests(
+  fallbackScanUsed: boolean,
+  hasClipRects: boolean,
+  loadedCount: number,
+  aspectRatio: number,
+): boolean {
+  return shouldApplyBitmapAtlasEdgeTone(fallbackScanUsed, hasClipRects, loadedCount, aspectRatio);
 }
 
 function createBitmapAtlasEdgeAlphaMask(
@@ -4648,6 +4663,7 @@ function renderBitmapTVGToCanvas(
     viewport,
     centerOnOrigin: options?.centerOnOrigin ?? false,
     backgroundComposite: options?.skipBackgroundComposite !== true,
+    disableBitmapAtlasEdgeTone: options?.disableBitmapAtlasEdgeTone ?? false,
     diagnostics: drawing.diagnostics,
   } as TVGBitmapRenderState;
   return canvas;
@@ -4866,6 +4882,7 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
     targetH = Math.max(1, targetH - 2);
   }
   const bitmapEdgeAlphaMask = (state?.backgroundComposite ?? true)
+    && !(state?.disableBitmapAtlasEdgeTone ?? false)
     && shouldApplyBitmapAtlasEdgeTone(fallbackScanUsed, hasClipRects, loaded.length, renderW / Math.max(renderH, 1))
     ? createBitmapAtlasEdgeAlphaMask(renderCanvas, width, height, dx, dy, targetW, targetH)
     : null;
