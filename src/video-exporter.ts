@@ -1439,6 +1439,7 @@ export async function exportSVG(
       let strokeWidth = 0;
       let strokeLinecap = '';
       let strokeLinejoin = '';
+      let strokeDasharray = '';
 
       // Get fill style
       if (edge.fillStyle0 !== undefined || edge.fillStyle1 !== undefined) {
@@ -1459,11 +1460,17 @@ export async function exportSVG(
           else if (strokeStyle.caps === 'square') strokeLinecap = ' stroke-linecap="square"';
           if (strokeStyle.joints === 'round') strokeLinejoin = ' stroke-linejoin="round"';
           else if (strokeStyle.joints === 'bevel') strokeLinejoin = ' stroke-linejoin="bevel"';
+          // Dashed strokes carry a [dash, gap] pattern in user-space units, 1:1 with
+          // stroke-width (= strokeStyle.weight, same units the canvas uses for lineWidth/
+          // setLineDash). Emit only for a non-empty dash; absent/empty -> solid (no attr).
+          if (Array.isArray(strokeStyle.dash) && strokeStyle.dash.length > 0) {
+            strokeDasharray = ` stroke-dasharray="${strokeStyle.dash.join(' ')}"`;
+          }
         }
       }
 
       const fillAttr = fill.includes('fill-opacity') ? `fill="${fill.split('"')[0]}" fill-opacity="${fill.split('"')[1]}"` : `fill="${fill}"`;
-      const strokeAttr = stroke !== 'none' ? ` stroke="${stroke}" stroke-width="${strokeWidth}"${strokeLinecap}${strokeLinejoin}` : '';
+      const strokeAttr = stroke !== 'none' ? ` stroke="${stroke}" stroke-width="${strokeWidth}"${strokeLinecap}${strokeLinejoin}${strokeDasharray}` : '';
 
       paths.push(`<path d="${pathData}" ${fillAttr}${strokeAttr}/>`);
     }
