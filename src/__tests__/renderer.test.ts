@@ -960,6 +960,95 @@ describe('FLARenderer', () => {
 
       expect(() => renderer.renderFrame(0)).not.toThrow();
     });
+
+    // Load-bearing proof that a DashedStroke renders with GAPS rather than as a
+    // solid line. Renders a long, thick horizontal stroke and inspects the row
+    // band the stroke occupies: a dashed stroke alternates dark (dash) and white
+    // (gap) columns, while a solid stroke would be dark all along. This test
+    // FAILS before the fix (no setLineDash -> all columns dark) and PASSES after.
+    function buildHorizontalStrokeDoc(dash?: number[]) {
+      return createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [],
+                strokes: [{
+                  type: 'solid',
+                  index: 1,
+                  color: '#000000',
+                  weight: 8,
+                  caps: 'none', // butt caps so gaps aren't filled in by round/square caps
+                  joints: 'round',
+                  ...(dash ? { dash } : {}),
+                }],
+                edges: [{
+                  strokeStyle: 1,
+                  commands: [
+                    { type: 'M', x: 40, y: 200 },
+                    { type: 'L', x: 500, y: 200 },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+    }
+
+    // Scan the canvas, find the horizontal row with the most dark (non-white)
+    // pixels (the stroke band), then return how many columns in that row are dark
+    // (dash) vs white (gap). Background is opaque white (#FFFFFF).
+    function strokeRowDarkLightCounts(): { dark: number; light: number } {
+      const ctx = canvas.getContext('2d')!;
+      const w = canvas.width;
+      const h = canvas.height;
+      const d = ctx.getImageData(0, 0, w, h).data;
+      const isDark = (x: number, y: number): boolean => {
+        const i = (y * w + x) * 4;
+        const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+        return a > 0 && (r < 200 || g < 200 || b < 200);
+      };
+      // Find the densest stroke row.
+      let bestRow = -1;
+      let bestDark = -1;
+      for (let y = 0; y < h; y++) {
+        let dark = 0;
+        for (let x = 0; x < w; x++) if (isDark(x, y)) dark++;
+        if (dark > bestDark) { bestDark = dark; bestRow = y; }
+      }
+      // Within the horizontal extent of the stroke on that row, count dark/light.
+      let minX = w, maxX = -1;
+      for (let x = 0; x < w; x++) {
+        if (isDark(x, bestRow)) { if (x < minX) minX = x; if (x > maxX) maxX = x; }
+      }
+      let dark = 0, light = 0;
+      for (let x = minX; x <= maxX; x++) {
+        if (isDark(x, bestRow)) dark++; else light++;
+      }
+      return { dark, light };
+    }
+
+    it('renders a solid stroke as a continuous line (no gaps)', async () => {
+      await renderer.setDocument(buildHorizontalStrokeDoc());
+      renderer.renderFrame(0);
+      const { dark, light } = strokeRowDarkLightCounts();
+      expect(dark).toBeGreaterThan(0);
+      // A solid stroke has essentially no interior gaps along its span.
+      expect(light).toBe(0);
+    });
+
+    it('renders a DashedStroke with visible gaps along the line', async () => {
+      // Pattern large relative to weight so gaps are unmistakable.
+      await renderer.setDocument(buildHorizontalStrokeDoc([24, 24]));
+      renderer.renderFrame(0);
+      const { dark, light } = strokeRowDarkLightCounts();
+      // Both dash (dark) and gap (white) samples must appear along the stroke path.
+      expect(dark).toBeGreaterThan(0);
+      expect(light).toBeGreaterThan(0);
+    });
   });
 
   describe('symbol instances', () => {

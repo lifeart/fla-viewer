@@ -58,6 +58,14 @@ export function setParserDebug(value: boolean): void {
 export type ProgressCallback = (message: string) => void;
 export type SkipCheckCallback = () => boolean;
 
+// Animate's default "Dashed" line style when <DashedStroke> omits dashLength/spaceLength.
+// Source: the Property Inspector "Dashed" stroke style (Stroke Style dialog) defaults; the
+// Adobe JSFL Stroke object documents dash1 (solid run) and dash2 (gap) as integers but does
+// not publish the absent-attribute defaults, so we mirror the UI default 4-unit dash + 4-unit
+// gap. Units match `weight` (1:1 with canvas lineWidth/user space), so no conversion is needed.
+const DEFAULT_DASH_LENGTH = 4;
+const DEFAULT_DASH_SPACE_LENGTH = 4;
+
 export class FLAParser {
   private zip: JSZip | null = null;
   private symbolCache: Map<string, Symbol> = new Map();
@@ -1332,17 +1340,27 @@ export class FLAParser {
         continue;
       }
 
-      // Check for DashedStroke (treat similar to SolidStroke)
+      // Check for DashedStroke (a solid-colored line drawn with a dash pattern)
       const dashedStroke = strokeEl.querySelector('DashedStroke');
       if (dashedStroke) {
         const commonProps = parseCommonStrokeProps(dashedStroke);
         const solidColor = dashedStroke.querySelector('fill > SolidColor');
         const color = solidColor?.getAttribute('color') || '#000000';
 
+        // XFL <DashedStroke dashLength="…" spaceLength="…"> — lengths are in the
+        // same user-space units as `weight`, so they map 1:1 to canvas setLineDash.
+        // Real Animate files routinely omit both attributes and rely on the UI
+        // default "Dashed" line style, which is a 4-unit dash + 4-unit gap.
+        const dashLengthAttr = dashedStroke.getAttribute('dashLength');
+        const spaceLengthAttr = dashedStroke.getAttribute('spaceLength');
+        const dashLength = dashLengthAttr !== null ? parseFloat(dashLengthAttr) : DEFAULT_DASH_LENGTH;
+        const spaceLength = spaceLengthAttr !== null ? parseFloat(spaceLengthAttr) : DEFAULT_DASH_SPACE_LENGTH;
+
         strokes.push({
           index,
           type: 'solid',
           color,
+          dash: [dashLength, spaceLength],
           ...commonProps
         } as StrokeStyle);
         continue;

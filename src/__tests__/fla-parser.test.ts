@@ -3009,7 +3009,7 @@ describe('FLAParser', () => {
                         <fills></fills>
                         <strokes>
                           <StrokeStyle index="1">
-                            <DashedStroke weight="2" caps="round" joints="round">
+                            <DashedStroke weight="2" caps="round" joints="round" dashLength="4" spaceLength="3">
                               <fill><SolidColor color="#333333"/></fill>
                             </DashedStroke>
                           </StrokeStyle>
@@ -3033,6 +3033,8 @@ describe('FLAParser', () => {
       expect(element.strokes.length).toBeGreaterThan(0);
       expect(element.strokes[0].weight).toBe(2);
       expect(element.strokes[0].color).toBe('#333333');
+      // DashedStroke carries the [dashLength, spaceLength] pattern (user-space units).
+      expect(element.strokes[0].dash).toEqual([4, 3]);
     });
 
     it('should parse DashedStroke with default attributes', async () => {
@@ -3072,6 +3074,9 @@ describe('FLAParser', () => {
       expect(element.strokes.length).toBeGreaterThan(0);
       expect(element.strokes[0].weight).toBe(1); // default
       expect(element.strokes[0].color).toBe('#000000'); // default
+      // When dashLength/spaceLength are absent (as in real Animate files), fall back to the
+      // Animate UI "Dashed" line style default (4-unit dash + 4-unit gap).
+      expect(element.strokes[0].dash).toEqual([4, 4]);
     });
   });
 
