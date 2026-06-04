@@ -379,7 +379,8 @@ describe('tvg rendering', () => {
   });
 
   it('uses source-stable eligibility for clipped bitmap atlas edge tone', () => {
-    expect(__shouldApplyBitmapAtlasEdgeToneForTests(false, true, 8, 1.47)).toBe(false);
+    expect(__shouldApplyBitmapAtlasEdgeToneForTests(false, true, 8, 1.34)).toBe(false);
+    expect(__shouldApplyBitmapAtlasEdgeToneForTests(false, true, 8, 1.47)).toBe(true);
     expect(__shouldApplyBitmapAtlasEdgeToneForTests(false, true, 8, 2.01)).toBe(true);
     expect(__shouldApplyBitmapAtlasEdgeToneForTests(false, true, 12, 2.1)).toBe(false);
     expect(__shouldApplyBitmapAtlasEdgeToneForTests(false, true, 12, 2.38)).toBe(true);
