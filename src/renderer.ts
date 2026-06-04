@@ -1835,17 +1835,24 @@ export class FLARenderer {
                            instance.rotationZ !== undefined ||
                            instance.z !== undefined;
 
-    // Per-channel RGB color transform (covers tint) cannot be expressed with
-    // CSS/canvas filters reliably, so when present we render the symbol's
-    // subtree into an offscreen buffer, apply c' = clamp(c*mult + offset, 0, 255)
-    // per pixel, then composite the tinted buffer back onto the main context.
-    // Alpha (globalAlpha), blend mode, and any filters were already configured
-    // on the main `ctx` above and are applied exactly once at composite time.
+    // Per-channel RGB color transform (covers tint) AND colorMatrix filters
+    // cannot be expressed with CSS/canvas filters reliably (Chromium's 2D
+    // ctx.filter does not honor data-URL SVG feColorMatrix), so when either is
+    // present we render the symbol's subtree into an offscreen buffer, apply the
+    // per-pixel passes (color transform c'=clamp(c*mult+offset); then each
+    // colorMatrix M.[r,g,b,a,1]) on that buffer, then composite the adjusted
+    // buffer back onto the main context. Alpha (globalAlpha), blend mode, and
+    // the OTHER filters (blur/glow/dropShadow — set on the main `ctx` above via
+    // shadow/CSS) are applied exactly once at composite time, so they operate on
+    // the already color-adjusted bitmap (matching Flash's filter stack order:
+    // AdjustColor/ColorMatrix adjusts the bitmap, then blur/glow spread it).
     const needsRgbColorTransform =
       !!instance.colorTransform && this.colorTransformAffectsRGB(instance.colorTransform);
+    const needsColorMatrix = this.filtersHaveColorMatrix(instance.filters);
+    const needsPixelPass = needsRgbColorTransform || needsColorMatrix;
     let colorTransformOffscreen: HTMLCanvasElement | null = null;
     let mainCtxForColorTransform: CanvasRenderingContext2D | null = null;
-    if (needsRgbColorTransform) {
+    if (needsPixelPass) {
       const offscreen = document.createElement('canvas');
       offscreen.width = this.canvas.width;
       offscreen.height = this.canvas.height;
@@ -1968,25 +1975,37 @@ export class FLARenderer {
     }
 
     // If we diverted the subtree to an offscreen buffer for an RGB color
-    // transform, apply the per-channel c*mult+offset tint to that buffer and
-    // composite it back onto the main context. The composite uses the main
-    // context's globalAlpha (alpha applied once), filters, and blend mode.
-    if (colorTransformOffscreen && mainCtxForColorTransform && instance.colorTransform) {
+    // transform and/or a colorMatrix filter, apply the per-pixel passes to that
+    // buffer and composite it back onto the main context. The composite uses the
+    // main context's globalAlpha (alpha applied once), filters (blur/glow/
+    // dropShadow), and blend mode.
+    if (colorTransformOffscreen && mainCtxForColorTransform) {
       // Restore the main context as the active drawing target.
       this.ctx = mainCtxForColorTransform;
       const offCtx = colorTransformOffscreen.getContext('2d');
       if (offCtx) {
-        this.applyColorTransformToImage(
-          offCtx,
-          instance.colorTransform,
-          0, 0,
-          colorTransformOffscreen.width,
-          colorTransformOffscreen.height
-        );
+        const ow = colorTransformOffscreen.width;
+        const oh = colorTransformOffscreen.height;
+        // 1) Color transform (tint) first: c' = clamp(c*mult + offset).
+        if (needsRgbColorTransform && instance.colorTransform) {
+          this.applyColorTransformToImage(offCtx, instance.colorTransform, 0, 0, ow, oh);
+        }
+        // 2) Then each colorMatrix filter (in filter-list order), applied to the
+        //    already color-transformed bitmap. This matches Flash's filter stack:
+        //    the color transform is an instance property applied before filters,
+        //    and ColorMatrix/AdjustColor filters adjust the resulting bitmap.
+        if (needsColorMatrix && instance.filters) {
+          for (const filter of instance.filters) {
+            if (filter.type === 'colorMatrix' && Array.isArray(filter.matrix) && filter.matrix.length === 20) {
+              this.applyColorMatrixToImage(offCtx, filter.matrix, 0, 0, ow, oh);
+            }
+          }
+        }
       }
       // Composite at identity transform: the offscreen already baked in the
       // parent transform + instance matrix, so draw 1:1. globalAlpha / filter /
-      // blend mode currently on the main ctx are honored here (once).
+      // blend mode currently on the main ctx are honored here (once) and apply
+      // to the already color-adjusted bitmap.
       const mainCtx = mainCtxForColorTransform;
       mainCtx.save();
       mainCtx.setTransform(1, 0, 0, 1, 0, 0);
@@ -3609,16 +3628,14 @@ export class FLARenderer {
           ctx.shadowOffsetY = -highlightOffsetY;
           break;
         case 'colorMatrix':
-          // Apply color matrix using SVG filter
-          // Build SVG feColorMatrix filter string
-          if (filter.matrix && filter.matrix.length === 20) {
-            // Convert 4x5 matrix to SVG feColorMatrix format (5x4 transposed, no alpha offset row)
-            // SVG format: R->R, R->G, R->B, R->A, R->offset, G->R, ...
-            const m = filter.matrix;
-            // Build url() filter using inline SVG
-            const svgFilter = this.buildColorMatrixSVGFilter(m);
-            cssFilters.push(`url("data:image/svg+xml,${encodeURIComponent(svgFilter)}")`);
-          }
+          // colorMatrix is handled by an offscreen per-pixel pass in
+          // renderSymbolInstance (see applyColorMatrixToImage), NOT here:
+          // Chromium's 2D ctx.filter does not honor data-URL SVG feColorMatrix
+          // references, so pushing url("data:image/svg+xml,...feColorMatrix...")
+          // onto ctx.filter is a silent no-op (and would also clobber any
+          // working CSS filter like blur). Deliberately do nothing in the
+          // canvas filter pass. (The SVG-export path renders feColorMatrix
+          // natively elsewhere and is unaffected.)
           break;
         case 'convolution':
           // Convolution filters (sharpen, emboss, etc.) require pixel manipulation
@@ -3674,19 +3691,6 @@ export class FLARenderer {
     if (cssFilters.length > 0) {
       ctx.filter = cssFilters.join(' ');
     }
-  }
-
-  // Build an inline SVG filter for color matrix transformation
-  private buildColorMatrixSVGFilter(matrix: number[]): string {
-    // Normalize matrix values for SVG (divide offsets by 255)
-    const m = [...matrix];
-    // Offsets are at indices 4, 9, 14, 19 - convert from 0-255 to 0-1
-    m[4] /= 255;
-    m[9] /= 255;
-    m[14] /= 255;
-    m[19] /= 255;
-
-    return `<svg xmlns="http://www.w3.org/2000/svg"><filter id="cm"><feColorMatrix type="matrix" values="${m.join(' ')}"/></filter></svg>#cm`;
   }
 
   // Check if convolution matrix is identity (no effect)
@@ -3813,6 +3817,57 @@ export class FLARenderer {
       d[i] = Math.max(0, Math.min(255, d[i] * rMult + rOff));
       d[i + 1] = Math.max(0, Math.min(255, d[i + 1] * gMult + gOff));
       d[i + 2] = Math.max(0, Math.min(255, d[i + 2] * bMult + bOff));
+    }
+    offCtx.putImageData(image, x, y);
+  }
+
+  // True when the filter list contains at least one colorMatrix filter (so the
+  // instance needs the offscreen per-pixel pass — ctx.filter does not honor
+  // data-URL SVG feColorMatrix in Chromium, see applyColorMatrixToImage).
+  private filtersHaveColorMatrix(filters: Filter[] | undefined): boolean {
+    return !!filters && filters.some(f => f.type === 'colorMatrix' && Array.isArray(f.matrix) && f.matrix.length === 20);
+  }
+
+  // Apply a 4x5 colorMatrix per pixel in place over the given region of a
+  // canvas's pixels: [r',g',b',a'] = M . [r,g,b,a,1], clamped to [0,255].
+  //
+  // Offset-scale convention (matched EXACTLY to the SVG feColorMatrix path so
+  // canvas == SVG export): the parser stores the matrix with multiplier
+  // coefficients that act on channels treated as 0..1 (SVG feColorMatrix
+  // convention) but with the 5th-column offsets in the 0..255 scale (see
+  // buildAdjustColorMatrix in fla-parser.ts, which adds brightness*2.55 and
+  // t*255 into the offset columns). The SVG path divides those offsets by 255 to
+  // feed SVG's 0..1 offsets. getImageData pixels are straight (un-premultiplied)
+  // RGBA in 0..255. Because the multiplier part is a linear combination it is
+  // scale-invariant (m*255c == 255*(m*c)), so on 0..255 channels we apply the
+  // multipliers directly and ADD the stored 0..255 offset — algebraically
+  // identical to the SVG path's normalize/denormalize. The alpha row is applied
+  // the same way.
+  private applyColorMatrixToImage(
+    offCtx: CanvasRenderingContext2D,
+    matrix: number[],
+    x: number,
+    y: number,
+    w: number,
+    h: number
+  ): void {
+    if (w <= 0 || h <= 0) return;
+    if (!Array.isArray(matrix) || matrix.length !== 20) return;
+    const m = matrix;
+    const image = offCtx.getImageData(x, y, w, h);
+    const d = image.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+      // Multipliers (indices *0..*3) act linearly on the 0..255 channels; the
+      // offset column (indices *4) is already in the 0..255 scale.
+      const nr = m[0]  * r + m[1]  * g + m[2]  * b + m[3]  * a + m[4];
+      const ng = m[5]  * r + m[6]  * g + m[7]  * b + m[8]  * a + m[9];
+      const nb = m[10] * r + m[11] * g + m[12] * b + m[13] * a + m[14];
+      const na = m[15] * r + m[16] * g + m[17] * b + m[18] * a + m[19];
+      d[i]     = nr < 0 ? 0 : nr > 255 ? 255 : nr;
+      d[i + 1] = ng < 0 ? 0 : ng > 255 ? 255 : ng;
+      d[i + 2] = nb < 0 ? 0 : nb > 255 ? 255 : nb;
+      d[i + 3] = na < 0 ? 0 : na > 255 ? 255 : na;
     }
     offCtx.putImageData(image, x, y);
   }
