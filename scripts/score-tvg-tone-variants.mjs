@@ -17,6 +17,20 @@ const allVariants = [
   { name: 'no-dense-post', renderOptions: { disableDenseLineFillAdjustment: true } },
   { name: 'bg-post-before-dense', renderOptions: { backgroundCompositeTiming: 'post-downsample-before-dense' } },
   { name: 'bg-post-after-dense', renderOptions: { backgroundCompositeTiming: 'post-downsample-after-dense' } },
+  {
+    name: 'edge-post-bg-before-dense',
+    renderOptions: {
+      denseEdgeCoverageTiming: 'post-downsample',
+      backgroundCompositeTiming: 'post-downsample-before-dense',
+    },
+  },
+  {
+    name: 'edge-post-bg-after-dense',
+    renderOptions: {
+      denseEdgeCoverageTiming: 'post-downsample',
+      backgroundCompositeTiming: 'post-downsample-after-dense',
+    },
+  },
   { name: 'dense-edge-alpha-1.00', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.0 } } },
   { name: 'dense-edge-alpha-1.05', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.05 } } },
   { name: 'dense-edge-alpha-1.10', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.1 } } },
@@ -27,7 +41,11 @@ const allVariants = [
   { name: 'dense-edge-alpha-1.18', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.18 } } },
   { name: 'dense-edge-alpha-1.20', renderOptions: { denseLineFillTuning: { edgeAlphaScale: 1.2 } } },
   { name: 'dense-expansion-0.70', renderOptions: { denseLineFillTuning: { exteriorEdgeExpansionScale: 0.7 } } },
+  { name: 'dense-expansion-0.75', renderOptions: { denseLineFillTuning: { exteriorEdgeExpansionScale: 0.75 } } },
+  { name: 'dense-expansion-0.78', renderOptions: { denseLineFillTuning: { exteriorEdgeExpansionScale: 0.78 } } },
   { name: 'dense-expansion-0.80', renderOptions: { denseLineFillTuning: { exteriorEdgeExpansionScale: 0.8 } } },
+  { name: 'dense-expansion-0.82', renderOptions: { denseLineFillTuning: { exteriorEdgeExpansionScale: 0.82 } } },
+  { name: 'dense-expansion-0.85', renderOptions: { denseLineFillTuning: { exteriorEdgeExpansionScale: 0.85 } } },
   { name: 'dense-expansion-1.00', renderOptions: { denseLineFillTuning: { exteriorEdgeExpansionScale: 1.0 } } },
   { name: 'dense-edge-tone-0', renderOptions: { denseLineFillTuning: { edgeToneSubtract: 0 } } },
   { name: 'dense-edge-tone-16', renderOptions: { denseLineFillTuning: { edgeToneSubtract: 16 } } },

@@ -2989,6 +2989,8 @@ export interface TVGRenderOptions {
   disableDenseLineFillAdjustment?: boolean;
   /** Experimental: choose when white background is composited relative to downsampling/dense post-processing. */
   backgroundCompositeTiming?: 'pre-downsample' | 'post-downsample-before-dense' | 'post-downsample-after-dense';
+  /** Experimental: choose whether dense edge alpha coverage is adjusted before or after downsampling. */
+  denseEdgeCoverageTiming?: 'pre-downsample' | 'post-downsample';
   /** Experimental: override dense line-fill post-processing constants for local score probes. */
   denseLineFillTuning?: TVGDenseLineFillTuning;
 }
@@ -3009,7 +3011,7 @@ const DENSE_LINE_FILL_TONE_CONTRAST = 0.9024;
 const DENSE_LINE_FILL_TONE_OFFSET = -4;
 const DENSE_LINE_FILL_BACKGROUND_TOLERANCE = 12;
 const DENSE_LINE_FILL_EDGE_ALPHA_SCALE = 1.14;
-const DENSE_LINE_FILL_EXTERIOR_EDGE_EXPANSION_SCALE = 0.9;
+const DENSE_LINE_FILL_EXTERIOR_EDGE_EXPANSION_SCALE = 0.78;
 const DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS = 900;
 const DENSE_LINE_FILL_EDGE_EXPANSION_MAX_FRACTIONAL_ALPHA_PIXELS = 1000;
 const DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS = 1500;
@@ -3969,10 +3971,11 @@ export function renderTVGToCanvas(
 
   const shouldApplyDenseLineFillAdjustment = shouldApplyDenseLineFillInkDensityAdjustment(renderDrawing, options);
   const denseLineFillTuning = resolveDenseLineFillTuning(options);
+  const denseEdgeCoverageTiming = options?.denseEdgeCoverageTiming ?? 'pre-downsample';
   let denseLineFillOutputAlphaMask: Uint8ClampedArray | null = null;
   let shouldApplyDenseLineFillEdgeTone = false;
   let denseLineFillOutputFractionalAlphaPixels = 0;
-  if (shouldApplyDenseLineFillAdjustment) {
+  if (shouldApplyDenseLineFillAdjustment && denseEdgeCoverageTiming === 'pre-downsample') {
     const outputFractionalAlphaPixels = applyDenseLineFillEdgeCoverageAdjustment(
       canvas,
       width,
@@ -3985,7 +3988,12 @@ export function renderTVGToCanvas(
   }
 
   // Pre-composite against white background (skip for matte/compositor sources)
-  const backgroundCompositeTiming = options?.backgroundCompositeTiming ?? 'pre-downsample';
+  const requestedBackgroundCompositeTiming = options?.backgroundCompositeTiming ?? 'pre-downsample';
+  const backgroundCompositeTiming = shouldApplyDenseLineFillAdjustment
+    && denseEdgeCoverageTiming === 'post-downsample'
+    && requestedBackgroundCompositeTiming === 'pre-downsample'
+    ? 'post-downsample-before-dense'
+    : requestedBackgroundCompositeTiming;
   const shouldCompositeBackground = !options?.skipBackgroundComposite;
   if (shouldCompositeBackground && backgroundCompositeTiming === 'pre-downsample') {
     compositeWhiteBackground(canvas);
@@ -4000,6 +4008,17 @@ export function renderTVGToCanvas(
     outCtx.imageSmoothingEnabled = true;
     outCtx.imageSmoothingQuality = 'high';
     outCtx.drawImage(canvas, 0, 0, width, height);
+    if (shouldApplyDenseLineFillAdjustment && denseEdgeCoverageTiming === 'post-downsample') {
+      const outputFractionalAlphaPixels = applyDenseLineFillEdgeCoverageAdjustment(
+        outCanvas,
+        width,
+        height,
+        denseLineFillTuning,
+      );
+      denseLineFillOutputFractionalAlphaPixels = outputFractionalAlphaPixels;
+      denseLineFillOutputAlphaMask = createOutputAlphaMask(outCanvas, width, height);
+      shouldApplyDenseLineFillEdgeTone = outputFractionalAlphaPixels >= DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS;
+    }
     if (shouldCompositeBackground && backgroundCompositeTiming === 'post-downsample-before-dense') {
       compositeWhiteBackground(outCanvas);
     }
@@ -4016,6 +4035,17 @@ export function renderTVGToCanvas(
     return outCanvas;
   }
 
+  if (shouldApplyDenseLineFillAdjustment && denseEdgeCoverageTiming === 'post-downsample') {
+    const outputFractionalAlphaPixels = applyDenseLineFillEdgeCoverageAdjustment(
+      canvas,
+      width,
+      height,
+      denseLineFillTuning,
+    );
+    denseLineFillOutputFractionalAlphaPixels = outputFractionalAlphaPixels;
+    denseLineFillOutputAlphaMask = createOutputAlphaMask(canvas, width, height);
+    shouldApplyDenseLineFillEdgeTone = outputFractionalAlphaPixels >= DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS;
+  }
   if (shouldCompositeBackground && backgroundCompositeTiming === 'post-downsample-before-dense') {
     compositeWhiteBackground(canvas);
   }
