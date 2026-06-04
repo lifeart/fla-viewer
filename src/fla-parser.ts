@@ -978,6 +978,13 @@ export class FLAParser {
       const alignment = (attrsEl?.getAttribute('alignment') || 'left') as TextRun['alignment'];
       const size = parseFloat(attrsEl?.getAttribute('size') || '12');
       const lineHeight = parseFloat(attrsEl?.getAttribute('lineHeight') || String(size));
+      // lineSpacing = leading: extra space ADDED between lines, in the SAME
+      // point/pixel scale as `lineHeight`/`size` (no twips conversion). Absent
+      // => undefined => treated as 0 (no change) by the renderer. See
+      // Adobe "Extending Flash Professional" TextAttrs.lineSpacing.
+      const lineSpacing = attrsEl?.getAttribute('lineSpacing')
+        ? parseFloat(attrsEl.getAttribute('lineSpacing')!)
+        : undefined;
       const face = attrsEl?.getAttribute('face') || undefined;
       const fillColor = attrsEl?.getAttribute('fillColor') || '#000000';
       const bold = attrsEl?.getAttribute('bold') === 'true';
@@ -1027,6 +1034,7 @@ export class FLAParser {
       };
 
       // Only add optional properties if they have values
+      if (lineSpacing !== undefined) run.lineSpacing = lineSpacing;
       if (underline) run.underline = true;
       if (indent !== undefined) run.indent = indent;
       if (leftMargin !== undefined) run.leftMargin = leftMargin;

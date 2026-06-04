@@ -214,6 +214,13 @@ export interface TextRun {
   alignment?: 'left' | 'center' | 'right' | 'justify';
   size: number;
   lineHeight?: number;
+  /**
+   * Leading: extra vertical space ADDED between consecutive lines, in the same
+   * point/pixel scale as `size`/`lineHeight`. Maps to XFL
+   * `<DOMTextAttrs lineSpacing="…">`. Positive widens the gap, negative tightens
+   * it (Adobe TextAttrs.lineSpacing range is -360..720). Absent/0 => no change.
+   */
+  lineSpacing?: number;
   face?: string;
   fillColor: string;
   bold?: boolean;
