@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FLARenderer, setRendererDebug } from '../renderer';
-import type { Edge } from '../types';
+import type { Edge, TextRun } from '../types';
 import {
   createConsoleSpy,
   createConsoleWarnSpy,
@@ -3171,6 +3171,173 @@ describe('FLARenderer', () => {
       await renderer.setDocument(doc);
 
       expect(() => renderer.renderFrame(0)).not.toThrow();
+    });
+  });
+
+  describe('inline multi-run text layout', () => {
+    // Find the bounding box of all pixels matching a color (with tolerance),
+    // ignoring antialiased blends with the white background.
+    function colorBounds(
+      cnv: HTMLCanvasElement,
+      colorHex: string,
+      tolerance = 60
+    ): { minX: number; maxX: number; minY: number; maxY: number; count: number } {
+      const ctx = cnv.getContext('2d')!;
+      const data = ctx.getImageData(0, 0, cnv.width, cnv.height).data;
+      const tr = parseInt(colorHex.slice(1, 3), 16);
+      const tg = parseInt(colorHex.slice(3, 5), 16);
+      const tb = parseInt(colorHex.slice(5, 7), 16);
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, count = 0;
+      for (let y = 0; y < cnv.height; y++) {
+        for (let x = 0; x < cnv.width; x++) {
+          const i = (y * cnv.width + x) * 4;
+          const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+          if (
+            a > 40 &&
+            Math.abs(r - tr) <= tolerance &&
+            Math.abs(g - tg) <= tolerance &&
+            Math.abs(b - tb) <= tolerance
+          ) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+            count++;
+          }
+        }
+      }
+      return { minX, maxX, minY, maxY, count };
+    }
+
+    it('flows two contrasting runs inline on the same line (run2 to the right of run1)', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                left: 0,
+                width: 300,
+                height: 100,
+                textRuns: [
+                  { characters: 'Bold ', size: 24, face: 'Arial', fillColor: '#000000', bold: true },
+                  { characters: 'Red', size: 24, face: 'Arial', fillColor: '#FF0000' },
+                ],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const black = colorBounds(canvas, '#000000');
+      const red = colorBounds(canvas, '#FF0000');
+
+      expect(black.count).toBeGreaterThan(0);
+      expect(red.count).toBeGreaterThan(0);
+
+      // Same vertical row band: the runs share a line, so their y ranges overlap.
+      const vOverlap = Math.min(black.maxY, red.maxY) - Math.max(black.minY, red.minY);
+      expect(vOverlap).toBeGreaterThan(0);
+
+      // run2 ("Red") is appended to the RIGHT of run1 ("Bold ").
+      // Pre-fix this FAILS: "Red" was drawn a full line BELOW, restarting at the
+      // left x, so red.minX (~left) was NOT greater than black.maxX.
+      expect(red.minX).toBeGreaterThan(black.maxX);
+    });
+
+    it('breaks to the next line on a trailing carriage return without a spurious blank line', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 50 }),
+                left: 0,
+                width: 300,
+                height: 200,
+                textRuns: [
+                  // Real-file shape: run1 ends with \r, run2 follows on the next line.
+                  { characters: 'Line1\r', size: 24, lineHeight: 30, face: 'Arial', fillColor: '#000000' },
+                  { characters: 'Line2', size: 24, lineHeight: 30, face: 'Arial', fillColor: '#FF0000' },
+                ],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const black = colorBounds(canvas, '#000000');
+      const red = colorBounds(canvas, '#FF0000');
+
+      expect(black.count).toBeGreaterThan(0);
+      expect(red.count).toBeGreaterThan(0);
+
+      // run2 is on the NEXT line (greater y band, no vertical overlap).
+      expect(red.minY).toBeGreaterThan(black.maxY);
+
+      // The y delta between line tops is approximately ONE lineHeight (30px),
+      // not two: the trailing \r must not insert a spurious blank line.
+      const lineDelta = red.minY - black.minY;
+      expect(lineDelta).toBeGreaterThan(15);
+      expect(lineDelta).toBeLessThan(45);
+    });
+
+    it('centers a line made of two inline runs as if it were one centered run', async () => {
+      // Build a doc with a single text element; the textRuns differ per case.
+      const makeDoc = (textRuns: TextRun[]) => createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 100 }),
+                left: 0,
+                width: 400,
+                height: 60,
+                textRuns,
+              }],
+            })],
+          })],
+        })],
+      });
+
+      // Reference: ONE centered run with the same text + font.
+      await renderer.setDocument(makeDoc([
+        { characters: 'AAA BBBBBBBB', size: 24, face: 'Arial', fillColor: '#0000FF', alignment: 'center' },
+      ]));
+      renderer.renderFrame(0);
+      const ref = colorBounds(canvas, '#0000FF');
+      expect(ref.count).toBeGreaterThan(0);
+      const refCenter = (ref.minX + ref.maxX) / 2;
+
+      // Two inline runs of different widths, both centered. Mixed-run line-width
+      // measurement must place the combined line at the SAME horizontal center
+      // as the single-run reference (transform/scale agnostic).
+      await renderer.setDocument(makeDoc([
+        { characters: 'AAA ', size: 24, face: 'Arial', fillColor: '#000000', alignment: 'center' },
+        { characters: 'BBBBBBBB', size: 24, face: 'Arial', fillColor: '#FF0000', alignment: 'center' },
+      ]));
+      renderer.renderFrame(0);
+      const black = colorBounds(canvas, '#000000');
+      const red = colorBounds(canvas, '#FF0000');
+      expect(black.count).toBeGreaterThan(0);
+      expect(red.count).toBeGreaterThan(0);
+
+      // run2 still inline to the right of run1.
+      expect(red.minX).toBeGreaterThan(black.maxX);
+
+      const lineMinX = Math.min(black.minX, red.minX);
+      const lineMaxX = Math.max(black.maxX, red.maxX);
+      const lineCenter = (lineMinX + lineMaxX) / 2;
+
+      // Same center as the single-run reference (small slack for AA / bearings).
+      expect(Math.abs(lineCenter - refCenter)).toBeLessThan(8);
     });
   });
 
