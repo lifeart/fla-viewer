@@ -2434,5 +2434,206 @@ describe('video-exporter', () => {
       expect(inside[3]).toBeGreaterThan(200); // opaque
       expect(outside[3]).toBeLessThan(20);    // clipped => transparent
     });
+
+    // --- Color-transform (tint) parity with the canvas renderer -------------
+    // The instance RGB color transform (tint) is emitted as a <feColorMatrix>
+    // PREPENDED into the SAME instance <filter> chain as blur/glow/etc. (see
+    // createFilterDef in video-exporter.ts), so SVG export matches the canvas,
+    // which renders the subtree to an offscreen buffer, applies
+    // c' = clamp(c*mult + offset, 0, 255) per channel, then composites it
+    // through any filters. Build a doc with a single graphic-symbol instance
+    // carrying the given colorTransform (and optional filters), so we can assert
+    // how exportSVG emits the instance <g> / <filter>. The symbol is a solid
+    // (white) square.
+    const createTintInstanceDoc = (
+      instanceProps: Partial<import('../types').SymbolInstance>
+    ): import('../types').FLADocument => {
+      const symbols = new Map();
+      symbols.set('TintSymbol', {
+        name: 'TintSymbol',
+        itemID: 'tint-1',
+        symbolType: 'graphic' as const,
+        timeline: {
+          name: 'TintSymbol',
+          layers: [{
+            name: 'Layer 1',
+            color: '#000000',
+            visible: true,
+            locked: false,
+            outline: false,
+            frames: [{
+              index: 0,
+              duration: 1,
+              keyMode: 9728,
+              elements: [{
+                type: 'shape' as const,
+                matrix: createMatrix(),
+                fills: [{ index: 1, type: 'solid' as const, color: '#FFFFFF' }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M' as const, x: 0, y: 0 },
+                    { type: 'L' as const, x: 20, y: 0 },
+                    { type: 'L' as const, x: 20, y: 20 },
+                    { type: 'L' as const, x: 0, y: 20 },
+                    { type: 'Z' as const },
+                  ],
+                }],
+              }],
+            }],
+          }],
+          totalFrames: 1,
+          referenceLayers: new Set<number>(),
+        },
+      });
+
+      return createMinimalDoc({
+        width: 100,
+        height: 100,
+        symbols,
+        timelines: [createTimeline({
+          totalFrames: 1,
+          layers: [createLayer({
+            frames: [createFrame({
+              index: 0,
+              duration: 1,
+              elements: [{
+                type: 'symbol',
+                libraryItemName: 'TintSymbol',
+                symbolType: 'graphic',
+                matrix: createMatrix(),
+                transformationPoint: { x: 0, y: 0 },
+                loop: 'single frame',
+                firstFrame: 0,
+                ...instanceProps,
+              }],
+            })],
+          })],
+        })],
+      });
+    };
+
+    it('emits a feColorMatrix for an RGB color-transform (tint) and references it from the instance <g>', async () => {
+      // #FF0000 @ tint 0.32 -> redMultiplier 0.68, redOffset 81.6 (0..255 scale,
+      // matching the canvas / parser convention). feColorMatrix offsets are 0..1,
+      // so the R-offset slot must be 81.6/255 = 0.32.
+      const doc = createTintInstanceDoc({
+        colorTransform: {
+          redMultiplier: 0.68,
+          greenMultiplier: 0.68,
+          blueMultiplier: 0.68,
+          redOffset: 81.6,
+          greenOffset: 0,
+          blueOffset: 0,
+        },
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // A feColorMatrix is emitted...
+      expect(text).toContain('<feColorMatrix');
+      // ...with the R/G/B multipliers and the R-offset = 81.6/255 ≈ 0.32 in the
+      // R-offset slot (5th value). Parse the matrix and assert numerically so
+      // we don't depend on float formatting (0.31999999999999995).
+      const matrixMatch = text.match(/<feColorMatrix[^>]* type="matrix" values="([^"]+)"/);
+      expect(matrixMatch).not.toBeNull();
+      const values = matrixMatch![1].trim().split(/\s+/).map(Number);
+      // Row-major 4x5: R row = indices 0..4.
+      expect(values[0]).toBeCloseTo(0.68, 6); // redMultiplier
+      expect(values[4]).toBeCloseTo(0.32, 6); // redOffset/255
+      expect(values[6]).toBeCloseTo(0.68, 6); // greenMultiplier
+      expect(values[9]).toBeCloseTo(0, 6);    // greenOffset/255
+      expect(values[12]).toBeCloseTo(0.68, 6); // blueMultiplier
+      expect(values[14]).toBeCloseTo(0, 6);   // blueOffset/255
+      // ...wrapped in a <filter> the instance <g> references.
+      const filterMatch = text.match(/<filter id="(filter_\d+)"/);
+      expect(filterMatch).not.toBeNull();
+      const filterId = filterMatch![1];
+      expect(text).toContain(`filter="url(#${filterId})"`);
+    });
+
+    it('keeps a blur filter AND the tint color-matrix in the same chain (no clobber)', async () => {
+      const doc = createTintInstanceDoc({
+        colorTransform: {
+          redMultiplier: 0.68,
+          greenMultiplier: 0.68,
+          blueMultiplier: 0.68,
+          redOffset: 81.6,
+        },
+        filters: [{ type: 'blur', blurX: 8, blurY: 8 }],
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // Both primitives are present...
+      expect(text).toContain('<feColorMatrix');
+      expect(text).toContain('<feGaussianBlur');
+      // ...in the SAME <filter> (single id referenced by the <g>).
+      const filterBlock = text.match(/<filter id="filter_\d+"[^>]*>(.*?)<\/filter>/s);
+      expect(filterBlock).not.toBeNull();
+      const inner = filterBlock![1];
+      expect(inner).toContain('<feColorMatrix');
+      expect(inner).toContain('<feGaussianBlur');
+      // Order: color-transform first (applied to pixels), then blur — matches the
+      // canvas, where the tinted buffer is composited through the blur filter.
+      expect(inner.indexOf('<feColorMatrix')).toBeLessThan(inner.indexOf('<feGaussianBlur'));
+      // The blur consumes the tinted result (not the raw SourceGraphic), so the
+      // tint is not bypassed: the feColorMatrix names a result the blur reads.
+      const ctResultMatch = inner.match(/<feColorMatrix[^>]* result="(f\d+)"/);
+      expect(ctResultMatch).not.toBeNull();
+      expect(inner).toContain(`<feGaussianBlur in="${ctResultMatch![1]}"`);
+      // blurX/blurY 8 -> stdDeviation 4 4 (diameter -> radius sigma).
+      expect(inner).toContain('stdDeviation="4 4"');
+    });
+
+    it('applies alphaMultiplier via opacity once, keeping the feColorMatrix alpha row identity (not doubled)', async () => {
+      const doc = createTintInstanceDoc({
+        colorTransform: {
+          alphaMultiplier: 0.5,
+          redMultiplier: 0.68,
+          greenMultiplier: 0.68,
+          blueMultiplier: 0.68,
+          redOffset: 81.6,
+        },
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      // Alpha is on the <g> as opacity...
+      expect(text).toContain('opacity="0.5"');
+      // ...and the feColorMatrix alpha row is identity (0 0 0 1 0), so alpha is
+      // applied exactly once and never doubled.
+      const matrixMatch = text.match(/<feColorMatrix[^>]* type="matrix" values="([^"]+)"/);
+      expect(matrixMatch).not.toBeNull();
+      const values = matrixMatch![1].trim().split(/\s+/).map(Number);
+      // 4x5 row-major; the alpha (4th) row is the last 5 entries.
+      const alphaRow = values.slice(15, 20);
+      expect(alphaRow).toEqual([0, 0, 0, 1, 0]);
+      // No 0.5 leaked into the matrix.
+      expect(values).not.toContain(0.5);
+    });
+
+    it('emits NO feColorMatrix or filter for an identity color-transform (mults=1, offsets=0)', async () => {
+      const doc = createTintInstanceDoc({
+        colorTransform: {
+          redMultiplier: 1,
+          greenMultiplier: 1,
+          blueMultiplier: 1,
+          redOffset: 0,
+          greenOffset: 0,
+          blueOffset: 0,
+        },
+      });
+
+      const blob = await exportSVG(doc, 0);
+      const text = await blob.text();
+
+      expect(text).not.toContain('<feColorMatrix');
+      expect(text).not.toContain('filter="url(#');
+    });
   });
 });

@@ -1226,12 +1226,46 @@ export async function exportSVG(
   // real-file usage and the canvas renderer only crudely approximates them, so
   // we skip them gracefully (emit no primitive, never throw).
   const createFilterDef = (
-    filters: import('./types').Filter[] | undefined
+    filters: import('./types').Filter[] | undefined,
+    colorTransform?: import('./types').ColorTransform
   ): string => {
-    if (!filters || filters.length === 0) return '';
+    // Does the color transform have a non-identity RGB part (tint)? Mirrors the
+    // canvas renderer's colorTransformAffectsRGB (renderer.ts:3775) EXACTLY,
+    // including the 1e-6 threshold, so SVG and canvas agree on when a tint is
+    // present. Alpha is intentionally excluded (handled via the <g> opacity).
+    const hasRgbTint = (() => {
+      if (!colorTransform) return false;
+      const rMult = colorTransform.redMultiplier ?? 1;
+      const gMult = colorTransform.greenMultiplier ?? 1;
+      const bMult = colorTransform.blueMultiplier ?? 1;
+      const rOff = colorTransform.redOffset ?? 0;
+      const gOff = colorTransform.greenOffset ?? 0;
+      const bOff = colorTransform.blueOffset ?? 0;
+      return (
+        Math.abs(rMult - 1) > 1e-6 || Math.abs(gMult - 1) > 1e-6 || Math.abs(bMult - 1) > 1e-6 ||
+        Math.abs(rOff) > 1e-6 || Math.abs(gOff) > 1e-6 || Math.abs(bOff) > 1e-6
+      );
+    })();
 
-    // Dedupe key: the serialized filter chain. Identical chains reuse one def.
-    const cacheKey = JSON.stringify(filters);
+    const hasFilters = !!filters && filters.length > 0;
+    // Neither filters NOR an RGB tint → no <filter> attribute at all.
+    if (!hasFilters && !hasRgbTint) return '';
+
+    // Dedupe key: the serialized filter chain PLUS the RGB color transform, so a
+    // tinted chain and an untinted-but-otherwise-identical chain don't collide.
+    const cacheKey = JSON.stringify({
+      f: filters ?? null,
+      ct: hasRgbTint
+        ? {
+            rm: colorTransform!.redMultiplier ?? 1,
+            gm: colorTransform!.greenMultiplier ?? 1,
+            bm: colorTransform!.blueMultiplier ?? 1,
+            ro: colorTransform!.redOffset ?? 0,
+            go: colorTransform!.greenOffset ?? 0,
+            bo: colorTransform!.blueOffset ?? 0,
+          }
+        : null,
+    });
     if (filterDefCache.has(cacheKey)) {
       const cached = filterDefCache.get(cacheKey)!;
       return cached ? ` filter="url(#${cached})"` : '';
@@ -1247,7 +1281,45 @@ export async function exportSVG(
     // feFlood flood-opacity must stay within [0,1].
     const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
-    for (const filter of filters) {
+    // 1) RGB color transform (tint) FIRST — matching the canvas, which renders
+    // the symbol's pixels into an offscreen buffer, applies c' =
+    // clamp(c*mult + offset, 0, 255) per channel (renderer.ts
+    // applyColorTransformToImage), then composites the tinted buffer through any
+    // filters. So the <feColorMatrix> reads SourceGraphic and its tinted result
+    // becomes the input the geometric filters (blur) consume below. Offsets are
+    // stored on the 0..255 scale by the parser (fla-parser.ts
+    // parseColorTransform: redOffset = tintColorR * tintMultiplier) and the
+    // canvas; feColorMatrix uses 0..1 offsets, so each offset is divided by 255.
+    // e.g. #FF0000 @ tint 0.32 -> redOffset 81.6 -> R-offset slot 81.6/255 ≈
+    // 0.32. Alpha row is identity: alphaMultiplier is applied once via the <g>
+    // opacity attribute, so alpha is never doubled.
+    let tintResult: string | null = null;
+    if (hasRgbTint) {
+      const rMult = colorTransform!.redMultiplier ?? 1;
+      const gMult = colorTransform!.greenMultiplier ?? 1;
+      const bMult = colorTransform!.blueMultiplier ?? 1;
+      const rOff = (colorTransform!.redOffset ?? 0) / 255;
+      const gOff = (colorTransform!.greenOffset ?? 0) / 255;
+      const bOff = (colorTransform!.blueOffset ?? 0) / 255;
+      const m = [
+        rMult, 0, 0, 0, rOff,
+        0, gMult, 0, 0, gOff,
+        0, 0, bMult, 0, bOff,
+        0, 0, 0, 1, 0,
+      ];
+      tintResult = `f${resultCounter++}`;
+      primitives.push(
+        `<feColorMatrix in="SourceGraphic" type="matrix" values="${m.join(' ')}" result="${tintResult}"/>`
+      );
+    }
+    // When a tint is prepended, geometric filters must consume the TINTED pixels
+    // (not the raw SourceGraphic), matching the canvas order. These map the
+    // default inputs onto the tint result so the existing primitive emission
+    // below stays unchanged.
+    const sourceGraphicIn = tintResult ?? 'SourceGraphic';
+    const sourceAlphaIn = tintResult ?? 'SourceAlpha';
+
+    for (const filter of filters ?? []) {
       switch (filter.type) {
         case 'blur': {
           // Flash blurX/blurY (px) ≈ 2× SVG stdDeviation; the renderer uses CSS
@@ -1256,7 +1328,7 @@ export async function exportSVG(
           const sx = filter.blurX / 2;
           const sy = filter.blurY / 2;
           primitives.push(
-            `<feGaussianBlur in="SourceGraphic" stdDeviation="${sx} ${sy}"/>`
+            `<feGaussianBlur in="${sourceGraphicIn}" stdDeviation="${sx} ${sy}"/>`
           );
           break;
         }
@@ -1278,7 +1350,7 @@ export async function exportSVG(
           const shadowResult = `f${resultCounter++}`;
 
           primitives.push(
-            `<feGaussianBlur in="SourceAlpha" stdDeviation="${stdDev}" result="${blurResult}"/>`
+            `<feGaussianBlur in="${sourceAlphaIn}" stdDeviation="${stdDev}" result="${blurResult}"/>`
           );
 
           let composeIn = blurResult;
@@ -1313,7 +1385,7 @@ export async function exportSVG(
             m[14] /= 255;
             m[19] /= 255;
             primitives.push(
-              `<feColorMatrix in="SourceGraphic" type="matrix" values="${m.join(' ')}"/>`
+              `<feColorMatrix in="${sourceGraphicIn}" type="matrix" values="${m.join(' ')}"/>`
             );
           }
           break;
@@ -1331,7 +1403,7 @@ export async function exportSVG(
         .map((r) => `<feMergeNode in="${r}"/>`)
         .join('');
       primitives.push(
-        `<feMerge>${merges}<feMergeNode in="SourceGraphic"/></feMerge>`
+        `<feMerge>${merges}<feMergeNode in="${sourceGraphicIn}"/></feMerge>`
       );
     }
 
@@ -1609,9 +1681,13 @@ export async function exportSVG(
       }
     }
 
-    // Emit blur/glow/dropShadow/colorMatrix as an SVG <filter> on this group.
-    // Coexists with opacity (alphaMultiplier) — both attributes are kept.
-    const svgFilterAttr = createFilterDef(instance.filters);
+    // Emit blur/glow/dropShadow/colorMatrix AND the instance's per-channel RGB
+    // color transform (tint) as a single SVG <filter> on this group: the tint
+    // <feColorMatrix> is prepended FIRST so geometric filters operate on the
+    // tinted pixels, matching the canvas. Coexists with opacity (alphaMultiplier
+    // is applied once on the <g>; the matrix alpha row is identity) — both
+    // attributes are kept.
+    const svgFilterAttr = createFilterDef(instance.filters, instance.colorTransform);
 
     // Emit the instance blend mode as a CSS mix-blend-mode on this group, with
     // isolation:isolate so it composites against its sibling stack (the symbol's
