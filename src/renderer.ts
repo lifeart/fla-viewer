@@ -8,6 +8,7 @@ import type {
   VideoInstance,
   BitmapInstance,
   TextInstance,
+  TextRun,
   Shape,
   Matrix,
   FillStyle,
@@ -2340,101 +2341,17 @@ export class FLARenderer {
       });
     }
 
-    // Render each text run
-    let yOffset = 0;
-    let isFirstParagraph = true;
-
-    for (const run of text.textRuns) {
-      // Build font string
-      const fontStyle = run.italic ? 'italic ' : '';
-      const fontWeight = run.bold ? 'bold ' : '';
-      let fontSize = run.size;
-
-      // Adjust font size for subscript/superscript
-      if (run.characterPosition === 'subscript' || run.characterPosition === 'superscript') {
-        fontSize = fontSize * 0.7; // Smaller for sub/super
-      }
-
-      // Map FLA font names to web font names
-      const fontFace = this.mapFontName(run.face || 'sans-serif');
-      ctx.font = `${fontStyle}${fontWeight}${fontSize}px ${fontFace}, sans-serif`;
-      ctx.fillStyle = run.fillColor;
-      ctx.textBaseline = 'top';
-
-      // Split by line breaks first
-      const paragraphs = run.characters.split(/\r|\n/);
-      const lineHeight = run.lineHeight || run.size * 1.2;
-
-      // Letter spacing (default 0, can be negative to compress)
-      const letterSpacing = run.letterSpacing || 0;
-
-      // Margins (in twips, convert to pixels by dividing by 20)
-      const leftMargin = (run.leftMargin || 0) / 20;
-      const rightMargin = (run.rightMargin || 0) / 20;
-      const indent = (run.indent || 0) / 20;
-
-      // Calculate effective width for wrapping
-      const effectiveWidth = text.width - leftMargin - rightMargin;
-
-      for (let paraIndex = 0; paraIndex < paragraphs.length; paraIndex++) {
-        const paragraph = paragraphs[paraIndex];
-        if (paragraph.length === 0) {
-          yOffset += lineHeight;
-          isFirstParagraph = false;
-          continue;
-        }
-
-        // Word wrap within effective width
-        const wrappedLines = this.wrapText(ctx, paragraph, effectiveWidth - (isFirstParagraph ? indent : 0), letterSpacing);
-
-        for (let lineIndex = 0; lineIndex < wrappedLines.length; lineIndex++) {
-          const line = wrappedLines[lineIndex];
-          // Calculate line width for alignment
-          const lineWidth = this.measureTextWidth(ctx, line, letterSpacing);
-
-          // Calculate x position based on alignment with margins
-          let xPos = text.left + leftMargin;
-
-          // Apply indent only to first line of first paragraph
-          if (lineIndex === 0 && isFirstParagraph && indent > 0) {
-            xPos += indent;
-          }
-
-          if (run.alignment === 'center') {
-            xPos = text.left + leftMargin + (effectiveWidth - lineWidth) / 2;
-          } else if (run.alignment === 'right') {
-            xPos = text.left + leftMargin + effectiveWidth - lineWidth;
-          }
-
-          // Calculate y position with subscript/superscript offset
-          let renderY = yOffset;
-          if (run.characterPosition === 'subscript') {
-            renderY += run.size * 0.3; // Move down for subscript
-          } else if (run.characterPosition === 'superscript') {
-            renderY -= run.size * 0.2; // Move up for superscript
-          }
-
-          // Render with letter spacing, kerning, and rotation
-          this.renderTextWithSpacing(ctx, line, xPos, renderY, letterSpacing, run.autoKern, run.rotation);
-
-          // Render underline if enabled
-          if (run.underline) {
-            ctx.save();
-            ctx.strokeStyle = run.fillColor;
-            ctx.lineWidth = Math.max(1, fontSize / 12);
-            const underlineY = renderY + fontSize + 2;
-            ctx.beginPath();
-            ctx.moveTo(xPos, underlineY);
-            ctx.lineTo(xPos + lineWidth, underlineY);
-            ctx.stroke();
-            ctx.restore();
-          }
-
-          yOffset += lineHeight;
-        }
-
-        isFirstParagraph = false;
-      }
+    // Render text runs. Multiple DOMTextRuns within one text block are inline
+    // styled spans that flow across a paragraph (a black run followed by a
+    // colored run sits on the SAME line), not independent vertical blocks. They
+    // only break to a new line on an actual \r/\n (real files put the line
+    // break at the END of a run's characters) or on width overflow.
+    if (text.textRuns.length <= 1) {
+      // Single-run fast path: common case, output kept byte-for-byte identical.
+      this.renderSingleTextRun(text);
+    } else {
+      // Multi-run inline path: flow styled spans across shared lines.
+      this.renderInlineTextRuns(text);
     }
 
     // Clear filters if applied
@@ -2443,6 +2360,313 @@ export class FLARenderer {
     }
 
     ctx.restore();
+  }
+
+  // Build the canvas font string + derived style values for a single run.
+  // Shared by the single-run and inline multi-run layout paths so per-segment
+  // font/size/bold/italic/color/letterSpacing are applied consistently.
+  private buildRunStyle(run: TextRun): {
+    font: string;
+    fontSize: number;
+    color: string;
+    letterSpacing: number;
+    lineHeight: number;
+  } {
+    const fontStyle = run.italic ? 'italic ' : '';
+    const fontWeight = run.bold ? 'bold ' : '';
+    let fontSize = run.size;
+
+    // Adjust font size for subscript/superscript
+    if (run.characterPosition === 'subscript' || run.characterPosition === 'superscript') {
+      fontSize = fontSize * 0.7; // Smaller for sub/super
+    }
+
+    const fontFace = this.mapFontName(run.face || 'sans-serif');
+    return {
+      font: `${fontStyle}${fontWeight}${fontSize}px ${fontFace}, sans-serif`,
+      fontSize,
+      color: run.fillColor,
+      letterSpacing: run.letterSpacing || 0,
+      lineHeight: run.lineHeight || run.size * 1.2,
+    };
+  }
+
+  // Original single-run layout. Kept identical to the pre-rewrite behavior so a
+  // text block with one DOMTextRun (the overwhelmingly common case) renders
+  // byte-for-byte the same.
+  private renderSingleTextRun(text: TextInstance): void {
+    const ctx = this.ctx;
+    const run = text.textRuns[0];
+    if (!run) {
+      return;
+    }
+
+    let yOffset = 0;
+    let isFirstParagraph = true;
+
+    const style = this.buildRunStyle(run);
+    const fontSize = style.fontSize;
+    ctx.font = style.font;
+    ctx.fillStyle = style.color;
+    ctx.textBaseline = 'top';
+
+    // Split by line breaks first
+    const paragraphs = run.characters.split(/\r|\n/);
+    const lineHeight = style.lineHeight;
+
+    // Letter spacing (default 0, can be negative to compress)
+    const letterSpacing = style.letterSpacing;
+
+    // Margins (in twips, convert to pixels by dividing by 20)
+    const leftMargin = (run.leftMargin || 0) / 20;
+    const rightMargin = (run.rightMargin || 0) / 20;
+    const indent = (run.indent || 0) / 20;
+
+    // Calculate effective width for wrapping
+    const effectiveWidth = text.width - leftMargin - rightMargin;
+
+    for (let paraIndex = 0; paraIndex < paragraphs.length; paraIndex++) {
+      const paragraph = paragraphs[paraIndex];
+      if (paragraph.length === 0) {
+        yOffset += lineHeight;
+        isFirstParagraph = false;
+        continue;
+      }
+
+      // Word wrap within effective width
+      const wrappedLines = this.wrapText(ctx, paragraph, effectiveWidth - (isFirstParagraph ? indent : 0), letterSpacing);
+
+      for (let lineIndex = 0; lineIndex < wrappedLines.length; lineIndex++) {
+        const line = wrappedLines[lineIndex];
+        // Calculate line width for alignment
+        const lineWidth = this.measureTextWidth(ctx, line, letterSpacing);
+
+        // Calculate x position based on alignment with margins
+        let xPos = text.left + leftMargin;
+
+        // Apply indent only to first line of first paragraph
+        if (lineIndex === 0 && isFirstParagraph && indent > 0) {
+          xPos += indent;
+        }
+
+        if (run.alignment === 'center') {
+          xPos = text.left + leftMargin + (effectiveWidth - lineWidth) / 2;
+        } else if (run.alignment === 'right') {
+          xPos = text.left + leftMargin + effectiveWidth - lineWidth;
+        }
+
+        // Calculate y position with subscript/superscript offset
+        let renderY = yOffset;
+        if (run.characterPosition === 'subscript') {
+          renderY += run.size * 0.3; // Move down for subscript
+        } else if (run.characterPosition === 'superscript') {
+          renderY -= run.size * 0.2; // Move up for superscript
+        }
+
+        // Render with letter spacing, kerning, and rotation
+        this.renderTextWithSpacing(ctx, line, xPos, renderY, letterSpacing, run.autoKern, run.rotation);
+
+        // Render underline if enabled
+        if (run.underline) {
+          ctx.save();
+          ctx.strokeStyle = run.fillColor;
+          ctx.lineWidth = Math.max(1, fontSize / 12);
+          const underlineY = renderY + fontSize + 2;
+          ctx.beginPath();
+          ctx.moveTo(xPos, underlineY);
+          ctx.lineTo(xPos + lineWidth, underlineY);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        yOffset += lineHeight;
+      }
+
+      isFirstParagraph = false;
+    }
+  }
+
+  // Line-based inline layout for blocks with multiple DOMTextRuns. Runs are
+  // inline styled spans: they flow left-to-right on a shared horizontal cursor,
+  // re-applying each span's own font/color/letterSpacing, and only break to a
+  // new line on a real \r/\n in the characters or on width overflow.
+  private renderInlineTextRuns(text: TextInstance): void {
+    const ctx = this.ctx;
+    ctx.textBaseline = 'top';
+
+    // A drawable word: a run of non-space text tagged with its source run.
+    // Spaces are kept as separate tokens so inter-word breaks survive wrapping.
+    type Token = { text: string; run: TextRun; style: ReturnType<FLARenderer['buildRunStyle']>; isSpace: boolean };
+
+    // Each LINE is a list of styled tokens (wrapping may add more lines).
+    const sourceLines: Token[][] = [[]];
+
+    for (const run of text.textRuns) {
+      const style = this.buildRunStyle(run);
+      // Split run characters on explicit line breaks. A break terminates the
+      // current line; text after it begins a new line. A trailing break (the
+      // common "...\r" run shape) leaves an empty trailing segment which we do
+      // NOT turn into a spurious blank line below.
+      const segments = run.characters.split(/\r|\n/);
+      for (let s = 0; s < segments.length; s++) {
+        if (s > 0) {
+          // An explicit line break: start a fresh line.
+          sourceLines.push([]);
+        }
+        const segment = segments[s];
+        if (segment.length === 0) {
+          continue;
+        }
+        // Tokenize into words and the spaces between them so word-wrap can
+        // break at spaces while preserving each span's style.
+        const parts = segment.split(/( +)/);
+        for (const part of parts) {
+          if (part.length === 0) continue;
+          sourceLines[sourceLines.length - 1].push({
+            text: part,
+            run,
+            style,
+            isSpace: /^ +$/.test(part),
+          });
+        }
+      }
+    }
+
+    // Drop a trailing empty line produced by a run ending in \r (so a trailing
+    // line break does not create an extra blank line).
+    if (sourceLines.length > 1 && sourceLines[sourceLines.length - 1].length === 0) {
+      sourceLines.pop();
+    }
+
+    // Use the first run's block-level metrics (margins/width) for the box, the
+    // same width source the single-run path derives alignment from.
+    const firstRun = text.textRuns[0];
+    const leftMargin = (firstRun.leftMargin || 0) / 20;
+    const rightMargin = (firstRun.rightMargin || 0) / 20;
+    const effectiveWidth = text.width - leftMargin - rightMargin;
+
+    const measureToken = (token: Token): number => {
+      ctx.font = token.style.font;
+      return this.measureTextWidth(ctx, token.text, token.style.letterSpacing);
+    };
+
+    // Wrap each source line into visual lines that fit effectiveWidth. A line
+    // with a defined box width breaks between words on overflow; the leading
+    // space of a wrapped line is dropped. Lines never break mid-word.
+    const visualLines: Token[][] = [];
+    const canWrap = effectiveWidth > 0 && isFinite(effectiveWidth);
+    for (const lineTokens of sourceLines) {
+      if (!canWrap) {
+        visualLines.push(lineTokens);
+        continue;
+      }
+      let current: Token[] = [];
+      let currentWidth = 0;
+      for (const token of lineTokens) {
+        const tokenWidth = measureToken(token);
+        if (token.isSpace) {
+          if (current.length === 0) {
+            continue; // skip leading space on a (wrapped) line
+          }
+          current.push(token);
+          currentWidth += tokenWidth;
+          continue;
+        }
+        if (current.length > 0 && currentWidth + tokenWidth > effectiveWidth) {
+          // Overflow: trim a trailing space off the finished line, then break.
+          while (current.length > 0 && current[current.length - 1].isSpace) {
+            const removed = current.pop()!;
+            currentWidth -= measureToken(removed);
+          }
+          visualLines.push(current);
+          current = [token];
+          currentWidth = tokenWidth;
+        } else {
+          current.push(token);
+          currentWidth += tokenWidth;
+        }
+      }
+      // Always push the line, even when empty, so blank source lines preserved.
+      visualLines.push(current);
+    }
+
+    const alignment = firstRun.alignment;
+    let yOffset = 0;
+
+    for (const lineTokens of visualLines) {
+      // Drop a trailing space so it does not affect alignment width.
+      const trimmed = [...lineTokens];
+      while (trimmed.length > 0 && trimmed[trimmed.length - 1].isSpace) {
+        trimmed.pop();
+      }
+
+      // Line advances by the tallest line-height among its spans (or the first
+      // run's line-height for an empty line).
+      let lineHeight = firstRun.lineHeight || firstRun.size * 1.2;
+      for (const token of trimmed) {
+        if (token.style.lineHeight > lineHeight) {
+          lineHeight = token.style.lineHeight;
+        }
+      }
+
+      // Measure the line's TOTAL width across all spans, each with its own font.
+      let lineWidth = 0;
+      for (const token of trimmed) {
+        lineWidth += measureToken(token);
+      }
+
+      // Start x from alignment relative to the text box (same origin the
+      // single-run path uses).
+      let xPos = text.left + leftMargin;
+      if (alignment === 'center') {
+        xPos = text.left + leftMargin + (effectiveWidth - lineWidth) / 2;
+      } else if (alignment === 'right') {
+        xPos = text.left + leftMargin + effectiveWidth - lineWidth;
+      }
+
+      // Draw each span left-to-right at the running cursor, re-applying its own
+      // font/color/letterSpacing.
+      for (const token of trimmed) {
+        const run = token.run;
+        ctx.font = token.style.font;
+        ctx.fillStyle = token.style.color;
+
+        let renderY = yOffset;
+        if (run.characterPosition === 'subscript') {
+          renderY += run.size * 0.3;
+        } else if (run.characterPosition === 'superscript') {
+          renderY -= run.size * 0.2;
+        }
+
+        const tokenWidth = measureToken(token);
+        ctx.font = token.style.font; // measureToken changed ctx.font
+        this.renderTextWithSpacing(
+          ctx,
+          token.text,
+          xPos,
+          renderY,
+          token.style.letterSpacing,
+          run.autoKern,
+          run.rotation
+        );
+
+        if (run.underline) {
+          ctx.save();
+          ctx.strokeStyle = token.style.color;
+          ctx.lineWidth = Math.max(1, token.style.fontSize / 12);
+          const underlineY = renderY + token.style.fontSize + 2;
+          ctx.beginPath();
+          ctx.moveTo(xPos, underlineY);
+          ctx.lineTo(xPos + tokenWidth, underlineY);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        xPos += tokenWidth;
+      }
+
+      yOffset += lineHeight;
+    }
   }
 
   // Word wrap text to fit within maxWidth
