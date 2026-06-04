@@ -10566,4 +10566,141 @@ describe('FLARenderer', () => {
     });
   });
 
+  // XFL <DOMTextAttrs lineSpacing="…"> is "leading": extra vertical space ADDED
+  // between consecutive lines (Adobe "Extending Flash Professional"
+  // TextAttrs.lineSpacing, range -360..720; same point scale as size/lineHeight,
+  // per JPEXS twipToPixel(leading)). Per-line advance = lineHeight + lineSpacing.
+  // These tests render a 2-line block and measure the pixel gap between line 1
+  // and line 2: positive lineSpacing widens it, negative tightens it, absent is
+  // identical to lineSpacing=0. The renderer fits/DPR-scales content, but the
+  // stage + text box are identical across variants, so the same scale applies
+  // and the measured gaps are directly comparable.
+  describe('text lineSpacing (leading)', () => {
+    // Build a doc with one text element whose two lines are a top "A" and a
+    // bottom "B" (single run with an embedded line break, or two inline runs).
+    // Large font + plenty of box height so each glyph forms a clearly separated
+    // dark band on the white background.
+    function makeTwoLineTextDoc(opts: {
+      lineSpacing?: number;
+      lineHeight?: number;
+      multiRun?: boolean;
+    }) {
+      const baseRun: Partial<TextRun> = {
+        alignment: 'left',
+        size: 30,
+        lineHeight: opts.lineHeight ?? 36,
+        face: 'sans-serif',
+        fillColor: '#000000',
+        ...(opts.lineSpacing !== undefined ? { lineSpacing: opts.lineSpacing } : {}),
+      };
+
+      const textRuns: TextRun[] = opts.multiRun
+        ? [
+            // Two inline runs: the first carries the line break, exercising the
+            // renderInlineTextRuns path. Both runs share the same metrics.
+            { ...(baseRun as TextRun), characters: 'A\n' },
+            { ...(baseRun as TextRun), characters: 'B' },
+          ]
+        : [{ ...(baseRun as TextRun), characters: 'A\nB' }];
+
+      return createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 60, ty: 60 }),
+                left: 0,
+                width: 200,
+                height: 300,
+                textRuns,
+              }],
+            })],
+          })],
+        })],
+      });
+    }
+
+    // Render the given doc and return the vertical pixel gap between the
+    // centroids of the two dark text bands (line 2 baseline minus line 1).
+    // Scans full rows for dark (text) pixels, groups contiguous dark rows into
+    // bands, requires exactly two bands, and returns the centroid distance.
+    async function measureLineGap(doc: ReturnType<typeof makeTwoLineTextDoc>): Promise<number> {
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const ctx = canvas.getContext('2d')!;
+      const w = canvas.width;
+      const h = canvas.height;
+      const d = ctx.getImageData(0, 0, w, h).data;
+
+      // Per-row count of dark pixels (text is black on white).
+      const darkPerRow: number[] = new Array(h).fill(0);
+      for (let y = 0; y < h; y++) {
+        let count = 0;
+        for (let x = 0; x < w; x++) {
+          const i = (y * w + x) * 4;
+          const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+          if (a > 0 && r < 120 && g < 120 && b < 120) count++;
+        }
+        darkPerRow[y] = count;
+      }
+
+      // Group contiguous rows that contain any dark pixel into bands.
+      const bands: { start: number; end: number; weight: number; sumY: number }[] = [];
+      let cur: { start: number; end: number; weight: number; sumY: number } | null = null;
+      for (let y = 0; y < h; y++) {
+        if (darkPerRow[y] > 0) {
+          if (!cur) cur = { start: y, end: y, weight: 0, sumY: 0 };
+          cur.end = y;
+          cur.weight += darkPerRow[y];
+          cur.sumY += y * darkPerRow[y];
+        } else if (cur) {
+          bands.push(cur);
+          cur = null;
+        }
+      }
+      if (cur) bands.push(cur);
+
+      // Expect exactly the two glyph bands (A then B). If antialiasing produced
+      // a 1px stray band, merge any band whose weight is negligible.
+      const significant = bands.filter((band) => band.weight >= 5);
+      expect(significant.length).toBe(2);
+
+      const centroid = (band: typeof significant[number]) => band.sumY / band.weight;
+      return centroid(significant[1]) - centroid(significant[0]);
+    }
+
+    it('single run: positive lineSpacing widens the inter-line gap, negative tightens it', async () => {
+      const gapZero = await measureLineGap(makeTwoLineTextDoc({ lineSpacing: 0 }));
+      const gapWide = await measureLineGap(makeTwoLineTextDoc({ lineSpacing: 40 }));
+      const gapTight = await measureLineGap(makeTwoLineTextDoc({ lineSpacing: -10 }));
+
+      // Leading is ADDED between lines: +40 must push line 2 clearly lower.
+      // The added gap scales with the (consistent) fit/DPR factor, so use a
+      // proportional tolerance rather than the raw 40px doc-space delta.
+      expect(gapWide).toBeGreaterThan(gapZero + 20);
+      // Negative leading pulls line 2 closer.
+      expect(gapTight).toBeLessThan(gapZero - 3);
+
+      // FAIL-BEFORE GUARD: before this change both paths ignored lineSpacing, so
+      // gapWide === gapZero === gapTight and these strict inequalities fail.
+    });
+
+    it('multi-run inline path: lineSpacing widens the inter-line gap', async () => {
+      const gapZero = await measureLineGap(makeTwoLineTextDoc({ lineSpacing: 0, multiRun: true }));
+      const gapWide = await measureLineGap(makeTwoLineTextDoc({ lineSpacing: 40, multiRun: true }));
+
+      expect(gapWide).toBeGreaterThan(gapZero + 20);
+    });
+
+    it('regression: absent lineSpacing renders identically to lineSpacing=0', async () => {
+      const gapAbsent = await measureLineGap(makeTwoLineTextDoc({}));
+      const gapZero = await measureLineGap(makeTwoLineTextDoc({ lineSpacing: 0 }));
+
+      // Absent must be a no-op: identical line gap (sub-pixel exact).
+      expect(Math.abs(gapAbsent - gapZero)).toBeLessThan(0.5);
+    });
+  });
+
 });

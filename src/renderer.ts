@@ -2390,6 +2390,7 @@ export class FLARenderer {
     color: string;
     letterSpacing: number;
     lineHeight: number;
+    lineSpacing: number;
   } {
     const fontStyle = run.italic ? 'italic ' : '';
     const fontWeight = run.bold ? 'bold ' : '';
@@ -2407,6 +2408,9 @@ export class FLARenderer {
       color: run.fillColor,
       letterSpacing: run.letterSpacing || 0,
       lineHeight: run.lineHeight || run.size * 1.2,
+      // Leading: extra space ADDED between lines (XFL lineSpacing). Absent => 0
+      // => no change. Same point/pixel scale as lineHeight/size.
+      lineSpacing: run.lineSpacing || 0,
     };
   }
 
@@ -2432,6 +2436,13 @@ export class FLARenderer {
     // Split by line breaks first
     const paragraphs = run.characters.split(/\r|\n/);
     const lineHeight = style.lineHeight;
+    // Per-line vertical advance = line height + leading (XFL lineSpacing).
+    // Leading is ADDED between lines; absent/0 => identical to prior behavior.
+    // Source: Adobe "Extending Flash Professional" TextAttrs.lineSpacing
+    // ("line spacing (leading) of the paragraph", -360..720), and the SWF text
+    // metric leading = total line height - (ascent + descent). JPEXS writes it
+    // as twipToPixel(leading), the same scale as size/lineHeight.
+    const lineAdvance = lineHeight + style.lineSpacing;
 
     // Letter spacing (default 0, can be negative to compress)
     const letterSpacing = style.letterSpacing;
@@ -2447,7 +2458,7 @@ export class FLARenderer {
     for (let paraIndex = 0; paraIndex < paragraphs.length; paraIndex++) {
       const paragraph = paragraphs[paraIndex];
       if (paragraph.length === 0) {
-        yOffset += lineHeight;
+        yOffset += lineAdvance;
         isFirstParagraph = false;
         continue;
       }
@@ -2498,7 +2509,7 @@ export class FLARenderer {
           ctx.restore();
         }
 
-        yOffset += lineHeight;
+        yOffset += lineAdvance;
       }
 
       isFirstParagraph = false;
@@ -2620,13 +2631,20 @@ export class FLARenderer {
       }
 
       // Line advances by the tallest line-height among its spans (or the first
-      // run's line-height for an empty line).
+      // run's line-height for an empty line). The leading (XFL lineSpacing) of
+      // that same dominant span is ADDED on top, matching the single-run path
+      // (advance = lineHeight + lineSpacing). Leading pairs with the span that
+      // sets the line height so the tallest run drives both. Absent/0
+      // lineSpacing => identical to prior behavior.
       let lineHeight = firstRun.lineHeight || firstRun.size * 1.2;
+      let lineSpacing = firstRun.lineSpacing || 0;
       for (const token of trimmed) {
         if (token.style.lineHeight > lineHeight) {
           lineHeight = token.style.lineHeight;
+          lineSpacing = token.style.lineSpacing;
         }
       }
+      const lineAdvance = lineHeight + lineSpacing;
 
       // Measure the line's TOTAL width across all spans, each with its own font.
       let lineWidth = 0;
@@ -2684,7 +2702,7 @@ export class FLARenderer {
         xPos += tokenWidth;
       }
 
-      yOffset += lineHeight;
+      yOffset += lineAdvance;
     }
   }
 
