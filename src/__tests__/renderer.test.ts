@@ -714,6 +714,141 @@ describe('FLARenderer', () => {
 
       expect(() => renderer.renderFrame(0)).not.toThrow();
     });
+
+    // Regression: XFL stores bitmap-fill matrices in TWIP space (typical a=20,d=20),
+    // but edge geometry is already converted twips->pixels at parse time
+    // (edge-decoder.ts COORD_SCALE=20). The renderer draws geometry in pixel space
+    // with no global 1/20 context scale, so the bitmap-fill matrix must be pre-scaled
+    // by 1/20 to land in pixel space. Applying it raw over-scales the bitmap ~20x:
+    // only the first image-pixel column ends up filling the shape.
+    //
+    // This test pins the corrected scale. It loads a real 4x4 image whose columns are
+    // [red, red, blue, blue] and fills a 40px square with a twip-space identity fill
+    // matrix (a=20,d=20). Smoothing is disabled so sampled pixels stay pure.
+    //
+    // At the correct pixel scale the 4px image tiles ~10 times across the 40px shape,
+    // so red AND blue both appear with many alternations. At the buggy 20x scale each
+    // image-pixel becomes 20px, so the 40px shape only reaches the first two columns
+    // (red, red) -> the whole square is red and blue never shows (blue starts at x=40,
+    // outside the shape).
+    it('should apply twip-space bitmap-fill matrix (a=20,d=20) at pixel scale, not 20x over-scaled', async () => {
+      // Build a real HTMLImageElement: 4px wide, 4px tall, columns [red, red, blue, blue].
+      const imgCanvas = document.createElement('canvas');
+      imgCanvas.width = 4;
+      imgCanvas.height = 4;
+      const imgCtx = imgCanvas.getContext('2d')!;
+      imgCtx.fillStyle = '#FF0000';
+      imgCtx.fillRect(0, 0, 2, 4); // left two columns red
+      imgCtx.fillStyle = '#0000FF';
+      imgCtx.fillRect(2, 0, 2, 4); // right two columns blue
+      const dataUrl = imgCanvas.toDataURL('image/png');
+
+      const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error('failed to load fixture image'));
+        el.src = dataUrl;
+      });
+
+      const bitmaps = new Map();
+      bitmaps.set('twip.png', {
+        name: 'twip.png',
+        href: 'twip.png',
+        width: 4,
+        height: 4,
+        imageData: image,
+      });
+
+      const doc = createMinimalDoc({
+        bitmaps,
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'shape',
+                matrix: createMatrix(),
+                fills: [{
+                  index: 1,
+                  type: 'bitmap',
+                  bitmapPath: 'twip.png',
+                  // Twip-space identity: 1 image-pixel == 20 twips == 1 pixel.
+                  matrix: createMatrix({ a: 20, b: 0, c: 0, d: 20, tx: 0, ty: 0 }),
+                  // Disable smoothing so tiled pixels stay pure red/blue (no blend).
+                  bitmapIsSmoothed: false,
+                }],
+                strokes: [],
+                edges: [{
+                  fillStyle0: 1,
+                  commands: [
+                    { type: 'M', x: 0, y: 0 },
+                    { type: 'L', x: 40, y: 0 },
+                    { type: 'L', x: 40, y: 40 },
+                    { type: 'L', x: 0, y: 40 },
+                    { type: 'Z' },
+                  ],
+                }],
+              }],
+            })],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(0);
+
+      const ctx = canvas.getContext('2d')!;
+      const { data, width } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+      let redCount = 0;
+      let blueCount = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        const a = data[i + 3];
+        if (a === 0) continue;
+        if (r > 200 && g < 60 && b < 60) redCount++;
+        else if (b > 200 && r < 60 && g < 60) blueCount++;
+      }
+
+      // Correct (pixel-scale) behavior: the 2px image tiles across the 20px shape,
+      // so both colors are present in meaningful amounts.
+      // Buggy (20x over-scale) behavior: only the first (red) image column fills the
+      // shape, blueCount stays 0 -> this assertion fails.
+      expect(redCount).toBeGreaterThan(0);
+      expect(blueCount).toBeGreaterThan(0);
+
+      // Stronger pin: tiling produces many red<->blue transitions along a scanline
+      // through the shape. Over-scaling would yield a single solid red run (0 flips).
+      // Sample the row at roughly 1/4 of the shape height (well inside the square).
+      let flips = 0;
+      // Find a y row that intersects the filled shape by scanning for first row with
+      // any saturated red/blue pixel.
+      let sampleRow = -1;
+      for (let y = 0; y < canvas.height && sampleRow < 0; y++) {
+        for (let x = 0; x < width; x++) {
+          const idx = (y * width + x) * 4;
+          const r = data[idx], g = data[idx + 1], b = data[idx + 2], a = data[idx + 3];
+          if (a > 0 && ((r > 200 && g < 60 && b < 60) || (b > 200 && r < 60 && g < 60))) {
+            sampleRow = y;
+            break;
+          }
+        }
+      }
+      expect(sampleRow).toBeGreaterThanOrEqual(0);
+      let prev: 'r' | 'b' | null = null;
+      for (let x = 0; x < width; x++) {
+        const idx = (sampleRow * width + x) * 4;
+        const r = data[idx], g = data[idx + 1], b = data[idx + 2], a = data[idx + 3];
+        if (a === 0) continue;
+        let cur: 'r' | 'b' | null = null;
+        if (r > 200 && g < 60 && b < 60) cur = 'r';
+        else if (b > 200 && r < 60 && g < 60) cur = 'b';
+        if (cur && prev && cur !== prev) flips++;
+        if (cur) prev = cur;
+      }
+      // Many alternations at pixel scale; zero at the buggy 20x scale.
+      expect(flips).toBeGreaterThan(2);
+    });
   });
 
   describe('video instance with metadata', () => {

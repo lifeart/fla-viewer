@@ -3206,12 +3206,31 @@ export class FLARenderer {
 
     // Apply the bitmap matrix transform
     if (matrix) {
-      // Flash bitmap fills use a matrix to position and scale the bitmap
-      // The matrix transforms from bitmap space to shape-local space
+      // Flash bitmap fills use a matrix to position and scale the bitmap.
+      // The matrix transforms from bitmap (image-pixel) space to shape-local space.
+      //
+      // XFL stores this matrix in TWIP space: a typical 1:1 fill is a=20,d=20
+      // (1 image-pixel == 20 twips), with tx/ty also in twips. But this renderer
+      // draws edge geometry in PIXEL space because edge-decoder.ts converts
+      // twips->pixels at parse time (COORD_SCALE=20). There is NO global 1/20
+      // viewbox/context scale here, so the raw twip-space matrix would over-scale
+      // the bitmap ~20x and mis-translate it ~20x.
+      //
+      // Ruffle applies the same matrix raw, but it draws geometry in twips under a
+      // bounds_viewbox_matrix with a=1/20 (set_a(1.0/20.0)); that 1/20 context
+      // cancels the 20. We lack that context, so we must pre-divide the whole
+      // matrix (scale AND translation) by 20 to convert it into the pixel space the
+      // rest of the geometry uses.
+      //
+      // NOTE: gradient fills are unaffected and use a different code path
+      // (createLinearGradient/createRadialGradient) whose matrices are already
+      // pixel-space (e.g. a~=0.0087) and multiply the GRADIENT_SIZE box. Do not
+      // apply this twip correction there.
+      const TWIPS_PER_PIXEL = 20;
       pattern.setTransform(new DOMMatrix([
-        matrix.a, matrix.b,
-        matrix.c, matrix.d,
-        matrix.tx, matrix.ty
+        matrix.a / TWIPS_PER_PIXEL, matrix.b / TWIPS_PER_PIXEL,
+        matrix.c / TWIPS_PER_PIXEL, matrix.d / TWIPS_PER_PIXEL,
+        matrix.tx / TWIPS_PER_PIXEL, matrix.ty / TWIPS_PER_PIXEL
       ]));
     }
 
