@@ -113,6 +113,9 @@ const allVariants = [
   { name: 'edge-8,-8,-8', edgeAdd: [-8, -8, -8] },
   { name: 'edge-16,-16,-16', edgeAdd: [-16, -16, -16] },
   { name: 'edge-24,-20,-20', edgeAdd: [-24, -20, -20] },
+  { name: 'edge-8-low-frac', edgeAdd: [-8, -8, -8], minFractionalAlpha: 900, maxFractionalAlpha: 1000 },
+  { name: 'edge-12-low-frac', edgeAdd: [-12, -12, -12], minFractionalAlpha: 900, maxFractionalAlpha: 1000 },
+  { name: 'edge-16-low-frac', edgeAdd: [-16, -16, -16], minFractionalAlpha: 900, maxFractionalAlpha: 1000 },
   { name: 'edge-luma120-8', edgeAdd: [-8, -8, -8], minLuma: 120 },
   { name: 'edge-luma120-16', edgeAdd: [-16, -16, -16], minLuma: 120 },
   { name: 'edge-luma140-16', edgeAdd: [-16, -16, -16], minLuma: 140 },
@@ -147,6 +150,8 @@ const allVariants = [
   { name: 'source-edge-16 high-frac', sourceEdgeAdd: [-16, -16, -16], minFractionalAlpha: 1500 },
   { name: 'source-edge-32 high-frac', sourceEdgeAdd: [-32, -32, -32], minFractionalAlpha: 1500 },
   { name: 'source-edge-48 high-frac', sourceEdgeAdd: [-48, -42, -42], minFractionalAlpha: 1500 },
+  { name: 'source-edge-8-low-frac', sourceEdgeAdd: [-8, -8, -8], minFractionalAlpha: 900, maxFractionalAlpha: 1000 },
+  { name: 'source-edge-16-low-frac', sourceEdgeAdd: [-16, -16, -16], minFractionalAlpha: 900, maxFractionalAlpha: 1000 },
 ];
 
 const splitVariantNames = (value) => {
@@ -355,6 +360,7 @@ try {
         && !variant.sourcePaintEdgeAdd
         && !variant.multiInterior) return canvas;
       if (variant.minFractionalAlpha !== undefined && fractionalAlphaCount < variant.minFractionalAlpha) return canvas;
+      if (variant.maxFractionalAlpha !== undefined && fractionalAlphaCount > variant.maxFractionalAlpha) return canvas;
 
       const output = cloneCanvas(canvas);
       const ctx = output.getContext('2d');
