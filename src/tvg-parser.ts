@@ -3002,6 +3002,7 @@ export interface TVGDenseLineFillTuning {
   edgeAlphaScale?: number;
   exteriorEdgeExpansionScale?: number;
   edgeToneSubtract?: number;
+  priority2CarrierEdgeToneSubtract?: number;
   inkDensitySubtract?: number;
   saturatedFillDensitySubtract?: number;
   saturatedFillReliefMaxFractionalAlphaPixels?: number;
@@ -3022,6 +3023,7 @@ const DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS = 900;
 const DENSE_LINE_FILL_EDGE_EXPANSION_MAX_FRACTIONAL_ALPHA_PIXELS = 1000;
 const DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS = 1500;
 const DENSE_LINE_FILL_EDGE_TONE_SUBTRACT = 32;
+const DENSE_LINE_FILL_PRIORITY2_CARRIER_EDGE_TONE_SUBTRACT = 22;
 const DENSE_LINE_FILL_INTERIOR_SHADOW_LUMA_LIMIT = 96;
 const DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT = { r: 8, g: 40, b: 40 };
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_SIZE = 1500;
@@ -3048,6 +3050,7 @@ interface ResolvedDenseLineFillTuning {
   edgeAlphaScale: number;
   exteriorEdgeExpansionScale: number;
   edgeToneSubtract: number;
+  priority2CarrierEdgeToneSubtract: number;
   inkDensitySubtract: number;
   saturatedFillDensitySubtract: number;
   saturatedFillReliefMaxFractionalAlphaPixels: number;
@@ -3059,6 +3062,9 @@ function resolveDenseLineFillTuning(options?: TVGRenderOptions): ResolvedDenseLi
     exteriorEdgeExpansionScale:
       options?.denseLineFillTuning?.exteriorEdgeExpansionScale ?? DENSE_LINE_FILL_EXTERIOR_EDGE_EXPANSION_SCALE,
     edgeToneSubtract: options?.denseLineFillTuning?.edgeToneSubtract ?? DENSE_LINE_FILL_EDGE_TONE_SUBTRACT,
+    priority2CarrierEdgeToneSubtract:
+      options?.denseLineFillTuning?.priority2CarrierEdgeToneSubtract
+      ?? DENSE_LINE_FILL_PRIORITY2_CARRIER_EDGE_TONE_SUBTRACT,
     inkDensitySubtract: options?.denseLineFillTuning?.inkDensitySubtract ?? DENSE_LINE_FILL_INK_DENSITY_SUBTRACT,
     saturatedFillDensitySubtract:
       options?.denseLineFillTuning?.saturatedFillDensitySubtract ?? DENSE_LINE_FILL_SATURATED_FILL_INK_DENSITY_SUBTRACT,
@@ -3066,6 +3072,22 @@ function resolveDenseLineFillTuning(options?: TVGRenderOptions): ResolvedDenseLi
       options?.denseLineFillTuning?.saturatedFillReliefMaxFractionalAlphaPixels
       ?? DENSE_LINE_FILL_EDGE_EXPANSION_MAX_FRACTIONAL_ALPHA_PIXELS,
   };
+}
+
+function resolveDenseLineFillEdgeTone(
+  outputFractionalAlphaPixels: number,
+  tuning: ResolvedDenseLineFillTuning,
+  usePriority2CarrierTone: boolean,
+): { subtract: number; usePreCoverageMask: boolean } {
+  if (outputFractionalAlphaPixels >= DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS) {
+    return { subtract: tuning.edgeToneSubtract, usePreCoverageMask: false };
+  }
+  if (usePriority2CarrierTone) {
+    // Priority-2 cross-paint carriers need their original antialias mask;
+    // coverage expansion changes the edge class before final tone correction.
+    return { subtract: tuning.priority2CarrierEdgeToneSubtract, usePreCoverageMask: true };
+  }
+  return { subtract: 0, usePreCoverageMask: false };
 }
 
 function getActiveArtLayerTypes(options?: TVGRenderOptions): TVGArtLayer['type'][] {
@@ -3282,8 +3304,8 @@ function applyDenseLineFillEdgeCoverageAdjustment(
   outputWidth: number,
   outputHeight: number,
   tuning: ResolvedDenseLineFillTuning,
+  outputFractionalAlphaPixels = countDenseLineFillOutputFractionalAlphaPixels(canvas, outputWidth, outputHeight),
 ): number {
-  const outputFractionalAlphaPixels = countDenseLineFillOutputFractionalAlphaPixels(canvas, outputWidth, outputHeight);
   if (outputFractionalAlphaPixels < DENSE_LINE_FILL_EDGE_MIN_FRACTIONAL_ALPHA_PIXELS) return outputFractionalAlphaPixels;
 
   const ctx = canvas.getContext('2d');
@@ -3398,12 +3420,47 @@ function createOutputAlphaMask(
   return alphaCtx.getImageData(0, 0, outputWidth, outputHeight).data;
 }
 
+interface DenseLineFillEdgeAdjustment {
+  outputFractionalAlphaPixels: number;
+  outputAlphaMask: Uint8ClampedArray | null;
+  edgeToneAlphaMask: Uint8ClampedArray | null;
+  edgeToneSubtract: number;
+}
+
+function applyDenseLineFillEdgeAdjustments(
+  canvas: HTMLCanvasElement,
+  outputWidth: number,
+  outputHeight: number,
+  tuning: ResolvedDenseLineFillTuning,
+  usePriority2CarrierTone: boolean,
+): DenseLineFillEdgeAdjustment {
+  const outputFractionalAlphaPixels = countDenseLineFillOutputFractionalAlphaPixels(canvas, outputWidth, outputHeight);
+  const edgeTone = resolveDenseLineFillEdgeTone(outputFractionalAlphaPixels, tuning, usePriority2CarrierTone);
+  const preCoverageAlphaMask = edgeTone.usePreCoverageMask && edgeTone.subtract > 0
+    ? createOutputAlphaMask(canvas, outputWidth, outputHeight)
+    : null;
+  applyDenseLineFillEdgeCoverageAdjustment(
+    canvas,
+    outputWidth,
+    outputHeight,
+    tuning,
+    outputFractionalAlphaPixels,
+  );
+  const outputAlphaMask = createOutputAlphaMask(canvas, outputWidth, outputHeight);
+  return {
+    outputFractionalAlphaPixels,
+    outputAlphaMask,
+    edgeToneAlphaMask: edgeTone.usePreCoverageMask ? preCoverageAlphaMask : outputAlphaMask,
+    edgeToneSubtract: edgeTone.subtract,
+  };
+}
+
 function applyDenseLineFillEdgeToneAdjustment(
   canvas: HTMLCanvasElement,
   alphaMask: Uint8ClampedArray | null,
-  tuning: ResolvedDenseLineFillTuning,
+  subtract: number,
 ): void {
-  if (!alphaMask) return;
+  if (!alphaMask || subtract <= 0) return;
 
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -3413,9 +3470,9 @@ function applyDenseLineFillEdgeToneAdjustment(
   for (let index = 0; index < data.length; index += 4) {
     const alpha = alphaMask[index + 3];
     if (alpha <= 0 || alpha >= 255) continue;
-    data[index] = Math.max(0, data[index] - tuning.edgeToneSubtract);
-    data[index + 1] = Math.max(0, data[index + 1] - tuning.edgeToneSubtract);
-    data[index + 2] = Math.max(0, data[index + 2] - tuning.edgeToneSubtract);
+    data[index] = Math.max(0, data[index] - subtract);
+    data[index + 1] = Math.max(0, data[index + 1] - subtract);
+    data[index + 2] = Math.max(0, data[index + 2] - subtract);
   }
   ctx.putImageData(image, 0, 0);
 }
@@ -3988,20 +4045,25 @@ export function renderTVGToCanvas(
 
   const shouldApplyDenseLineFillAdjustment = shouldApplyDenseLineFillInkDensityAdjustment(renderDrawing, options);
   const denseLineFillTuning = resolveDenseLineFillTuning(options);
+  const usePriority2CarrierTone = shouldApplyDenseLineFillAdjustment
+    && hasSinglePriority2LineFillCarrier(activeDrawing);
   const denseEdgeCoverageTiming = options?.denseEdgeCoverageTiming ?? 'pre-downsample';
   let denseLineFillOutputAlphaMask: Uint8ClampedArray | null = null;
-  let shouldApplyDenseLineFillEdgeTone = false;
+  let denseLineFillEdgeToneAlphaMask: Uint8ClampedArray | null = null;
+  let denseLineFillEdgeToneSubtract = 0;
   let denseLineFillOutputFractionalAlphaPixels = 0;
   if (shouldApplyDenseLineFillAdjustment && denseEdgeCoverageTiming === 'pre-downsample') {
-    const outputFractionalAlphaPixels = applyDenseLineFillEdgeCoverageAdjustment(
+    const edgeAdjustment = applyDenseLineFillEdgeAdjustments(
       canvas,
       width,
       height,
       denseLineFillTuning,
+      usePriority2CarrierTone,
     );
-    denseLineFillOutputFractionalAlphaPixels = outputFractionalAlphaPixels;
-    denseLineFillOutputAlphaMask = createOutputAlphaMask(canvas, width, height);
-    shouldApplyDenseLineFillEdgeTone = outputFractionalAlphaPixels >= DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS;
+    denseLineFillOutputFractionalAlphaPixels = edgeAdjustment.outputFractionalAlphaPixels;
+    denseLineFillOutputAlphaMask = edgeAdjustment.outputAlphaMask;
+    denseLineFillEdgeToneAlphaMask = edgeAdjustment.edgeToneAlphaMask;
+    denseLineFillEdgeToneSubtract = edgeAdjustment.edgeToneSubtract;
   }
 
   // Pre-composite against white background (skip for matte/compositor sources)
@@ -4026,15 +4088,17 @@ export function renderTVGToCanvas(
     outCtx.imageSmoothingQuality = 'high';
     outCtx.drawImage(canvas, 0, 0, width, height);
     if (shouldApplyDenseLineFillAdjustment && denseEdgeCoverageTiming === 'post-downsample') {
-      const outputFractionalAlphaPixels = applyDenseLineFillEdgeCoverageAdjustment(
+      const edgeAdjustment = applyDenseLineFillEdgeAdjustments(
         outCanvas,
         width,
         height,
         denseLineFillTuning,
+        usePriority2CarrierTone,
       );
-      denseLineFillOutputFractionalAlphaPixels = outputFractionalAlphaPixels;
-      denseLineFillOutputAlphaMask = createOutputAlphaMask(outCanvas, width, height);
-      shouldApplyDenseLineFillEdgeTone = outputFractionalAlphaPixels >= DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS;
+      denseLineFillOutputFractionalAlphaPixels = edgeAdjustment.outputFractionalAlphaPixels;
+      denseLineFillOutputAlphaMask = edgeAdjustment.outputAlphaMask;
+      denseLineFillEdgeToneAlphaMask = edgeAdjustment.edgeToneAlphaMask;
+      denseLineFillEdgeToneSubtract = edgeAdjustment.edgeToneSubtract;
     }
     if (shouldCompositeBackground && backgroundCompositeTiming === 'post-downsample-before-dense') {
       compositeWhiteBackground(outCanvas);
@@ -4042,9 +4106,7 @@ export function renderTVGToCanvas(
     if (shouldApplyDenseLineFillAdjustment) {
       applyDenseLineFillInkDensityAdjustment(outCanvas, denseLineFillOutputFractionalAlphaPixels, denseLineFillTuning);
       applyDenseLineFillInteriorShadowToneAdjustment(outCanvas, denseLineFillOutputAlphaMask);
-      if (shouldApplyDenseLineFillEdgeTone) {
-        applyDenseLineFillEdgeToneAdjustment(outCanvas, denseLineFillOutputAlphaMask, denseLineFillTuning);
-      }
+      applyDenseLineFillEdgeToneAdjustment(outCanvas, denseLineFillEdgeToneAlphaMask, denseLineFillEdgeToneSubtract);
     }
     if (shouldCompositeBackground && backgroundCompositeTiming === 'post-downsample-after-dense') {
       compositeWhiteBackground(outCanvas);
@@ -4053,15 +4115,17 @@ export function renderTVGToCanvas(
   }
 
   if (shouldApplyDenseLineFillAdjustment && denseEdgeCoverageTiming === 'post-downsample') {
-    const outputFractionalAlphaPixels = applyDenseLineFillEdgeCoverageAdjustment(
+    const edgeAdjustment = applyDenseLineFillEdgeAdjustments(
       canvas,
       width,
       height,
       denseLineFillTuning,
+      usePriority2CarrierTone,
     );
-    denseLineFillOutputFractionalAlphaPixels = outputFractionalAlphaPixels;
-    denseLineFillOutputAlphaMask = createOutputAlphaMask(canvas, width, height);
-    shouldApplyDenseLineFillEdgeTone = outputFractionalAlphaPixels >= DENSE_LINE_FILL_EDGE_TONE_MIN_FRACTIONAL_ALPHA_PIXELS;
+    denseLineFillOutputFractionalAlphaPixels = edgeAdjustment.outputFractionalAlphaPixels;
+    denseLineFillOutputAlphaMask = edgeAdjustment.outputAlphaMask;
+    denseLineFillEdgeToneAlphaMask = edgeAdjustment.edgeToneAlphaMask;
+    denseLineFillEdgeToneSubtract = edgeAdjustment.edgeToneSubtract;
   }
   if (shouldCompositeBackground && backgroundCompositeTiming === 'post-downsample-before-dense') {
     compositeWhiteBackground(canvas);
@@ -4069,9 +4133,7 @@ export function renderTVGToCanvas(
   if (shouldApplyDenseLineFillAdjustment) {
     applyDenseLineFillInkDensityAdjustment(canvas, denseLineFillOutputFractionalAlphaPixels, denseLineFillTuning);
     applyDenseLineFillInteriorShadowToneAdjustment(canvas, denseLineFillOutputAlphaMask);
-    if (shouldApplyDenseLineFillEdgeTone) {
-      applyDenseLineFillEdgeToneAdjustment(canvas, denseLineFillOutputAlphaMask, denseLineFillTuning);
-    }
+    applyDenseLineFillEdgeToneAdjustment(canvas, denseLineFillEdgeToneAlphaMask, denseLineFillEdgeToneSubtract);
   }
   if (shouldCompositeBackground && backgroundCompositeTiming === 'post-downsample-after-dense') {
     compositeWhiteBackground(canvas);
@@ -5927,6 +5989,19 @@ function preRenderLargeLineFillCarrierPriority(
     && chain.supportFragmentCount >= 8
     && chain.fragmentCount >= 20,
   ) ? 2 : 0;
+}
+
+function hasSinglePriority2LineFillCarrier(drawing: TVGDrawing): boolean {
+  let carrierCount = 0;
+  for (const layer of drawing.layers) {
+    if (layer.type !== 'line') continue;
+    for (let shapeIndex = 0; shapeIndex < layer.shapes.length; shapeIndex++) {
+      if (preRenderLargeLineFillCarrierPriority(layer, layer.shapes[shapeIndex], shapeIndex) !== 2) continue;
+      carrierCount++;
+      if (carrierCount > 1) return false;
+    }
+  }
+  return carrierCount === 1;
 }
 
 interface LineFillPreRenderPlan {

@@ -233,11 +233,15 @@ async function runBenchmark() {
   const denseEdgeAlphaScale = optionalNumberParam(params, 'denseEdgeAlphaScale');
   const denseExteriorEdgeExpansionScale = optionalNumberParam(params, 'denseExteriorEdgeExpansionScale');
   const denseEdgeToneSubtract = optionalNumberParam(params, 'denseEdgeToneSubtract');
+  const densePriority2CarrierEdgeToneSubtract = optionalNumberParam(params, 'densePriority2CarrierEdgeToneSubtract');
   if (denseEdgeAlphaScale !== undefined) denseLineFillTuning.edgeAlphaScale = denseEdgeAlphaScale;
   if (denseExteriorEdgeExpansionScale !== undefined) {
     denseLineFillTuning.exteriorEdgeExpansionScale = denseExteriorEdgeExpansionScale;
   }
   if (denseEdgeToneSubtract !== undefined) denseLineFillTuning.edgeToneSubtract = denseEdgeToneSubtract;
+  if (densePriority2CarrierEdgeToneSubtract !== undefined) {
+    denseLineFillTuning.priority2CarrierEdgeToneSubtract = densePriority2CarrierEdgeToneSubtract;
+  }
   const renderOptions = {
     supersample: 2,
     ...(Object.keys(denseLineFillTuning).length > 0 ? { denseLineFillTuning } : {}),

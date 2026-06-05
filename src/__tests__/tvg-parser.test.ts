@@ -3427,11 +3427,16 @@ describe('tvg rendering', () => {
     resolveExternalPalette(drawing, externalColors);
 
     const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    const noPriority2CarrierEdgeToneCanvas = renderTVGToCanvas(drawing, 160, 160, 336, {
+      denseLineFillTuning: { priority2CarrierEdgeToneSubtract: 0 },
+    });
     expect(canvas).not.toBeNull();
+    expect(noPriority2CarrierEdgeToneCanvas).not.toBeNull();
     const reference = await loadImageFromArrayBuffer(thumbData);
     const score = scoreCanvasSources(reference, canvas!, 160);
+    const noPriority2CarrierEdgeToneScore = scoreCanvasSources(reference, noPriority2CarrierEdgeToneCanvas!, 160);
 
-    expect(score.rawScore).toBeGreaterThan(96.0);
+    expect(score.rawScore).toBeGreaterThan(noPriority2CarrierEdgeToneScore.rawScore + 0.03);
     expect(score.alignedScore).toBeGreaterThan(99.0);
     expect(score.foregroundIou).toBeGreaterThan(97.4);
   });

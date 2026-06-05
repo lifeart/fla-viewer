@@ -16,6 +16,7 @@ function buildBenchmarkUrl(rawMode, args) {
     ['--dense-edge-alpha-scale=', 'denseEdgeAlphaScale'],
     ['--dense-exterior-edge-expansion-scale=', 'denseExteriorEdgeExpansionScale'],
     ['--dense-edge-tone-subtract=', 'denseEdgeToneSubtract'],
+    ['--dense-priority2-carrier-edge-tone-subtract=', 'densePriority2CarrierEdgeToneSubtract'],
   ];
   for (const [prefix, paramName] of passthroughParams) {
     const arg = args.find((entry) => entry.startsWith(prefix));
