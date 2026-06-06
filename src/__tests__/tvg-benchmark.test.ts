@@ -72,6 +72,43 @@ describe('tvg-benchmark scoring', () => {
     expect(Math.abs(result.bestShift.y)).toBe(1);
   });
 
+  it('keeps geometry alignment stable across tone-only changes with the same foreground mask', () => {
+    const reference = createBuffer(32, 24);
+    const candidate = createBuffer(32, 24);
+    const tonedCandidate = createBuffer(32, 24);
+    const colors: Array<[number, number, number, number]> = [
+      [20, 40, 80, 255],
+      [180, 60, 30, 255],
+    ];
+    for (let x = 8; x < 24; x++) {
+      fillRect(reference, x, 7, x + 1, 17, colors[x % 2]);
+      const candidateColor = colors[(x + 1) % 2];
+      fillRect(candidate, x, 7, x + 1, 17, candidateColor);
+      fillRect(tonedCandidate, x, 7, x + 1, 17, [
+        Math.max(0, candidateColor[0] - 16),
+        Math.max(0, candidateColor[1] - 16),
+        Math.max(0, candidateColor[2] - 16),
+        255,
+      ]);
+    }
+
+    const result = scorePixelBuffers(reference, candidate, {
+      tolerance: 10,
+      maxShift: 2,
+      searchRadius: 0,
+    });
+    const tonedResult = scorePixelBuffers(reference, tonedCandidate, {
+      tolerance: 10,
+      maxShift: 2,
+      searchRadius: 0,
+    });
+
+    expect(result.geometryBestShift).toEqual({ x: 0, y: 0 });
+    expect(tonedResult.geometryBestShift).toEqual(result.geometryBestShift);
+    expect(result.geometryForegroundIou).toBe(100);
+    expect(tonedResult.geometryForegroundIou).toBe(result.geometryForegroundIou);
+  });
+
   it('does not normalize away large placement errors', () => {
     const reference = createBuffer(24, 24);
     fillRect(reference, 7, 7, 15, 15, [40, 40, 220, 255]);

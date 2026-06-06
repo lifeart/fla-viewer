@@ -17,6 +17,13 @@ function buildBenchmarkUrl(rawMode, args) {
     ['--dense-exterior-edge-expansion-scale=', 'denseExteriorEdgeExpansionScale'],
     ['--dense-edge-tone-subtract=', 'denseEdgeToneSubtract'],
     ['--dense-priority2-carrier-edge-tone-subtract=', 'densePriority2CarrierEdgeToneSubtract'],
+    ['--bitmap-atlas-edge-tone-base-subtract=', 'bitmapAtlasEdgeToneBaseSubtract'],
+    ['--bitmap-atlas-edge-tone-foreground-subtract=', 'bitmapAtlasEdgeToneForegroundSubtract'],
+    ['--bitmap-atlas-edge-tone-multi-tile-foreground-subtract=', 'bitmapAtlasEdgeToneMultiTileForegroundSubtract'],
+    ['--bitmap-atlas-edge-tone-background-threshold=', 'bitmapAtlasEdgeToneBackgroundThreshold'],
+    ['--bitmap-atlas-edge-tone-min-alpha=', 'bitmapAtlasEdgeToneMinAlpha'],
+    ['--bitmap-atlas-edge-tone-max-alpha=', 'bitmapAtlasEdgeToneMaxAlpha'],
+    ['--bitmap-atlas-edge-tone-min-pixels=', 'bitmapAtlasEdgeToneMinPixels'],
   ];
   for (const [prefix, paramName] of passthroughParams) {
     const arg = args.find((entry) => entry.startsWith(prefix));
@@ -128,6 +135,9 @@ function printSummary(summary) {
   }
   if (typeof summary.minAlignedVector === 'number') {
     console.log(`Aligned minima: vector=${summary.minAlignedVector.toFixed(2)} bitmap=${summary.minAlignedBitmap.toFixed(2)}`);
+  }
+  if (typeof summary.geometryAlignedOverallAverage === 'number') {
+    console.log(`Geometry-selected averages: aligned=${summary.geometryAlignedOverallAverage.toFixed(2)} focused=${summary.geometryNormalizedOverallAverage.toFixed(2)} iou=${summary.geometryIouOverallAverage.toFixed(2)} shiftDisagreements=${summary.geometryShiftDisagreements}`);
   }
   if (typeof summary.minRawVector === 'number') {
     console.log(`Raw minima: vector=${summary.minRawVector.toFixed(2)} bitmap=${summary.minRawBitmap.toFixed(2)}`);

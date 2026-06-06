@@ -208,6 +208,7 @@ interface TVGBitmapRenderState {
   centerOnOrigin: boolean;
   backgroundComposite: boolean;
   disableBitmapAtlasEdgeTone: boolean;
+  bitmapAtlasEdgeToneTuning: ResolvedBitmapAtlasEdgeToneTuning;
   diagnostics?: TVGDiagnostics;
 }
 
@@ -2996,6 +2997,8 @@ export interface TVGRenderOptions {
   denseLineFillTuning?: TVGDenseLineFillTuning;
   /** Experimental: bypass clipped bitmap-atlas edge tone in local score probes. */
   disableBitmapAtlasEdgeTone?: boolean;
+  /** Experimental: override clipped bitmap-atlas edge tone constants in local score probes. */
+  bitmapAtlasEdgeToneTuning?: TVGBitmapAtlasEdgeToneTuning;
 }
 
 export interface TVGDenseLineFillTuning {
@@ -3006,6 +3009,16 @@ export interface TVGDenseLineFillTuning {
   inkDensitySubtract?: number;
   saturatedFillDensitySubtract?: number;
   saturatedFillReliefMaxFractionalAlphaPixels?: number;
+}
+
+export interface TVGBitmapAtlasEdgeToneTuning {
+  baseSubtract?: number;
+  foregroundSubtract?: number;
+  multiTileForegroundSubtract?: number;
+  backgroundThreshold?: number;
+  minAlpha?: number;
+  maxAlpha?: number;
+  minPixels?: number;
 }
 
 const DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT = 220;
@@ -3029,7 +3042,8 @@ const DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT = { r: 8, g: 40, b: 40 };
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_SIZE = 1500;
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_DISTANCE = 2500;
 const BITMAP_ATLAS_EDGE_TONE_BASE_SUBTRACT = 8;
-const BITMAP_ATLAS_EDGE_TONE_FOREGROUND_SUBTRACT = 32;
+const BITMAP_ATLAS_EDGE_TONE_FOREGROUND_SUBTRACT = 36;
+const BITMAP_ATLAS_EDGE_TONE_MULTI_TILE_FOREGROUND_SUBTRACT = 32;
 const BITMAP_ATLAS_EDGE_TONE_BACKGROUND_THRESHOLD = 243;
 const BITMAP_ATLAS_EDGE_TONE_MIN_ALPHA = 32;
 const BITMAP_ATLAS_EDGE_TONE_MAX_ALPHA = 239;
@@ -3056,6 +3070,16 @@ interface ResolvedDenseLineFillTuning {
   saturatedFillReliefMaxFractionalAlphaPixels: number;
 }
 
+interface ResolvedBitmapAtlasEdgeToneTuning {
+  baseSubtract: number;
+  foregroundSubtract: number;
+  multiTileForegroundSubtract: number;
+  backgroundThreshold: number;
+  minAlpha: number;
+  maxAlpha: number;
+  minPixels: number;
+}
+
 function resolveDenseLineFillTuning(options?: TVGRenderOptions): ResolvedDenseLineFillTuning {
   return {
     edgeAlphaScale: options?.denseLineFillTuning?.edgeAlphaScale ?? DENSE_LINE_FILL_EDGE_ALPHA_SCALE,
@@ -3071,6 +3095,23 @@ function resolveDenseLineFillTuning(options?: TVGRenderOptions): ResolvedDenseLi
     saturatedFillReliefMaxFractionalAlphaPixels:
       options?.denseLineFillTuning?.saturatedFillReliefMaxFractionalAlphaPixels
       ?? DENSE_LINE_FILL_EDGE_EXPANSION_MAX_FRACTIONAL_ALPHA_PIXELS,
+  };
+}
+
+function resolveBitmapAtlasEdgeToneTuning(options?: TVGRenderOptions): ResolvedBitmapAtlasEdgeToneTuning {
+  return {
+    baseSubtract: options?.bitmapAtlasEdgeToneTuning?.baseSubtract ?? BITMAP_ATLAS_EDGE_TONE_BASE_SUBTRACT,
+    foregroundSubtract:
+      options?.bitmapAtlasEdgeToneTuning?.foregroundSubtract ?? BITMAP_ATLAS_EDGE_TONE_FOREGROUND_SUBTRACT,
+    multiTileForegroundSubtract:
+      options?.bitmapAtlasEdgeToneTuning?.multiTileForegroundSubtract
+      ?? options?.bitmapAtlasEdgeToneTuning?.foregroundSubtract
+      ?? BITMAP_ATLAS_EDGE_TONE_MULTI_TILE_FOREGROUND_SUBTRACT,
+    backgroundThreshold:
+      options?.bitmapAtlasEdgeToneTuning?.backgroundThreshold ?? BITMAP_ATLAS_EDGE_TONE_BACKGROUND_THRESHOLD,
+    minAlpha: options?.bitmapAtlasEdgeToneTuning?.minAlpha ?? BITMAP_ATLAS_EDGE_TONE_MIN_ALPHA,
+    maxAlpha: options?.bitmapAtlasEdgeToneTuning?.maxAlpha ?? BITMAP_ATLAS_EDGE_TONE_MAX_ALPHA,
+    minPixels: options?.bitmapAtlasEdgeToneTuning?.minPixels ?? BITMAP_ATLAS_EDGE_TONE_MIN_PIXELS,
   };
 }
 
@@ -4656,6 +4697,7 @@ function createBitmapAtlasEdgeAlphaMask(
   dy: number,
   targetW: number,
   targetH: number,
+  tuning: ResolvedBitmapAtlasEdgeToneTuning,
 ): Uint8ClampedArray | null {
   const alphaCanvas = document.createElement('canvas');
   alphaCanvas.width = width;
@@ -4668,11 +4710,11 @@ function createBitmapAtlasEdgeAlphaMask(
   let edgePixels = 0;
   for (let index = 3; index < image.data.length; index += 4) {
     const alpha = image.data[index];
-    if (alpha >= BITMAP_ATLAS_EDGE_TONE_MIN_ALPHA && alpha <= BITMAP_ATLAS_EDGE_TONE_MAX_ALPHA) {
+    if (alpha >= tuning.minAlpha && alpha <= tuning.maxAlpha) {
       edgePixels++;
     }
   }
-  return edgePixels >= BITMAP_ATLAS_EDGE_TONE_MIN_PIXELS ? image.data : null;
+  return edgePixels >= tuning.minPixels ? image.data : null;
 }
 
 function applyBitmapAtlasEdgeTone(
@@ -4680,21 +4722,22 @@ function applyBitmapAtlasEdgeTone(
   alphaMask: Uint8ClampedArray,
   width: number,
   height: number,
+  tuning: ResolvedBitmapAtlasEdgeToneTuning,
 ): void {
   const image = ctx.getImageData(0, 0, width, height);
   const data = image.data;
   for (let index = 0; index < data.length; index += 4) {
     const alpha = alphaMask[index + 3];
-    if (alpha < BITMAP_ATLAS_EDGE_TONE_MIN_ALPHA || alpha > BITMAP_ATLAS_EDGE_TONE_MAX_ALPHA) continue;
-    const baseR = Math.max(0, data[index] - BITMAP_ATLAS_EDGE_TONE_BASE_SUBTRACT);
-    const baseG = Math.max(0, data[index + 1] - BITMAP_ATLAS_EDGE_TONE_BASE_SUBTRACT);
-    const baseB = Math.max(0, data[index + 2] - BITMAP_ATLAS_EDGE_TONE_BASE_SUBTRACT);
-    const subtract = baseR < BITMAP_ATLAS_EDGE_TONE_BACKGROUND_THRESHOLD
-      || baseG < BITMAP_ATLAS_EDGE_TONE_BACKGROUND_THRESHOLD
-      || baseB < BITMAP_ATLAS_EDGE_TONE_BACKGROUND_THRESHOLD
-      || data[index + 3] < BITMAP_ATLAS_EDGE_TONE_BACKGROUND_THRESHOLD
-      ? BITMAP_ATLAS_EDGE_TONE_FOREGROUND_SUBTRACT
-      : BITMAP_ATLAS_EDGE_TONE_BASE_SUBTRACT;
+    if (alpha < tuning.minAlpha || alpha > tuning.maxAlpha) continue;
+    const baseR = Math.max(0, data[index] - tuning.baseSubtract);
+    const baseG = Math.max(0, data[index + 1] - tuning.baseSubtract);
+    const baseB = Math.max(0, data[index + 2] - tuning.baseSubtract);
+    const subtract = baseR < tuning.backgroundThreshold
+      || baseG < tuning.backgroundThreshold
+      || baseB < tuning.backgroundThreshold
+      || data[index + 3] < tuning.backgroundThreshold
+      ? tuning.foregroundSubtract
+      : tuning.baseSubtract;
     data[index] = Math.max(0, data[index] - subtract);
     data[index + 1] = Math.max(0, data[index + 1] - subtract);
     data[index + 2] = Math.max(0, data[index + 2] - subtract);
@@ -4726,6 +4769,7 @@ function renderBitmapTVGToCanvas(
     centerOnOrigin: options?.centerOnOrigin ?? false,
     backgroundComposite: options?.skipBackgroundComposite !== true,
     disableBitmapAtlasEdgeTone: options?.disableBitmapAtlasEdgeTone ?? false,
+    bitmapAtlasEdgeToneTuning: resolveBitmapAtlasEdgeToneTuning(options),
     diagnostics: drawing.diagnostics,
   } as TVGBitmapRenderState;
   return canvas;
@@ -4738,6 +4782,7 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
   const state = (canvas as any).__bitmapState as TVGBitmapRenderState | undefined;
   const bounds = state?.bounds ?? { minX: 0, minY: 0, maxX: 0, maxY: 0 };
   const renderDiagnostics = diagnostics ?? state?.diagnostics;
+  const resolvedBitmapAtlasEdgeToneTuning = state?.bitmapAtlasEdgeToneTuning ?? resolveBitmapAtlasEdgeToneTuning();
   const ctx = canvas.getContext('2d')!;
   const width = canvas.width;
   const height = canvas.height;
@@ -4824,6 +4869,12 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
 
   const loaded = images.filter((x): x is { tile: TVGBitmapTile; img: HTMLCanvasElement } => x !== null);
   if (loaded.length === 0) return false;
+  const bitmapAtlasEdgeToneTuning = loaded.length >= BITMAP_ATLAS_EDGE_TONE_MULTI_TILE_MIN
+    ? {
+      ...resolvedBitmapAtlasEdgeToneTuning,
+      foregroundSubtract: resolvedBitmapAtlasEdgeToneTuning.multiTileForegroundSubtract,
+    }
+    : resolvedBitmapAtlasEdgeToneTuning;
 
   const hasClipRects = isFinite(bounds.minX) && isFinite(bounds.minY) && (bounds.maxX - bounds.minX) > 0 && (bounds.maxY - bounds.minY) > 0;
   const largest = loaded.reduce((a, b) => a.img.width * a.img.height > b.img.width * b.img.height ? a : b);
@@ -4946,11 +4997,26 @@ export async function loadBitmapTiles(canvas: HTMLCanvasElement, diagnostics?: T
   const bitmapEdgeAlphaMask = (state?.backgroundComposite ?? true)
     && !(state?.disableBitmapAtlasEdgeTone ?? false)
     && shouldApplyBitmapAtlasEdgeTone(fallbackScanUsed, hasClipRects, loaded.length, renderW / Math.max(renderH, 1))
-    ? createBitmapAtlasEdgeAlphaMask(renderCanvas, width, height, dx, dy, targetW, targetH)
+    ? createBitmapAtlasEdgeAlphaMask(
+      renderCanvas,
+      width,
+      height,
+      dx,
+      dy,
+      targetW,
+      targetH,
+      bitmapAtlasEdgeToneTuning,
+    )
     : null;
   drawImageWithProgressiveDownscale(ctx, renderCanvas, dx, dy, targetW, targetH);
   if (bitmapEdgeAlphaMask) {
-    applyBitmapAtlasEdgeTone(ctx, bitmapEdgeAlphaMask, width, height);
+    applyBitmapAtlasEdgeTone(
+      ctx,
+      bitmapEdgeAlphaMask,
+      width,
+      height,
+      bitmapAtlasEdgeToneTuning,
+    );
   }
 
   // Clean up

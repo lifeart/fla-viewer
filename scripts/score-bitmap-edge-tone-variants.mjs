@@ -21,6 +21,37 @@ const cases = caseArg.split(',')
     return { elementName, drawingName };
   });
 
+const variants = [
+  { name: 'production', renderOptions: {} },
+  { name: 'no-edge-tone', renderOptions: { disableBitmapAtlasEdgeTone: true } },
+  { name: 'foreground-16', renderOptions: { bitmapAtlasEdgeToneTuning: { foregroundSubtract: 16 } } },
+  { name: 'foreground-20', renderOptions: { bitmapAtlasEdgeToneTuning: { foregroundSubtract: 20 } } },
+  { name: 'foreground-24', renderOptions: { bitmapAtlasEdgeToneTuning: { foregroundSubtract: 24 } } },
+  { name: 'foreground-28', renderOptions: { bitmapAtlasEdgeToneTuning: { foregroundSubtract: 28 } } },
+  { name: 'foreground-32', renderOptions: { bitmapAtlasEdgeToneTuning: { foregroundSubtract: 32 } } },
+  { name: 'foreground-34', renderOptions: { bitmapAtlasEdgeToneTuning: { foregroundSubtract: 34 } } },
+  { name: 'foreground-36', renderOptions: { bitmapAtlasEdgeToneTuning: { foregroundSubtract: 36 } } },
+  {
+    name: 'small-foreground-36',
+    renderOptions: { bitmapAtlasEdgeToneTuning: { foregroundSubtract: 36, multiTileForegroundSubtract: 32 } },
+  },
+  { name: 'foreground-38', renderOptions: { bitmapAtlasEdgeToneTuning: { foregroundSubtract: 38 } } },
+  { name: 'foreground-40', renderOptions: { bitmapAtlasEdgeToneTuning: { foregroundSubtract: 40 } } },
+  { name: 'foreground-44', renderOptions: { bitmapAtlasEdgeToneTuning: { foregroundSubtract: 44 } } },
+  { name: 'foreground-48', renderOptions: { bitmapAtlasEdgeToneTuning: { foregroundSubtract: 48 } } },
+  { name: 'base-0', renderOptions: { bitmapAtlasEdgeToneTuning: { baseSubtract: 0 } } },
+  { name: 'base-4', renderOptions: { bitmapAtlasEdgeToneTuning: { baseSubtract: 4 } } },
+  { name: 'base-12', renderOptions: { bitmapAtlasEdgeToneTuning: { baseSubtract: 12 } } },
+  {
+    name: 'base-4-foreground-24',
+    renderOptions: { bitmapAtlasEdgeToneTuning: { baseSubtract: 4, foregroundSubtract: 24 } },
+  },
+  {
+    name: 'base-4-foreground-28',
+    renderOptions: { bitmapAtlasEdgeToneTuning: { baseSubtract: 4, foregroundSubtract: 28 } },
+  },
+];
+
 const browser = await puppeteer.launch({ headless: 'new' });
 
 try {
@@ -28,7 +59,7 @@ try {
   page.setDefaultNavigationTimeout(0);
   await page.goto('http://127.0.0.1:4175/', { waitUntil: 'domcontentloaded' });
 
-  const result = await page.evaluate(async ({ cases, size }) => {
+  const result = await page.evaluate(async ({ cases, size, variants }) => {
     const JSZipMod = await import('/node_modules/.vite/deps/jszip.js');
     const tvg = await import('/src/tvg-parser.ts');
     const pal = await import('/src/tpl-palette.ts');
@@ -118,6 +149,11 @@ try {
         aligned: score.alignedScore,
         focused: score.normalizedScore,
         iou: score.foregroundIou,
+        bestShift: score.bestShift,
+        geometryAligned: score.geometryAlignedScore,
+        geometryFocused: score.geometryNormalizedScore,
+        geometryIou: score.geometryForegroundIou,
+        geometryBestShift: score.geometryBestShift,
         bounds: canvas ? canvasBounds(canvas) : null,
       };
     }
@@ -145,56 +181,89 @@ try {
         aspectRatio: renderW !== null && renderH !== null ? renderW / Math.max(renderH, 1) : null,
       };
 
-      const production = await renderAndScore({
-        base,
-        drawingName: testCase.drawingName,
-        viewport,
-        thumbnail,
-        renderOptions: {},
-      });
-      const noEdgeTone = await renderAndScore({
-        base,
-        drawingName: testCase.drawingName,
-        viewport,
-        thumbnail,
-        renderOptions: { disableBitmapAtlasEdgeTone: true },
-      });
+      const scores = {};
+      for (const variant of variants) {
+        scores[variant.name] = await renderAndScore({
+          base,
+          drawingName: testCase.drawingName,
+          viewport,
+          thumbnail,
+          renderOptions: variant.renderOptions,
+        });
+      }
+      const production = scores.production;
       rows.push({
         case: `${testCase.elementName}/${testCase.drawingName}`,
         metadata,
-        production,
-        noEdgeTone,
-        deltaNoEdgeRaw: noEdgeTone.raw - production.raw,
-        deltaNoEdgeAligned: noEdgeTone.aligned - production.aligned,
+        variants: Object.fromEntries(Object.entries(scores).map(([name, score]) => [
+          name,
+          {
+            ...score,
+            deltaRaw: score.raw - production.raw,
+            deltaAligned: score.aligned - production.aligned,
+            deltaFocused: score.focused - production.focused,
+            deltaIou: score.iou - production.iou,
+            deltaGeometryAligned: score.geometryAligned - production.geometryAligned,
+            deltaGeometryFocused: score.geometryFocused - production.geometryFocused,
+            deltaGeometryIou: score.geometryIou - production.geometryIou,
+          },
+        ])),
       });
     }
 
-    const aggregate = rows.reduce((entry, row) => {
-      entry.count += 1;
-      entry.averageNoEdgeRawDelta += row.deltaNoEdgeRaw;
-      entry.averageNoEdgeAlignedDelta += row.deltaNoEdgeAligned;
-      entry.rawRegressions += row.deltaNoEdgeRaw < -0.0001 ? 1 : 0;
-      entry.rawImprovements += row.deltaNoEdgeRaw > 0.0001 ? 1 : 0;
-      entry.minNoEdgeRawDelta = Math.min(entry.minNoEdgeRawDelta, row.deltaNoEdgeRaw);
-      entry.maxNoEdgeRawDelta = Math.max(entry.maxNoEdgeRawDelta, row.deltaNoEdgeRaw);
-      return entry;
-    }, {
-      count: 0,
-      averageNoEdgeRawDelta: 0,
-      averageNoEdgeAlignedDelta: 0,
-      rawRegressions: 0,
-      rawImprovements: 0,
-      minNoEdgeRawDelta: Infinity,
-      maxNoEdgeRawDelta: -Infinity,
-    });
-    if (aggregate.count > 0) {
-      aggregate.averageNoEdgeRawDelta /= aggregate.count;
-      aggregate.averageNoEdgeAlignedDelta /= aggregate.count;
+    const aggregate = {};
+    for (const variant of variants) {
+      const summary = {
+        averageRawDelta: 0,
+        averageAlignedDelta: 0,
+        averageFocusedDelta: 0,
+        averageIouDelta: 0,
+        averageGeometryAlignedDelta: 0,
+        averageGeometryFocusedDelta: 0,
+        averageGeometryIouDelta: 0,
+        selectedShiftFlips: 0,
+        geometryShiftFlips: 0,
+        rawRegressions: 0,
+        rawImprovements: 0,
+        minRawDelta: Infinity,
+        maxRawDelta: -Infinity,
+      };
+      for (const row of rows) {
+        const score = row.variants[variant.name];
+        summary.averageRawDelta += score.deltaRaw;
+        summary.averageAlignedDelta += score.deltaAligned;
+        summary.averageFocusedDelta += score.deltaFocused;
+        summary.averageIouDelta += score.deltaIou;
+        summary.averageGeometryAlignedDelta += score.deltaGeometryAligned;
+        summary.averageGeometryFocusedDelta += score.deltaGeometryFocused;
+        summary.averageGeometryIouDelta += score.deltaGeometryIou;
+        summary.selectedShiftFlips += score.bestShift.x !== row.variants.production.bestShift.x
+          || score.bestShift.y !== row.variants.production.bestShift.y
+          ? 1
+          : 0;
+        summary.geometryShiftFlips += score.geometryBestShift.x !== row.variants.production.geometryBestShift.x
+          || score.geometryBestShift.y !== row.variants.production.geometryBestShift.y
+          ? 1
+          : 0;
+        summary.rawRegressions += score.deltaRaw < -0.0001 ? 1 : 0;
+        summary.rawImprovements += score.deltaRaw > 0.0001 ? 1 : 0;
+        summary.minRawDelta = Math.min(summary.minRawDelta, score.deltaRaw);
+        summary.maxRawDelta = Math.max(summary.maxRawDelta, score.deltaRaw);
+      }
+      if (rows.length > 0) {
+        summary.averageRawDelta /= rows.length;
+        summary.averageAlignedDelta /= rows.length;
+        summary.averageFocusedDelta /= rows.length;
+        summary.averageIouDelta /= rows.length;
+        summary.averageGeometryAlignedDelta /= rows.length;
+        summary.averageGeometryFocusedDelta /= rows.length;
+        summary.averageGeometryIouDelta /= rows.length;
+      }
+      aggregate[variant.name] = summary;
     }
 
-    rows.sort((a, b) => a.deltaNoEdgeRaw - b.deltaNoEdgeRaw);
     return { aggregate, cases: rows };
-  }, { cases, size: SIZE });
+  }, { cases, size: SIZE, variants });
 
   console.log(JSON.stringify(result, null, 2));
 } finally {

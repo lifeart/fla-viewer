@@ -32,6 +32,10 @@ export interface BenchmarkScoreResult {
   macroScore: number;
   bestShift: { x: number; y: number };
   foregroundIou: number;
+  geometryAlignedScore: number;
+  geometryNormalizedScore: number;
+  geometryBestShift: { x: number; y: number };
+  geometryForegroundIou: number;
   referenceBounds: BenchmarkBounds | null;
   candidateBounds: BenchmarkBounds | null;
 }
@@ -43,6 +47,7 @@ const DEFAULTS: Required<BenchmarkScoreOptions> = {
   searchRadius: 2,
   contentKind: 'vector',
 };
+const GEOMETRY_ALIGNMENT_IOU_WINDOW = 0.25;
 
 function getOptions(options?: BenchmarkScoreOptions): Required<BenchmarkScoreOptions> {
   return {
@@ -407,6 +412,12 @@ function scorePixelBuffersBase(
   let bestNormalizedScore = rawNormalized;
   let bestIou = raw.foregroundIou;
   const seenShifts = new Set<string>();
+  const shiftCandidates: Array<{
+    shift: { x: number; y: number };
+    alignedScore: number;
+    normalizedScore: number;
+    foregroundIou: number;
+  }> = [];
 
   const considerShift = (shiftX: number, shiftY: number) => {
     const key = `${shiftX},${shiftY}`;
@@ -425,6 +436,12 @@ function scorePixelBuffersBase(
       : result.foregroundIou;
     const focusedScore = normalized;
     const effectiveScore = result.score;
+    shiftCandidates.push({
+      shift: { x: shiftX, y: shiftY },
+      alignedScore: effectiveScore,
+      normalizedScore: focusedScore,
+      foregroundIou: result.foregroundIou,
+    });
     const bestDistance = Math.abs(bestShift.x) + Math.abs(bestShift.y);
     const candidateDistance = Math.abs(shiftX) + Math.abs(shiftY);
     if (effectiveScore > bestScore
@@ -463,6 +480,28 @@ function scorePixelBuffersBase(
     }
   }
 
+  const maxGeometryIou = Math.max(...shiftCandidates.map(candidate => candidate.foregroundIou));
+  const geometryCandidates = shiftCandidates.filter(
+    candidate => candidate.foregroundIou >= maxGeometryIou - GEOMETRY_ALIGNMENT_IOU_WINDOW,
+  );
+  geometryCandidates.sort((a, b) => {
+    const alignedDelta = b.alignedScore - a.alignedScore;
+    if (alignedDelta !== 0) return alignedDelta;
+    const normalizedDelta = b.normalizedScore - a.normalizedScore;
+    if (normalizedDelta !== 0) return normalizedDelta;
+    const iouDelta = b.foregroundIou - a.foregroundIou;
+    if (iouDelta !== 0) return iouDelta;
+    const aDistance = Math.abs(a.shift.x) + Math.abs(a.shift.y);
+    const bDistance = Math.abs(b.shift.x) + Math.abs(b.shift.y);
+    return aDistance - bDistance;
+  });
+  const geometryBest = geometryCandidates[0] ?? {
+    shift: bestShift,
+    alignedScore: bestAlignedScore,
+    normalizedScore: bestNormalizedScore,
+    foregroundIou: bestIou,
+  };
+
   const croppedBounds = unionBounds(
     referenceBounds,
     candidateBounds ? shiftBounds(candidateBounds, bestShift.x, bestShift.y) : null,
@@ -487,6 +526,10 @@ function scorePixelBuffersBase(
     macroScore: bestScore,
     bestShift,
     foregroundIou: bestIou,
+    geometryAlignedScore: geometryBest.alignedScore,
+    geometryNormalizedScore: geometryBest.normalizedScore,
+    geometryBestShift: geometryBest.shift,
+    geometryForegroundIou: geometryBest.foregroundIou,
     referenceBounds,
     candidateBounds,
   };

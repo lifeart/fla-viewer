@@ -567,6 +567,7 @@ describe('tvg rendering', () => {
       { elementName: '7f81', drawingName: '7f81-1', minRaw: 98.2, minGate: 99.2 },
       { elementName: '84fe', drawingName: '84fe-1', minRaw: 98.4, minGate: 99.2 },
       { elementName: 'cc62', drawingName: 'cc62-1', minRaw: 98.4, minGate: 99.2 },
+      { elementName: '6be2', drawingName: '6be2-1', minRaw: 98.7, minGate: 99.6 },
       { elementName: 'Screenshot_2022', drawingName: 'Screenshot_2022-1', minRaw: 99.6, minGate: 99.9 },
     ];
 
