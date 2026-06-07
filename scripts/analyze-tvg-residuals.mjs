@@ -302,6 +302,11 @@ try {
           densityImproved: 0,
           densityWorsened: 0,
           shadowImproved: 0,
+          beforeToleranceFailures: 0,
+          densityToleranceRepairs: 0,
+          densityToleranceRegressions: 0,
+          finalToleranceRepairs: 0,
+          finalToleranceRegressions: 0,
           finalBetterThanBefore: 0,
           finalWorseThanBefore: 0,
           beforeError: 0,
@@ -314,10 +319,23 @@ try {
         const densityError = pixelError(density, refData, index);
         const shadowError = pixelError(shadow, refData, index);
         const finalError = pixelError(final, refData, index);
+        const failsTolerance = data => (
+          Math.abs(data[index] - refData[index]) > BAD_DELTA_THRESHOLD
+          || Math.abs(data[index + 1] - refData[index + 1]) > BAD_DELTA_THRESHOLD
+          || Math.abs(data[index + 2] - refData[index + 2]) > BAD_DELTA_THRESHOLD
+        );
+        const beforeFailsTolerance = failsTolerance(before);
+        const densityFailsTolerance = failsTolerance(density);
+        const finalFailsTolerance = failsTolerance(final);
         cohort.count++;
         if (densityError < beforeError) cohort.densityImproved++;
         else if (densityError > beforeError) cohort.densityWorsened++;
         if (shadowError < densityError) cohort.shadowImproved++;
+        if (beforeFailsTolerance) cohort.beforeToleranceFailures++;
+        if (beforeFailsTolerance && !densityFailsTolerance) cohort.densityToleranceRepairs++;
+        else if (!beforeFailsTolerance && densityFailsTolerance) cohort.densityToleranceRegressions++;
+        if (beforeFailsTolerance && !finalFailsTolerance) cohort.finalToleranceRepairs++;
+        else if (!beforeFailsTolerance && finalFailsTolerance) cohort.finalToleranceRegressions++;
         if (finalError < beforeError) cohort.finalBetterThanBefore++;
         else if (finalError > beforeError) cohort.finalWorseThanBefore++;
         cohort.beforeError += beforeError;
@@ -393,6 +411,18 @@ try {
           netImprovedPixels: improvedPixels - worsenedPixels,
           channelToleranceFailures,
           meanAbsoluteError: Number((absoluteError / (current.length / 4)).toFixed(3)),
+          score: (() => {
+            const score = bench.scorePixelBuffers(
+              { width: SIZE, height: SIZE, data: refData },
+              { width: snapshot.width, height: snapshot.height, data: current },
+            );
+            return {
+              raw: score.rawScore,
+              aligned: score.alignedScore,
+              focused: score.normalizedScore,
+              foregroundIou: score.foregroundIou,
+            };
+          })(),
         });
         previous = current;
       }
