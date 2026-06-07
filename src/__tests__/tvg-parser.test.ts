@@ -3427,17 +3427,40 @@ describe('tvg rendering', () => {
     const drawing = parseTVG(tvgData);
     resolveExternalPalette(drawing, externalColors);
 
-    const canvas = renderTVGToCanvas(drawing, 160, 160, 336);
+    const denseLineFillTrace = {
+      applied: false,
+      usePriority2CarrierTone: false,
+      outputFractionalAlphaPixels: 0,
+      stages: {},
+    };
+    const canvas = renderTVGToCanvas(drawing, 160, 160, 336, { denseLineFillTrace });
     const noPriority2CarrierEdgeToneCanvas = renderTVGToCanvas(drawing, 160, 160, 336, {
       denseLineFillTuning: { priority2CarrierEdgeToneSubtract: 0 },
     });
+    const genericCarrierInkDensityCanvas = renderTVGToCanvas(drawing, 160, 160, 336, {
+      denseLineFillTuning: { priority2CarrierInkDensitySubtract: 32 },
+    });
     expect(canvas).not.toBeNull();
     expect(noPriority2CarrierEdgeToneCanvas).not.toBeNull();
+    expect(genericCarrierInkDensityCanvas).not.toBeNull();
     const reference = await loadImageFromArrayBuffer(thumbData);
     const score = scoreCanvasSources(reference, canvas!, 160);
     const noPriority2CarrierEdgeToneScore = scoreCanvasSources(reference, noPriority2CarrierEdgeToneCanvas!, 160);
+    const defaultPixels = canvas!.getContext('2d')!.getImageData(0, 0, 160, 160).data;
+    const genericCarrierPixels = genericCarrierInkDensityCanvas!.getContext('2d')!.getImageData(0, 0, 160, 160).data;
 
     expect(score.rawScore).toBeGreaterThan(noPriority2CarrierEdgeToneScore.rawScore + 0.03);
+    expect(defaultPixels.some((value, index) => value !== genericCarrierPixels[index])).toBe(true);
+    expect(denseLineFillTrace.applied).toBe(true);
+    expect(denseLineFillTrace.usePriority2CarrierTone).toBe(true);
+    expect(Object.keys(denseLineFillTrace.stages)).toEqual([
+      'before-edge-coverage',
+      'after-edge-coverage',
+      'before-density',
+      'after-density',
+      'after-interior-shadow',
+      'after-edge-tone',
+    ]);
     expect(score.alignedScore).toBeGreaterThan(99.0);
     expect(score.foregroundIou).toBeGreaterThan(97.4);
   });

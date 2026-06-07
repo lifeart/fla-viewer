@@ -234,6 +234,15 @@ async function runBenchmark() {
   const denseExteriorEdgeExpansionScale = optionalNumberParam(params, 'denseExteriorEdgeExpansionScale');
   const denseEdgeToneSubtract = optionalNumberParam(params, 'denseEdgeToneSubtract');
   const densePriority2CarrierEdgeToneSubtract = optionalNumberParam(params, 'densePriority2CarrierEdgeToneSubtract');
+  const densePriority2CarrierInkDensitySubtract = optionalNumberParam(params, 'densePriority2CarrierInkDensitySubtract');
+  const densePriority2CarrierMidtoneInkDensitySubtract = optionalNumberParam(
+    params,
+    'densePriority2CarrierMidtoneInkDensitySubtract',
+  );
+  const densePriority2CarrierSaturatedFillDensitySubtract = optionalNumberParam(
+    params,
+    'densePriority2CarrierSaturatedFillDensitySubtract',
+  );
   if (denseEdgeAlphaScale !== undefined) denseLineFillTuning.edgeAlphaScale = denseEdgeAlphaScale;
   if (denseExteriorEdgeExpansionScale !== undefined) {
     denseLineFillTuning.exteriorEdgeExpansionScale = denseExteriorEdgeExpansionScale;
@@ -241,6 +250,15 @@ async function runBenchmark() {
   if (denseEdgeToneSubtract !== undefined) denseLineFillTuning.edgeToneSubtract = denseEdgeToneSubtract;
   if (densePriority2CarrierEdgeToneSubtract !== undefined) {
     denseLineFillTuning.priority2CarrierEdgeToneSubtract = densePriority2CarrierEdgeToneSubtract;
+  }
+  if (densePriority2CarrierInkDensitySubtract !== undefined) {
+    denseLineFillTuning.priority2CarrierInkDensitySubtract = densePriority2CarrierInkDensitySubtract;
+  }
+  if (densePriority2CarrierMidtoneInkDensitySubtract !== undefined) {
+    denseLineFillTuning.priority2CarrierMidtoneInkDensitySubtract = densePriority2CarrierMidtoneInkDensitySubtract;
+  }
+  if (densePriority2CarrierSaturatedFillDensitySubtract !== undefined) {
+    denseLineFillTuning.priority2CarrierSaturatedFillDensitySubtract = densePriority2CarrierSaturatedFillDensitySubtract;
   }
   const bitmapAtlasEdgeToneTuning = {};
   const bitmapAtlasEdgeToneParams = [

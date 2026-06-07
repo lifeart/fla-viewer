@@ -250,6 +250,75 @@ try {
       .sort((a, b) => b.count - a.count || b.meanAbsDelta - a.meanAbsDelta)
       .slice(0, 32);
 
+    const summarizeDenseLineFillTrace = (trace, refData) => {
+      if (!trace.applied) return { applied: false, stages: [] };
+      const stageOrder = [
+        'before-edge-coverage',
+        'after-edge-coverage',
+        'before-density',
+        'after-density',
+        'after-interior-shadow',
+        'after-edge-tone',
+      ];
+      let previous = null;
+      const stages = [];
+      for (const stage of stageOrder) {
+        const snapshot = trace.stages[stage];
+        if (!snapshot) continue;
+        const current = new Uint8ClampedArray(snapshot.data.length);
+        for (let index = 0; index < snapshot.data.length; index += 4) {
+          const alpha = snapshot.data[index + 3] / 255;
+          current[index] = Math.round(snapshot.data[index] * alpha + 255 * (1 - alpha));
+          current[index + 1] = Math.round(snapshot.data[index + 1] * alpha + 255 * (1 - alpha));
+          current[index + 2] = Math.round(snapshot.data[index + 2] * alpha + 255 * (1 - alpha));
+          current[index + 3] = 255;
+        }
+        let changedPixels = 0;
+        let improvedPixels = 0;
+        let worsenedPixels = 0;
+        let channelToleranceFailures = 0;
+        let absoluteError = 0;
+        for (let index = 0; index < current.length; index += 4) {
+          const currentError = Math.abs(current[index] - refData[index])
+            + Math.abs(current[index + 1] - refData[index + 1])
+            + Math.abs(current[index + 2] - refData[index + 2]);
+          absoluteError += currentError;
+          if (Math.abs(current[index] - refData[index]) > BAD_DELTA_THRESHOLD
+            || Math.abs(current[index + 1] - refData[index + 1]) > BAD_DELTA_THRESHOLD
+            || Math.abs(current[index + 2] - refData[index + 2]) > BAD_DELTA_THRESHOLD) {
+            channelToleranceFailures++;
+          }
+          if (!previous) continue;
+          const changed = current[index] !== previous[index]
+            || current[index + 1] !== previous[index + 1]
+            || current[index + 2] !== previous[index + 2];
+          if (!changed) continue;
+          changedPixels++;
+          const previousError = Math.abs(previous[index] - refData[index])
+            + Math.abs(previous[index + 1] - refData[index + 1])
+            + Math.abs(previous[index + 2] - refData[index + 2]);
+          if (currentError < previousError) improvedPixels++;
+          else if (currentError > previousError) worsenedPixels++;
+        }
+        stages.push({
+          stage,
+          changedPixels,
+          improvedPixels,
+          worsenedPixels,
+          netImprovedPixels: improvedPixels - worsenedPixels,
+          channelToleranceFailures,
+          meanAbsoluteError: Number((absoluteError / (current.length / 4)).toFixed(3)),
+        });
+        previous = current;
+      }
+      return {
+        applied: true,
+        usePriority2CarrierTone: trace.usePriority2CarrierTone,
+        outputFractionalAlphaPixels: trace.outputFractionalAlphaPixels,
+        stages,
+      };
+    };
+
     const analyzeCase = async (drawingName) => {
       const drawing = tvg.parseTVG(await zip.file(`${base}/${drawingName}.tvg`).async('arraybuffer'));
       tvg.resolveExternalPalette(drawing, externalColors);
@@ -264,7 +333,16 @@ try {
       refCtx.drawImage(thumbnail, 0, 0, SIZE, SIZE);
       const refData = refCtx.getImageData(0, 0, SIZE, SIZE).data;
 
-      const candidate = tvg.renderTVGToCanvas(drawing, SIZE, SIZE, viewport, { supersample: 2 });
+      const denseLineFillTrace = {
+        applied: false,
+        usePriority2CarrierTone: false,
+        outputFractionalAlphaPixels: 0,
+        stages: {},
+      };
+      const candidate = tvg.renderTVGToCanvas(drawing, SIZE, SIZE, viewport, {
+        supersample: 2,
+        denseLineFillTrace,
+      });
       if (candidate) await tvg.loadBitmapTiles(candidate, drawing.diagnostics);
       const transparent = tvg.renderTVGToCanvas(
         drawing,
@@ -390,6 +468,7 @@ try {
           .sort(([a], [b]) => Number(a.split('-')[0]) - Number(b.split('-')[0]))
           .map(([range, bucket]) => ({ range, ...finalizeBucket(bucket) })),
         paintBuckets: includePaintBuckets ? finalizePaintBuckets(paintBuckets) : undefined,
+        denseLineFillTrace: summarizeDenseLineFillTrace(denseLineFillTrace, refData),
         refOnlySummary: {
           bounds: boundsForMask(refOnly),
           topRows: rowCounts(refOnly),
