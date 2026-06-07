@@ -4,6 +4,9 @@ import pako from 'pako';
 import { FLAParser, setParserDebug } from '../fla-parser';
 import { FLARenderer } from '../renderer';
 import { createConsoleSpy, expectLogContaining, type ConsoleSpy } from './test-utils';
+// A small real MP3 stream (frame-aligned slice of a real Animate sound .dat),
+// used to prove MP3 carried under a PCM-style format string decodes correctly.
+import mp3SoundUrl from './fixtures/mp3-sound.mp3?url';
 
 // Helper to create a real FLA zip file with given content
 async function createFlaZip(domDocumentXml: string, additionalFiles: Record<string, string | Uint8Array> = {}): Promise<File> {
@@ -3163,6 +3166,40 @@ describe('FLAParser', () => {
       expect(sound!.sampleRate).toBe(44000);
       expect(sound!.bitDepth).toBe(16);
       expect(sound!.channels).toBe(2);
+    });
+
+    it('decodes MP3 data carried under a PCM-style format string (issue #10, load-bearing)', async () => {
+      // Real repro: Adobe Animate stores the sound as an MP3 stream in bin/ but
+      // writes format="44kHz 16bit Stereo" (the *uncompressed* playback props)
+      // and appends a low-rate PCM "cache" after the MP3 frames. Before the fix
+      // the parser trusted the format string, fed the MP3 bytes to the raw-PCM
+      // path, and produced static. The parser must sniff the MP3 magic, trim to
+      // dataLength, and hand the stream to decodeAudioData.
+      const mp3 = new Uint8Array(await (await fetch(mp3SoundUrl)).arrayBuffer());
+      // Mirror Animate's layout: MP3 frames followed by an 8-bit PCM cache
+      // (0x80 == silence). dataLength marks where the MP3 ends.
+      const cache = new Uint8Array(2048).fill(0x80);
+      const dat = new Uint8Array(mp3.length + cache.length);
+      dat.set(mp3, 0);
+      dat.set(cache, mp3.length);
+
+      const media = `
+        <media>
+          <DOMSoundItem name="shuckssound" href="shuckssound.mp3" soundDataHRef="snd.dat"
+            format="44kHz 16bit Stereo" sampleCount="4608" dataLength="${mp3.length}"/>
+        </media>`;
+      const fla = await createFlaZip(createDOMDocument({ media }), { 'bin/snd.dat': dat });
+      const doc = await parser.parse(fla);
+
+      const sound = doc.sounds.get('shuckssound');
+      expect(sound).toBeDefined();
+      expect(sound!.dataLength).toBe(mp3.length);
+      expect(sound!.audioData).toBeDefined();
+      // The MP3 really decodes to ~0.105s of audio. The buggy raw-PCM path
+      // reinterprets the bytes as 16-bit stereo and yields only ~0.03s of
+      // noise, so a duration this long can only come from decoding the MP3.
+      expect(sound!.audioData!.duration).toBeGreaterThan(0.08);
+      expect(sound!.audioData!.duration).toBeLessThan(0.15);
     });
 
     it('should parse mono PCM format', async () => {

@@ -2171,6 +2171,12 @@ export class FLAParser {
       const sampleCount = soundEl.getAttribute('sampleCount')
         ? parseInt(soundEl.getAttribute('sampleCount')!)
         : undefined;
+      // Byte length of the actual stored (e.g. MP3) stream. Adobe appends a
+      // low-rate PCM "cache" after the compressed frames inside the same .dat,
+      // so this lets us hand only the real stream to the decoder.
+      const dataLength = soundEl.getAttribute('dataLength')
+        ? parseInt(soundEl.getAttribute('dataLength')!)
+        : undefined;
 
       // Parse format string to extract sample rate, bit depth, and channels
       // Format examples: "44kHz 16bit Stereo", "22kHz 8bit Mono", "mp3"
@@ -2182,6 +2188,7 @@ export class FLAParser {
         soundDataHRef,
         format,
         sampleCount,
+        dataLength,
         ...formatInfo
       };
 
@@ -2262,7 +2269,37 @@ export class FLAParser {
       return;
     }
 
+    // Adobe Animate frequently stores the sound as an MP3 stream while still
+    // writing format="44kHz 16bit Stereo" (the *uncompressed* playback props),
+    // so the format string is not a reliable codec indicator. Sniff the real
+    // codec from the leading bytes and prefer it. Without this, MP3 bytes are
+    // fed to the raw-PCM path and play as static (issue #10 "sound glitches").
+    const head = new Uint8Array(audioData, 0, Math.min(4, audioData.byteLength));
+    const isMp3 = (head[0] === 0xff && (head[1] & 0xe0) === 0xe0) || // MPEG frame sync (FF Ex)
+                  (head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33); // "ID3" tag
+
     try {
+      if (isMp3) {
+        // Trim any trailing PCM cache Adobe appends after the MP3 frames so the
+        // decoder only sees the compressed stream. slice() copies, leaving
+        // audioData intact for the format-string fallback below.
+        const end = soundItem.dataLength && soundItem.dataLength < audioData.byteLength
+          ? soundItem.dataLength
+          : audioData.byteLength;
+        try {
+          soundItem.audioData = await this.audioContext.decodeAudioData(audioData.slice(0, end));
+          if (DEBUG) {
+            console.log(`Loaded MP3 sound: ${soundItem.name}, duration: ${soundItem.audioData.duration.toFixed(2)}s`);
+          }
+          return;
+        } catch (e) {
+          // Magic looked like MP3 but the browser couldn't decode it; fall
+          // through to the format-string driven path rather than giving up.
+          if (DEBUG) {
+            console.warn(`MP3 magic detected but decode failed, falling back: ${sourceRef}`, e);
+          }
+        }
+      }
       if (isADPCM) {
         // Decode ADPCM compressed audio
         const sampleRate = soundItem.sampleRate || 44100;
