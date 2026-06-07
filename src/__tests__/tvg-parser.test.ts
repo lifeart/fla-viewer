@@ -3440,17 +3440,26 @@ describe('tvg rendering', () => {
     const genericCarrierInkDensityCanvas = renderTVGToCanvas(drawing, 160, 160, 336, {
       denseLineFillTuning: { priority2CarrierInkDensitySubtract: 32 },
     });
+    const fullPriority2InteriorToneCanvas = renderTVGToCanvas(drawing, 160, 160, 336, {
+      denseLineFillTuning: { priority2CarrierOpaqueInteriorToneScale: 1 },
+    });
     expect(canvas).not.toBeNull();
     expect(noPriority2CarrierEdgeToneCanvas).not.toBeNull();
     expect(genericCarrierInkDensityCanvas).not.toBeNull();
+    expect(fullPriority2InteriorToneCanvas).not.toBeNull();
     const reference = await loadImageFromArrayBuffer(thumbData);
     const score = scoreCanvasSources(reference, canvas!, 160);
     const noPriority2CarrierEdgeToneScore = scoreCanvasSources(reference, noPriority2CarrierEdgeToneCanvas!, 160);
     const defaultPixels = canvas!.getContext('2d')!.getImageData(0, 0, 160, 160).data;
     const genericCarrierPixels = genericCarrierInkDensityCanvas!.getContext('2d')!.getImageData(0, 0, 160, 160).data;
+    const fullPriority2InteriorTonePixels = fullPriority2InteriorToneCanvas!
+      .getContext('2d')!
+      .getImageData(0, 0, 160, 160)
+      .data;
 
     expect(score.rawScore).toBeGreaterThan(noPriority2CarrierEdgeToneScore.rawScore + 0.03);
     expect(defaultPixels.some((value, index) => value !== genericCarrierPixels[index])).toBe(true);
+    expect(defaultPixels.some((value, index) => value !== fullPriority2InteriorTonePixels[index])).toBe(true);
     expect(denseLineFillTrace.applied).toBe(true);
     expect(denseLineFillTrace.usePriority2CarrierTone).toBe(true);
     expect(Object.keys(denseLineFillTrace.stages)).toEqual([

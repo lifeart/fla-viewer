@@ -20,6 +20,8 @@ function buildBenchmarkUrl(rawMode, args) {
     ['--dense-priority2-carrier-ink-density-subtract=', 'densePriority2CarrierInkDensitySubtract'],
     ['--dense-priority2-carrier-midtone-ink-density-subtract=', 'densePriority2CarrierMidtoneInkDensitySubtract'],
     ['--dense-priority2-carrier-saturated-fill-density-subtract=', 'densePriority2CarrierSaturatedFillDensitySubtract'],
+    ['--dense-opaque-interior-tone-scale=', 'denseOpaqueInteriorToneScale'],
+    ['--dense-priority2-carrier-opaque-interior-tone-scale=', 'densePriority2CarrierOpaqueInteriorToneScale'],
     ['--bitmap-atlas-edge-tone-base-subtract=', 'bitmapAtlasEdgeToneBaseSubtract'],
     ['--bitmap-atlas-edge-tone-foreground-subtract=', 'bitmapAtlasEdgeToneForegroundSubtract'],
     ['--bitmap-atlas-edge-tone-multi-tile-foreground-subtract=', 'bitmapAtlasEdgeToneMultiTileForegroundSubtract'],

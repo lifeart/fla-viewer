@@ -250,6 +250,102 @@ try {
       .sort((a, b) => b.count - a.count || b.meanAbsDelta - a.meanAbsDelta)
       .slice(0, 32);
 
+    const compositeTraceSnapshot = (snapshot) => {
+      const current = new Uint8ClampedArray(snapshot.data.length);
+      for (let index = 0; index < snapshot.data.length; index += 4) {
+        const alpha = snapshot.data[index + 3] / 255;
+        current[index] = Math.round(snapshot.data[index] * alpha + 255 * (1 - alpha));
+        current[index + 1] = Math.round(snapshot.data[index + 1] * alpha + 255 * (1 - alpha));
+        current[index + 2] = Math.round(snapshot.data[index + 2] * alpha + 255 * (1 - alpha));
+        current[index + 3] = 255;
+      }
+      return current;
+    };
+
+    const pixelError = (data, refData, index) => (
+      Math.abs(data[index] - refData[index])
+      + Math.abs(data[index + 1] - refData[index + 1])
+      + Math.abs(data[index + 2] - refData[index + 2])
+    );
+
+    const summarizeDenseLineFillCohorts = (trace, refData) => {
+      const beforeSnapshot = trace.stages['before-density'];
+      const densitySnapshot = trace.stages['after-density'];
+      const shadowSnapshot = trace.stages['after-interior-shadow'];
+      const finalSnapshot = trace.stages['after-edge-tone'];
+      const coverageSnapshot = trace.stages['after-edge-coverage'];
+      if (!beforeSnapshot || !densitySnapshot || !shadowSnapshot || !finalSnapshot || !coverageSnapshot) return [];
+
+      const before = compositeTraceSnapshot(beforeSnapshot);
+      const density = compositeTraceSnapshot(densitySnapshot);
+      const shadow = compositeTraceSnapshot(shadowSnapshot);
+      const final = compositeTraceSnapshot(finalSnapshot);
+      const cohorts = new Map();
+      for (let index = 0; index < before.length; index += 4) {
+        if (before[index] === density[index]
+          && before[index + 1] === density[index + 1]
+          && before[index + 2] === density[index + 2]) continue;
+
+        const beforeLuma = luma(before, index);
+        const chroma = Math.max(before[index], before[index + 1], before[index + 2])
+          - Math.min(before[index], before[index + 1], before[index + 2]);
+        const lumaStart = Math.floor(beforeLuma / 16) * 16;
+        const chromaStart = Math.floor(chroma / 32) * 32;
+        const coverageAlpha = coverageSnapshot.data[index + 3];
+        const coverageClass = coverageAlpha === 255 ? 'interior' : coverageAlpha > 0 ? 'edge' : 'outside';
+        const key = `${coverageClass}/${lumaStart}-${Math.min(255, lumaStart + 15)}/${chromaStart}-${Math.min(255, chromaStart + 31)}`;
+        const cohort = cohorts.get(key) ?? {
+          coverageClass,
+          lumaRange: `${lumaStart}-${Math.min(255, lumaStart + 15)}`,
+          chromaRange: `${chromaStart}-${Math.min(255, chromaStart + 31)}`,
+          count: 0,
+          densityImproved: 0,
+          densityWorsened: 0,
+          shadowImproved: 0,
+          finalBetterThanBefore: 0,
+          finalWorseThanBefore: 0,
+          beforeError: 0,
+          densityError: 0,
+          finalError: 0,
+          desiredDeltaFromBefore: [0, 0, 0],
+          desiredDeltaFromFinal: [0, 0, 0],
+        };
+        const beforeError = pixelError(before, refData, index);
+        const densityError = pixelError(density, refData, index);
+        const shadowError = pixelError(shadow, refData, index);
+        const finalError = pixelError(final, refData, index);
+        cohort.count++;
+        if (densityError < beforeError) cohort.densityImproved++;
+        else if (densityError > beforeError) cohort.densityWorsened++;
+        if (shadowError < densityError) cohort.shadowImproved++;
+        if (finalError < beforeError) cohort.finalBetterThanBefore++;
+        else if (finalError > beforeError) cohort.finalWorseThanBefore++;
+        cohort.beforeError += beforeError;
+        cohort.densityError += densityError;
+        cohort.finalError += finalError;
+        for (let channel = 0; channel < 3; channel++) {
+          cohort.desiredDeltaFromBefore[channel] += refData[index + channel] - before[index + channel];
+          cohort.desiredDeltaFromFinal[channel] += refData[index + channel] - final[index + channel];
+        }
+        cohorts.set(key, cohort);
+      }
+
+      return [...cohorts.values()]
+        .map((cohort) => ({
+          ...cohort,
+          meanBeforeError: Number((cohort.beforeError / cohort.count).toFixed(2)),
+          meanDensityError: Number((cohort.densityError / cohort.count).toFixed(2)),
+          meanFinalError: Number((cohort.finalError / cohort.count).toFixed(2)),
+          meanDesiredDeltaFromBefore: cohort.desiredDeltaFromBefore
+            .map(value => Number((value / cohort.count).toFixed(2))),
+          meanDesiredDeltaFromFinal: cohort.desiredDeltaFromFinal
+            .map(value => Number((value / cohort.count).toFixed(2))),
+        }))
+        .sort((a, b) => b.finalWorseThanBefore - a.finalWorseThanBefore || b.count - a.count)
+        .slice(0, 32)
+        .map(({ beforeError, densityError, finalError, desiredDeltaFromBefore, desiredDeltaFromFinal, ...cohort }) => cohort);
+    };
+
     const summarizeDenseLineFillTrace = (trace, refData) => {
       if (!trace.applied) return { applied: false, stages: [] };
       const stageOrder = [
@@ -265,23 +361,14 @@ try {
       for (const stage of stageOrder) {
         const snapshot = trace.stages[stage];
         if (!snapshot) continue;
-        const current = new Uint8ClampedArray(snapshot.data.length);
-        for (let index = 0; index < snapshot.data.length; index += 4) {
-          const alpha = snapshot.data[index + 3] / 255;
-          current[index] = Math.round(snapshot.data[index] * alpha + 255 * (1 - alpha));
-          current[index + 1] = Math.round(snapshot.data[index + 1] * alpha + 255 * (1 - alpha));
-          current[index + 2] = Math.round(snapshot.data[index + 2] * alpha + 255 * (1 - alpha));
-          current[index + 3] = 255;
-        }
+        const current = compositeTraceSnapshot(snapshot);
         let changedPixels = 0;
         let improvedPixels = 0;
         let worsenedPixels = 0;
         let channelToleranceFailures = 0;
         let absoluteError = 0;
         for (let index = 0; index < current.length; index += 4) {
-          const currentError = Math.abs(current[index] - refData[index])
-            + Math.abs(current[index + 1] - refData[index + 1])
-            + Math.abs(current[index + 2] - refData[index + 2]);
+          const currentError = pixelError(current, refData, index);
           absoluteError += currentError;
           if (Math.abs(current[index] - refData[index]) > BAD_DELTA_THRESHOLD
             || Math.abs(current[index + 1] - refData[index + 1]) > BAD_DELTA_THRESHOLD
@@ -294,9 +381,7 @@ try {
             || current[index + 2] !== previous[index + 2];
           if (!changed) continue;
           changedPixels++;
-          const previousError = Math.abs(previous[index] - refData[index])
-            + Math.abs(previous[index + 1] - refData[index + 1])
-            + Math.abs(previous[index + 2] - refData[index + 2]);
+          const previousError = pixelError(previous, refData, index);
           if (currentError < previousError) improvedPixels++;
           else if (currentError > previousError) worsenedPixels++;
         }
@@ -316,6 +401,7 @@ try {
         usePriority2CarrierTone: trace.usePriority2CarrierTone,
         outputFractionalAlphaPixels: trace.outputFractionalAlphaPixels,
         stages,
+        densityCohorts: summarizeDenseLineFillCohorts(trace, refData),
       };
     };
 

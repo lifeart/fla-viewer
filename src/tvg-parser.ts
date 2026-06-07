@@ -3035,6 +3035,8 @@ export interface TVGDenseLineFillTuning {
   saturatedFillDensitySubtract?: number;
   priority2CarrierSaturatedFillDensitySubtract?: number;
   saturatedFillReliefMaxFractionalAlphaPixels?: number;
+  opaqueInteriorToneScale?: number;
+  priority2CarrierOpaqueInteriorToneScale?: number;
 }
 
 export interface TVGBitmapAtlasEdgeToneTuning {
@@ -3065,6 +3067,7 @@ const DENSE_LINE_FILL_EDGE_TONE_SUBTRACT = 32;
 const DENSE_LINE_FILL_PRIORITY2_CARRIER_EDGE_TONE_SUBTRACT = 22;
 const DENSE_LINE_FILL_PRIORITY2_CARRIER_INK_DENSITY_SUBTRACT = 28;
 const DENSE_LINE_FILL_PRIORITY2_CARRIER_MIDTONE_INK_DENSITY_SUBTRACT = 26;
+const DENSE_LINE_FILL_PRIORITY2_CARRIER_OPAQUE_INTERIOR_TONE_SCALE = 0.25;
 const DENSE_LINE_FILL_INTERIOR_SHADOW_LUMA_LIMIT = 96;
 const DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT = { r: 8, g: 40, b: 40 };
 const LINE_FILL_BOUNDS_ONLY_MIN_OUTLIER_SIZE = 1500;
@@ -3099,6 +3102,8 @@ interface ResolvedDenseLineFillTuning {
   saturatedFillDensitySubtract: number;
   priority2CarrierSaturatedFillDensitySubtract: number;
   saturatedFillReliefMaxFractionalAlphaPixels: number;
+  opaqueInteriorToneScale: number;
+  priority2CarrierOpaqueInteriorToneScale: number;
 }
 
 interface ResolvedBitmapAtlasEdgeToneTuning {
@@ -3136,6 +3141,12 @@ function resolveDenseLineFillTuning(options?: TVGRenderOptions): ResolvedDenseLi
     saturatedFillReliefMaxFractionalAlphaPixels:
       options?.denseLineFillTuning?.saturatedFillReliefMaxFractionalAlphaPixels
       ?? DENSE_LINE_FILL_EDGE_EXPANSION_MAX_FRACTIONAL_ALPHA_PIXELS,
+    opaqueInteriorToneScale: Math.max(0, Math.min(1, options?.denseLineFillTuning?.opaqueInteriorToneScale ?? 1)),
+    priority2CarrierOpaqueInteriorToneScale: Math.max(0, Math.min(
+      1,
+      options?.denseLineFillTuning?.priority2CarrierOpaqueInteriorToneScale
+      ?? DENSE_LINE_FILL_PRIORITY2_CARRIER_OPAQUE_INTERIOR_TONE_SCALE,
+    )),
   };
 }
 
@@ -3295,9 +3306,11 @@ function shouldUseTinyVectorViewportFloor(
 
 function applyDenseLineFillInkDensityAdjustment(
   canvas: HTMLCanvasElement,
+  alphaMask: Uint8ClampedArray | null,
   outputFractionalAlphaPixels: number,
   tuning: ResolvedDenseLineFillTuning,
   usePriority2CarrierTone: boolean,
+  opaqueInteriorToneScale: number,
 ): void {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -3322,6 +3335,11 @@ function applyDenseLineFillInkDensityAdjustment(
       || Math.abs(data[index + 2] - 255) > DENSE_LINE_FILL_BACKGROUND_TOLERANCE
       || data[index + 3] < 255 - DENSE_LINE_FILL_BACKGROUND_TOLERANCE;
     if (!isForeground) continue;
+    const toneScale = alphaMask?.[index + 3] === 255 ? opaqueInteriorToneScale : 1;
+    if (toneScale <= 0) continue;
+    const originalR = data[index];
+    const originalG = data[index + 1];
+    const originalB = data[index + 2];
 
     if (luma <= DENSE_LINE_FILL_INK_DENSITY_LUMA_LIMIT) {
       const chroma = Math.max(data[index], data[index + 1], data[index + 2])
@@ -3357,6 +3375,11 @@ function applyDenseLineFillInkDensityAdjustment(
         + DENSE_LINE_FILL_TONE_CONTRAST * (data[index + 2] - DENSE_LINE_FILL_TONE_PIVOT)
         + DENSE_LINE_FILL_TONE_OFFSET,
     )));
+    if (toneScale < 1) {
+      data[index] = Math.round(originalR + toneScale * (data[index] - originalR));
+      data[index + 1] = Math.round(originalG + toneScale * (data[index + 1] - originalG));
+      data[index + 2] = Math.round(originalB + toneScale * (data[index + 2] - originalB));
+    }
   }
   ctx.putImageData(image, 0, 0);
 }
@@ -3615,8 +3638,9 @@ function applyDenseLineFillEdgeToneAdjustment(
 function applyDenseLineFillInteriorShadowToneAdjustment(
   canvas: HTMLCanvasElement,
   alphaMask: Uint8ClampedArray | null,
+  toneScale: number,
 ): void {
-  if (!alphaMask) return;
+  if (!alphaMask || toneScale <= 0) return;
 
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -3635,9 +3659,9 @@ function applyDenseLineFillInteriorShadowToneAdjustment(
       || data[index + 3] < 255 - DENSE_LINE_FILL_BACKGROUND_TOLERANCE;
     if (!isForeground) continue;
 
-    data[index] = Math.min(255, data[index] + DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT.r);
-    data[index + 1] = Math.min(255, data[index + 1] + DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT.g);
-    data[index + 2] = Math.min(255, data[index + 2] + DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT.b);
+    data[index] = Math.min(255, Math.round(data[index] + toneScale * DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT.r));
+    data[index + 1] = Math.min(255, Math.round(data[index + 1] + toneScale * DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT.g));
+    data[index + 2] = Math.min(255, Math.round(data[index + 2] + toneScale * DENSE_LINE_FILL_INTERIOR_SHADOW_LIFT.b));
   }
   ctx.putImageData(image, 0, 0);
 }
@@ -4182,6 +4206,9 @@ export function renderTVGToCanvas(
   const denseLineFillTuning = resolveDenseLineFillTuning(options);
   const usePriority2CarrierTone = shouldApplyDenseLineFillAdjustment
     && hasSinglePriority2LineFillCarrier(activeDrawing);
+  const denseLineFillOpaqueInteriorToneScale = usePriority2CarrierTone
+    ? denseLineFillTuning.priority2CarrierOpaqueInteriorToneScale
+    : denseLineFillTuning.opaqueInteriorToneScale;
   const denseLineFillTrace = options?.denseLineFillTrace;
   if (denseLineFillTrace) {
     denseLineFillTrace.applied = shouldApplyDenseLineFillAdjustment;
@@ -4254,12 +4281,18 @@ export function renderTVGToCanvas(
       captureDenseLineFillTraceStage(denseLineFillTrace, 'before-density', outCanvas);
       applyDenseLineFillInkDensityAdjustment(
         outCanvas,
+        denseLineFillOutputAlphaMask,
         denseLineFillOutputFractionalAlphaPixels,
         denseLineFillTuning,
         usePriority2CarrierTone,
+        denseLineFillOpaqueInteriorToneScale,
       );
       captureDenseLineFillTraceStage(denseLineFillTrace, 'after-density', outCanvas);
-      applyDenseLineFillInteriorShadowToneAdjustment(outCanvas, denseLineFillOutputAlphaMask);
+      applyDenseLineFillInteriorShadowToneAdjustment(
+        outCanvas,
+        denseLineFillOutputAlphaMask,
+        denseLineFillOpaqueInteriorToneScale,
+      );
       captureDenseLineFillTraceStage(denseLineFillTrace, 'after-interior-shadow', outCanvas);
       applyDenseLineFillEdgeToneAdjustment(outCanvas, denseLineFillEdgeToneAlphaMask, denseLineFillEdgeToneSubtract);
       captureDenseLineFillTraceStage(denseLineFillTrace, 'after-edge-tone', outCanvas);
@@ -4294,12 +4327,18 @@ export function renderTVGToCanvas(
     captureDenseLineFillTraceStage(denseLineFillTrace, 'before-density', canvas);
     applyDenseLineFillInkDensityAdjustment(
       canvas,
+      denseLineFillOutputAlphaMask,
       denseLineFillOutputFractionalAlphaPixels,
       denseLineFillTuning,
       usePriority2CarrierTone,
+      denseLineFillOpaqueInteriorToneScale,
     );
     captureDenseLineFillTraceStage(denseLineFillTrace, 'after-density', canvas);
-    applyDenseLineFillInteriorShadowToneAdjustment(canvas, denseLineFillOutputAlphaMask);
+    applyDenseLineFillInteriorShadowToneAdjustment(
+      canvas,
+      denseLineFillOutputAlphaMask,
+      denseLineFillOpaqueInteriorToneScale,
+    );
     captureDenseLineFillTraceStage(denseLineFillTrace, 'after-interior-shadow', canvas);
     applyDenseLineFillEdgeToneAdjustment(canvas, denseLineFillEdgeToneAlphaMask, denseLineFillEdgeToneSubtract);
     captureDenseLineFillTraceStage(denseLineFillTrace, 'after-edge-tone', canvas);
