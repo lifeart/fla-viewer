@@ -47,6 +47,9 @@ export interface VideoItem {
   sourceExternalFilepath?: string;
   // Parsed FLV data (if available)
   flvData?: ParsedFLVData;
+  // Object URL of an embedded native video stream (e.g. MP4 wrapped in the .dat)
+  // that the browser can decode directly. Set by the parser, drawn by the renderer.
+  videoUrl?: string;
 }
 
 // Simplified FLV data stored in VideoItem (full ParsedFLV is in flv-parser.ts)

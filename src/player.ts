@@ -37,6 +37,9 @@ export class FLAPlayer {
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new FLARenderer(canvas);
+    // Let the renderer ask for a repaint when an embedded video frame decodes
+    // while the timeline is paused (otherwise it would stay on the placeholder).
+    this.renderer.setNeedsRedrawCallback(() => this.render());
   }
 
   async setDocument(doc: FLADocument): Promise<void> {
@@ -122,6 +125,7 @@ export class FLAPlayer {
 
     this.state.playing = true;
     this.lastFrameTime = performance.now();
+    this.renderer.setPlaying(true);
     this.startAudio();
     this.animate();
     this.notifyStateChange();
@@ -129,6 +133,7 @@ export class FLAPlayer {
 
   pause(): void {
     this.state.playing = false;
+    this.renderer.setPlaying(false);
     this.stopAudio();
     if (this.animationId !== null) {
       cancelAnimationFrame(this.animationId);

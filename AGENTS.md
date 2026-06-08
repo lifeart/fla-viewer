@@ -826,6 +826,20 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   both v3=512 and v4=4096-byte sectors). Currently extracts document props + library only
   (empty stage); timeline/geometry decoding is future work (reference: eddiemoore/fla-decoder).
 
+### Embedded video `.dat` (issue #10)
+- A `<DOMVideoItem videoDataHRef="…">` points at a `bin/…dat` that, in modern XFL, is **not**
+  an FLV — it's a native **MP4/MOV** wrapped behind a tiny Adobe media header (`03 08` + 8
+  bytes; the `0x08` is the video media-type marker, cf. `0x05`/`0x03` for 32-/8-bit bitmaps).
+  The old `parseFLV` path threw on this and the renderer drew a gray placeholder.
+- `loadVideoFLV` now detects FLV (`"FLV"` magic) vs native: for native it locates the container
+  by signature (ISO `ftyp` box — stream starts 4 bytes before `ftyp`; or WebM EBML) and exposes
+  a `Blob` **object URL** on `VideoItem.videoUrl`. The renderer (`renderVideoInstance`) lazily
+  creates a cached muted `<video>`, plays/pauses with the timeline, and `drawImage`s real frames.
+- **Note:** the FLV path only ever extracted *metadata*, never pixels — so true FLV still shows
+  the placeholder. **Deferred:** deterministic per-frame seeking (HTMLVideoElement seeks are
+  async) and the **export path** (`video-exporter.ts` still emits a `#333` rect) — both need
+  WebCodecs `VideoDecoder` for frame-accurate extraction.
+
 ### Video export (CI)
 - The exporter checks `AudioEncoder.isConfigSupported` and **degrades to video-only** (with a
   `console.warn`) when the audio codec is unavailable — headless CI lacks the AAC encoder, and
