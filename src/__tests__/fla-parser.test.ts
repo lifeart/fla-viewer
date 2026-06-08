@@ -4975,6 +4975,44 @@ describe('FLAParser', () => {
       expect(video?.fps).toBeUndefined();
       expect(video?.duration).toBeUndefined();
     });
+
+    it('extracts an embedded MP4 from the .dat into a playable object URL (issue #10, load-bearing)', async () => {
+      // Adobe wraps a native MP4 in the bin/ .dat behind a small media header
+      // (e.g. 03 08 + 8 bytes) and the XFL references it via DOMVideoItem. The
+      // ISO-BMFF `ftyp` box starts 4 bytes before the "ftyp" tag; the parser
+      // must locate it, strip the Adobe prefix, and expose a blob: URL the
+      // browser can decode (the old FLV path threw on this and showed a
+      // gray placeholder).
+      const adobeHeader = [0x03, 0x08, 0x00, 0x00, 0x00, 0x7b, 0xd2, 0x03, 0x00, 0x00]; // 10-byte prefix
+      // Minimal 24-byte ftyp box: size(0x18) + 'ftyp' + 'mp42' + 2 compat brands.
+      const ftypBox = [
+        0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, // size + 'ftyp'
+        0x6d, 0x70, 0x34, 0x32, 0x00, 0x00, 0x00, 0x00, // 'mp42' + minor version
+        0x6d, 0x70, 0x34, 0x32, 0x69, 0x73, 0x6f, 0x6d, // 'mp42' 'isom'
+      ];
+      const dat = new Uint8Array([...adobeHeader, ...ftypBox]);
+
+      const media = `
+        <media>
+          <DOMVideoItem name="clip.mp4" videoDataHRef="vid.dat" width="640" height="360" fps="24"/>
+        </media>`;
+      const fla = await createFlaZip(createDOMDocument({ media }), { 'bin/vid.dat': dat });
+      const doc = await parser.parse(fla);
+
+      const video = doc.videos.get('clip.mp4');
+      expect(video).toBeDefined();
+      // A playable object URL must be produced...
+      expect(video?.videoUrl).toBeDefined();
+      expect(video?.videoUrl?.startsWith('blob:')).toBe(true);
+
+      // ...and it must start exactly at the ISO box (Adobe's 10-byte prefix
+      // stripped), i.e. the box-size field 00 00 00 18 followed by 'ftyp'.
+      const extracted = new Uint8Array(await (await fetch(video!.videoUrl!)).arrayBuffer());
+      expect(extracted.length).toBe(ftypBox.length);
+      expect(Array.from(extracted.slice(0, 8))).toEqual([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]);
+
+      URL.revokeObjectURL(video!.videoUrl!);
+    });
   });
 
   describe('filter parsing', () => {

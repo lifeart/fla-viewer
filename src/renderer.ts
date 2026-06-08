@@ -88,6 +88,13 @@ export class FLARenderer {
   // Current scene index for multiple scene support
   private currentScene: number = 0;
 
+  // Embedded-video playback: one cached <video> element per object URL, plus
+  // whether the timeline is currently playing and a hook to request a redraw
+  // when a video frame becomes available while paused.
+  private videoElements = new Map<string, HTMLVideoElement>();
+  private playing = false;
+  private onNeedsRedraw: (() => void) | null = null;
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const ctx = canvas.getContext('2d');
@@ -436,6 +443,7 @@ export class FLARenderer {
     this.loadingFonts.clear();
     this.movieClipStates.clear();
     this.currentInstancePath = [];
+    this.releaseVideoElements();
 
     // Update canvas size (skip for offscreen rendering)
     if (!skipResize) {
@@ -2182,6 +2190,53 @@ export class FLARenderer {
     ctx.restore();
   }
 
+  /** Tell the renderer whether the timeline is playing, so embedded videos can
+   *  play/pause in step. Pausing the timeline pauses all cached video elements. */
+  setPlaying(playing: boolean): void {
+    this.playing = playing;
+    if (!playing) {
+      for (const el of this.videoElements.values()) {
+        if (!el.paused) el.pause();
+      }
+    }
+  }
+
+  /** Register a callback the renderer can call to request a re-render (used when
+   *  an embedded video frame becomes available while the timeline is paused). */
+  setNeedsRedrawCallback(cb: (() => void) | null): void {
+    this.onNeedsRedraw = cb;
+  }
+
+  /** Lazily create and cache a muted, looping <video> element for an object URL. */
+  private getVideoElement(url: string): HTMLVideoElement {
+    let el = this.videoElements.get(url);
+    if (!el) {
+      el = document.createElement('video');
+      el.src = url;
+      el.muted = true;
+      el.loop = true;
+      el.playsInline = true;
+      el.preload = 'auto';
+      const requestRedraw = () => this.onNeedsRedraw?.();
+      // Repaint once the first/sought frame is decoded (matters while paused).
+      el.addEventListener('loadeddata', requestRedraw);
+      el.addEventListener('seeked', requestRedraw);
+      el.load();
+      this.videoElements.set(url, el);
+    }
+    return el;
+  }
+
+  /** Pause, detach, and drop all cached video elements (called on new document). */
+  private releaseVideoElements(): void {
+    for (const el of this.videoElements.values()) {
+      el.pause();
+      el.removeAttribute('src');
+      el.load();
+    }
+    this.videoElements.clear();
+  }
+
   private renderVideoInstance(video: VideoInstance, depth: number = 0): void {
     const ctx = this.ctx;
     ctx.save();
@@ -2201,6 +2256,27 @@ export class FLARenderer {
         depth,
         parentPath: [...this.debugSymbolPath]
       });
+    }
+
+    // If this video has a decodable embedded stream, draw real frames.
+    const videoItem = this.doc?.videos.get(video.libraryItemName);
+    if (videoItem?.videoUrl) {
+      const el = this.getVideoElement(videoItem.videoUrl);
+      // Keep playback in step with the timeline: play while the timeline plays,
+      // pause when it stops (so a paused viewer shows a held frame).
+      if (this.playing) {
+        if (el.paused) el.play().catch(() => { /* autoplay can reject; frame still draws */ });
+      } else if (!el.paused) {
+        el.pause();
+      }
+      // HAVE_CURRENT_DATA — a frame is available to paint.
+      if (el.readyState >= 2 && el.videoWidth > 0) {
+        ctx.drawImage(el, 0, 0, video.width, video.height);
+        ctx.restore();
+        return;
+      }
+      // Not ready yet: fall through to the placeholder; getVideoElement has
+      // registered a redraw so the first frame paints as soon as it decodes.
     }
 
     // Render placeholder rectangle for video

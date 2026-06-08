@@ -2442,23 +2442,75 @@ export class FLAParser {
     return videos;
   }
 
+  /**
+   * Locate an embedded native video container inside a `.dat` blob and return
+   * the playable slice + MIME type. Adobe prefixes its own small media header
+   * (e.g. `03 08` + 8 bytes) before the real stream, so we find the container
+   * by signature rather than hardcoding the prefix length:
+   * - ISO base media (MP4/MOV/M4V): an early `ftyp` box; the stream starts 4
+   *   bytes before `ftyp` (the box-size field).
+   * - WebM/Matroska: the EBML header `1A 45 DF A3` at the start.
+   */
+  private static extractNativeVideo(bytes: Uint8Array): { bytes: Uint8Array; mime: string } | null {
+    const limit = Math.min(bytes.length - 4, 64);
+    for (let i = 0; i <= limit; i++) {
+      // 'ftyp'
+      if (bytes[i] === 0x66 && bytes[i + 1] === 0x74 && bytes[i + 2] === 0x79 && bytes[i + 3] === 0x70) {
+        const start = i >= 4 ? i - 4 : 0; // back up over the 4-byte box size
+        return { bytes: bytes.subarray(start), mime: 'video/mp4' };
+      }
+    }
+    if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) {
+      return { bytes, mime: 'video/webm' };
+    }
+    return null;
+  }
+
   private async loadVideoFLV(videoItem: VideoItem): Promise<void> {
-    try {
-      // Try to load from bin/ folder first (common for embedded video)
-      let flvData = await this.findFileData(videoItem.href, 'bin');
+    // Try to load from bin/ folder first (common for embedded video)
+    let data = await this.findFileData(videoItem.href, 'bin');
 
-      // Fallback to LIBRARY folder
-      if (!flvData) {
-        flvData = await this.findFileData(videoItem.href);
-      }
+    // Fallback to LIBRARY folder
+    if (!data) {
+      data = await this.findFileData(videoItem.href);
+    }
 
-      if (!flvData) {
+    if (!data) {
+      console.warn(`Video file not found: ${videoItem.href}`);
+      return;
+    }
+
+    const bytes = new Uint8Array(data);
+
+    // Embedded video in XFL is usually NOT an FLV: Adobe wraps a native MP4/MOV
+    // (or WebM) in the `.dat` behind a small media header. Hand that straight to
+    // the browser as an object URL so the renderer can decode/draw real frames.
+    // (The FLV path below only ever extracted metadata — never pixels.)
+    const isFlv = bytes[0] === 0x46 && bytes[1] === 0x4c && bytes[2] === 0x56; // 'FLV'
+    if (!isFlv) {
+      const native = FLAParser.extractNativeVideo(bytes);
+      if (native && typeof URL !== 'undefined' && URL.createObjectURL) {
+        // Copy the slice into a fresh ArrayBuffer-backed view so Blob accepts it.
+        const payload = new Uint8Array(native.bytes.byteLength);
+        payload.set(native.bytes);
+        videoItem.videoUrl = URL.createObjectURL(new Blob([payload], { type: native.mime }));
         if (DEBUG) {
-          console.warn(`Video file not found: ${videoItem.href}`);
+          console.log(`Embedded video ready: ${videoItem.name} (${native.mime}, ${native.bytes.length} bytes)`);
         }
-        return;
+      } else {
+        // Don't swallow this silently — an unrecognized embedded format is why a
+        // video renders as the gray placeholder, and that should be visible.
+        console.warn(
+          `Unrecognized embedded video format for ${videoItem.href} ` +
+          `(first bytes: ${Array.from(bytes.slice(0, 4)).map((b) => b.toString(16).padStart(2, '0')).join(' ')}); ` +
+          `showing placeholder.`
+        );
       }
+      return;
+    }
 
+    try {
+      const flvData = data;
       // Parse FLV data
       const parsed = parseFLV(flvData);
 
@@ -2502,9 +2554,9 @@ export class FLAParser {
           `duration: ${videoItem.flvData.duration.toFixed(2)}s`);
       }
     } catch (e) {
-      if (DEBUG) {
-        console.warn(`Failed to parse FLV: ${videoItem.href}`, e);
-      }
+      // Surface FLV parse failures (not DEBUG-gated) so broken video wiring is
+      // visible instead of silently degrading to the placeholder.
+      console.warn(`Failed to parse FLV: ${videoItem.href}`, e);
     }
   }
 
