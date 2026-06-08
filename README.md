@@ -66,6 +66,7 @@ A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no inst
 | 🖼️ | **Bitmaps** | PNG, JPG, GIF + Adobe `.dat` with recovery |
 | 🔤 | **Text** | Static/dynamic, word wrap, Google Fonts, kerning |
 | 🔊 | **Audio** | MP3, ADPCM, PCM (8/16/24/32-bit), stream sync with volume control |
+| 📽️ | **Embedded Video** | Native MP4 (H.264) / WebM playback on the timeline |
 | 📹 | **Export** | MP4, PNG sequence, sprite sheet, single frame |
 | 🎥 | **Camera** | Auto-detected camera layers with follow mode |
 
@@ -252,7 +253,7 @@ FLA (ZIP) → Parser → Document → Renderer → Canvas
 | Frame Labels | ✓ |
 | Multiple Scenes | ✓ |
 | FLV Video Parsing | ✓ |
-| Video Playback | ✗ |
+| Embedded Video Playback (MP4/WebM) | ✓ |
 | ActionScript | ✗ |
 
 ---
@@ -260,7 +261,7 @@ FLA (ZIP) → Parser → Document → Renderer → Canvas
 ## Limitations
 
 - No ActionScript execution (no interactivity)
-- Embedded video shows metadata only (FLV parsing supported, playback not implemented)
+- Embedded **native video** (MP4/WebM) plays muted on the timeline; per-frame seeking is best-effort (shows the nearest decoded frame) and embedded video isn't drawn into exports yet. Legacy **FLV** is parsed for metadata only (no pixels).
 - Fonts fall back to Google Fonts (external request) or system fonts
 - Some advanced filter options not fully supported
 - 3D transforms use simplified perspective projection
