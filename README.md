@@ -137,7 +137,7 @@ Click the **Download** button to open export options:
 
 ## Bitmap Recovery
 
-Adobe `.dat` files use chunked deflate-compressed ABGR pixel data. Some files are corrupted or use preset dictionaries.
+Adobe `.dat` files use chunked deflate-compressed pixel data. 32-bit images store premultiplied **A,R,G,B** bytes (8-bit palettes store **R,G,B,A**) — reading 32-bit as ABGR swaps red and blue (issue #10). Some files are corrupted or use preset dictionaries.
 
 | Strategy | Recovery | Speed |
 |----------|:--------:|:-----:|
