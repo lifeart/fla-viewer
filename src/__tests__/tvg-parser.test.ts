@@ -3418,6 +3418,42 @@ describe('tvg rendering', () => {
     expect(score.foregroundIou).toBeGreaterThan(99.0);
   });
 
+  it('preserves render context when diagnostics suppress non-drawable line shapes', async () => {
+    const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
+    const zip = await JSZip.loadAsync(await response.arrayBuffer());
+    const externalColors = flattenExternalPaletteColors(await loadPalettes(zip));
+    const tvgData = await zip.file('CH_Anna_rig_football_suit_V001_V07/elements/color.101/color-3.tvg')!.async('arraybuffer');
+    const drawing = parseTVG(tvgData);
+    resolveExternalPalette(drawing, externalColors);
+
+    const lineLayer = drawing.layers.find(layer => layer.type === 'line');
+    expect(lineLayer).toBeTruthy();
+    for (const shapeIndex of [87, 107]) {
+      const chainDebug = __debugBuildLegacyChainsForShape(lineLayer!.shapes[shapeIndex]);
+      expect(chainDebug.groups.every(group => group.drawableChains.length === 0)).toBe(true);
+      expect(Math.min(...chainDebug.groups.flatMap(group => group.chains.map(chain => chain.endpointGap)))).toBeGreaterThan(500);
+    }
+
+    const renderOptions = {
+      supersample: 2,
+      skipBackgroundComposite: true,
+      disableDenseLineFillAdjustment: true,
+    };
+    const baseline = renderTVGToCanvas(drawing, 160, 160, 336, renderOptions);
+    expect(baseline).not.toBeNull();
+    const baselinePixels = baseline!.getContext('2d')!.getImageData(0, 0, 160, 160).data;
+
+    for (const shapeIndex of [87, 107]) {
+      const suppressed = renderTVGToCanvas(drawing, 160, 160, 336, {
+        ...renderOptions,
+        diagnosticSkipShape: { layerType: 'line', shapeIndex },
+      });
+      expect(suppressed).not.toBeNull();
+      const suppressedPixels = suppressed!.getContext('2d')!.getImageData(0, 0, 160, 160).data;
+      expect(suppressedPixels).toEqual(baselinePixels);
+    }
+  });
+
   it('keeps resolved color-21 eye fills despite later sparse boundary markers', async () => {
     const response = await fetch('/sample/toon/CH_Anna_rig_football_suit_V001_V07.zip');
     const zip = await JSZip.loadAsync(await response.arrayBuffer());

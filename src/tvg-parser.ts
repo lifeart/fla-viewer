@@ -2997,6 +2997,11 @@ export interface TVGRenderOptions {
   denseLineFillTuning?: TVGDenseLineFillTuning;
   /** Diagnostic-only snapshots around dense line-fill post-processing stages. */
   denseLineFillTrace?: TVGDenseLineFillTrace;
+  /** Diagnostic-only: suppress one shape's pixels while preserving all render-context decisions. */
+  diagnosticSkipShape?: {
+    layerType: TVGArtLayer['type'];
+    shapeIndex: number;
+  };
   /** Experimental: bypass clipped bitmap-atlas edge tone in local score probes. */
   disableBitmapAtlasEdgeTone?: boolean;
   /** Experimental: override clipped bitmap-atlas edge tone constants in local score probes. */
@@ -4176,6 +4181,9 @@ export function renderTVGToCanvas(
         skipClipping: options?.skipClipping ?? false,
         diagnostics: activeDrawing.diagnostics,
         allLayers: activeDrawing.layers,
+        skipShapeIndex: options?.diagnosticSkipShape?.layerType === layer.type
+          ? options.diagnosticSkipShape.shapeIndex
+          : undefined,
       });
     }
   }
@@ -4198,6 +4206,9 @@ export function renderTVGToCanvas(
         skipClipping: options?.skipClipping ?? false,
         diagnostics: activeDrawing.diagnostics,
         allLayers: activeDrawing.layers,
+        skipShapeIndex: options?.diagnosticSkipShape?.layerType === layer.type
+          ? options.diagnosticSkipShape.shapeIndex
+          : undefined,
       });
     }
   }
@@ -5258,6 +5269,7 @@ interface TVGFillRenderOptions {
   skipClipping: boolean;
   diagnostics?: TVGDiagnostics;
   allLayers?: TVGArtLayer[];
+  skipShapeIndex?: number;
 }
 
 interface LocalFillPaintSource {
@@ -8646,10 +8658,17 @@ export function __debugBuildLegacyChainsForShape(
     key: string;
     allChainIndices: number[];
     componentIndexes: number[];
-    chains: Array<{ componentIndexes: number[]; closed: boolean }>;
+    chains: Array<{
+      componentIndexes: number[];
+      closed: boolean;
+      autoClose: boolean;
+      endpointGap: number;
+    }>;
     drawableChains: Array<{
       componentIndexes: number[];
       closed: boolean;
+      autoClose: boolean;
+      endpointGap: number;
       parent: number;
       bbox: { minX: number; minY: number; maxX: number; maxY: number };
       area: number;
@@ -8659,29 +8678,36 @@ export function __debugBuildLegacyChainsForShape(
   }>;
 } {
   const componentIndexByRef = new Map(shape.components.map((comp, index) => [comp, index]));
-  const chainableFillComps = shape.components.filter(comp =>
+  const chainableFillComps = expandLegacyChainComponents(shape.components.filter(comp =>
     (comp.componentType === 0 || comp.componentType === 1)
     && comp.path
     && comp.path.segments.length > 1
     && !isDegenerate(comp.path)
     && (!comp.color || comp.color.a > 0),
-  );
+  ));
   const paintedFillComps = chainableFillComps.filter(comp => comp.outerPaint !== null);
   const supportFillComps = chainableFillComps.filter(comp => comp.outerPaint === null);
-  const boundaryStrokes = strokeComps.filter(comp =>
+  const boundaryStrokes = expandLegacyChainComponents(strokeComps.filter(comp =>
     comp.componentType === 2
     && comp.strokeWidth === null
     && comp.path
     && comp.path.segments.length > 1,
-  );
+  ));
   const allChainComps = [...paintedFillComps, ...supportFillComps, ...boundaryStrokes];
   const groups = buildLegacyFillRenderGroups(allChainComps, options)
     .map(group => {
-      const { chains, drawableChains } = buildLegacyChains(allChainComps, group.allChainIndices, 2.0);
+      const tolerance = 2.0;
+      const { chains, drawableChains, autoCloseChains } = buildLegacyChains(
+        allChainComps,
+        group.allChainIndices,
+        tolerance,
+      );
       const { chainGeometries, parent } = analyzeLegacyDrawableChains(drawableChains, allChainComps);
       const toDebugChain = (chain: LegacyChainLink[]) => ({
         componentIndexes: chain.map(link => componentIndexByRef.get(allChainComps[link.ci]) ?? -1),
-        closed: Math.abs(chain[0].startX - chain[chain.length - 1].endX) + Math.abs(chain[0].startY - chain[chain.length - 1].endY) < 4,
+        closed: isLegacyChainClosed(chain, tolerance),
+        autoClose: autoCloseChains.has(chain),
+        endpointGap: legacyChainEndpointGap(chain),
       });
       return {
         key: group.key,
@@ -8763,21 +8789,21 @@ export function __debugTraceLegacyChainSelectionsForShape(
   }>;
 } {
   const componentIndexByRef = new Map(shape.components.map((comp, index) => [comp, index]));
-  const chainableFillComps = shape.components.filter(comp =>
+  const chainableFillComps = expandLegacyChainComponents(shape.components.filter(comp =>
     (comp.componentType === 0 || comp.componentType === 1)
     && comp.path
     && comp.path.segments.length > 1
     && !isDegenerate(comp.path)
     && (!comp.color || comp.color.a > 0),
-  );
+  ));
   const paintedFillComps = chainableFillComps.filter(comp => comp.outerPaint !== null);
   const supportFillComps = chainableFillComps.filter(comp => comp.outerPaint === null);
-  const boundaryStrokes = strokeComps.filter(comp =>
+  const boundaryStrokes = expandLegacyChainComponents(strokeComps.filter(comp =>
     comp.componentType === 2
     && comp.strokeWidth === null
     && comp.path
     && comp.path.segments.length > 1,
-  );
+  ));
   const allChainComps = [...paintedFillComps, ...supportFillComps, ...boundaryStrokes];
   const groups = buildLegacyFillRenderGroups(allChainComps, options)
     .map(group => {
@@ -9396,6 +9422,7 @@ function renderLayerPass(
   const preRenderedLegacyPaintKeys = new Map<number, Set<FillStyleKey>>();
   if (pass === 'fill' && layer.type === 'line') {
     for (const { shapeIndex, shape, preRenderPlan } of preRenderEntries) {
+      if (shapeIndex === options?.skipShapeIndex) continue;
       const strokeComps = shape.components.filter(comp =>
         (comp.componentType === 4 || comp.componentType === 2)
         && comp.path
@@ -9436,6 +9463,7 @@ function renderLayerPass(
   }
   for (let renderShapeIndex = 0; renderShapeIndex < renderEntries.length; renderShapeIndex++) {
     const { shapeIndex, shape, preRenderPlan } = renderEntries[renderShapeIndex];
+    if (shapeIndex === options?.skipShapeIndex) continue;
     const strokeComps = shape.components.filter(c => (c.componentType === 4 || c.componentType === 2) && c.path && c.path.segments.length > 0);
     const lowAlphaGuideFillScale = attenuateLowAlphaGuideFills
       && shape.components.length === 1

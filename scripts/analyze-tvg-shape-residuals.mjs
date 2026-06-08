@@ -102,10 +102,16 @@ try {
       bothForeground: 0,
       badBothForeground: 0,
       channelToleranceFailures: 0,
+      edgeToleranceFailures: 0,
+      interiorToleranceFailures: 0,
       refOnly: 0,
       candidateOnly: 0,
       edgePixels: 0,
       interiorPixels: 0,
+      edgeFailureDelta: [0, 0, 0],
+      interiorFailureDelta: [0, 0, 0],
+      edgeFailureAbsDelta: 0,
+      interiorFailureAbsDelta: 0,
       alphaSum: 0,
       meanDelta: [0, 0, 0],
       meanAbsDelta: 0,
@@ -187,7 +193,23 @@ try {
         meanAlpha: Number((bucket.alphaSum / bucket.pixels).toFixed(2)),
         meanDelta: bucket.meanDelta.map((value) => Number((value / bucket.pixels).toFixed(2))),
         meanAbsDelta: Number((bucket.meanAbsDelta / bucket.pixels).toFixed(2)),
+        meanEdgeFailureDelta: bucket.edgeToleranceFailures > 0
+          ? bucket.edgeFailureDelta.map((value) => Number((value / bucket.edgeToleranceFailures).toFixed(2)))
+          : null,
+        meanInteriorFailureDelta: bucket.interiorToleranceFailures > 0
+          ? bucket.interiorFailureDelta.map((value) => Number((value / bucket.interiorToleranceFailures).toFixed(2)))
+          : null,
+        meanEdgeFailureAbsDelta: bucket.edgeToleranceFailures > 0
+          ? Number((bucket.edgeFailureAbsDelta / bucket.edgeToleranceFailures).toFixed(2))
+          : null,
+        meanInteriorFailureAbsDelta: bucket.interiorToleranceFailures > 0
+          ? Number((bucket.interiorFailureAbsDelta / bucket.interiorToleranceFailures).toFixed(2))
+          : null,
         alphaSum: undefined,
+        edgeFailureDelta: undefined,
+        interiorFailureDelta: undefined,
+        edgeFailureAbsDelta: undefined,
+        interiorFailureAbsDelta: undefined,
       };
     };
 
@@ -212,26 +234,38 @@ try {
       await tvg.loadBitmapTiles(fullCanvas, drawing.diagnostics);
       const score = bench.scoreCanvasSources(thumb, fullCanvas, SIZE);
       const candidateData = fullCanvas.getContext('2d').getImageData(0, 0, SIZE, SIZE).data;
+      const transparentBaseCanvas = tvg.renderTVGToCanvas(drawing, SIZE, SIZE, viewport, {
+        supersample: 2,
+        skipBackgroundComposite: true,
+        disableDenseLineFillAdjustment: true,
+      });
+      if (!transparentBaseCanvas) return { drawingName, viewport, score: null, shapes: [] };
+      const transparentBaseData = transparentBaseCanvas.getContext('2d').getImageData(0, 0, SIZE, SIZE).data;
 
       const decisions = new Map(tvg.__debugLineFillDecisions(layer).map((entry) => [entry.shapeIndex, entry]));
       const renderOrder = lineFillRenderOrder(layer, decisions);
       const shapeMasks = [];
       for (let shapeIndex = 0; shapeIndex < layer.shapes.length; shapeIndex++) {
         const shape = layer.shapes[shapeIndex];
-        const single = {
-          ...drawing,
-          layers: drawing.layers.map((entry) =>
-            entry === layer ? { ...entry, shapes: [shape] } : { ...entry, shapes: [] },
-          ),
-        };
-        const canvas = tvg.renderTVGToCanvas(single, SIZE, SIZE, viewport, {
+        const canvas = tvg.renderTVGToCanvas(drawing, SIZE, SIZE, viewport, {
           supersample: 2,
           skipBackgroundComposite: true,
           disableDenseLineFillAdjustment: true,
+          diagnosticSkipShape: { layerType, shapeIndex },
         });
         if (!canvas) continue;
-        await tvg.loadBitmapTiles(canvas, single.diagnostics);
-        const data = canvas.getContext('2d').getImageData(0, 0, SIZE, SIZE).data;
+        const withoutTargetData = canvas.getContext('2d').getImageData(0, 0, SIZE, SIZE).data;
+        const data = new Uint8ClampedArray(transparentBaseData.length);
+        for (let index = 0; index < data.length; index += 4) {
+          const difference = Math.max(
+            Math.abs(transparentBaseData[index] - withoutTargetData[index]),
+            Math.abs(transparentBaseData[index + 1] - withoutTargetData[index + 1]),
+            Math.abs(transparentBaseData[index + 2] - withoutTargetData[index + 2]),
+            Math.abs(transparentBaseData[index + 3] - withoutTargetData[index + 3]),
+          );
+          if (difference === 0) continue;
+          data[index + 3] = Math.max(transparentBaseData[index + 3], difference);
+        }
         const contourDebug = tvg.__debugBuildContoursForShape(shape, layer.type, shapeIndex);
         shapeMasks.push({
           shapeIndex,
@@ -241,7 +275,11 @@ try {
             dominantPaintKey: paintKeyForShape(shape),
             renderStrategy: tvg.__debugLineFillRenderStrategy(layer, shapeIndex, drawing.layers),
             contourSummary: summarizeContourDebug(shape, contourDebug),
-            ...(includeDetails ? { contourDebug } : {}),
+            ...(includeDetails ? {
+              contourDebug,
+              legacyChains: tvg.__debugBuildLegacyChainsForShape(shape),
+              legacyChainSelections: tvg.__debugTraceLegacyChainSelectionsForShape(shape),
+            } : {}),
           },
         });
       }
@@ -285,7 +323,22 @@ try {
           if (refForeground && candidateForeground) {
             bucket.bothForeground += 1;
             if (delta.sumAbs > BAD_SUM_DELTA) bucket.badBothForeground += 1;
-            if (delta.channelFail) bucket.channelToleranceFailures += 1;
+            if (delta.channelFail) {
+              bucket.channelToleranceFailures += 1;
+              const failureDelta = topmostAlpha > 0 && topmostAlpha < 255
+                ? bucket.edgeFailureDelta
+                : bucket.interiorFailureDelta;
+              failureDelta[0] += delta.dr;
+              failureDelta[1] += delta.dg;
+              failureDelta[2] += delta.db;
+              if (topmostAlpha > 0 && topmostAlpha < 255) {
+                bucket.edgeToleranceFailures += 1;
+                bucket.edgeFailureAbsDelta += delta.sumAbs;
+              } else {
+                bucket.interiorToleranceFailures += 1;
+                bucket.interiorFailureAbsDelta += delta.sumAbs;
+              }
+            }
           } else if (refForeground) {
             bucket.refOnly += 1;
           } else {
