@@ -796,6 +796,17 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   last, NOT premultiplied), count at byte 25 (0=256), indices deflate-compressed, rows padded
   to `rowSize` (see the 8-bit section above).
 
+### Sound `.dat` codec vs. `format` string (issue #10)
+- A `<DOMSoundItem format="…">` string (e.g. `"44kHz 16bit Stereo"`) describes the
+  **uncompressed playback properties**, NOT the stored codec. Animate routinely stores the
+  sound as **MP3** while still writing a PCM-looking `format` string, so the string alone is
+  not a reliable codec indicator. **Sniff the leading bytes of the stream** instead: `FF Ex`
+  (MPEG frame sync) or `49 44 33` (`ID3`) ⇒ MP3 ⇒ hand it to `AudioContext.decodeAudioData`.
+  Trusting the `format` string feeds MP3 bytes to the raw-PCM path and plays as static.
+- The `.dat` may be **MP3 frames followed by a low-rate PCM "cache"** (`cacheFormat`,
+  e.g. `5kHz 8bit Stereo`); `DOMSoundItem dataLength` marks the end of the MP3. Trim to
+  `dataLength` before decoding so the cache isn't handed to the decoder. (`loadSoundAudio`.)
+
 ### Layer parenting & visibility (issue #12)
 - `parentLayerIndex` on a `<DOMLayer>` is **overloaded**: the parent may be a `folder`
   (group), a `mask`, or a normal layer (Animate "Layer Parenting" rig).

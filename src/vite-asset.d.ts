@@ -11,3 +11,9 @@ declare module '*.fla.gz?url' {
   const url: string;
   export default url;
 }
+
+// MP3 fixture (e.g. a real sound stream used to test audio decoding).
+declare module '*.mp3?url' {
+  const url: string;
+  export default url;
+}
