@@ -61,6 +61,9 @@ export class FLARenderer {
   private doc: FLADocument | null = null;
   private canvas: HTMLCanvasElement;
   private scale: number = 1;
+  private zoomLevel: number = 1; // Manual zoom multiplier on top of the auto-fit scale
+  private panX: number = 0; // Manual pan offset in CSS pixels
+  private panY: number = 0;
   private dpr: number = 1;
   private debugMode: boolean = false;
   private debugElements: DebugElement[] = [];
@@ -107,10 +110,10 @@ export class FLARenderer {
       const canvasX = (e.clientX - rect.left) * scaleX;
       const canvasY = (e.clientY - rect.top) * scaleY;
 
-      // Convert to document coordinates (remove the base scale applied during rendering)
-      const combinedScale = this.scale * this.dpr;
-      const docX = canvasX / combinedScale;
-      const docY = canvasY / combinedScale;
+      // Convert to document coordinates (remove the base scale, zoom, and pan applied during rendering)
+      const combinedScale = this.scale * this.zoomLevel * this.dpr;
+      const docX = (canvasX - this.panX * this.dpr) / combinedScale;
+      const docY = (canvasY - this.panY * this.dpr) / combinedScale;
 
       console.log(`Click at doc coords: (${docX.toFixed(1)}, ${docY.toFixed(1)}), canvas: (${canvasX.toFixed(1)}, ${canvasY.toFixed(1)}), tracking ${this.debugElements.length} elements`);
 
@@ -293,6 +296,57 @@ export class FLARenderer {
     return this.currentScene;
   }
 
+  /**
+   * Zoom in one step (max 400%), keeping the viewport center fixed.
+   */
+  zoomIn(): void {
+    this.applyZoom(1.2);
+  }
+
+  /**
+   * Zoom out one step (min 25%), keeping the viewport center fixed.
+   */
+  zoomOut(): void {
+    this.applyZoom(1 / 1.2);
+  }
+
+  private applyZoom(factor: number): void {
+    const newZoom = Math.min(Math.max(this.zoomLevel * factor, 0.25), 4);
+    if (newZoom === this.zoomLevel) return;
+    // Adjust pan so the point at the viewport center stays at the center
+    const centerX = this.canvas.width / this.dpr / 2;
+    const centerY = this.canvas.height / this.dpr / 2;
+    const ratio = newZoom / this.zoomLevel;
+    this.panX = centerX - (centerX - this.panX) * ratio;
+    this.panY = centerY - (centerY - this.panY) * ratio;
+    this.zoomLevel = newZoom;
+  }
+
+  resetZoom(): void {
+    this.zoomLevel = 1;
+  }
+
+  /**
+   * Pan the view by the given offset in CSS pixels.
+   */
+  pan(dx: number, dy: number): void {
+    this.panX += dx;
+    this.panY += dy;
+  }
+
+  resetPan(): void {
+    this.panX = 0;
+    this.panY = 0;
+  }
+
+  getZoomLevel(): number {
+    return this.zoomLevel;
+  }
+
+  getPanOffset(): { x: number; y: number } {
+    return { x: this.panX, y: this.panY };
+  }
+
   // Clear all cached data to force recomputation
   clearCaches(): void {
     // Clear shape path cache by creating a new WeakMap
@@ -432,6 +486,9 @@ export class FLARenderer {
     this.loadingFonts.clear();
     this.movieClipStates.clear();
     this.currentInstancePath = [];
+    this.zoomLevel = 1;
+    this.panX = 0;
+    this.panY = 0;
 
     // Update canvas size (skip for offscreen rendering)
     if (!skipResize) {
@@ -733,9 +790,9 @@ export class FLARenderer {
     // Get effective viewport size
     const viewport = this.getEffectiveViewportSize();
 
-    // Apply DPR and content scale together
-    const combinedScale = this.scale * this.dpr;
-    ctx.setTransform(combinedScale, 0, 0, combinedScale, 0, 0);
+    // Apply DPR, auto-fit scale, and manual zoom together; pan offsets are in CSS pixels
+    const combinedScale = this.scale * this.zoomLevel * this.dpr;
+    ctx.setTransform(combinedScale, 0, 0, combinedScale, this.panX * this.dpr, this.panY * this.dpr);
 
     // Fill with background color (fill the viewport area)
     ctx.fillStyle = doc.backgroundColor;

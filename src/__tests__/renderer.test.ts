@@ -40,6 +40,87 @@ describe('FLARenderer', () => {
     });
   });
 
+  describe('zoom and pan controls', () => {
+    it('defaults to zoom 1 and no pan', () => {
+      expect(renderer.getZoomLevel()).toBe(1);
+      expect(renderer.getPanOffset()).toEqual({ x: 0, y: 0 });
+    });
+
+    it('steps the zoom level by 1.2x per zoomIn/zoomOut', () => {
+      renderer.zoomIn();
+      expect(renderer.getZoomLevel()).toBeCloseTo(1.2);
+      renderer.zoomOut();
+      expect(renderer.getZoomLevel()).toBeCloseTo(1);
+    });
+
+    it('clamps zoom to the 25%-400% range', () => {
+      for (let i = 0; i < 20; i++) renderer.zoomIn();
+      expect(renderer.getZoomLevel()).toBeLessThanOrEqual(4);
+      for (let i = 0; i < 40; i++) renderer.zoomOut();
+      expect(renderer.getZoomLevel()).toBeGreaterThanOrEqual(0.25);
+    });
+
+    it('keeps the viewport center fixed while zooming', () => {
+      renderer.zoomIn();
+      const pan = renderer.getPanOffset();
+      expect(pan.x).toBeLessThan(0);
+      expect(pan.y).toBeLessThan(0);
+      renderer.zoomOut();
+      const reset = renderer.getPanOffset();
+      expect(reset.x).toBeCloseTo(0);
+      expect(reset.y).toBeCloseTo(0);
+    });
+
+    it('accumulates pan offsets and resets them', () => {
+      renderer.pan(10, -5);
+      renderer.pan(2, 3);
+      expect(renderer.getPanOffset()).toEqual({ x: 12, y: -2 });
+      renderer.resetPan();
+      expect(renderer.getPanOffset()).toEqual({ x: 0, y: 0 });
+      renderer.zoomIn();
+      renderer.resetZoom();
+      expect(renderer.getZoomLevel()).toBe(1);
+    });
+
+    it('resets zoom and pan when a new document is loaded', async () => {
+      renderer.zoomIn();
+      renderer.pan(30, 40);
+      await renderer.setDocument(createMinimalDoc());
+      expect(renderer.getZoomLevel()).toBe(1);
+      expect(renderer.getPanOffset()).toEqual({ x: 0, y: 0 });
+    });
+
+    it('applies pan as a DPR-scaled translation in the canvas transform', async () => {
+      const doc = createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame()],
+          })],
+        })],
+      });
+      await renderer.setDocument(doc);
+      const ctx = canvas.getContext('2d')!;
+
+      renderer.renderFrame(0);
+      const base = ctx.getTransform();
+
+      renderer.pan(10, 5);
+      renderer.renderFrame(0);
+      const panned = ctx.getTransform();
+
+      const dpr = window.devicePixelRatio || 1;
+      expect(panned.e - base.e).toBeCloseTo(10 * dpr);
+      expect(panned.f - base.f).toBeCloseTo(5 * dpr);
+      expect(panned.a).toBeCloseTo(base.a);
+
+      renderer.resetPan();
+      renderer.zoomIn();
+      renderer.renderFrame(0);
+      const zoomed = ctx.getTransform();
+      expect(zoomed.a / base.a).toBeCloseTo(1.2);
+    });
+  });
+
   describe('renderFrame', () => {
     it('should render empty frame without errors', async () => {
       const doc = createMinimalDoc({

@@ -7,6 +7,9 @@ import { parseTPL, isTPLFile, type TPLMetadata } from './tpl-parser';
 import JSZip from 'jszip';
 import type { PlayerState, FLADocument, DisplayElement, Symbol } from './types';
 
+// View pan distance in CSS pixels per button press / arrow key press
+const PAN_STEP = 20;
+
 export class FLAViewerApp {
   private parser: FLAParser;
   private player: FLAPlayer | null = null;
@@ -70,6 +73,31 @@ export class FLAViewerApp {
   private tplPanelContent: HTMLElement;
   private tplCloseBtn: HTMLButtonElement;
   private tplTabs: NodeListOf<HTMLButtonElement>;
+  // Mobile zoom/pan controls
+  private zoomInBtn: HTMLButtonElement;
+  private zoomOutBtn: HTMLButtonElement;
+  private resetViewBtn: HTMLButtonElement;
+  private panUpBtn: HTMLButtonElement;
+  private panDownBtn: HTMLButtonElement;
+  private panLeftBtn: HTMLButtonElement;
+  private panRightBtn: HTMLButtonElement;
+  // Drag state for the floating upload widget
+  private isDraggingDropZone: boolean = false;
+  private dropZoneDragMoved: boolean = false;
+  private dragOffsetX: number = 0;
+  private dragOffsetY: number = 0;
+  private dropZoneDragStartX: number = 0;
+  private dropZoneDragStartY: number = 0;
+  private dropZoneDragWidth: number = 0;
+  private dropZoneDragHeight: number = 0;
+  // Drag state for canvas panning
+  private isDraggingCanvas: boolean = false;
+  private canvasDragStartX: number = 0;
+  private canvasDragStartY: number = 0;
+  // Pan deltas accumulated between animation frames during canvas drag
+  private pendingPanX: number = 0;
+  private pendingPanY: number = 0;
+  private panRafId: number | null = null;
 
   constructor() {
     this.parser = new FLAParser();
@@ -130,13 +158,29 @@ export class FLAViewerApp {
     this.tplPanelContent = document.getElementById('tpl-panel-content')!;
     this.tplCloseBtn = document.getElementById('tpl-close-btn') as HTMLButtonElement;
     this.tplTabs = document.querySelectorAll('.tpl-tab') as NodeListOf<HTMLButtonElement>;
+    // Mobile zoom/pan controls
+    this.zoomInBtn = document.getElementById('zoom-in-btn') as HTMLButtonElement;
+    this.zoomOutBtn = document.getElementById('zoom-out-btn') as HTMLButtonElement;
+    this.resetViewBtn = document.getElementById('reset-view-btn') as HTMLButtonElement;
+    this.panUpBtn = document.getElementById('pan-up-btn') as HTMLButtonElement;
+    this.panDownBtn = document.getElementById('pan-down-btn') as HTMLButtonElement;
+    this.panLeftBtn = document.getElementById('pan-left-btn') as HTMLButtonElement;
+    this.panRightBtn = document.getElementById('pan-right-btn') as HTMLButtonElement;
 
     this.setupEventListeners();
   }
 
   private setupEventListeners(): void {
-    // File drop zone
-    this.dropZone.addEventListener('click', () => this.fileInput.click());
+    // File drop zone is a <label for="file-input">, so a plain click opens the
+    // file picker natively (works on mobile browsers where a programmatic
+    // input.click() can be blocked). Suppress the click that follows a drag of
+    // the floating widget so dragging it doesn't open the picker.
+    this.dropZone.addEventListener('click', (e) => {
+      if (this.dropZoneDragMoved) {
+        e.preventDefault();
+        this.dropZoneDragMoved = false;
+      }
+    });
     this.dropZone.addEventListener('dragover', (e) => {
       e.preventDefault();
       this.dropZone.classList.add('dragover');
@@ -153,6 +197,50 @@ export class FLAViewerApp {
       }
     });
 
+    // Drag to reposition the floating upload widget (viewer mode only)
+    this.dropZone.addEventListener('mousedown', (e) => {
+      this.dropZoneDragMoved = false;
+      if (!this.dropZone.classList.contains('viewer-mode')) return;
+      if ((e.target as HTMLElement).closest('button')) return;
+      this.startDropZoneDrag(e.clientX, e.clientY);
+    });
+
+    this.dropZone.addEventListener('touchstart', (e) => {
+      this.dropZoneDragMoved = false;
+      if (!this.dropZone.classList.contains('viewer-mode')) return;
+      if ((e.target as HTMLElement).closest('button')) return;
+      this.startDropZoneDrag(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: true });
+
+    // Canvas drag to pan
+    this.canvas.addEventListener('mousedown', (e) => {
+      if (!this.player) return;
+      this.isDraggingCanvas = true;
+      this.canvasDragStartX = e.clientX;
+      this.canvasDragStartY = e.clientY;
+    });
+
+    this.canvas.addEventListener('touchstart', (e) => {
+      if (!this.player || e.touches.length > 1) return;
+      this.isDraggingCanvas = true;
+      this.canvasDragStartX = e.touches[0].clientX;
+      this.canvasDragStartY = e.touches[0].clientY;
+    }, { passive: true });
+
+    document.addEventListener('mousemove', (e) => {
+      this.handlePointerMove(e.clientX, e.clientY);
+    });
+
+    document.addEventListener('touchmove', (e) => {
+      if (e.touches.length > 0) {
+        this.handlePointerMove(e.touches[0].clientX, e.touches[0].clientY);
+      }
+    }, { passive: true });
+
+    document.addEventListener('mouseup', () => this.endPointerDrag());
+    document.addEventListener('touchend', () => this.endPointerDrag());
+    document.addEventListener('touchcancel', () => this.endPointerDrag());
+
     // File input
     this.fileInput.addEventListener('change', () => {
       const files = this.fileInput.files;
@@ -163,7 +251,8 @@ export class FLAViewerApp {
 
     // Load sample button
     this.loadSampleBtn.addEventListener('click', async (e) => {
-      e.stopPropagation(); // Prevent drop zone click handler
+      e.preventDefault(); // Don't trigger the surrounding label's file picker
+      e.stopPropagation();
       const sampleFile = await generateSampleFLA();
       this.loadFile(sampleFile);
     });
@@ -199,6 +288,15 @@ export class FLAViewerApp {
       this.skipImagesFix = true;
       this.skipImagesBtn.classList.add('hidden');
     });
+
+    // Mobile zoom/pan controls
+    this.zoomInBtn?.addEventListener('click', () => this.player?.zoomIn());
+    this.zoomOutBtn?.addEventListener('click', () => this.player?.zoomOut());
+    this.resetViewBtn?.addEventListener('click', () => this.player?.resetView());
+    this.panUpBtn?.addEventListener('click', () => this.player?.pan(0, PAN_STEP));
+    this.panDownBtn?.addEventListener('click', () => this.player?.pan(0, -PAN_STEP));
+    this.panLeftBtn?.addEventListener('click', () => this.player?.pan(PAN_STEP, 0));
+    this.panRightBtn?.addEventListener('click', () => this.player?.pan(-PAN_STEP, 0));
 
     // Timeline scrubbing (uses global frames to seek across scenes)
     this.timeline.addEventListener('click', (e) => {
@@ -300,16 +398,60 @@ export class FLAViewerApp {
     document.addEventListener('keydown', (e) => {
       if (!this.player) return;
 
+      // Don't hijack keys from focused form controls (e.g. the volume slider)
+      const target = e.target as HTMLElement | null;
+      if (target && (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        target.isContentEditable
+      )) {
+        return;
+      }
+
       switch (e.key) {
         case ' ':
           e.preventDefault();
           this.togglePlay();
           break;
         case 'ArrowLeft':
-          this.player.prevFrame();
-          break;
         case 'ArrowRight':
-          this.player.nextFrame();
+        case 'ArrowUp':
+        case 'ArrowDown': {
+          if (e.shiftKey) {
+            // Shift+arrows pan the view
+            e.preventDefault();
+            if (e.key === 'ArrowLeft') {
+              this.player.pan(PAN_STEP, 0);
+            } else if (e.key === 'ArrowRight') {
+              this.player.pan(-PAN_STEP, 0);
+            } else if (e.key === 'ArrowUp') {
+              this.player.pan(0, PAN_STEP);
+            } else {
+              this.player.pan(0, -PAN_STEP);
+            }
+          } else if (e.key === 'ArrowLeft') {
+            this.player.prevFrame();
+          } else if (e.key === 'ArrowRight') {
+            this.player.nextFrame();
+          }
+          break;
+        }
+        case '+':
+        case '=':
+          e.preventDefault();
+          this.player.zoomIn();
+          break;
+        case '-':
+        case '_':
+          e.preventDefault();
+          this.player.zoomOut();
+          break;
+        case '0':
+          if (!e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            this.player.resetView();
+          }
           break;
         case 'Home':
           this.player.goToFrame(0);
@@ -339,6 +481,77 @@ export class FLAViewerApp {
           break;
       }
     });
+  }
+
+  private startDropZoneDrag(clientX: number, clientY: number): void {
+    this.isDraggingDropZone = true;
+    this.dropZoneDragStartX = clientX;
+    this.dropZoneDragStartY = clientY;
+    const rect = this.dropZone.getBoundingClientRect();
+    this.dragOffsetX = clientX - rect.left;
+    this.dragOffsetY = clientY - rect.top;
+    // Cache size so the move handler doesn't force layout on every event
+    this.dropZoneDragWidth = rect.width;
+    this.dropZoneDragHeight = rect.height;
+  }
+
+  private handlePointerMove(clientX: number, clientY: number): void {
+    if (this.isDraggingDropZone) {
+      if (!this.dropZoneDragMoved) {
+        const dist = Math.hypot(clientX - this.dropZoneDragStartX, clientY - this.dropZoneDragStartY);
+        // Ignore sub-threshold jitter so a normal click still opens the picker
+        if (dist < 4) return;
+        this.dropZoneDragMoved = true;
+      }
+      const x = clientX - this.dragOffsetX;
+      const y = clientY - this.dragOffsetY;
+      const maxX = window.innerWidth - this.dropZoneDragWidth;
+      const maxY = window.innerHeight - this.dropZoneDragHeight;
+      this.dropZone.style.right = 'auto';
+      this.dropZone.style.bottom = 'auto';
+      this.dropZone.style.left = `${Math.max(0, Math.min(x, maxX))}px`;
+      this.dropZone.style.top = `${Math.max(0, Math.min(y, maxY))}px`;
+      return;
+    }
+
+    if (this.isDraggingCanvas && this.player) {
+      // Coalesce pan deltas into one render per animation frame; a full
+      // renderFrame per mousemove event janks on heavy documents
+      this.pendingPanX += clientX - this.canvasDragStartX;
+      this.pendingPanY += clientY - this.canvasDragStartY;
+      this.canvasDragStartX = clientX;
+      this.canvasDragStartY = clientY;
+      if (this.panRafId === null) {
+        this.panRafId = requestAnimationFrame(() => this.flushPendingPan());
+      }
+    }
+  }
+
+  private flushPendingPan(): void {
+    this.panRafId = null;
+    if (this.pendingPanX !== 0 || this.pendingPanY !== 0) {
+      this.player?.pan(this.pendingPanX, this.pendingPanY);
+      this.pendingPanX = 0;
+      this.pendingPanY = 0;
+    }
+  }
+
+  private endPointerDrag(): void {
+    this.isDraggingDropZone = false;
+    this.isDraggingCanvas = false;
+    if (this.panRafId !== null) {
+      cancelAnimationFrame(this.panRafId);
+      this.flushPendingPan();
+    }
+  }
+
+  // Clear inline positioning left over from dragging the floating widget so
+  // the drop zone can return to its CSS-defined (fullscreen or corner) layout
+  private resetDropZonePosition(): void {
+    this.dropZone.style.left = '';
+    this.dropZone.style.top = '';
+    this.dropZone.style.right = '';
+    this.dropZone.style.bottom = '';
   }
 
   private debugMode: boolean = false;
@@ -886,6 +1099,10 @@ export class FLAViewerApp {
       this.loading.classList.remove('active');
       this.viewer.classList.add('active');
 
+      // Keep the upload UI available as a compact floating widget
+      this.dropZone.classList.add('viewer-mode');
+      this.dropZone.classList.remove('hidden');
+
       // Check if we have audio and multiple frames
       const hasAudio = this.hasLoadedAudio(doc);
       const hasMultipleFrames = state.globalTotalFrames > 1;
@@ -941,7 +1158,8 @@ export class FLAViewerApp {
       console.error('Failed to load file:', error);
       alert('Failed to load file: ' + (error as Error).message);
       this.loading.classList.remove('active');
-      this.dropZone.classList.remove('hidden');
+      this.dropZone.classList.remove('hidden', 'viewer-mode');
+      this.resetDropZonePosition();
       this.skipImagesBtn.classList.add('hidden');
     }
   }
