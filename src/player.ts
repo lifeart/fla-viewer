@@ -484,4 +484,46 @@ export class FLAPlayer {
   getVolume(): number {
     return this.volume;
   }
+
+  // Zoom controls
+  zoomIn(): void {
+    this.renderer.zoomIn();
+    this.render();
+  }
+
+  zoomOut(): void {
+    this.renderer.zoomOut();
+    this.render();
+  }
+
+  resetZoom(): void {
+    this.renderer.resetZoom();
+    this.render();
+  }
+
+  getZoomLevel(): number {
+    return this.renderer.getZoomLevel();
+  }
+
+  // Pan controls
+  pan(dx: number, dy: number): void {
+    this.renderer.pan(dx, dy);
+    this.render();
+  }
+
+  resetPan(): void {
+    this.renderer.resetPan();
+    this.render();
+  }
+
+  // Reset zoom and pan together with a single re-render
+  resetView(): void {
+    this.renderer.resetZoom();
+    this.renderer.resetPan();
+    this.render();
+  }
+
+  getPanOffset(): { x: number; y: number } {
+    return this.renderer.getPanOffset();
+  }
 }

@@ -45,10 +45,10 @@ function createAppDOM(): HTMLElement {
   container.id = 'app-container';
 
   container.innerHTML = `
-    <div id="drop-zone">
+    <label id="drop-zone" for="file-input">
       <input type="file" id="file-input" accept=".fla" />
       <button id="load-sample-btn">Load Sample</button>
-    </div>
+    </label>
     <div id="loading">
       <div id="loading-stages">
         <div class="loading-stage" data-stage="extract">Extract</div>
@@ -673,15 +673,23 @@ describe('main.ts', () => {
       expect(app).toBeInstanceOf(FLAViewerApp);
     });
 
-    it('should setup drop zone click handler', () => {
-      const dropZone = document.getElementById('drop-zone')!;
+    it('opens the file picker via native label activation', () => {
+      const dropZone = document.getElementById('drop-zone') as HTMLLabelElement;
       const fileInput = document.getElementById('file-input') as HTMLInputElement;
 
-      // Spy on click
-      const clickSpy = vi.spyOn(fileInput, 'click');
-      dropZone.click();
+      expect(dropZone.tagName).toBe('LABEL');
+      expect(dropZone.htmlFor).toBe('file-input');
+      expect(Array.from(fileInput.labels ?? [])).toContain(dropZone);
 
-      expect(clickSpy).toHaveBeenCalled();
+      // Label activation forwards the click to the input (cancel it so no
+      // real file picker opens during the test)
+      let inputClicks = 0;
+      fileInput.addEventListener('click', (e) => {
+        inputClicks++;
+        e.preventDefault();
+      });
+      dropZone.click();
+      expect(inputClicks).toBe(1);
     });
 
     it('should add dragover class on dragover', () => {
