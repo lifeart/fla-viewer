@@ -617,9 +617,11 @@ export class FLARenderer {
     // When following camera, use detected camera viewport size
     const viewportSize = this.getEffectiveViewportSize();
 
-    // Calculate scale to fit canvas while maintaining aspect ratio
-    const maxWidth = Math.min(window.innerWidth - 100, 1920);
-    const maxHeight = Math.min(window.innerHeight - 300, 1080);
+    // Calculate scale to fit canvas while maintaining aspect ratio.
+    // Floor the available space so very small windows can't produce a
+    // zero or negative scale (which would render the document flipped).
+    const maxWidth = Math.max(Math.min(window.innerWidth - 100, 1920), 50);
+    const maxHeight = Math.max(Math.min(window.innerHeight - 300, 1080), 50);
 
     const scaleX = maxWidth / viewportSize.width;
     const scaleY = maxHeight / viewportSize.height;

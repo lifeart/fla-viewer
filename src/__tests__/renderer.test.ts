@@ -41,6 +41,27 @@ describe('FLARenderer', () => {
     });
   });
 
+  describe('updateCanvasSize', () => {
+    it('keeps a positive render scale in very small windows', async () => {
+      const origWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth');
+      const origHeight = Object.getOwnPropertyDescriptor(window, 'innerHeight');
+      Object.defineProperty(window, 'innerWidth', { value: 80, configurable: true });
+      Object.defineProperty(window, 'innerHeight', { value: 120, configurable: true });
+      try {
+        await renderer.setDocument(createMinimalDoc());
+        renderer.renderFrame(0);
+        const t = canvas.getContext('2d')!.getTransform();
+        expect(t.a).toBeGreaterThan(0);
+        expect(t.d).toBeGreaterThan(0);
+      } finally {
+        if (origWidth) Object.defineProperty(window, 'innerWidth', origWidth);
+        else delete (window as { innerWidth?: number }).innerWidth;
+        if (origHeight) Object.defineProperty(window, 'innerHeight', origHeight);
+        else delete (window as { innerHeight?: number }).innerHeight;
+      }
+    });
+  });
+
   describe('zoom and pan controls', () => {
     it('defaults to zoom 1 and no pan', () => {
       expect(renderer.getZoomLevel()).toBe(1);
