@@ -305,6 +305,37 @@
       margin-top: 8px;
     }
 
+    /* Dismiss (×) button — only shown on the floating widget so it can be
+       hidden without losing the full-screen drop zone on the upload screen */
+    .drop-zone-close {
+      display: none;
+    }
+
+    .drop-zone.viewer-mode .drop-zone-close {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      font-size: 16px;
+      line-height: 1;
+      cursor: pointer;
+      z-index: 1;
+    }
+
+    .drop-zone.viewer-mode .drop-zone-close:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
     .drop-zone:hover,
     .drop-zone.dragover {
       background: var(--accent-dim);
@@ -1579,6 +1610,7 @@
       </article>
 
       <label class="drop-zone" id="drop-zone" for="file-input" role="region" aria-label="File upload area">
+        <button class="drop-zone-close" id="drop-zone-close" type="button" title="Hide upload widget" aria-label="Hide upload widget">&times;</button>
         <div class="drop-zone-content">
           <svg class="drop-zone-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
@@ -1793,6 +1825,10 @@
               <input type="range" id="volume-slider" min="0" max="100" value="100" title="Volume">
             </div>
           </div>
+
+          <button class="transport-btn" id="open-file-btn" title="Open file">
+            <svg viewBox="0 0 24 24"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+          </button>
 
           <button class="transport-btn" id="download-btn" title="Download as MP4">
             <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
