@@ -58,6 +58,43 @@ export function setParserDebug(value: boolean): void {
 export type ProgressCallback = (message: string) => void;
 export type SkipCheckCallback = () => boolean;
 
+/**
+ * Anything the parser can ingest. Browser callers pass a `File`/`Blob`; headless
+ * or library callers (Node, the VS Code extension host) pass raw bytes.
+ */
+export type FLAInput = File | Blob | ArrayBuffer | Uint8Array;
+
+/** A constructor compatible with the WHATWG `DOMParser` (browser global or linkedom). */
+export type DOMParserCtor = {
+  new (): { parseFromString(source: string, mimeType: string): Document };
+};
+
+export interface FLAParserOptions {
+  /**
+   * XML parser implementation. Defaults to the global `DOMParser` (browsers).
+   * Outside a browser, inject one — e.g. linkedom's `DOMParser` in Node or the
+   * VS Code extension host: `new FLAParser({ DOMParser })`.
+   */
+  DOMParser?: DOMParserCtor;
+}
+
+export interface ParseOptions {
+  /**
+   * Skip browser-only media decoding (bitmap pixels, audio samples, FLV/video).
+   * Library/headless consumers that only need timeline structure + types should
+   * set this. Media *item metadata* (names, dimensions, formats) is still parsed.
+   */
+  structureOnly?: boolean;
+}
+
+/** Normalize any accepted input to bytes. JSZip and the OLE2 sniff both accept Uint8Array. */
+async function toBytes(input: FLAInput): Promise<Uint8Array> {
+  if (input instanceof Uint8Array) return input;
+  if (input instanceof ArrayBuffer) return new Uint8Array(input);
+  // File | Blob
+  return new Uint8Array(await input.arrayBuffer());
+}
+
 // Animate's default "Dashed" line style when <DashedStroke> omits dashLength/spaceLength.
 // Source: the Property Inspector "Dashed" stroke style (Stroke Style dialog) defaults; the
 // Adobe JSFL Stroke object documents dash1 (solid run) and dash2 (gap) as integers but does
@@ -69,8 +106,19 @@ const DEFAULT_DASH_SPACE_LENGTH = 4;
 export class FLAParser {
   private zip: JSZip | null = null;
   private symbolCache: Map<string, Symbol> = new Map();
-  private parser = new DOMParser();
+  private parser: { parseFromString(source: string, mimeType: string): Document };
   private lastYieldTime = 0;
+
+  constructor(options: FLAParserOptions = {}) {
+    const Ctor = options.DOMParser ?? (typeof DOMParser !== 'undefined' ? DOMParser : null);
+    if (!Ctor) {
+      throw new Error(
+        'FLAParser: no DOMParser available. Pass one via `new FLAParser({ DOMParser })` ' +
+        "(e.g. linkedom's DOMParser) when running outside a browser."
+      );
+    }
+    this.parser = new Ctor();
+  }
 
   // Yield to browser if more than 50ms has passed since last yield
   private async yieldIfNeeded(): Promise<void> {
@@ -81,33 +129,33 @@ export class FLAParser {
     }
   }
 
-  async parse(file: File, onProgress?: ProgressCallback, isSkipImagesFix?: SkipCheckCallback): Promise<FLADocument> {
+  async parse(input: FLAInput, onProgress?: ProgressCallback, isSkipImagesFix?: SkipCheckCallback, options: ParseOptions = {}): Promise<FLADocument> {
     const progress = onProgress || (() => {});
     const shouldSkipImagesFix = isSkipImagesFix || (() => false);
+
+    const bytes = await toBytes(input);
 
     // Detect format by leading bytes. CS5+ FLAs are ZIP archives ("PK"…);
     // pre-CS5 FLAs are OLE2 compound documents (D0 CF 11 E0 …) — a completely
     // different container that JSZip cannot read (GitHub issue #8). Branch
     // before touching JSZip so binary files take the dedicated code path
     // instead of failing later with "DOMDocument.xml not found".
-    const headerBytes = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+    const headerBytes = bytes.subarray(0, 8);
     if (isOLE2(headerBytes)) {
       progress('Reading binary (pre-CS5) FLA...');
-      const fullBytes = new Uint8Array(await file.arrayBuffer());
       // parseBinaryFLA throws with a specific message on unrecognized binary
       // FLAs; let it propagate so the UI shows real feedback (no silent catch).
-      return parseBinaryFLA(fullBytes);
+      return parseBinaryFLA(bytes);
     }
 
     // Try to load ZIP, handling potentially corrupted files
     progress('Extracting archive...');
     try {
-      this.zip = await JSZip.loadAsync(file);
+      this.zip = await JSZip.loadAsync(bytes);
     } catch (e) {
       // Some FLA files have minor corruption - try to repair by truncating
       progress('Repairing archive...');
-      const arrayBuffer = await file.arrayBuffer();
-      const repaired = await this.tryRepairZip(arrayBuffer);
+      const repaired = await this.tryRepairZip(bytes);
       if (repaired) {
         this.zip = repaired;
       } else {
@@ -137,15 +185,15 @@ export class FLAParser {
 
     // Parse bitmap items from media section and load images
     progress('Loading images...');
-    const bitmaps = await this.parseBitmaps(root, progress, shouldSkipImagesFix);
+    const bitmaps = await this.parseBitmaps(root, progress, shouldSkipImagesFix, options.structureOnly);
 
     // Parse sound items from media section and load audio
     progress('Loading audio...');
-    const sounds = await this.parseSounds(root);
+    const sounds = await this.parseSounds(root, options.structureOnly);
 
     // Parse video items from media section and load FLV data
     progress('Loading videos...');
-    const videos = await this.parseVideos(root);
+    const videos = await this.parseVideos(root, options.structureOnly);
 
     // Parse main timeline (pass dimensions for camera detection)
     progress('Building timeline...');
@@ -164,10 +212,15 @@ export class FLAParser {
     };
   }
 
-  private async tryRepairZip(buffer: ArrayBuffer): Promise<JSZip | null> {
+  private async tryRepairZip(input: Uint8Array): Promise<JSZip | null> {
     // The "missing X bytes" error usually means the central directory size is wrong
     // We can try to fix this by finding and patching the End of Central Directory record
 
+    // Work on a standalone ArrayBuffer copy so DataView/slice offsets stay simple
+    // even when `input` is a subarray view over a larger buffer. The cast drops
+    // the SharedArrayBuffer arm of ArrayBufferLike — FLA bytes are never backed
+    // by shared memory, and JSZip.loadAsync only accepts a plain ArrayBuffer.
+    const buffer = input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength) as ArrayBuffer;
     const bytes = new Uint8Array(buffer);
 
     // Find EOCD signature (0x06054b50) - search from end of file
@@ -840,6 +893,9 @@ export class FLAParser {
 
   private parseSymbolInstance(el: globalThis.Element, composedMatrix?: Matrix): SymbolInstance {
     const libraryItemName = el.getAttribute('libraryItemName') || '';
+    // Instance name (Properties panel) — the AS identifier for this object.
+    // The renderer ignores it; tooling (code completion) relies on it.
+    const name = el.getAttribute('name') || undefined;
     const symbolType = (el.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
     const loop = (el.getAttribute('loop') || 'loop') as 'loop' | 'play once' | 'single frame';
     const firstFrame = el.getAttribute('firstFrame');
@@ -897,6 +953,7 @@ export class FLAParser {
     return {
       type: 'symbol',
       libraryItemName,
+      ...(name && { name }),
       symbolType,
       matrix,
       transformationPoint,
@@ -1378,7 +1435,7 @@ export class FLAParser {
     return strokes;
   }
 
-  private async parseBitmaps(root: globalThis.Element, progress: ProgressCallback, shouldSkipImagesFix: SkipCheckCallback): Promise<Map<string, BitmapItem>> {
+  private async parseBitmaps(root: globalThis.Element, progress: ProgressCallback, shouldSkipImagesFix: SkipCheckCallback, structureOnly = false): Promise<Map<string, BitmapItem>> {
     const bitmaps = new Map<string, BitmapItem>();
     const bitmapElements = root.querySelectorAll('media > DOMBitmapItem');
 
@@ -1412,18 +1469,21 @@ export class FLAParser {
       bitmapItems.push(bitmapItem);
     }
 
-    // Load images sequentially with progress updates
-    const totalImages = bitmapItems.length;
-    for (let i = 0; i < totalImages; i++) {
-      if (shouldSkipImagesFix()) {
-        progress('Skipping remaining images...');
-        break;
+    // Decode pixel data sequentially with progress updates. Skipped in
+    // structure-only/headless mode (no Image/canvas available, and unneeded).
+    if (!structureOnly) {
+      const totalImages = bitmapItems.length;
+      for (let i = 0; i < totalImages; i++) {
+        if (shouldSkipImagesFix()) {
+          progress('Skipping remaining images...');
+          break;
+        }
+        const imageProgress = (algo: string) => {
+          progress(`Fixing images ${i + 1}/${totalImages} [${algo}]`);
+        };
+        imageProgress('loading');
+        await this.loadBitmapImage(bitmapItems[i], imageProgress);
       }
-      const imageProgress = (algo: string) => {
-        progress(`Fixing images ${i + 1}/${totalImages} [${algo}]`);
-      };
-      imageProgress('loading');
-      await this.loadBitmapImage(bitmapItems[i], imageProgress);
     }
 
     return bitmaps;
@@ -2157,7 +2217,7 @@ export class FLAParser {
 
   private audioContext: AudioContext | null = null;
 
-  private async parseSounds(root: globalThis.Element): Promise<Map<string, SoundItem>> {
+  private async parseSounds(root: globalThis.Element, structureOnly = false): Promise<Map<string, SoundItem>> {
     const sounds = new Map<string, SoundItem>();
     const soundElements = root.querySelectorAll('media > DOMSoundItem');
 
@@ -2194,8 +2254,10 @@ export class FLAParser {
 
       sounds.set(name, soundItem);
 
-      // Load actual audio data from ZIP
-      loadPromises.push(this.loadSoundAudio(soundItem));
+      // Load actual audio data from ZIP (skipped in structure-only/headless mode)
+      if (!structureOnly) {
+        loadPromises.push(this.loadSoundAudio(soundItem));
+      }
     }
 
     // Wait for all sounds to load
@@ -2398,7 +2460,7 @@ export class FLAParser {
     return audioBuffer;
   }
 
-  private async parseVideos(root: globalThis.Element): Promise<Map<string, VideoItem>> {
+  private async parseVideos(root: globalThis.Element, structureOnly = false): Promise<Map<string, VideoItem>> {
     const videos = new Map<string, VideoItem>();
     const videoElements = root.querySelectorAll('media > DOMVideoItem');
     const loadPromises: Promise<void>[] = [];
@@ -2426,8 +2488,8 @@ export class FLAParser {
 
       videos.set(name, videoItem);
 
-      // Load and parse FLV data
-      if (href) {
+      // Load and parse FLV data (skipped in structure-only/headless mode)
+      if (href && !structureOnly) {
         loadPromises.push(this.loadVideoFLV(videoItem));
       }
 

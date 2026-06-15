@@ -171,6 +171,13 @@ export interface SymbolInstance {
   type: 'symbol';
   libraryItemName: string;
   symbolType: 'graphic' | 'movieclip' | 'button';
+  /**
+   * Instance name set in the Properties panel — the identifier ActionScript
+   * uses to reference this object on the timeline (e.g. `myClip._x`). Absent for
+   * unnamed instances. Captured for tooling (e.g. code completion); the renderer
+   * does not use it.
+   */
+  name?: string;
   matrix: Matrix;
   transformationPoint: Point;
   centerPoint3D?: Point; // 3D transformation center point
