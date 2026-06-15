@@ -526,6 +526,60 @@ describe('FLAPlayer', () => {
       await audioContext.close();
     });
 
+    it('re-seeks the audio to the frame when it drifts ahead (video lag)', async () => {
+      const audioContext = new AudioContext();
+      const sampleRate = audioContext.sampleRate;
+      const audioBuffer = audioContext.createBuffer(2, Math.ceil(sampleRate * 2), sampleRate);
+
+      const sounds = new Map();
+      sounds.set('drift.mp3', { name: 'drift.mp3', audioData: audioBuffer });
+
+      const doc = createMinimalDoc({
+        frameRate: 24,
+        sounds,
+        timelines: [createTimeline({
+          totalFrames: 48,
+          layers: [createLayer({
+            frames: [createFrame({
+              index: 0,
+              duration: 48,
+              sound: { name: 'drift.mp3', sync: 'stream', inPoint44: 0 },
+            })],
+          })],
+        })],
+      });
+      await player.setDocument(doc);
+
+      // Start audio directly (without the rAF loop) so the test is deterministic.
+      const p = player as unknown as {
+        startAudio: () => void;
+        syncAudioToFrame: () => void;
+        activeAudioSource: AudioBufferSourceNode | null;
+        activeStream: unknown;
+        audioStartContextTime: number;
+        audioContext: AudioContext;
+      };
+      p.startAudio();
+      const firstSource = p.activeAudioSource;
+      expect(firstSource).toBeTruthy();
+      expect(p.activeStream).toBeTruthy();
+
+      // Aligned (no drift): the source must be left alone, no audible restart.
+      p.audioStartContextTime = p.audioContext.currentTime;
+      p.syncAudioToFrame();
+      expect(p.activeAudioSource).toBe(firstSource);
+
+      // Simulate heavy render lag: audio has played ~1s while still on frame 0.
+      p.audioStartContextTime = p.audioContext.currentTime - 1;
+      p.syncAudioToFrame();
+      // Audio should be re-seeked back to the frame (a fresh source).
+      expect(p.activeAudioSource).toBeTruthy();
+      expect(p.activeAudioSource).not.toBe(firstSource);
+
+      player.pause();
+      await audioContext.close();
+    });
+
     it('should set volume on gainNode when playing', async () => {
       const audioContext = new AudioContext();
       const sampleRate = audioContext.sampleRate;

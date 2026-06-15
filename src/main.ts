@@ -59,6 +59,11 @@ export class FLAViewerApp {
   private skipImagesBtn: HTMLButtonElement;
   private skipImagesFix: boolean = false;
   private loadSampleBtn: HTMLButtonElement;
+  private dropZoneClose: HTMLButtonElement;
+  private openFileBtn: HTMLButtonElement;
+  // Whether the user dismissed the floating upload widget (persists across
+  // loads in this session so it doesn't keep reappearing)
+  private dropZoneDismissed: boolean = false;
   private loadingStages: HTMLElement;
   private loadingProgressFill: HTMLElement;
   // Scene controls
@@ -138,6 +143,8 @@ export class FLAViewerApp {
     this.exportCancelBtn = document.getElementById('export-cancel-btn') as HTMLButtonElement;
     this.skipImagesBtn = document.getElementById('skip-images-btn') as HTMLButtonElement;
     this.loadSampleBtn = document.getElementById('load-sample-btn') as HTMLButtonElement;
+    this.dropZoneClose = document.getElementById('drop-zone-close') as HTMLButtonElement;
+    this.openFileBtn = document.getElementById('open-file-btn') as HTMLButtonElement;
     this.loadingStages = document.getElementById('loading-stages')!;
     this.loadingProgressFill = document.getElementById('loading-progress-fill')!;
     this.debugCloseBtn = document.getElementById('debug-close-btn') as HTMLButtonElement;
@@ -183,6 +190,15 @@ export class FLAViewerApp {
       if (files && files.length > 0) {
         this.loadFile(files[0]);
       }
+    });
+
+    // Dismiss the floating upload widget. preventDefault/stopPropagation keep
+    // the surrounding <label> from opening the file picker on this click.
+    this.dropZoneClose?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.dropZoneDismissed = true;
+      this.dropZone.classList.add('hidden');
     });
 
     // Drag to reposition the floating upload widget (viewer mode only)
@@ -263,7 +279,17 @@ export class FLAViewerApp {
 
     // Fullscreen
     this.fullscreenBtn.addEventListener('click', () => this.toggleFullscreen());
-    document.addEventListener('fullscreenchange', () => this.updateFullscreenButton());
+    document.addEventListener('fullscreenchange', () => {
+      this.updateFullscreenButton();
+      // Re-fit the canvas to the new viewport: fill the screen when entering
+      // fullscreen, restore the normal layout when exiting. A rAF lets the
+      // fullscreen reflow settle so the container reports its final size.
+      requestAnimationFrame(() => this.player?.updateCanvasSize());
+    });
+
+    // Open a new file from the transport bar (always available, even after the
+    // floating upload widget has been dismissed).
+    this.openFileBtn?.addEventListener('click', () => this.fileInput.click());
 
     // Download/Export
     this.downloadBtn.addEventListener('click', () => this.showExportModal());
@@ -1024,9 +1050,14 @@ export class FLAViewerApp {
       this.loading.classList.remove('active');
       this.viewer.classList.add('active');
 
-      // Keep the upload UI available as a compact floating widget
+      // Keep the upload UI available as a compact floating widget, unless the
+      // user dismissed it (they can reopen files from the transport bar).
       this.dropZone.classList.add('viewer-mode');
-      this.dropZone.classList.remove('hidden');
+      if (this.dropZoneDismissed) {
+        this.dropZone.classList.add('hidden');
+      } else {
+        this.dropZone.classList.remove('hidden');
+      }
 
       // Check if we have audio and multiple frames
       const hasAudio = this.hasLoadedAudio(doc);

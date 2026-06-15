@@ -620,12 +620,30 @@ export class FLARenderer {
     // Calculate scale to fit canvas while maintaining aspect ratio.
     // Floor the available space so very small windows can't produce a
     // zero or negative scale (which would render the document flipped).
-    const maxWidth = Math.max(Math.min(window.innerWidth - 100, 1920), 50);
-    const maxHeight = Math.max(Math.min(window.innerHeight - 300, 1080), 50);
+    let maxWidth = Math.max(Math.min(window.innerWidth - 100, 1920), 50);
+    let maxHeight = Math.max(Math.min(window.innerHeight - 300, 1080), 50);
+
+    // In fullscreen the surrounding page chrome is gone, so the fixed
+    // window-margin heuristic above leaves the document tiny in a sea of
+    // black. Measure the actual canvas container instead and let the
+    // document scale up past its natural size to truly fill the screen.
+    let allowUpscale = false;
+    const fsElement = typeof document !== 'undefined' ? document.fullscreenElement : null;
+    const container = this.canvas.parentElement;
+    if (fsElement && container && typeof container.getBoundingClientRect === 'function') {
+      const rect = container.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        maxWidth = rect.width;
+        maxHeight = rect.height;
+        allowUpscale = true;
+      }
+    }
 
     const scaleX = maxWidth / viewportSize.width;
     const scaleY = maxHeight / viewportSize.height;
-    this.scale = Math.min(scaleX, scaleY, 1);
+    // Cap at 1 in the normal layout (avoid blowing up small docs), but allow
+    // upscaling in fullscreen so the animation fills the available space.
+    this.scale = allowUpscale ? Math.min(scaleX, scaleY) : Math.min(scaleX, scaleY, 1);
 
     // Calculate CSS display size
     const displayWidth = viewportSize.width * this.scale;

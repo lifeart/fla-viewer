@@ -34,6 +34,14 @@ export class FLAPlayer {
   private activeAudioSource: AudioBufferSourceNode | null = null;
   private streamSounds: StreamSound[] = [];
   private volume: number = 1;
+  // Reference point for keeping audio locked to the rendered frame. Audio
+  // plays on the realtime audio clock, but the video advances one frame per
+  // render tick, so it falls behind under heavy rendering load. We track where
+  // the active source started (offset into the buffer + audio-context time at
+  // start) so we can detect drift and re-seek the audio back to the frame.
+  private activeStream: StreamSound | null = null;
+  private audioStartOffset: number = 0;
+  private audioStartContextTime: number = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new FLARenderer(canvas);
@@ -212,6 +220,48 @@ export class FLAPlayer {
     this.activeAudioSource = source;
 
     source.start(0, audioOffset);
+
+    // Remember where playback started so we can keep it aligned to the frame.
+    this.activeStream = stream;
+    this.audioStartOffset = audioOffset;
+    this.audioStartContextTime = this.audioContext.currentTime;
+  }
+
+  /**
+   * Keep the audio aligned with the rendered frame. The video advances one
+   * frame per render tick, so when rendering can't keep up it lags behind the
+   * realtime audio clock. Rather than let the sound race ahead, we re-seek the
+   * audio back to the current frame's position whenever drift gets audible, so
+   * picture and sound lag together.
+   */
+  private syncAudioToFrame(): void {
+    if (!this.audioContext || !this.activeAudioSource || !this.activeStream) return;
+
+    const stream = this.activeStream;
+    const fps = Math.max(1, this.state.fps);
+    const framesIntoSound = this.state.currentFrame - stream.startFrame;
+
+    // Playhead moved outside this stream's range — stop the sound.
+    if (framesIntoSound < 0 || this.state.currentFrame >= stream.startFrame + stream.duration) {
+      this.stopAudio();
+      return;
+    }
+
+    const inPointSeconds = (stream.sound.inPoint44 || 0) / 44100;
+    const expectedPos = inPointSeconds + framesIntoSound / fps;
+    const actualPos = this.audioStartOffset + (this.audioContext.currentTime - this.audioStartContextTime);
+
+    // Only correct when the audio has run *ahead* of the rendered frame (the
+    // render-lag case). Each correction restarts the buffer source, which is an
+    // audible discontinuity, so use a generous threshold (~quarter second) and
+    // re-seek occasionally rather than many times per second under heavy lag.
+    // We never pull the audio forward: the frame can't outrun realtime audio,
+    // so a negative drift is noise not worth a clicky restart.
+    const drift = actualPos - expectedPos;
+    const threshold = Math.max(0.25, 3 / fps);
+    if (drift > threshold) {
+      this.playStreamSound(stream, this.state.currentFrame);
+    }
   }
 
   private stopAudio(): void {
@@ -223,6 +273,7 @@ export class FLAPlayer {
       }
       this.activeAudioSource = null;
     }
+    this.activeStream = null;
   }
 
   nextFrame(): void {
@@ -399,6 +450,8 @@ export class FLAPlayer {
       }
 
       this.render();
+      // Keep the sound aligned with the (possibly lagging) rendered frame.
+      this.syncAudioToFrame();
       this.notifyStateChange();
     }
 

@@ -60,6 +60,36 @@ describe('FLARenderer', () => {
         else delete (window as { innerHeight?: number }).innerHeight;
       }
     });
+
+    it('upscales the document to fill the container in fullscreen', async () => {
+      // Canvas inside a sized container, like the real .canvas-container.
+      const container = document.createElement('div');
+      container.style.width = '1100px';
+      container.style.height = '800px';
+      const fsCanvas = document.createElement('canvas');
+      container.appendChild(fsCanvas);
+      document.body.appendChild(container);
+
+      const fsRenderer = new FLARenderer(fsCanvas);
+      await fsRenderer.setDocument(createMinimalDoc()); // 550 x 400
+
+      // Normal layout caps the scale at 1 — the 550px-wide doc never grows.
+      fsRenderer.updateCanvasSize();
+      expect(parseFloat(fsCanvas.style.width)).toBeLessThanOrEqual(550);
+
+      // Pretend the container is fullscreen.
+      const descriptor = Object.getOwnPropertyDescriptor(document, 'fullscreenElement');
+      Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => container });
+      try {
+        fsRenderer.updateCanvasSize();
+        // Now it should scale up past its natural width to fill the 1100px box.
+        expect(parseFloat(fsCanvas.style.width)).toBeGreaterThan(550);
+      } finally {
+        if (descriptor) Object.defineProperty(document, 'fullscreenElement', descriptor);
+        else delete (document as { fullscreenElement?: Element | null }).fullscreenElement;
+        document.body.removeChild(container);
+      }
+    });
   });
 
   describe('zoom and pan controls', () => {
