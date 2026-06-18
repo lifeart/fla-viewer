@@ -167,6 +167,16 @@ export type BlendMode =
   | 'alpha'
   | 'erase';
 
+/**
+ * A single author-time component parameter (<PD> element under <persistentData>).
+ * `type` is the raw XFL persistent-data type code (e.g. "0"=string/number).
+ */
+export interface ComponentParameter {
+  name: string;
+  value: string;
+  type?: string;
+}
+
 export interface SymbolInstance {
   type: 'symbol';
   libraryItemName: string;
@@ -188,6 +198,13 @@ export interface SymbolInstance {
   filters?: Filter[];
   blendMode?: BlendMode;
   isVisible?: boolean; // Instance visibility (default true)
+  /**
+   * Component (Component Inspector) parameters set at author time, read from
+   * <persistentData><PD .../></persistentData> on the instance. Present only for
+   * component instances. Captured for tooling (author-time property validation);
+   * the renderer does not use it.
+   */
+  componentParameters?: ComponentParameter[];
   // 3D transform properties
   rotationX?: number; // 3D rotation around X-axis (degrees)
   rotationY?: number; // 3D rotation around Y-axis (degrees)
@@ -212,6 +229,14 @@ export interface BitmapInstance {
 
 export interface TextInstance {
   type: 'text';
+  /**
+   * Instance name of a dynamic/input text field — the AS identifier used to
+   * reference it (e.g. `label_tf.text`). Absent for static text. Captured for
+   * tooling; the renderer does not use it.
+   */
+  name?: string;
+  /** Which kind of text field: static (no script access), dynamic, or input. */
+  textType?: 'static' | 'dynamic' | 'input';
   matrix: Matrix;
   left: number;
   width: number;
@@ -345,6 +370,13 @@ export interface Symbol {
   // Button-specific: frame index containing the hit area (typically frame 4)
   // The hit area defines the clickable region and is never rendered
   hitAreaFrame?: number;
+  // ActionScript linkage (Properties panel > "Export for ActionScript"). Read
+  // from <DOMSymbolItem>. Captured for tooling (resolving instances to their AS
+  // class); the renderer does not use these.
+  linkageExportForAS?: boolean; // linkageExportForAS="true"
+  linkageClassName?: string; // AS class path, e.g. "skyui.components.ItemCard"
+  linkageIdentifier?: string; // export id used by attachMovie("ItemCard", ...)
+  linkageBaseClass?: string; // declared base class, when present
 }
 
 export interface Rectangle {

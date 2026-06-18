@@ -14,15 +14,29 @@ step.
 Runs the parser headless under Node — the same environment as the VS Code
 extension host — using [linkedom](https://github.com/WebReflection/linkedom) for
 the DOM. No rendering, no bitmap/audio/video decoding. It emits the timeline
-structure as JSON, including:
+structure as JSON. Covering the features you asked for:
 
-- `symbols` — the library items (your candidate types).
-- `timelines[].layers[].frames[].elements[]` — every Stage element with its
-  `type` (`symbol` / `shape` / `text` / `bitmap` / `video`), and for symbols the
-  `name` (instance name — the AS identifier), `symbolType`
-  (`graphic` / `movieclip` / `button`), and `libraryItemName`.
-- `namedInstances` — a flat index of every **named** Stage instance mapped to its
-  type. This is the core of the use case: `instanceName → type`.
+1. **Per-symbol nested timelines** — `symbols[].timeline` carries each library
+   symbol's own layers/frames/instances. Resolve a nested path like
+   `panelContainer.itemList.scrollBar` by walking
+   `instance.libraryItemName → symbols[name] → its timeline → next instance`.
+2. **ActionScript class linkage** — each symbol carries `linkageClassName`,
+   `linkageIdentifier`, `linkageExportForAS` (read from `<DOMSymbolItem>`).
+3. **TextField instance names** — dynamic/input fields expose `name` and
+   `textType` (`static`/`dynamic`/`input`); named ones appear in `namedInstances`
+   with `kind: "text"`.
+4. **Frame labels** — every timeline (main and nested) has a `labels` array of
+   `labelType="name"` labels, plus `label` on the frame itself — for validating
+   `gotoAndPlay("…")` targets.
+5. **Component parameters** — instances carry `componentParameters`
+   (`{ name, value, type }`) read from `<persistentData><PD/></persistentData>`.
+   ⚠️ **Best-effort / unverified** — none of our sample files use components, so
+   please confirm this matches your component `.fla` files (and send one if not).
+
+Plus `namedInstances`: a flat index of **every** named instance across **all**
+timelines (document scenes + every library symbol), each tagged with its
+`container` (`document`/`symbol`), `containerName`, `layer`, `frame`, and a
+human `path`. This is the core map: `instanceName → type`, at any nesting depth.
 
 ## Run it
 
@@ -39,18 +53,35 @@ The built `fla-structure.mjs` is fully self-contained: copy it anywhere and run
 it with nothing but Node 18+ (no `node_modules` needed). If we send you the
 prebuilt file directly, skip the first two steps.
 
-### Example output (named movieclip + button on a timeline)
+### Example output (named instances across a nested symbol)
 
 ```jsonc
 {
-  "stage": { "width": 640, "height": 480, "frameRate": 24, "backgroundColor": "#101820" },
-  "symbols": [ /* library items: { name, itemID, symbolType } */ ],
+  "symbols": [
+    {
+      "name": "ItemCard", "itemID": "abc-…", "symbolType": "movieclip",
+      "linkageExportForAS": true,
+      "linkageClassName": "skyui.components.ItemCard",
+      "linkageIdentifier": "ItemCard",
+      "timeline": { "name": "ItemCard", "labels": [{ "name": "idle", "frame": 0 }],
+        "layers": [ /* content layer: scrollBar (movieclip), label_tf (dynamic text) */ ] }
+    }
+  ],
   "namedInstances": [
-    { "name": "playBtn", "symbolType": "button",    "libraryItemName": "PlayButton", "timeline": "Scene 1", "layer": "ui", "frame": 0 },
-    { "name": "hero",    "symbolType": "movieclip", "libraryItemName": "HeroClip",   "timeline": "Scene 1", "layer": "ui", "frame": 0 }
+    { "name": "panelContainer", "kind": "symbol", "symbolType": "movieclip", "libraryItemName": "ItemCard",
+      "container": "document", "containerName": "Scene 1", "layer": "ui", "frame": 0, "path": "Scene 1 > ui > panelContainer" },
+    { "name": "scrollBar", "kind": "symbol", "symbolType": "movieclip", "libraryItemName": "ScrollBar",
+      "container": "symbol", "containerName": "ItemCard", "layer": "content", "frame": 0, "path": "ItemCard > content > scrollBar" },
+    { "name": "label_tf", "kind": "text", "textType": "dynamic",
+      "container": "symbol", "containerName": "ItemCard", "layer": "content", "frame": 0, "path": "ItemCard > content > label_tf" }
   ]
 }
 ```
+
+The `panelContainer` instance (a `movieclip` of `ItemCard`) carries
+`componentParameters` when set in the Component Inspector, and its type resolves
+to `linkageClassName: "skyui.components.ItemCard"` via the matching `symbols`
+entry.
 
 ## Use it as a library (instead of the CLI)
 
@@ -68,11 +99,14 @@ for (const inst of json.namedInstances) {
 
 ## What to check / tell us
 
-- Do your AS2 `.fla` files produce the `namedInstances` you expect (instance
-  name + `movieclip`/`button`/`graphic`)?
-- Anything missing for completion? Known not-yet-captured: text-field instance
-  names (`DOMDynamicText`/`DOMInputText` `name`), component/parameter metadata,
-  per-symbol nested timelines. These are quick to add if you need them.
+- Do your AS2 `.fla` files produce the `namedInstances` and nested
+  `symbols[].timeline` you expect, so the deep paths
+  (`a.b.c`) resolve correctly?
+- Do `linkageClassName` / `linkageIdentifier` come through on your scripted
+  symbols, and the `name`/`textType` on your dynamic & input text fields?
+- **Component parameters (#5)** are best-effort and untested on real data —
+  please confirm they appear for your components, or attach a small `.fla` with a
+  component so we can correct the mapping.
 
 If this covers your needs, we'll extract the parser into a proper package
 (`FLAParser` + types, with a `DOMParser` you inject) and publish it.

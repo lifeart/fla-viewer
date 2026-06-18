@@ -9,6 +9,7 @@ import type {
   FrameSound,
   DisplayElement,
   SymbolInstance,
+  ComponentParameter,
   VideoInstance,
   BitmapInstance,
   TextInstance,
@@ -409,6 +410,13 @@ export class FLAParser {
         const itemID = symbolRoot.getAttribute('itemID') || '';
         const symbolType = (symbolRoot.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
 
+        // ActionScript linkage (Export for ActionScript). Used by tooling to map
+        // a library symbol to its AS class / attachMovie identifier.
+        const linkageExportForAS = symbolRoot.getAttribute('linkageExportForAS') === 'true' ? true : undefined;
+        const linkageClassName = symbolRoot.getAttribute('linkageClassName') || undefined;
+        const linkageIdentifier = symbolRoot.getAttribute('linkageIdentifier') || undefined;
+        const linkageBaseClass = symbolRoot.getAttribute('linkageBaseClass') || undefined;
+
         // Parse 9-slice scaling grid if present
         const scalingGrid = symbolRoot.getAttribute('scalingGrid') === 'true';
         let scale9Grid: Rectangle | undefined;
@@ -449,7 +457,11 @@ export class FLAParser {
           symbolType,
           timeline,
           ...(scale9Grid && { scale9Grid }),
-          ...(hitAreaFrame !== undefined && { hitAreaFrame })
+          ...(hitAreaFrame !== undefined && { hitAreaFrame }),
+          ...(linkageExportForAS && { linkageExportForAS }),
+          ...(linkageClassName && { linkageClassName }),
+          ...(linkageIdentifier && { linkageIdentifier }),
+          ...(linkageBaseClass && { linkageBaseClass })
         };
 
         // Store with both normalized and original names
@@ -950,6 +962,9 @@ export class FLAParser {
     const isVisibleAttr = el.getAttribute('isVisible');
     const isVisible = isVisibleAttr === 'false' ? false : undefined; // Only set if explicitly false
 
+    // Parse author-time component parameters (Component Inspector)
+    const componentParameters = this.parseComponentParameters(el);
+
     return {
       type: 'symbol',
       libraryItemName,
@@ -969,8 +984,33 @@ export class FLAParser {
       ...(rotationY !== undefined && { rotationY }),
       ...(rotationZ !== undefined && { rotationZ }),
       ...(z !== undefined && { z }),
-      ...(cacheAsBitmap && { cacheAsBitmap })
+      ...(cacheAsBitmap && { cacheAsBitmap }),
+      ...(componentParameters && { componentParameters })
     };
+  }
+
+  /**
+   * Parse author-time component (Component Inspector) parameters from an
+   * instance. Animate stores these as <persistentData><PD n="name" t="type"
+   * v="value"/></persistentData> on the <DOMSymbolInstance>. Returns undefined
+   * when the instance is not a component (no persistent data).
+   */
+  private parseComponentParameters(el: globalThis.Element): SymbolInstance['componentParameters'] {
+    const pd = el.querySelector(':scope > persistentData');
+    if (!pd) return undefined;
+    const items = pd.querySelectorAll(':scope > PD');
+    const params: ComponentParameter[] = [];
+    for (const item of items) {
+      const name = item.getAttribute('n');
+      if (!name) continue;
+      const type = item.getAttribute('t') || undefined;
+      params.push({
+        name,
+        value: item.getAttribute('v') || '',
+        ...(type && { type })
+      });
+    }
+    return params.length > 0 ? params : undefined;
   }
 
   private parseVideoInstance(el: globalThis.Element): VideoInstance {
@@ -1011,6 +1051,14 @@ export class FLAParser {
   }
 
   private parseTextInstance(el: globalThis.Element, composedMatrix?: Matrix): TextInstance {
+    // Instance name + kind. Dynamic/input fields carry an AS-visible name; static
+    // text does not. Captured for tooling; the renderer ignores both.
+    const name = el.getAttribute('name') || undefined;
+    const textType: TextInstance['textType'] =
+      el.tagName === 'DOMDynamicText' ? 'dynamic'
+      : el.tagName === 'DOMInputText' ? 'input'
+      : 'static';
+
     const matrixEl = el.querySelector(':scope > matrix > Matrix');
     let matrix: Matrix;
 
@@ -1110,6 +1158,8 @@ export class FLAParser {
 
     return {
       type: 'text',
+      ...(name && { name }),
+      textType,
       matrix,
       left,
       width,
