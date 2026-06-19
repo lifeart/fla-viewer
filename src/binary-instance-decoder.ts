@@ -442,6 +442,16 @@ function placementKind(cls: string): NamedInstance {
 const NAMED_INSTANCE_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** Flash device-font aliases — these are font names, never instance names. */
 const DEVICE_FONTS = new Set(['_sans', '_serif', '_typewriter']);
+/**
+ * Button/movie-clip frame-label state words. These live on CPicFrame records, not
+ * placements, but the heuristic name scan can pick one up as a placement's "first
+ * identifier" — filter them so they don't masquerade as instance names.
+ */
+const STATE_LABELS = new Set([
+  'Up', 'Over', 'Down', 'Hit', '_up', '_over', '_down', '_hit',
+  'Normal', 'Selected', 'Hover', 'Disabled', 'Off', 'On',
+  'up', 'over', 'down', 'hover', 'select', 'normal', 'selected', 'disabled', 'off', 'on',
+]);
 
 /**
  * The instance name within a placement body [start, end): the first identifier-
@@ -463,7 +473,7 @@ function placementName(data: Uint8Array, start: number, end: number, classRefs: 
     p += 3 + len * 2;
     if (!ok || !NAMED_INSTANCE_RE.test(s)) continue;
     if (s.startsWith('$') || DEVICE_FONTS.has(s)) continue; // font tokens
-    if (classRefs.has(s)) continue; // MFC CRuntimeClass ref
+    if (classRefs.has(s) || STATE_LABELS.has(s)) continue; // class refs / frame labels
     return s;
   }
   return '';
@@ -550,6 +560,31 @@ export function scanNamedInstances(data: Uint8Array): NamedInstance[] {
       seen.add(name);
       out.push({ type: 'text', name });
     }
+  }
+
+  // 4) Name-field recovery. A CPicSymbol instance name is serialized as an EMPTY
+  //    Flash string immediately followed by the name Flash string
+  //    (FF FE FF 00 · FF FE FF <name>). Catches sprite/button placements whose
+  //    object-index back-ref start wasn't detected (e.g. prevBtn, a sibling of an
+  //    already-found nextBtn). Only ADDS missed names (existing ones are deduped).
+  for (let p = 0; p + 8 <= data.length; p++) {
+    if (data[p] !== 0xff || data[p + 1] !== 0xfe || data[p + 2] !== 0xff || data[p + 3] !== 0x00) continue;
+    const q = p + 4;
+    if (data[q] !== 0xff || data[q + 1] !== 0xfe || data[q + 2] !== 0xff) continue;
+    const len = data[q + 3];
+    if (len === 0 || len > 40 || q + 4 + len * 2 > data.length) continue;
+    let s = '';
+    let ok = true;
+    for (let i = 0; i < len; i++) {
+      const c = data[q + 4 + i * 2] | (data[q + 4 + i * 2 + 1] << 8);
+      if (c < 0x20 || c > 0x7e) { ok = false; break; }
+      s += String.fromCharCode(c);
+    }
+    p = q + 3 + len * 2;
+    if (!ok || !NAMED_INSTANCE_RE.test(s)) continue;
+    if (s.startsWith('$') || DEVICE_FONTS.has(s) || classRefs.has(s) || STATE_LABELS.has(s) || seen.has(s)) continue;
+    seen.add(s);
+    out.push({ type: 'symbol', symbolType: 'movieclip', name: s });
   }
   return out;
 }
