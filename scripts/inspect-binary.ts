@@ -100,6 +100,35 @@ if (process.argv[3] === '--strings') {
   process.exit(0);
 }
 
+// Interleaved records: node run-inspect.mjs file.fla --records
+if (process.argv[3] === '--records') {
+  const d = ole.readStream('Contents');
+  type Row = { at: number; kind: 'lib' | 'link'; text: string };
+  const rows: Row[] = [];
+  // library "Symbol N" MFC CString edit-names (prefix + preceding length byte)
+  const symPrefix = utf16le('Symbol ');
+  for (const at of indexAll(d, symPrefix)) {
+    const strLen = at > 0 ? d[at - 1] : 0;
+    if (strLen > 0 && strLen < 12 && at + strLen * 2 <= d.length) {
+      let s = '';
+      for (let i = 0; i < strLen; i++) s += String.fromCharCode(d[at + i * 2] | (d[at + i * 2 + 1] << 8));
+      const m = /^Symbol (\d+)$/.exec(s);
+      if (m) rows.push({ at, kind: 'lib', text: `editName Symbol ${m[1]}` });
+    }
+  }
+  // linkage "." blocks
+  const dot = new Uint8Array([0xff, 0xfe, 0xff, 0x01, 0x2e, 0x00]);
+  for (const at of indexAll(d, dot)) {
+    const cls = readFlashStr(d, at + 6);
+    let id: string | null = null;
+    for (let q = at - 4; q >= Math.max(0, at - 64); q--) { const fs = readFlashStr(d, q); if (fs && fs.end === at) { id = fs.str; break; } }
+    if (cls && (id || cls.str) && id !== 'null') rows.push({ at, kind: 'link', text: `LINKAGE id="${id}" class="${cls.str}"` });
+  }
+  rows.sort((a, b) => a.at - b.at);
+  for (const r of rows) console.log(`@${String(r.at).padStart(6)}  ${r.kind === 'link' ? '>>' : '  '} ${r.text}`);
+  process.exit(0);
+}
+
 // Linkage analysis: node run-inspect.mjs file.fla --linkage
 if (process.argv[3] === '--linkage') {
   const d = ole.readStream('Contents');
