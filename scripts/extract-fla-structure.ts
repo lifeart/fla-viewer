@@ -27,6 +27,8 @@
 import { readFileSync } from 'node:fs';
 import { DOMParser } from 'linkedom';
 import { FLAParser } from '../src/fla-parser';
+import { isOLE2 } from '../src/ole2-reader';
+import { augmentBinary, type BinaryAugment } from './binary-augment';
 import type { DisplayElement, Matrix, Timeline } from '../src/types';
 
 type SymbolKind = 'graphic' | 'movieclip' | 'button';
@@ -100,6 +102,12 @@ export interface StructureJSON {
   media: { bitmaps: string[]; sounds: string[]; videos: string[] };
   timelines: TimelineJSON[];
   namedInstances: NamedInstanceJSON[];
+  /**
+   * Present only for binary (pre-CS5 / OLE2) FLAs: best-effort metadata pulled
+   * directly from the OLE2 streams (linkage table + per-symbol Flash strings),
+   * since the binary geometry decoder does not surface it. See scripts/binary-augment.ts.
+   */
+  binary?: BinaryAugment;
 }
 
 function elementToJSON(el: DisplayElement): InstanceJSON {
@@ -225,6 +233,9 @@ export async function extractFlaStructure(
     },
     timelines,
     namedInstances,
+    // For binary FLAs, surface the linkage/instance metadata the geometry decoder
+    // can't reach, so the reporter can validate it on real files.
+    ...(isOLE2(bytes) ? { binary: augmentBinary(bytes) } : {}),
   };
 }
 

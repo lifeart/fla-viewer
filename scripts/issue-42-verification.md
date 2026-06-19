@@ -83,6 +83,37 @@ The `panelContainer` instance (a `movieclip` of `ItemCard`) carries
 to `linkageClassName: "skyui.components.ItemCard"` via the matching `symbols`
 entry.
 
+## Binary (pre-CS5 / OLE2) FLAs
+
+For binary FLAs (magic `D0 CF 11 E0`, the `parseBinaryFLA` path), the geometry
+decoder recovers symbols + placements but not the authoring metadata your
+language feature needs. That metadata lives in the OLE2 streams as Flash strings
+(`FF FE FF <len> <UTF-16LE>`), so the output adds a **`binary`** section pulled
+directly from those streams (`scripts/binary-augment.ts`):
+
+- **`binary.linkage`** — *reliable.* The Contents linkage table as
+  `{ identifier, className }`, e.g. `OptionsListEntry → OptionsListEntry`,
+  `ModListEntry → skyui.components.list.ButtonListEntry`. (Verified on your
+  `configpanel.fla` / `favoritesmenu.fla`.)
+- **`binary.symbols[]`** — per `Symbol N` stream, `candidateNames` (identifier-
+  like strings = likely child instance names, e.g. Symbol 35 →
+  `border, buttonArea, textField, valueField, weightField, statField, …`) and
+  `other` (layers / fonts / labels / component-param values, for transparency).
+
+**Two honest gaps I need your read on** (these are why the binary path needs your
+files to finish correctly):
+
+1. **Linkage → symbol number.** I can extract the full linkage table, but the
+   binary `Contents` doesn't obviously tie each linkage record to a specific
+   `Symbol N`. The identifiers don't match the symbols' (mostly auto-named)
+   display names. How does your tooling join a linkage record to its symbol
+   stream — is there an object id in the MFC `Contents` record I should follow?
+2. **Name vs param vs label.** `candidateNames` is a *superset* — it mixes real
+   instance names with component-param keys and class refs (all are `FF FE FF`
+   strings). Pinning each to a typed placement needs the per-placement record
+   schema (which differs from our older fixtures: float32 matrices, `FF FE FF`
+   names). If you can share how you split these, I'll decode them structurally.
+
 ## Use it as a library (instead of the CLI)
 
 The same bundle exports the function, so your extension can call it directly:

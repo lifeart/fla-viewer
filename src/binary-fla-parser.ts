@@ -457,6 +457,9 @@ function buildSymbolInstance(
   return {
     type: 'symbol',
     libraryItemName: entry.name,
+    // Propagate the decoded authoring instance name (the AS identifier). The
+    // decoder reads it (u8 len + ASCII) but it was previously dropped here.
+    ...(inst.instanceName && { name: inst.instanceName }),
     symbolType,
     matrix: inst.matrix,
     // The matrix tx/ty already place the instance; the transformation point is
