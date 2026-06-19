@@ -79,13 +79,17 @@ const LINK_CLASS = /^[A-Za-z_][A-Za-z0-9_.]*$/;
  * trailing `05 02 00 00 00` marker and read the three strings back from it.
  */
 export function extractLinkage(contents: Uint8Array): BinaryLinkage[] {
-  const marker = [0x05, 0x02, 0x00, 0x00, 0x00];
+  // Marker = <schema u8> 02 00 00 00. The schema byte varies by Flash version
+  // (0x05 in configpanel/inventorylists, 0x07 in itemcard's imported symbols);
+  // the className Flash string ends right at that schema byte.
   const out: BinaryLinkage[] = [];
   const seen = new Set<string>();
-  for (let at = 0; at + 5 <= contents.length; at++) {
-    if (!marker.every((b, i) => contents[at + i] === b)) continue;
-    // Read three Flash strings back from the marker: <identifier> <sep> <className>.
-    const className = flashStrEndingAt(contents, at);
+  for (let m = 1; m + 4 <= contents.length; m++) {
+    if (contents[m] !== 0x02 || contents[m + 1] !== 0x00 || contents[m + 2] !== 0x00 || contents[m + 3] !== 0x00) continue;
+    const schema = contents[m - 1];
+    if (schema < 1 || schema > 63) continue;
+    // Read three Flash strings back: <identifier> <sep> <className>.
+    const className = flashStrEndingAt(contents, m - 1);
     if (!className) continue;
     const sep = flashStrEndingAt(contents, className.start);
     if (!sep) continue;
