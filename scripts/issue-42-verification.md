@@ -92,9 +92,12 @@ language feature needs. That metadata lives in the OLE2 streams as Flash strings
 directly from those streams (`scripts/binary-augment.ts`):
 
 - **`binary.linkage`** — *reliable.* The Contents linkage table as
-  `{ identifier, className }`, e.g. `OptionsListEntry → OptionsListEntry`,
-  `ModListEntry → skyui.components.list.ButtonListEntry`. (Verified on your
-  `configpanel.fla` / `favoritesmenu.fla`.)
+  `{ identifier, className, kind }`, e.g. `OptionsListEntry → OptionsListEntry`,
+  `ModListEntry → skyui.components.list.ButtonListEntry`. `kind` is `"document"`
+  when the record binds the root (the `Symbol 0` / character-0 edit-name = the
+  main-timeline class, e.g. `bartermenu → BarterMenuObj → BarterMenu`) or
+  `"library"` otherwise — so a stage-instance resolver won't mistake the document
+  class for a library symbol. (Verified vs the compiled SWF `registerClass` set.)
 - **`binary.symbols[]`** — per `Symbol N` stream:
   - `namedInstances` — `{ name, type, symbolType }` decoded from the placement
     records (e.g. `textField[text]`, `selectorLeft[movieclip]`). Higher precision

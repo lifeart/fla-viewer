@@ -24,6 +24,13 @@ import { buildCombinedClassTable, scanNamedInstances, type NamedInstance } from 
 export interface BinaryLinkage {
   identifier: string;
   className: string;
+  /**
+   * 'document' = the main-timeline/root class (bound to character 0, i.e. the
+   * `Symbol 0` edit-name in the record); 'library' = a regular library symbol.
+   * Lets a stage-instance resolver avoid mistaking the document class for a
+   * library symbol.
+   */
+  kind: 'document' | 'library';
 }
 
 export interface BinarySymbolStrings {
@@ -77,6 +84,38 @@ function flashStrEndingAt(d: Uint8Array, end: number): { str: string; start: num
 const LINK_ID = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const LINK_CLASS = /^[A-Za-z_][A-Za-z0-9_.]*$/;
 
+// UTF-16LE "Symbol " / "Sprite " edit-name prefixes. Character 0 is the root /
+// main timeline, so a linkage record whose bound edit-name is "Symbol 0" is the
+// document class. Each library symbol binds "Symbol N"/"Sprite N" with N>=1.
+const SYMBOL_PREFIX = [0x53, 0, 0x79, 0, 0x6d, 0, 0x62, 0, 0x6f, 0, 0x6c, 0, 0x20, 0];
+const SPRITE_PREFIX = [0x53, 0, 0x70, 0, 0x72, 0, 0x69, 0, 0x74, 0, 0x65, 0, 0x20, 0];
+
+function matchPrefix(d: Uint8Array, q: number, pre: number[]): boolean {
+  for (let j = 0; j < pre.length; j++) if (d[q + j] !== pre[j]) return false;
+  return true;
+}
+
+/**
+ * True iff the NEAREST "Symbol N"/"Sprite N" edit-name before the linkage
+ * identifier is exactly "Symbol 0" — i.e. this record binds the root (character
+ * 0) = the document class. Taking the nearest edit-name (not just "is there a
+ * Symbol 0 within a window") avoids tagging a later library record whose own
+ * binding (e.g. "Sprite 4") sits between it and an unrelated earlier "Symbol 0".
+ */
+function boundToRoot(d: Uint8Array, identifierStart: number): boolean {
+  for (let q = identifierStart - 2; q >= Math.max(0, identifierStart - 200); q--) {
+    const isSym = matchPrefix(d, q, SYMBOL_PREFIX);
+    if (!isSym && !matchPrefix(d, q, SPRITE_PREFIX)) continue;
+    let n = '';
+    for (let p = q + SYMBOL_PREFIX.length; p + 1 < d.length && d[p] >= 0x30 && d[p] <= 0x39 && d[p + 1] === 0; p += 2) {
+      n += String.fromCharCode(d[p]);
+    }
+    if (n === '') continue;
+    return isSym && n === '0'; // nearest edit-name decides
+  }
+  return false;
+}
+
 /**
  * The Contents linkage table. Each record is
  *   <identifier> <separator> <className> `05 02 00 00 00`
@@ -111,7 +150,8 @@ export function extractLinkage(contents: Uint8Array): BinaryLinkage[] {
     const key = id + '|' + cls;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ identifier: id, className: cls });
+    const kind = boundToRoot(contents, identifier.start) ? 'document' : 'library';
+    out.push({ identifier: id, className: cls, kind });
   }
   return out;
 }
