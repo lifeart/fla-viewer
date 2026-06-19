@@ -199,7 +199,12 @@ export function augmentBinary(bytes: Uint8Array): BinaryAugment {
     : [];
   const symbols: BinarySymbolStrings[] = [];
   for (const name of names) {
-    if (!/^Symbol \d+$/.test(name)) continue;
+    // Symbol timelines come under TWO naming conventions: the classic
+    // "Symbol N" and the newer timestamped "S <n> <timestamp>" (+ the main
+    // timeline "Page N"). The old filter only matched "Symbol N", so every
+    // "S …" stream — and the symbols inside it — was silently skipped, which is
+    // why some symbols' children were missing per-file (issue #42 recall gap).
+    if (!/^(Symbol \d+|S \d+ \d+|Page \d+)$/.test(name)) continue;
     try {
       symbols.push(extractSymbolStrings(name, ole.readStream(name)));
     } catch {
