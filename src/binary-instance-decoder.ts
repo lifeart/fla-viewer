@@ -524,5 +524,32 @@ export function scanNamedInstances(data: Uint8Array): NamedInstance[] {
     seen.add(name);
     out.push({ ...placementKind(cls), name });
   }
+
+  // 3) Text-field recovery. Class-index back-refs find the FIRST CPicText of a
+  //    stream; later text fields reference a prior CPicText OBJECT by a high MFC
+  //    load-array index (e.g. 0x8083), which the class-index filter misses — so
+  //    their names get swallowed into a preceding sprite's range. A text field
+  //    references a font (`$…*` or a device font) immediately before its instance
+  //    name, so recover the name as the next identifier after each font token.
+  for (let p = 0; p + 4 <= data.length; p++) {
+    if (data[p] !== 0xff || data[p + 1] !== 0xfe || data[p + 2] !== 0xff) continue;
+    const len = data[p + 3];
+    if (len === 0 || len > 40 || p + 4 + len * 2 > data.length) continue;
+    let f = '';
+    let ok = true;
+    for (let i = 0; i < len; i++) {
+      const c = data[p + 4 + i * 2] | (data[p + 4 + i * 2 + 1] << 8);
+      if (c < 0x20 || c > 0x7e) { ok = false; break; }
+      f += String.fromCharCode(c);
+    }
+    p += 3 + len * 2;
+    if (!ok || !(f.startsWith('$') || DEVICE_FONTS.has(f))) continue;
+    // The name is the next identifier within the same text record (bounded window).
+    const name = placementName(data, p + 1, Math.min(data.length, p + 200), classRefs);
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      out.push({ type: 'text', name });
+    }
+  }
   return out;
 }
