@@ -19,7 +19,7 @@
  * binary_fla_linkage_names.
  */
 import { OLE2File } from '../src/ole2-reader';
-import { buildCombinedClassTable } from '../src/binary-instance-decoder';
+import { buildCombinedClassTable, scanNamedInstances, type NamedInstance } from '../src/binary-instance-decoder';
 
 export interface BinaryLinkage {
   identifier: string;
@@ -28,6 +28,13 @@ export interface BinaryLinkage {
 
 export interface BinarySymbolStrings {
   stream: string;
+  /**
+   * Named placements (name + kind) decoded from the placement records — higher
+   * precision than `candidateNames` (drops param keys, adds the type) but
+   * best-effort recall: the FP8 per-class field layout isn't fully decoded, so
+   * some names can be missed and a few frame labels/class refs can leak.
+   */
+  namedInstances: NamedInstance[];
   /** Identifier-like strings that are plausible child instance names. */
   candidateNames: string[];
   /** Everything else, for transparency (layers, fonts, labels, AS, param values). */
@@ -121,6 +128,7 @@ const STATEISH = /^(Up|Over|Down|Hit|Normal|Selected|Hover|Disabled|_up|_over|_d
  */
 export function extractSymbolStrings(stream: string, data: Uint8Array): BinarySymbolStrings {
   const classRefs = new Set(buildCombinedClassTable(data));
+  const namedInstances = scanNamedInstances(data);
   const candidateNames: string[] = [];
   const other: string[] = [];
   const seen = new Set<string>();
@@ -140,7 +148,7 @@ export function extractSymbolStrings(stream: string, data: Uint8Array): BinarySy
       !s.includes('(') && !s.includes(';') && !s.includes('=');
     (isName ? candidateNames : other).push(s);
   }
-  return { stream, candidateNames, other };
+  return { stream, namedInstances, candidateNames, other };
 }
 
 export function augmentBinary(bytes: Uint8Array): BinaryAugment {

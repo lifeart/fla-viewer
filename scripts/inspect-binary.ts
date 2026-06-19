@@ -8,6 +8,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { OLE2File } from '../src/ole2-reader';
+import { scanNamedInstances } from '../src/binary-instance-decoder';
 
 function ascii(bytes: Uint8Array, start: number, len: number): string {
   let s = '';
@@ -96,6 +97,19 @@ if (process.argv[3] === '--strings') {
         if (ok) { console.log(`@${String(p).padStart(5)}  [len ${String(len).padStart(2)}] "${s}"`); p += 3 + len * 2; }
       }
     }
+  }
+  process.exit(0);
+}
+
+// Named placements per symbol: node run-inspect.mjs file.fla --named ["Symbol 23"]
+if (process.argv[3] === '--named') {
+  const only = process.argv[4];
+  for (const e of ole.listStreams()) {
+    if (!/^(Symbol|Page) \d+$/.test(e.name)) continue;
+    if (only && e.name !== only) continue;
+    const named = scanNamedInstances(ole.readStream(e.name));
+    if (named.length === 0 && !only) continue;
+    console.log(`${e.name}: ` + named.map((n) => `${n.name}[${n.symbolType ?? n.type}]`).join(', '));
   }
   process.exit(0);
 }

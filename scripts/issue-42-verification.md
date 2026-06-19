@@ -95,10 +95,15 @@ directly from those streams (`scripts/binary-augment.ts`):
   `{ identifier, className }`, e.g. `OptionsListEntry → OptionsListEntry`,
   `ModListEntry → skyui.components.list.ButtonListEntry`. (Verified on your
   `configpanel.fla` / `favoritesmenu.fla`.)
-- **`binary.symbols[]`** — per `Symbol N` stream, `candidateNames` (identifier-
-  like strings = likely child instance names, e.g. Symbol 35 →
-  `border, buttonArea, textField, valueField, weightField, statField, …`) and
-  `other` (layers / fonts / labels / component-param values, for transparency).
+- **`binary.symbols[]`** — per `Symbol N` stream:
+  - `namedInstances` — `{ name, type, symbolType }` decoded from the placement
+    records (e.g. `textField[text]`, `selectorLeft[movieclip]`). Higher precision
+    than `candidateNames` (drops component-param keys, adds the **type**), but
+    best-effort recall: the FP8 per-class field layout isn't fully decoded, so a
+    few names can be missed and the odd frame label / class ref can leak.
+  - `candidateNames` — identifier-like strings = likely child instance names
+    (broader recall, no types), and `other` — layers / fonts / labels / param
+    values, for transparency.
 
 **Two honest gaps I need your read on** (these are why the binary path needs your
 files to finish correctly):

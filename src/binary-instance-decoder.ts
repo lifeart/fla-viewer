@@ -411,3 +411,114 @@ export function dedupeInstances(insts: DecodedInstance[]): DecodedInstance[] {
   }
   return out;
 }
+
+/** A named placement recovered from a stream (instance name + kind only). */
+export interface NamedInstance {
+  /** Authoring instance name — the AS identifier on the timeline. */
+  name: string;
+  /** Element kind, from the placement class. */
+  type: 'symbol' | 'text';
+  /** For symbol instances, the symbol kind. */
+  symbolType?: 'movieclip' | 'button' | 'graphic';
+}
+
+/** Placement classes whose records carry an instance name (incl. CPicText). */
+const NAMED_PLACEMENT_CLASSES = ['CPicSprite', 'CPicButton', 'CPicShapeObj', 'CPicText'] as const;
+
+function placementKind(cls: string): NamedInstance {
+  switch (cls) {
+    case 'CPicText':
+      return { name: '', type: 'text' };
+    case 'CPicButton':
+      return { name: '', type: 'symbol', symbolType: 'button' };
+    case 'CPicShapeObj':
+      return { name: '', type: 'symbol', symbolType: 'graphic' };
+    case 'CPicSprite':
+    default:
+      return { name: '', type: 'symbol', symbolType: 'movieclip' };
+  }
+}
+
+const NAMED_INSTANCE_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * The instance name within a placement body [start, end): the first identifier-
+ * like Flash string (`FF FE FF <u8 len> <UTF-16LE>`), excluding font tokens
+ * (`$…*`) and MFC class refs. Returns '' for an unnamed placement.
+ */
+function placementName(data: Uint8Array, start: number, end: number, classRefs: Set<string>): string {
+  for (let p = start; p + 4 <= end; p++) {
+    if (data[p] !== 0xff || data[p + 1] !== 0xfe || data[p + 2] !== 0xff) continue;
+    const len = data[p + 3];
+    if (len === 0 || len > 40 || p + 4 + len * 2 > end) continue;
+    let s = '';
+    let ok = true;
+    for (let i = 0; i < len; i++) {
+      const c = data[p + 4 + i * 2] | (data[p + 4 + i * 2 + 1] << 8);
+      if (c < 0x20 || c > 0x7e) { ok = false; break; }
+      s += String.fromCharCode(c);
+    }
+    p += 3 + len * 2;
+    if (!ok || s.startsWith('$') || classRefs.has(s) || !NAMED_INSTANCE_RE.test(s)) continue;
+    return s;
+  }
+  return '';
+}
+
+/**
+ * Recover NAMED placements (instance name + kind) from one `Symbol N` / `Page N`
+ * stream. Complements {@link scanForInstances}, which decodes placement geometry
+ * (matrix + media_ref) for the older 16.16/ASCII format but rejects the FP8
+ * variant (float32 matrix + `FF FE FF` UTF-16 name) used by newer files — which
+ * drops the instance names a language tool needs.
+ *
+ * Locates each placement by its CArchive class tag (NEWCLASS declaration or
+ * 0x80NN back-reference) and reads the instance name from the placement body,
+ * skipping the version-specific matrix entirely. Unnamed placements are omitted.
+ */
+export function scanNamedInstances(data: Uint8Array): NamedInstance[] {
+  const combined = buildCombinedClassTable(data);
+  const classRefs = new Set(combined);
+  const named = new Set<string>(NAMED_PLACEMENT_CLASSES);
+
+  const starts: Array<{ pos: number; cls: string }> = [];
+
+  // 1) class-declaration recovery — the first placement of each class.
+  for (const cls of NAMED_PLACEMENT_CLASSES) {
+    const tail = classDeclTail(cls);
+    let from = 0;
+    for (;;) {
+      const m = indexOf(data, tail, from);
+      if (m < 0) break;
+      from = m + 1;
+      if (m < 4 || data[m - 4] !== 0xff || data[m - 3] !== 0xff) continue;
+      starts.push({ pos: m + tail.length, cls });
+    }
+  }
+
+  // 2) back-reference recovery — 0x80NN tag whose index resolves to a placement class.
+  const placementIndex = new Map<number, string>();
+  for (let k = 0; k < combined.length; k++) {
+    if (named.has(combined[k])) placementIndex.set(k + 1, combined[k]);
+  }
+  for (let i = 2; i < data.length - 2; i++) {
+    const tag = data[i - 2] | (data[i - 1] << 8);
+    if (!(tag & 0x8000)) continue;
+    const cls = placementIndex.get(tag & 0x7fff);
+    if (cls) starts.push({ pos: i, cls });
+  }
+
+  starts.sort((a, b) => a.pos - b.pos);
+
+  const out: NamedInstance[] = [];
+  const seen = new Set<string>();
+  for (let s = 0; s < starts.length; s++) {
+    const { pos, cls } = starts[s];
+    const end = s + 1 < starts.length ? starts[s + 1].pos : data.length;
+    const name = placementName(data, pos, end, classRefs);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ ...placementKind(cls), name });
+  }
+  return out;
+}
