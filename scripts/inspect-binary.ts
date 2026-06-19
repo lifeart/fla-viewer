@@ -100,6 +100,29 @@ if (process.argv[3] === '--strings') {
   process.exit(0);
 }
 
+// CArchive class declarations: node run-inspect.mjs file.fla --carchive
+if (process.argv[3] === '--carchive') {
+  const d = ole.readStream(process.argv[4] || 'Contents');
+  // wNewClassTag = 0xFFFF, then schema(u16), nameLen(u16), name(ASCII)
+  let n = 0;
+  for (let p = 0; p + 6 < d.length; p++) {
+    if (d[p] === 0xff && d[p + 1] === 0xff) {
+      const schema = d[p + 2] | (d[p + 3] << 8);
+      const nameLen = d[p + 4] | (d[p + 5] << 8);
+      if (schema > 0 && schema < 0x4000 && nameLen >= 3 && nameLen <= 40 && p + 6 + nameLen <= d.length) {
+        let s = '', ok = true;
+        for (let i = 0; i < nameLen; i++) {
+          const c = d[p + 6 + i];
+          if (c < 0x41 || c > 0x7a) { ok = false; break; }
+          s += String.fromCharCode(c);
+        }
+        if (ok && s[0] === 'C') { console.log(`@${String(p).padStart(6)}  #${++n}  schema=${schema}  class=${s}`); p += 5 + nameLen; }
+      }
+    }
+  }
+  process.exit(0);
+}
+
 // Interleaved records: node run-inspect.mjs file.fla --records
 if (process.argv[3] === '--records') {
   const d = ole.readStream('Contents');
