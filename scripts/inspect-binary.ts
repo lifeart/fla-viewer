@@ -74,20 +74,26 @@ function readFlashStr(d: Uint8Array, p: number): { str: string; end: number } | 
   return { str: s, end: start + len * 2 };
 }
 
-// All Flash strings in a stream: node run-inspect.mjs file.fla --strings "Symbol 34"
+// All Flash strings in a stream: node run-inspect.mjs file.fla --strings "Symbol 34" [start] [len]
 if (process.argv[3] === '--strings') {
   const d = ole.readStream(process.argv[4]);
-  for (let p = 0; p + 4 <= d.length; p++) {
+  const start = process.argv[5] ? parseInt(process.argv[5], 10) : 0;
+  const end = process.argv[6] ? start + parseInt(process.argv[6], 10) : d.length;
+  const dotSig = [0xff, 0xfe, 0xff, 0x01, 0x2e, 0x00];
+  const markerSig = [0x05, 0x02, 0x00, 0x00, 0x00];
+  for (let p = start; p + 4 <= end; p++) {
+    if (markerSig.every((b, i) => d[p + i] === b)) { console.log(`@${String(p).padStart(5)}  <05 02 00 00 00 marker>`); p += 4; continue; }
     if (d[p] === 0xff && d[p + 1] === 0xfe && d[p + 2] === 0xff) {
+      if (dotSig.every((b, i) => d[p + i] === b)) { console.log(`@${String(p).padStart(5)}  <"." linkage-sep>`); p += 5; continue; }
       const len = d[p + 3];
-      if (len > 0 && len <= 64 && p + 4 + len * 2 <= d.length) {
+      if (p + 4 + len * 2 <= d.length) {
         let s = '', ok = true;
         for (let i = 0; i < len; i++) {
           const code = d[p + 4 + i * 2] | (d[p + 4 + i * 2 + 1] << 8);
           if (code < 0x20 || code > 0x7e) { ok = false; break; }
           s += String.fromCharCode(code);
         }
-        if (ok) { console.log(`@${String(p).padStart(5)}  "${s}"`); p += 3 + len * 2; }
+        if (ok) { console.log(`@${String(p).padStart(5)}  [len ${String(len).padStart(2)}] "${s}"`); p += 3 + len * 2; }
       }
     }
   }
