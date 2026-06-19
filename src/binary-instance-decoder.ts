@@ -440,6 +440,8 @@ function placementKind(cls: string): NamedInstance {
 }
 
 const NAMED_INSTANCE_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Flash device-font aliases — these are font names, never instance names. */
+const DEVICE_FONTS = new Set(['_sans', '_serif', '_typewriter']);
 
 /**
  * The instance name within a placement body [start, end): the first identifier-
@@ -459,7 +461,9 @@ function placementName(data: Uint8Array, start: number, end: number, classRefs: 
       s += String.fromCharCode(c);
     }
     p += 3 + len * 2;
-    if (!ok || s.startsWith('$') || classRefs.has(s) || !NAMED_INSTANCE_RE.test(s)) continue;
+    if (!ok || !NAMED_INSTANCE_RE.test(s)) continue;
+    if (s.startsWith('$') || DEVICE_FONTS.has(s)) continue; // font tokens
+    if (classRefs.has(s)) continue; // MFC CRuntimeClass ref
     return s;
   }
   return '';
