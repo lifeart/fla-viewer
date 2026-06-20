@@ -695,6 +695,11 @@ const AS_SOURCE_HINT = /\bfunction\b|\bimport\b|#initclip|gotoAnd|\btrace\(|\bst
  * (`FF FE FF FF <u16 len> <UTF-16LE>` — the 4th FF marks the >=255-char length
  * form), which a u8-length string reader can't see. Each script keeps its byte
  * offset so {@link attributeToFrames} can place it on the right keyframe.
+ *
+ * Short (<255-char) scripts use the plain `FF FE FF <u8>` form (same encoding as
+ * names/labels) and are mostly `stop();` boilerplate that conflates onto one
+ * frame under the single-frame fallback — captured experiments added noise
+ * without value, so only the substantial (extended) scripts are taken.
  */
 export function extractFrameScripts(data: Uint8Array): DecodedFrameScript[] {
   const out: DecodedFrameScript[] = [];
