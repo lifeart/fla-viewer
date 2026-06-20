@@ -833,6 +833,11 @@ export class FLAParser {
     for (const child of elementsContainer.children) {
       switch (child.tagName) {
         case 'DOMSymbolInstance':
+        // A Component Inspector component (`<DOMComponentInstance>`, e.g. SkyUI's
+        // lists/buttons) carries the same libraryItemName + instance name as a
+        // symbol instance, plus a <persistentData> params block we ignore here.
+        // Without this case its named instances are dropped from frame.elements.
+        case 'DOMComponentInstance':
           elements.push(this.parseSymbolInstance(child, identityMatrix));
           break;
         case 'DOMShape':
@@ -878,6 +883,7 @@ export class FLAParser {
           this.parseGroupMembers(child, elements, composedMatrix);
           break;
         case 'DOMSymbolInstance':
+        case 'DOMComponentInstance':
           elements.push(this.parseSymbolInstance(child, composedMatrix));
           break;
         case 'DOMVideoInstance':
@@ -913,7 +919,10 @@ export class FLAParser {
     // Instance name (Properties panel) — the AS identifier for this object.
     // The renderer ignores it; tooling (code completion) relies on it.
     const name = el.getAttribute('name') || undefined;
-    const symbolType = (el.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
+    // Components have no symbolType attribute but are movie clips; symbol
+    // instances default to graphic.
+    const symbolType = (el.getAttribute('symbolType') ||
+      (el.tagName === 'DOMComponentInstance' ? 'movieclip' : 'graphic')) as 'graphic' | 'movieclip' | 'button';
     const loop = (el.getAttribute('loop') || 'loop') as 'loop' | 'play once' | 'single frame';
     const firstFrame = el.getAttribute('firstFrame');
     const lastFrame = el.getAttribute('lastFrame');
