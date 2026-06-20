@@ -676,3 +676,42 @@ export function attributeToFrames<T extends { bodyStart: number }>(
   }
   return { perKeyframe, unattributed };
 }
+
+/** A keyframe's recovered ActionScript source + its stream byte offset. */
+export interface DecodedFrameScript {
+  /** Byte offset of the script's Flash string (for keyframe attribution). */
+  bodyStart: number;
+  /** AS2 source. */
+  source: string;
+}
+
+// Frame scripts are AS2 source; require one of these so a long non-script
+// extended string (e.g. a big text-field value) isn't taken as a script.
+const AS_SOURCE_HINT = /\bfunction\b|\bimport\b|#initclip|gotoAnd|\btrace\(|\bstop\(|\breturn\b|\bvar\b|;\s/;
+
+/**
+ * Recover frame ActionScript from a `Page N` / `Symbol N` stream. A substantial
+ * keyframe script is serialized as an EXTENDED-length Flash string
+ * (`FF FE FF FF <u16 len> <UTF-16LE>` — the 4th FF marks the >=255-char length
+ * form), which a u8-length string reader can't see. Each script keeps its byte
+ * offset so {@link attributeToFrames} can place it on the right keyframe.
+ */
+export function extractFrameScripts(data: Uint8Array): DecodedFrameScript[] {
+  const out: DecodedFrameScript[] = [];
+  for (let p = 0; p + 6 <= data.length; p++) {
+    if (data[p] !== 0xff || data[p + 1] !== 0xfe || data[p + 2] !== 0xff || data[p + 3] !== 0xff) continue;
+    const len = data[p + 4] | (data[p + 5] << 8);
+    const start = p + 6;
+    if (len < 4 || start + len * 2 > data.length) continue;
+    let s = '';
+    let ok = true;
+    for (let i = 0; i < len; i++) {
+      const c = data[start + i * 2] | (data[start + i * 2 + 1] << 8);
+      if (c === 0) { ok = false; break; } // NUL ⇒ not a clean UTF-16 string
+      s += String.fromCharCode(c);
+    }
+    if (ok && AS_SOURCE_HINT.test(s)) out.push({ bodyStart: p, source: s });
+    p = start + len * 2 - 1;
+  }
+  return out;
+}

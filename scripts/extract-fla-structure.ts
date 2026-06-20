@@ -57,6 +57,8 @@ export interface FrameJSON {
   duration: number;
   /** Only set for `labelType="name"` frame labels (gotoAndPlay targets). */
   label?: string;
+  /** Raw AS2 frame-action source on this keyframe, when present. */
+  actionScript?: string;
   elements: InstanceJSON[];
 }
 
@@ -158,7 +160,7 @@ function timelineToJSON(
     visible: layer.visible,
     frames: layer.frames
       // Keep frames that carry content OR a navigable label.
-      .filter((f) => f.elements.length > 0 || (f.labelType === 'name' && !!f.label))
+      .filter((f) => f.elements.length > 0 || (f.labelType === 'name' && !!f.label) || !!f.actionScript)
       .map((frame): FrameJSON => {
         if (frame.labelType === 'name' && frame.label) {
           labels.push({ name: frame.label, frame: frame.index });
@@ -184,6 +186,7 @@ function timelineToJSON(
           index: frame.index,
           duration: frame.duration,
           ...(frame.labelType === 'name' && frame.label ? { label: frame.label } : {}),
+          ...(frame.actionScript ? { actionScript: frame.actionScript } : {}),
           elements,
         };
       }),

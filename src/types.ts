@@ -99,6 +99,14 @@ export interface Frame {
   morphShape?: MorphShape; // For shape tweens
   label?: string; // Frame label name
   labelType?: 'name' | 'comment' | 'anchor'; // Type of frame label
+  /**
+   * Raw ActionScript source attached to this keyframe (the frame action). XFL:
+   * `<DOMFrame><Actionscript><script>`; binary: the frame's DoAction-equivalent
+   * source block. Captured for tooling (AS code intelligence); the renderer does
+   * not execute it. Instance-level `on()`/`onClipEvent()` handlers live on the
+   * instance, not here.
+   */
+  actionScript?: string;
   // Motion tween properties
   motionTweenRotate?: 'cw' | 'ccw' | 'none'; // Rotation direction
   motionTweenRotateTimes?: number; // Number of full rotations

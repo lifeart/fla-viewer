@@ -739,6 +739,10 @@ export class FLAParser {
       const label = frameEl.getAttribute('name') || undefined;
       const labelType = frameEl.getAttribute('labelType') as 'name' | 'comment' | 'anchor' | null;
 
+      // Parse the keyframe's frame action (XFL <Actionscript><script> CDATA).
+      const scriptEl = frameEl.querySelector(':scope > Actionscript > script');
+      const actionScript = scriptEl?.textContent?.trim() || undefined;
+
       frames.push({
         index,
         duration,
@@ -751,6 +755,7 @@ export class FLAParser {
         ...(morphShape && { morphShape }),
         ...(label && { label }),
         ...(labelType && { labelType }),
+        ...(actionScript && { actionScript }),
         ...(motionTweenRotate && { motionTweenRotate }),
         ...(motionTweenRotateTimes && { motionTweenRotateTimes: parseInt(motionTweenRotateTimes) }),
         ...(motionTweenScale === 'true' && { motionTweenScale: true }),

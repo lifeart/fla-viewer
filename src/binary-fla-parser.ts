@@ -65,6 +65,8 @@ import {
 import {
   attributeToFrames,
   decodeStreamTimeline,
+  extractFrameScripts,
+  type DecodedFrameScript,
   type DecodedStreamTimeline,
 } from './binary-timeline-decoder';
 import type {
@@ -131,6 +133,12 @@ export interface BinaryFLAInfo {
    */
   sceneTimelines: Map<number, DecodedStreamTimeline>;
   symbolTimelines: Map<number, DecodedStreamTimeline>;
+  /**
+   * Frame ActionScript recovered from each scene / symbol stream (with byte
+   * offsets, for keyframe attribution). Keyed by scene / symbol number.
+   */
+  sceneScripts: Map<number, DecodedFrameScript[]>;
+  symbolScripts: Map<number, DecodedFrameScript[]>;
   /**
    * Symbol-instance PLACEMENTS recovered from each scene's `Page N` stream
    * (issue #8 instance placement), keyed by scene number. Each placement
@@ -368,6 +376,8 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
   const symbolInstances = new Map<number, DecodedInstance[]>();
   const sceneTimelines = new Map<number, DecodedStreamTimeline>();
   const symbolTimelines = new Map<number, DecodedStreamTimeline>();
+  const sceneScripts = new Map<number, DecodedFrameScript[]>();
+  const symbolScripts = new Map<number, DecodedFrameScript[]>();
   for (const name of streams) {
     // Scene streams are named `Page N` (Flash 5..MX 2004) or `P N <timestamp>`
     // (Flash 8 / CS3+); symbol streams `Symbol N` or `S N <timestamp>`. Both
@@ -390,6 +400,8 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
       const tl = decodeStreamTimeline(streamData);
       if (tl) sceneTimelines.set(pageNum, tl);
       if (tl && insts.length > 0) sceneInstances.set(pageNum, insts);
+      const scripts = extractFrameScripts(streamData);
+      if (scripts.length > 0) sceneScripts.set(pageNum, scripts);
       continue;
     }
     const symNum = parseSymbolStreamNumber(name);
@@ -407,6 +419,8 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
       const tl = decodeStreamTimeline(streamData);
       if (tl) symbolTimelines.set(symNum, tl);
       if (tl && insts.length > 0) symbolInstances.set(symNum, insts);
+      const scripts = extractFrameScripts(streamData);
+      if (scripts.length > 0) symbolScripts.set(symNum, scripts);
     }
   }
   scenes.sort((a, b) => a.scene - b.scene);
@@ -432,6 +446,8 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
     symbolInstances,
     sceneTimelines,
     symbolTimelines,
+    sceneScripts,
+    symbolScripts,
   };
 }
 
@@ -614,7 +630,8 @@ function buildAttributedLayers(
   timeline: DecodedStreamTimeline,
   decodedShapes: DecodedShape[],
   decodedInstances: DecodedInstance[],
-  libraryByNumber: Map<number, BinaryLibraryEntry>
+  libraryByNumber: Map<number, BinaryLibraryEntry>,
+  scripts: DecodedFrameScript[]
 ): { layers: Layer[]; referenceLayers: Set<number>; totalFrames: number } | null {
   const referenceLayers = new Set<number>();
   let attributedAny = false;
@@ -632,6 +649,9 @@ function buildAttributedLayers(
 
     const shapeBuckets = attributeToFrames(dl.keyframes, decodedShapes);
     const instBuckets = attributeToFrames(dl.keyframes, decodedInstances);
+    // A script's byte offset falls in exactly one layer's keyframe range, so
+    // per-layer attribution places each script on its own layer with no dupes.
+    const scriptBuckets = attributeToFrames(dl.keyframes, scripts);
 
     const frames: Frame[] = dl.keyframes.map((kf, ki) => {
       const shapes = shapeBuckets.perKeyframe[ki].map((d) => d.shape);
@@ -640,11 +660,15 @@ function buildAttributedLayers(
         libraryByNumber
       );
       if (shapes.length > 0 || instances.length > 0) attributedAny = true;
+      const frameScripts = scriptBuckets.perKeyframe[ki];
       return {
         index: kf.startIndex,
         duration: kf.duration,
         keyMode: 0,
         elements: [...shapes, ...instances] as Frame['elements'],
+        ...(frameScripts.length > 0 && {
+          actionScript: frameScripts.map((s) => s.source).join('\n\n'),
+        }),
       };
     });
 
@@ -679,6 +703,20 @@ function buildAttributedLayers(
       frames,
     };
   });
+
+  // Frame scripts that fell outside every keyframe range go on the timeline's
+  // first frame (never drop a recovered script). Keeping a script-bearing
+  // timeline is preferable to the single-frame fallback, which carries no scripts.
+  if (scripts.length > 0 && layers.length > 0 && layers[0].frames.length > 0) {
+    const allKeyframes = timeline.layers.flatMap((l) => l.keyframes);
+    const orphanScripts = attributeToFrames(allKeyframes, scripts).unattributed;
+    if (orphanScripts.length > 0) {
+      const f0 = layers[0].frames[0];
+      const src = orphanScripts.map((s) => s.source).join('\n\n');
+      f0.actionScript = f0.actionScript ? `${f0.actionScript}\n\n${src}` : src;
+    }
+    attributedAny = true;
+  }
 
   if (!attributedAny) return null;
   return { layers, referenceLayers, totalFrames: timeline.totalFrames };
@@ -746,14 +784,16 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
     streamTimeline: DecodedStreamTimeline | undefined,
     decodedShapes: DecodedShape[],
     decodedInstances: DecodedInstance[],
-    dedupedInstances: DecodedInstance[]
+    dedupedInstances: DecodedInstance[],
+    scripts: DecodedFrameScript[]
   ): Timeline => {
     if (streamTimeline) {
       const attributed = buildAttributedLayers(
         streamTimeline,
         decodedShapes,
         decodedInstances,
-        libraryByNumber
+        libraryByNumber,
+        scripts
       );
       if (attributed) {
         return {
@@ -770,6 +810,11 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
       decodedShapes.map((d) => d.shape),
       buildSymbolInstances(dedupedInstances, libraryByNumber)
     );
+    // The structural walk failed, so we can't place scripts per keyframe — host
+    // them all on the single fallback frame rather than drop them.
+    if (scripts.length > 0 && layers[0]?.frames[0]) {
+      layers[0].frames[0].actionScript = scripts.map((s) => s.source).join('\n\n');
+    }
     return { name, layers, totalFrames: 1, referenceLayers };
   };
 
@@ -784,7 +829,8 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
       info.symbolTimelines.get(num),
       info.symbolShapesDecoded.get(num) ?? [],
       info.symbolInstances.get(num) ?? [],
-      dedupeInstances(info.symbolInstances.get(num) ?? [])
+      dedupeInstances(info.symbolInstances.get(num) ?? []),
+      info.symbolScripts.get(num) ?? []
     );
     const symbol: Symbol = {
       name: entry.name,
@@ -806,7 +852,8 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
             info.sceneTimelines.get(s.scene),
             info.sceneShapesDecoded.get(s.scene) ?? [],
             info.sceneInstances.get(s.scene) ?? [],
-            dedupeInstances(info.sceneInstances.get(s.scene) ?? [])
+            dedupeInstances(info.sceneInstances.get(s.scene) ?? []),
+            info.sceneScripts.get(s.scene) ?? []
           )
         )
       : [
