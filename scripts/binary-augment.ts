@@ -168,7 +168,8 @@ const STATEISH = /^(Up|Over|Down|Hit|Normal|Selected|Hover|Disabled|_up|_over|_d
  */
 export function extractSymbolStrings(stream: string, data: Uint8Array): BinarySymbolStrings {
   const classRefs = new Set(buildCombinedClassTable(data));
-  const namedInstances = scanNamedInstances(data);
+  // Drop the internal byte offset from the surfaced output.
+  const namedInstances = scanNamedInstances(data).map(({ bodyStart, ...n }) => n);
   const candidateNames: string[] = [];
   const other: string[] = [];
   const seen = new Set<string>();

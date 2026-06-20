@@ -8,10 +8,12 @@ import btnstrobUrl from './fixtures/btnstrob.fla?url';
 import { OLE2File } from '../ole2-reader';
 import { parseBinaryFLA } from '../binary-fla-parser';
 import {
+  attachInstanceNames,
   buildCombinedClassTable,
   dedupeInstances,
   instanceSymbolType,
   scanForInstances,
+  scanNamedInstances,
   tryParseInstanceAt,
   type DecodedInstance,
 } from '../binary-instance-decoder';
@@ -328,6 +330,24 @@ describe('binary-instance-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () =>
     });
   });
 
+  it('attaches the instance name to the placement by byte offset (no new placements)', async () => {
+    const bytes = await loadBtnstrob();
+    const page1 = new OLE2File(bytes).readStream('Page 1');
+    const raw = scanForInstances(page1);
+    // The structural read leaves the placement name empty for this file…
+    expect(raw[0].instanceName).toBe('');
+    // …and the name scanner finds it at the SAME body offset.
+    const named = scanNamedInstances(page1);
+    expect(named.some((n) => n.name === 'mvcBtnStrobe' && n.bodyStart === raw[0].bodyStart)).toBe(true);
+
+    const enriched = attachInstanceNames(raw, page1);
+    // The join only fills the name — count, order, geometry are unchanged.
+    expect(enriched).toHaveLength(raw.length);
+    expect(enriched[0].instanceName).toBe('mvcBtnStrobe');
+    expect(enriched[0].mediaRef).toBe(raw[0].mediaRef);
+    expect(enriched[0].matrix).toEqual(raw[0].matrix);
+  });
+
   it('parseBinaryFLA composites Symbol 1 onto the scene (was empty)', async () => {
     const bytes = await loadBtnstrob();
     const doc = parseBinaryFLA(bytes);
@@ -347,6 +367,9 @@ describe('binary-instance-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () =>
     expect(placed.type).toBe('symbol');
     if (placed.type === 'symbol') {
       expect(placed.libraryItemName).toBe('Symbol 1');
+      // The placement's authoring instance name is folded in by byte offset from
+      // the higher-recall name scanner (the structural read leaves it empty here).
+      expect(placed.name).toBe('mvcBtnStrobe');
       expect(placed.matrix.tx).toBe(300);
       expect(placed.matrix.ty).toBe(150);
       // The referenced symbol exists and carries the green square geometry.

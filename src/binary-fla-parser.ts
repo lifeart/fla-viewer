@@ -57,6 +57,7 @@ import {
   type DecodedShape,
 } from './binary-shape-decoder';
 import {
+  attachInstanceNames,
   dedupeInstances,
   instanceSymbolType,
   scanForInstances,
@@ -391,7 +392,7 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
         sceneShapes.set(pageNum, decoded.map((d) => d.shape));
         sceneShapesDecoded.set(pageNum, decoded);
       }
-      const insts = scanForInstances(streamData);
+      const insts = attachInstanceNames(scanForInstances(streamData), streamData);
       const deduped = dedupeInstances(insts);
       if (deduped.length > 0) sceneInstances.set(pageNum, deduped);
       // Attribution uses the UN-deduped placements (deduping would discard the
@@ -413,7 +414,7 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
         symbolShapes.set(symNum, decoded.map((d) => d.shape));
         symbolShapesDecoded.set(symNum, decoded);
       }
-      const insts = scanForInstances(streamData);
+      const insts = attachInstanceNames(scanForInstances(streamData), streamData);
       const deduped = dedupeInstances(insts);
       if (deduped.length > 0) symbolInstances.set(symNum, deduped);
       const tl = decodeStreamTimeline(streamData);

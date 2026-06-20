@@ -412,6 +412,38 @@ export function dedupeInstances(insts: DecodedInstance[]): DecodedInstance[] {
   return out;
 }
 
+/**
+ * Fill in MISSING instance names on decoded placements using the higher-recall
+ * name scanner ({@link scanNamedInstances}).
+ *
+ * `scanForInstances` reads each placement's instance name from a fixed
+ * structural offset, which the version-specific `field_90` layout often makes it
+ * read as empty even when the file does carry a name. `scanNamedInstances` finds
+ * those names robustly. Both scanners anchor a placement at the SAME `bodyStart`
+ * (the byte just past the placement's class tag), so a name is attached to a
+ * placement ONLY when their byte offsets match exactly. This never creates,
+ * drops, or reorders placements, and never overwrites a name the structural read
+ * already recovered — so callers' frame-content shape is unchanged; only an
+ * otherwise-empty `instanceName` becomes populated. Returns a new array; the
+ * input placements are not mutated.
+ */
+export function attachInstanceNames(
+  insts: DecodedInstance[],
+  data: Uint8Array
+): DecodedInstance[] {
+  if (insts.length === 0 || !insts.some((i) => !i.instanceName)) return insts;
+  const nameAt = new Map<number, string>();
+  for (const n of scanNamedInstances(data)) {
+    if (!nameAt.has(n.bodyStart)) nameAt.set(n.bodyStart, n.name);
+  }
+  if (nameAt.size === 0) return insts;
+  return insts.map((inst) => {
+    if (inst.instanceName) return inst;
+    const name = nameAt.get(inst.bodyStart);
+    return name ? { ...inst, instanceName: name } : inst;
+  });
+}
+
 /** A named placement recovered from a stream (instance name + kind only). */
 export interface NamedInstance {
   /** Authoring instance name — the AS identifier on the timeline. */
@@ -420,22 +452,24 @@ export interface NamedInstance {
   type: 'symbol' | 'text';
   /** For symbol instances, the symbol kind. */
   symbolType?: 'movieclip' | 'button' | 'graphic';
+  /** Byte offset of the placement, to match a decoded geometry instance / frame. */
+  bodyStart: number;
 }
 
 /** Placement classes whose records carry an instance name (incl. CPicText). */
 const NAMED_PLACEMENT_CLASSES = ['CPicSprite', 'CPicButton', 'CPicShapeObj', 'CPicText'] as const;
 
-function placementKind(cls: string): NamedInstance {
+function placementKind(cls: string): Pick<NamedInstance, 'type' | 'symbolType'> {
   switch (cls) {
     case 'CPicText':
-      return { name: '', type: 'text' };
+      return { type: 'text' };
     case 'CPicButton':
-      return { name: '', type: 'symbol', symbolType: 'button' };
+      return { type: 'symbol', symbolType: 'button' };
     case 'CPicShapeObj':
-      return { name: '', type: 'symbol', symbolType: 'graphic' };
+      return { type: 'symbol', symbolType: 'graphic' };
     case 'CPicSprite':
     default:
-      return { name: '', type: 'symbol', symbolType: 'movieclip' };
+      return { type: 'symbol', symbolType: 'movieclip' };
   }
 }
 
@@ -549,7 +583,7 @@ export function scanNamedInstances(data: Uint8Array): NamedInstance[] {
     const name = placementName(data, pos, end, classRefs);
     if (!name || seen.has(name)) continue;
     seen.add(name);
-    out.push({ ...placementKind(cls), name });
+    out.push({ ...placementKind(cls), name, bodyStart: pos });
   }
 
   // 3) Text-field recovery. Class-index back-refs find the FIRST CPicText of a
@@ -575,7 +609,7 @@ export function scanNamedInstances(data: Uint8Array): NamedInstance[] {
     const name = placementName(data, p + 1, Math.min(data.length, p + 200), classRefs);
     if (name && !seen.has(name)) {
       seen.add(name);
-      out.push({ type: 'text', name });
+      out.push({ type: 'text', name, bodyStart: p });
     }
   }
 
@@ -600,7 +634,7 @@ export function scanNamedInstances(data: Uint8Array): NamedInstance[] {
     p = q + 3 + len * 2;
     if (!ok || seen.has(s) || !isInstanceName(s, classRefs)) continue;
     seen.add(s);
-    out.push({ type: 'symbol', symbolType: 'movieclip', name: s });
+    out.push({ type: 'symbol', symbolType: 'movieclip', name: s, bodyStart: p });
   }
   return out;
 }
