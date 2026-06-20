@@ -685,28 +685,30 @@ export interface DecodedFrameScript {
   source: string;
 }
 
-// Frame scripts are AS2 source; require one of these so a long non-script
-// extended string (e.g. a big text-field value) isn't taken as a script.
+// A substantial (>=255-char) extended string is almost always AS2 — a loose hint
+// just avoids taking a big non-script value (e.g. a text-field paragraph).
 const AS_SOURCE_HINT = /\bfunction\b|\bimport\b|#initclip|gotoAnd|\btrace\(|\bstop\(|\breturn\b|\bvar\b|;\s/;
+// A SHORT string shares its encoding with names/labels/fonts, so require a call
+// statement (`identifier(...);`) to take it as a frame action — "stop();",
+// "gotoAndPlay(2);", "this.Foo();". Names/labels/fonts have no parens.
+const SHORT_SCRIPT_RE = /[A-Za-z_$][\w$.]*\s*\([^)]*\)\s*;/;
 
 /**
- * Recover frame ActionScript from a `Page N` / `Symbol N` stream. A substantial
- * keyframe script is serialized as an EXTENDED-length Flash string
- * (`FF FE FF FF <u16 len> <UTF-16LE>` — the 4th FF marks the >=255-char length
- * form), which a u8-length string reader can't see. Each script keeps its byte
- * offset so {@link attributeToFrames} can place it on the right keyframe.
- *
- * Short (<255-char) scripts use the plain `FF FE FF <u8>` form (same encoding as
- * names/labels) and are mostly `stop();` boilerplate that conflates onto one
- * frame under the single-frame fallback — captured experiments added noise
- * without value, so only the substantial (extended) scripts are taken.
+ * Recover frame ActionScript from a `Page N` / `Symbol N` stream. Keyframe scripts
+ * serialize as a Flash string: short ones as `FF FE FF <u8 len> <UTF-16LE>` and
+ * substantial (>=255-char) ones as the extended `FF FE FF FF <u16 len> <UTF-16LE>`
+ * form (the 4th FF marks the extended length). Short scripts are mostly `stop();`
+ * stop-frames — the reporter (issue #42) wants them kept, not filtered. Each
+ * script keeps its byte offset so {@link attributeToFrames} places it on its frame.
  */
 export function extractFrameScripts(data: Uint8Array): DecodedFrameScript[] {
   const out: DecodedFrameScript[] = [];
-  for (let p = 0; p + 6 <= data.length; p++) {
-    if (data[p] !== 0xff || data[p + 1] !== 0xfe || data[p + 2] !== 0xff || data[p + 3] !== 0xff) continue;
-    const len = data[p + 4] | (data[p + 5] << 8);
-    const start = p + 6;
+  for (let p = 0; p + 4 <= data.length; p++) {
+    if (data[p] !== 0xff || data[p + 1] !== 0xfe || data[p + 2] !== 0xff) continue;
+    const extended = data[p + 3] === 0xff; // >=255-char form: a u16 length follows
+    if (extended && p + 6 > data.length) continue;
+    const len = extended ? data[p + 4] | (data[p + 5] << 8) : data[p + 3];
+    const start = extended ? p + 6 : p + 4;
     if (len < 4 || start + len * 2 > data.length) continue;
     let s = '';
     let ok = true;
@@ -715,7 +717,10 @@ export function extractFrameScripts(data: Uint8Array): DecodedFrameScript[] {
       if (c === 0) { ok = false; break; } // NUL ⇒ not a clean UTF-16 string
       s += String.fromCharCode(c);
     }
-    if (ok && AS_SOURCE_HINT.test(s)) out.push({ bodyStart: p, source: s });
+    if (!ok) continue;
+    if (extended ? AS_SOURCE_HINT.test(s) : SHORT_SCRIPT_RE.test(s)) {
+      out.push({ bodyStart: p, source: s });
+    }
     p = start + len * 2 - 1;
   }
   return out;

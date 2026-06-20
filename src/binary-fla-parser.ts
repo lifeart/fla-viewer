@@ -667,7 +667,9 @@ function buildAttributedLayers(
         keyMode: 0,
         elements: [...shapes, ...instances] as Frame['elements'],
         ...(frameScripts.length > 0 && {
-          actionScript: frameScripts.map((s) => s.source).join('\n\n'),
+          // Dedupe identical scripts so a symbol whose stop-frames all collapse
+          // onto one frame shows "stop();" once, not "stop(); stop(); stop();".
+          actionScript: [...new Set(frameScripts.map((s) => s.source))].join('\n\n'),
         }),
       };
     });
@@ -712,7 +714,7 @@ function buildAttributedLayers(
     const orphanScripts = attributeToFrames(allKeyframes, scripts).unattributed;
     if (orphanScripts.length > 0) {
       const f0 = layers[0].frames[0];
-      const src = orphanScripts.map((s) => s.source).join('\n\n');
+      const src = [...new Set(orphanScripts.map((s) => s.source))].join('\n\n');
       f0.actionScript = f0.actionScript ? `${f0.actionScript}\n\n${src}` : src;
     }
     attributedAny = true;
@@ -813,7 +815,7 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
     // The structural walk failed, so we can't place scripts per keyframe — host
     // them all on the single fallback frame rather than drop them.
     if (scripts.length > 0 && layers[0]?.frames[0]) {
-      layers[0].frames[0].actionScript = scripts.map((s) => s.source).join('\n\n');
+      layers[0].frames[0].actionScript = [...new Set(scripts.map((s) => s.source))].join('\n\n');
     }
     return { name, layers, totalFrames: 1, referenceLayers };
   };
