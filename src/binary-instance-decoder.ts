@@ -443,15 +443,34 @@ const NAMED_INSTANCE_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** Flash device-font aliases — these are font names, never instance names. */
 const DEVICE_FONTS = new Set(['_sans', '_serif', '_typewriter']);
 /**
- * Button/movie-clip frame-label state words. These live on CPicFrame records, not
- * placements, but the heuristic name scan can pick one up as a placement's "first
- * identifier" — filter them so they don't masquerade as instance names.
+ * Tokens that aren't instance names but can be picked up by the heuristic name
+ * scan: button/clip frame-label state words (which live on CPicFrame records, not
+ * placements), boolean literal component-param values, and similar labels.
  */
-const STATE_LABELS = new Set([
+const NON_INSTANCE = new Set([
+  // button/clip states
   'Up', 'Over', 'Down', 'Hit', '_up', '_over', '_down', '_hit',
-  'Normal', 'Selected', 'Hover', 'Disabled', 'Off', 'On',
+  'Normal', 'Selected', 'Hover', 'Disabled', 'Off', 'On', 'Blink',
   'up', 'over', 'down', 'hover', 'select', 'normal', 'selected', 'disabled', 'off', 'on',
+  // equip-state labels
+  'Equipped', 'Unequipped', 'LeftEquip', 'RightEquip', 'LeftAndRightEquip',
+  // meter labels
+  'Full', 'Empty',
+  // platform-art labels (siblings of PS3Art/XBoxArt)
+  'PCArt', 'XBoxArt', 'PS3Art', 'PS3_A', 'PS3_B', 'PS3_R3', 'PS3_L3',
+  // "none" labels and boolean-literal component-param values
+  'None', 'NONE', 'none', 'true', 'false',
 ]);
+/** Embedded-font face names (e.g. TimesNewRomanPSMT, ArialMT) — never instances. */
+const FONT_NAME_RE = /MT$/;
+
+/** Whether a clean identifier string is a plausible instance name. */
+function isInstanceName(s: string, classRefs: Set<string>): boolean {
+  if (!NAMED_INSTANCE_RE.test(s)) return false;
+  if (s.startsWith('$') || DEVICE_FONTS.has(s) || FONT_NAME_RE.test(s)) return false; // fonts
+  if (classRefs.has(s) || NON_INSTANCE.has(s)) return false; // class refs / labels
+  return true;
+}
 
 /**
  * The instance name within a placement body [start, end): the first identifier-
@@ -471,9 +490,7 @@ function placementName(data: Uint8Array, start: number, end: number, classRefs: 
       s += String.fromCharCode(c);
     }
     p += 3 + len * 2;
-    if (!ok || !NAMED_INSTANCE_RE.test(s)) continue;
-    if (s.startsWith('$') || DEVICE_FONTS.has(s)) continue; // font tokens
-    if (classRefs.has(s) || STATE_LABELS.has(s)) continue; // class refs / frame labels
+    if (!ok || !isInstanceName(s, classRefs)) continue;
     return s;
   }
   return '';
@@ -581,8 +598,7 @@ export function scanNamedInstances(data: Uint8Array): NamedInstance[] {
       s += String.fromCharCode(c);
     }
     p = q + 3 + len * 2;
-    if (!ok || !NAMED_INSTANCE_RE.test(s)) continue;
-    if (s.startsWith('$') || DEVICE_FONTS.has(s) || classRefs.has(s) || STATE_LABELS.has(s) || seen.has(s)) continue;
+    if (!ok || seen.has(s) || !isInstanceName(s, classRefs)) continue;
     seen.add(s);
     out.push({ type: 'symbol', symbolType: 'movieclip', name: s });
   }
