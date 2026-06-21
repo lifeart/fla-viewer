@@ -121,6 +121,14 @@ export interface DecodedInstance {
   bodyStart: number;
   /** Byte offset just past the body. */
   endPos: number;
+  /**
+   * Set when this placement's `mediaRef` can't be trusted — an FP8 placement
+   * mis-decodes the library reference (it lands on a constant), so when several
+   * NAMED siblings share one ref it cannot be the real symbol. The parser then
+   * emits the named child WITHOUT a libraryItemName instead of inheriting a wrong
+   * class. See {@link markUnreliableRefs}.
+   */
+  unreliableRef?: boolean;
 }
 
 /** Read a 6-u32 affine matrix (a,b,c,d 16.16 FP; tx,ty twips → px). */
@@ -463,6 +471,30 @@ export function unjoinedNames(
   if (named.length === 0) return named;
   const placed = new Set(insts.map((i) => i.bodyStart));
   return named.filter((n) => !placed.has(n.bodyStart));
+}
+
+/**
+ * Flag placements whose `mediaRef` can't be trusted. A placement using the FP8
+ * float32-matrix layout mis-decodes through {@link tryParseInstanceAt} (built for
+ * the 16.16/ASCII layout): its `mediaRef` field lands on a constant (observed:
+ * 1). The reliable signal for such a placement is its NAME (recovered by the
+ * byte-offset join), not its reference. So when 2+ NAMED placements in one stream
+ * share a single `mediaRef`, they cannot all be that one symbol — the ref is a
+ * misread and is flagged `unreliableRef`, so the parser emits those named
+ * children without a (wrong) `libraryItemName` rather than inheriting whatever
+ * symbol the constant resolves to (e.g. the document/root class). A lone named
+ * placement (e.g. a real scene instance) keeps its reference.
+ */
+export function markUnreliableRefs(insts: DecodedInstance[]): DecodedInstance[] {
+  const namedPerRef = new Map<number, number>();
+  for (const i of insts) {
+    if (i.instanceName) namedPerRef.set(i.mediaRef, (namedPerRef.get(i.mediaRef) ?? 0) + 1);
+  }
+  return insts.map((i) =>
+    i.instanceName && (namedPerRef.get(i.mediaRef) ?? 0) >= 2
+      ? { ...i, unreliableRef: true }
+      : i
+  );
 }
 
 /** A named placement recovered from a stream (instance name + kind only). */

@@ -12,6 +12,7 @@ import {
   buildCombinedClassTable,
   dedupeInstances,
   instanceSymbolType,
+  markUnreliableRefs,
   scanForInstances,
   scanNamedInstances,
   tryParseInstanceAt,
@@ -417,5 +418,30 @@ describe('binary-instance-decoder: unjoinedNames (ghost-name selection)', () => 
 
   it('returns the input unchanged when there are no names', () => {
     expect(unjoinedNames([], [{ bodyStart: 5 }] as unknown as DecodedInstance[])).toEqual([]);
+  });
+});
+
+// ── markUnreliableRefs: distrust an FP8 mediaRef shared by named siblings ─────
+describe('binary-instance-decoder: markUnreliableRefs', () => {
+  it('flags a mediaRef shared by 2+ named placements (FP8 misread)', () => {
+    const insts = [
+      { mediaRef: 1, instanceName: 'background' },
+      { mediaRef: 1, instanceName: 'icon' },
+      { mediaRef: 5, instanceName: 'solo' },
+    ] as unknown as DecodedInstance[];
+    const out = markUnreliableRefs(insts);
+    expect(out.find((i) => i.instanceName === 'background')?.unreliableRef).toBe(true);
+    expect(out.find((i) => i.instanceName === 'icon')?.unreliableRef).toBe(true);
+    // A ref used by a single named placement is trusted (e.g. btnstrob's scene instance).
+    expect(out.find((i) => i.instanceName === 'solo')?.unreliableRef).toBeUndefined();
+  });
+
+  it('does not flag unnamed repeated copies of the same symbol', () => {
+    const insts = [
+      { mediaRef: 7, instanceName: '' },
+      { mediaRef: 7, instanceName: '' },
+      { mediaRef: 1, instanceName: 'only' },
+    ] as unknown as DecodedInstance[];
+    expect(markUnreliableRefs(insts).some((i) => i.unreliableRef)).toBe(false);
   });
 });

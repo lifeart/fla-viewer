@@ -60,6 +60,7 @@ import {
   attachInstanceNames,
   dedupeInstances,
   instanceSymbolType,
+  markUnreliableRefs,
   scanForInstances,
   scanNamedInstances,
   unjoinedNames,
@@ -428,7 +429,9 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
       }
       const named = scanNamedInstances(streamData);
       if (named.length > 0) sceneNamed.set(pageNum, named);
-      const insts = attachInstanceNames(scanForInstances(streamData), named);
+      const insts = markUnreliableRefs(
+        attachInstanceNames(scanForInstances(streamData), named)
+      );
       const deduped = dedupeInstances(insts);
       if (deduped.length > 0) sceneInstances.set(pageNum, deduped);
       // Attribution uses the UN-deduped placements (deduping would discard the
@@ -452,7 +455,9 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
       }
       const named = scanNamedInstances(streamData);
       if (named.length > 0) symbolNamed.set(symNum, named);
-      const insts = attachInstanceNames(scanForInstances(streamData), named);
+      const insts = markUnreliableRefs(
+        attachInstanceNames(scanForInstances(streamData), named)
+      );
       const deduped = dedupeInstances(insts);
       if (deduped.length > 0) symbolInstances.set(symNum, deduped);
       const tl = decodeStreamTimeline(streamData);
@@ -514,6 +519,20 @@ function buildSymbolInstance(
   inst: DecodedInstance,
   libraryByNumber: Map<number, BinaryLibraryEntry>
 ): SymbolInstance | null {
+  // An FP8 placement mis-decodes its mediaRef (see markUnreliableRefs), so emit
+  // the named child WITHOUT a libraryItemName — the consumer types it MovieClip
+  // (or the placement-class kind) instead of inheriting a wrong class.
+  if (inst.unreliableRef) {
+    return {
+      type: 'symbol',
+      libraryItemName: '',
+      ...(inst.instanceName && { name: inst.instanceName }),
+      symbolType: instanceSymbolType(inst.className),
+      matrix: inst.matrix,
+      transformationPoint: { x: 0, y: 0 },
+      loop: 'play once',
+    };
+  }
   const entry = libraryByNumber.get(inst.mediaRef);
   if (!entry) return null;
   // Prefer the library item's real kind; when the library type is unknown,
