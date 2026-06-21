@@ -73,7 +73,7 @@ import {
   type DecodedFrameScript,
   type DecodedStreamTimeline,
 } from './binary-timeline-decoder';
-import { extractLinkage } from './binary-linkage-decoder';
+import { extractLinkage, joinLinkageToSymbolNumbers } from './binary-linkage-decoder';
 import type {
   BinaryLinkage,
   FLADocument,
@@ -114,6 +114,14 @@ export interface BinaryFLAInfo {
    * consumer that owns the SWF join.
    */
   linkage: BinaryLinkage[];
+  /**
+   * Per-symbol resolution of {@link linkage}: `symbolNumber → linkage record`,
+   * joined via the u32 the library-item record writes after the item name (see
+   * {@link joinLinkageToSymbolNumbers}). Lets the parser set per-symbol
+   * `linkageClassName` directly — the binary path then matches the XFL shape with
+   * no SWF. Imported/shared classes with no local symbol stream are absent.
+   */
+  linkageBySymbol: Map<number, BinaryLinkage>;
   /** True when stage dimensions came from publish settings (else defaults). */
   dimensionsFromPublishSettings: boolean;
   /**
@@ -456,6 +464,15 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
   }
   scenes.sort((a, b) => a.scene - b.scene);
 
+  // Join the linkage table to library symbol NUMBERS so the parser can set
+  // per-symbol linkageClassName (the binary path then matches the XFL shape).
+  const symbolNumbers = new Set<number>();
+  for (const name of streams) {
+    const n = parseSymbolStreamNumber(name);
+    if (n !== null) symbolNumbers.add(n);
+  }
+  const linkageBySymbol = joinLinkageToSymbolNumbers(contents, linkage, symbolNumbers);
+
   return {
     // Flash's default stage is 550×400 @ 24fps on a white stage — apply these
     // as fallbacks when a value could not be recovered.
@@ -466,6 +483,7 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
     streams,
     library,
     linkage,
+    linkageBySymbol,
     dimensionsFromPublishSettings:
       dims.width !== undefined && dims.height !== undefined,
     scenes,
@@ -877,6 +895,21 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
     });
   }
 
+  // A symbol that a linkage record resolves to is a REAL library item (it has an
+  // AS class) even when we decoded no renderable content for it — synthesise an
+  // entry so its `linkageClassName` is still surfaced (the class is the point for
+  // tooling, not the geometry). This faithfully references the joined symbol
+  // number; nothing is fabricated.
+  for (const num of info.linkageBySymbol.keys()) {
+    if (!libraryByNumber.has(num)) {
+      libraryByNumber.set(num, {
+        symbolNumber: num,
+        name: `Symbol ${num}`,
+        symbolType: 'unknown',
+      });
+    }
+  }
+
   // Build one stream's viewer timeline: prefer confident per-frame attribution
   // (issue #8 timeline), else the existing single-frame fallback (#22/#24).
   const buildStreamTimeline = (
@@ -948,6 +981,15 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
       symbolType,
       timeline,
     };
+    // Apply the resolved AS linkage to this symbol — per-symbol class +
+    // identifier, exactly like the XFL path (Symbol.linkageClassName). The join
+    // is u32-by-symbol-number, so it sets the class on the right library item.
+    const link = info.linkageBySymbol.get(num);
+    if (link) {
+      symbol.linkageIdentifier = link.identifier;
+      symbol.linkageExportForAS = true;
+      if (link.className) symbol.linkageClassName = link.className;
+    }
     symbols.set(entry.name, symbol);
   }
 

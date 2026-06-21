@@ -113,3 +113,69 @@ export function extractLinkage(contents: Uint8Array): BinaryLinkage[] {
   }
   return out;
 }
+
+/**
+ * The library symbol NUMBER a linkage identifier binds to, or null.
+ *
+ * The library-item record writes the item's name as a Flash string immediately
+ * followed by a `u32` — the REAL symbol number (the `N` in the `S <N>` /
+ * `Symbol <N>` stream). This is NOT the "Symbol 1"/"Symbol 2" default edit-name
+ * string seen elsewhere (that is just the pre-rename display name). We take the
+ * FIRST occurrence of the identifier whose trailing 4 bytes are a `u32` (not
+ * another Flash-string header — that would be the linkage-TABLE record, where the
+ * separator string follows) AND whose value is an existing symbol stream number.
+ * Later occurrences (component-param references) can carry an unrelated u32, so
+ * first-match + the stream-number gate is what keeps the join 1:1.
+ */
+function symbolNumberFor(
+  contents: Uint8Array,
+  identifier: string,
+  symbolNumbers: Set<number>
+): number | null {
+  const len = identifier.length;
+  for (let p = 0; p + 4 + len * 2 + 4 <= contents.length; p++) {
+    if (contents[p] !== 0xff || contents[p + 1] !== 0xfe || contents[p + 2] !== 0xff || contents[p + 3] !== len) {
+      continue;
+    }
+    let ok = true;
+    for (let i = 0; i < len; i++) {
+      if ((contents[p + 4 + i * 2] | (contents[p + 4 + i * 2 + 1] << 8)) !== identifier.charCodeAt(i)) {
+        ok = false;
+        break;
+      }
+    }
+    if (!ok) continue;
+    const after = p + 4 + len * 2;
+    // A Flash-string header here means this is the linkage-table record (the
+    // separator/className strings follow), not the library-item record.
+    if (contents[after] === 0xff && contents[after + 1] === 0xfe && contents[after + 2] === 0xff) {
+      continue;
+    }
+    const val =
+      contents[after] | (contents[after + 1] << 8) | (contents[after + 2] << 16) | (contents[after + 3] * 0x1000000);
+    if (symbolNumbers.has(val)) return val;
+  }
+  return null;
+}
+
+/**
+ * Join each linkage record to its library Symbol number (see
+ * {@link symbolNumberFor}). Returns `symbolNumber → linkage record`, so the
+ * parser can set per-symbol `linkageClassName` directly — making the binary path
+ * match the XFL shape with no SWF and no consumer-side join. Records with no
+ * local symbol stream (imported/shared classes) are left unjoined (they stay in
+ * the document-level table only). The join is 1:1 (first writer wins on the rare
+ * chance two records resolve to the same number).
+ */
+export function joinLinkageToSymbolNumbers(
+  contents: Uint8Array,
+  linkage: BinaryLinkage[],
+  symbolNumbers: Set<number>
+): Map<number, BinaryLinkage> {
+  const out = new Map<number, BinaryLinkage>();
+  for (const rec of linkage) {
+    const num = symbolNumberFor(contents, rec.identifier, symbolNumbers);
+    if (num !== null && !out.has(num)) out.set(num, rec);
+  }
+  return out;
+}
