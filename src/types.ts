@@ -10,6 +10,34 @@ export interface FLADocument {
   bitmaps: Map<string, BitmapItem>;
   sounds: Map<string, SoundItem>;
   videos: Map<string, VideoItem>;
+  /**
+   * ActionScript linkage table for *binary* (pre-CS5) FLAs only — undefined for
+   * XFL, whose linkage lives per-symbol on `Symbol.linkageClassName`. A binary
+   * FLA cannot join a linkage record to a specific library symbol from its own
+   * bytes (the join is object-identity/SWF-based, not positional — see the
+   * binary parser docs), so the table is surfaced at document level for a
+   * consumer that owns the join (e.g. via the compiled SWF's registerClass map)
+   * to fingerprint each symbol's child instance names against and assign the
+   * class itself. Out of the verification extractor's `doc.binary` side-channel.
+   */
+  linkage?: BinaryLinkage[];
+}
+
+/**
+ * One ActionScript linkage record from a binary FLA's `Contents` table:
+ * an export identifier bound to an AS class.
+ */
+export interface BinaryLinkage {
+  /** Export/linkage identifier (e.g. attachMovie id). */
+  identifier: string;
+  /** Bound AS class path (may be empty when only an export id is set). */
+  className: string;
+  /**
+   * 'document' = the main-timeline/root class (bound to character 0); 'library'
+   * = a regular library symbol. Lets a resolver avoid mistaking the document
+   * class for a library symbol.
+   */
+  kind: 'document' | 'library';
 }
 
 export interface BitmapItem {

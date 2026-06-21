@@ -15,7 +15,9 @@ import {
   scanForInstances,
   scanNamedInstances,
   tryParseInstanceAt,
+  unjoinedNames,
   type DecodedInstance,
+  type NamedInstance,
 } from '../binary-instance-decoder';
 
 async function loadBtnstrob(): Promise<Uint8Array> {
@@ -340,7 +342,7 @@ describe('binary-instance-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () =>
     const named = scanNamedInstances(page1);
     expect(named.some((n) => n.name === 'mvcBtnStrobe' && n.bodyStart === raw[0].bodyStart)).toBe(true);
 
-    const enriched = attachInstanceNames(raw, page1);
+    const enriched = attachInstanceNames(raw, named);
     // The join only fills the name — count, order, geometry are unchanged.
     expect(enriched).toHaveLength(raw.length);
     expect(enriched[0].instanceName).toBe('mvcBtnStrobe');
@@ -354,6 +356,10 @@ describe('binary-instance-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () =>
 
     // The library still decodes its symbols (geometry PR).
     expect(doc.symbols.has('Symbol 1')).toBe(true);
+
+    // btnstrob carries no AS linkage table, so the optional document field is
+    // omitted (only populated for binary FLAs that actually have linkage records).
+    expect(doc.linkage).toBeUndefined();
 
     // The scene now carries a SymbolInstance referencing Symbol 1 — previously
     // the scene's frames were entirely empty.
@@ -390,5 +396,26 @@ describe('binary-instance-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () =>
     expect(hostLayer.layerType === 'guide' || hostLayer.layerType === 'folder').toBe(
       false
     );
+  });
+});
+
+// ── unjoinedNames: which recovered names become name-only "ghost" elements ───
+describe('binary-instance-decoder: unjoinedNames (ghost-name selection)', () => {
+  it('returns only names whose bodyStart matches no decoded placement', () => {
+    const named: NamedInstance[] = [
+      { name: 'joinedClip', type: 'symbol', symbolType: 'movieclip', bodyStart: 100 },
+      { name: 'ghostText', type: 'text', bodyStart: 200 },
+      { name: 'ghostButton', type: 'symbol', symbolType: 'button', bodyStart: 300 },
+    ];
+    // Two decoded placements; only bodyStart 100 overlaps a named entry.
+    const insts = [{ bodyStart: 100 }, { bodyStart: 999 }] as unknown as DecodedInstance[];
+    const ghosts = unjoinedNames(named, insts);
+    expect(ghosts.map((g) => g.name)).toEqual(['ghostText', 'ghostButton']);
+    // The joined name is excluded (it rides on its decoded placement instead).
+    expect(ghosts.some((g) => g.name === 'joinedClip')).toBe(false);
+  });
+
+  it('returns the input unchanged when there are no names', () => {
+    expect(unjoinedNames([], [{ bodyStart: 5 }] as unknown as DecodedInstance[])).toEqual([]);
   });
 });

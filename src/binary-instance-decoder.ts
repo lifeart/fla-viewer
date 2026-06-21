@@ -414,7 +414,9 @@ export function dedupeInstances(insts: DecodedInstance[]): DecodedInstance[] {
 
 /**
  * Fill in MISSING instance names on decoded placements using the higher-recall
- * name scanner ({@link scanNamedInstances}).
+ * names from {@link scanNamedInstances} (pre-scanned by the caller and passed in
+ * as `named`, so the stream is scanned once and the same list also drives the
+ * unjoined-name "ghost" elements).
  *
  * `scanForInstances` reads each placement's instance name from a fixed
  * structural offset, which the version-specific `field_90` layout often makes it
@@ -429,11 +431,13 @@ export function dedupeInstances(insts: DecodedInstance[]): DecodedInstance[] {
  */
 export function attachInstanceNames(
   insts: DecodedInstance[],
-  data: Uint8Array
+  named: NamedInstance[]
 ): DecodedInstance[] {
-  if (insts.length === 0 || !insts.some((i) => !i.instanceName)) return insts;
+  if (insts.length === 0 || named.length === 0 || !insts.some((i) => !i.instanceName)) {
+    return insts;
+  }
   const nameAt = new Map<number, string>();
-  for (const n of scanNamedInstances(data)) {
+  for (const n of named) {
     if (!nameAt.has(n.bodyStart)) nameAt.set(n.bodyStart, n.name);
   }
   if (nameAt.size === 0) return insts;
@@ -442,6 +446,23 @@ export function attachInstanceNames(
     const name = nameAt.get(inst.bodyStart);
     return name ? { ...inst, instanceName: name } : inst;
   });
+}
+
+/**
+ * The named instances that {@link attachInstanceNames} could NOT attach to a
+ * decoded placement — i.e. names whose `bodyStart` matches no entry in `insts`.
+ * These are FP8 placements (mostly text fields) that {@link scanForInstances}
+ * does not geometry-decode, so there is no placement to carry their name. A
+ * caller surfaces them as name-only "ghost" timeline elements (real name + kind,
+ * no geometry) so their instance names still reach the timeline for tooling.
+ */
+export function unjoinedNames(
+  named: NamedInstance[],
+  insts: DecodedInstance[]
+): NamedInstance[] {
+  if (named.length === 0) return named;
+  const placed = new Set(insts.map((i) => i.bodyStart));
+  return named.filter((n) => !placed.has(n.bodyStart));
 }
 
 /** A named placement recovered from a stream (instance name + kind only). */
