@@ -400,7 +400,13 @@ export class FLAParser {
       const symbolDoc = this.parser.parseFromString(symbolXml, 'text/xml');
       const symbolRoot = symbolDoc.documentElement;
 
-      if (symbolRoot.tagName === 'DOMSymbolItem') {
+      // A Component Inspector / SWC component lives in the library as a COMPILED
+      // CLIP — a <DOMCompiledClipItem>, not a <DOMSymbolItem>. It still carries
+      // name + linkageClassName (the registerClass'd AS class), so a stage
+      // instance referencing it can be typed. Load it the same way; without it
+      // the symbol is absent from doc.symbols and the instance can't be typed.
+      const isCompiledClip = symbolRoot.tagName === 'DOMCompiledClipItem';
+      if (symbolRoot.tagName === 'DOMSymbolItem' || isCompiledClip) {
         const rawName = symbolRoot.getAttribute('name') || filename.replace('.xml', '');
         const name = normalizePath(rawName);
 
@@ -408,7 +414,8 @@ export class FLAParser {
         if (hasWithNormalizedPath(this.symbolCache, rawName)) return;
 
         const itemID = symbolRoot.getAttribute('itemID') || '';
-        const symbolType = (symbolRoot.getAttribute('symbolType') || 'graphic') as 'graphic' | 'movieclip' | 'button';
+        // Compiled clips are movie clips; they carry no symbolType attribute.
+        const symbolType = (symbolRoot.getAttribute('symbolType') || (isCompiledClip ? 'movieclip' : 'graphic')) as 'graphic' | 'movieclip' | 'button';
 
         // ActionScript linkage (Export for ActionScript). Used by tooling to map
         // a library symbol to its AS class / attachMovie identifier.
