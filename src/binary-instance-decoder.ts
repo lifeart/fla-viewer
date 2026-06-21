@@ -121,6 +121,32 @@ export interface DecodedInstance {
   bodyStart: number;
   /** Byte offset just past the body. */
   endPos: number;
+  /**
+   * The u32 at `bodyStart + 72` — the REAL library symbol number for an FP8
+   * (float32-matrix) placement, which {@link tryParseInstanceAt}'s 16.16 reader
+   * mis-reads as the constant `mediaRef`. The parser prefers this (validated
+   * against the actual symbol-stream numbers) for FP8 placements so a container
+   * instance keeps the correct `libraryItemName`. Verified against the linkage
+   * ground truth (e.g. favoritesmenu `Entry0..6` → S8 = FavoritesListEntry,
+   * `btnAll` → S169 = AllButton). 0 when out of range. See memory.
+   */
+  altMediaRef: number;
+  /**
+   * Set when {@link correctFp8Refs} replaced `mediaRef` with the validated
+   * `altMediaRef` (an actual symbol-stream number). A corrected ref is trusted —
+   * {@link markUnreliableRefs} never flags it, so legitimately-repeated instances
+   * (e.g. a list's `Entry0..6`, all the same renderer symbol) keep their shared
+   * reference instead of being mistaken for the FP8 misread.
+   */
+  refCorrected?: boolean;
+  /**
+   * Set when this placement's `mediaRef` can't be trusted — an FP8 placement
+   * mis-decodes the library reference (it lands on a constant), so when several
+   * NAMED siblings share one ref it cannot be the real symbol. The parser then
+   * emits the named child WITHOUT a libraryItemName instead of inheriting a wrong
+   * class. See {@link markUnreliableRefs}.
+   */
+  unreliableRef?: boolean;
 }
 
 /** Read a 6-u32 affine matrix (a,b,c,d 16.16 FP; tx,ty twips → px). */
@@ -220,6 +246,15 @@ export function tryParseInstanceAt(
     const mediaRef = r.u32();
     if (mediaRef < 1 || mediaRef > MAX_MEDIA_REF) return null;
 
+    // The real symbol number for an FP8 placement sits at a fixed offset from the
+    // body start (the 16.16 reader above mis-reads `mediaRef`). Read it raw; the
+    // parser validates it against the actual symbol-stream numbers.
+    const a = bodyStart + 72;
+    const altMediaRef =
+      a + 4 <= data.length
+        ? data[a] | (data[a + 1] << 8) | (data[a + 2] << 16) | data[a + 3] * 0x1000000
+        : 0;
+
     return {
       className,
       mediaRef,
@@ -228,6 +263,7 @@ export function tryParseInstanceAt(
       recoveredVia,
       bodyStart,
       endPos: r.pos,
+      altMediaRef,
     };
   } catch (err) {
     if (err instanceof EndOfStreamError || err instanceof Error) return null;
@@ -408,6 +444,310 @@ export function dedupeInstances(insts: DecodedInstance[]): DecodedInstance[] {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(inst);
+  }
+  return out;
+}
+
+/**
+ * Fill in MISSING instance names on decoded placements using the higher-recall
+ * names from {@link scanNamedInstances} (pre-scanned by the caller and passed in
+ * as `named`, so the stream is scanned once and the same list also drives the
+ * unjoined-name "ghost" elements).
+ *
+ * `scanForInstances` reads each placement's instance name from a fixed
+ * structural offset, which the version-specific `field_90` layout often makes it
+ * read as empty even when the file does carry a name. `scanNamedInstances` finds
+ * those names robustly. Both scanners anchor a placement at the SAME `bodyStart`
+ * (the byte just past the placement's class tag), so a name is attached to a
+ * placement ONLY when their byte offsets match exactly. This never creates,
+ * drops, or reorders placements, and never overwrites a name the structural read
+ * already recovered — so callers' frame-content shape is unchanged; only an
+ * otherwise-empty `instanceName` becomes populated. Returns a new array; the
+ * input placements are not mutated.
+ */
+export function attachInstanceNames(
+  insts: DecodedInstance[],
+  named: NamedInstance[]
+): DecodedInstance[] {
+  if (insts.length === 0 || named.length === 0 || !insts.some((i) => !i.instanceName)) {
+    return insts;
+  }
+  const nameAt = new Map<number, string>();
+  for (const n of named) {
+    if (!nameAt.has(n.bodyStart)) nameAt.set(n.bodyStart, n.name);
+  }
+  if (nameAt.size === 0) return insts;
+  return insts.map((inst) => {
+    if (inst.instanceName) return inst;
+    const name = nameAt.get(inst.bodyStart);
+    return name ? { ...inst, instanceName: name } : inst;
+  });
+}
+
+/**
+ * The named instances that {@link attachInstanceNames} could NOT attach to a
+ * decoded placement — i.e. names whose `bodyStart` matches no entry in `insts`.
+ * These are FP8 placements (mostly text fields) that {@link scanForInstances}
+ * does not geometry-decode, so there is no placement to carry their name. A
+ * caller surfaces them as name-only "ghost" timeline elements (real name + kind,
+ * no geometry) so their instance names still reach the timeline for tooling.
+ */
+export function unjoinedNames(
+  named: NamedInstance[],
+  insts: DecodedInstance[]
+): NamedInstance[] {
+  if (named.length === 0) return named;
+  const placed = new Set(insts.map((i) => i.bodyStart));
+  return named.filter((n) => !placed.has(n.bodyStart));
+}
+
+/**
+ * Flag placements whose `mediaRef` can't be trusted. A placement using the FP8
+ * float32-matrix layout mis-decodes through {@link tryParseInstanceAt} (built for
+ * the 16.16/ASCII layout): its `mediaRef` field lands on a constant (observed:
+ * 1). The reliable signal for such a placement is its NAME (recovered by the
+ * byte-offset join), not its reference. So when 2+ NAMED placements in one stream
+ * share a single `mediaRef`, they cannot all be that one symbol — the ref is a
+ * misread and is flagged `unreliableRef`, so the parser emits those named
+ * children without a (wrong) `libraryItemName` rather than inheriting whatever
+ * symbol the constant resolves to (e.g. the document/root class). A lone named
+ * placement (e.g. a real scene instance) keeps its reference.
+ */
+/**
+ * Correct the mis-read `mediaRef` of FP8 (float32-matrix) placements. The 16.16
+ * reader in {@link tryParseInstanceAt} lands `mediaRef` on a constant for these,
+ * so a container instance would reference the wrong (often root) symbol. The real
+ * symbol number is `altMediaRef` (the u32 at `bodyStart + 72`).
+ *
+ * A placement is FP8 when its STRUCTURAL name read empty — the FP8 name lives in a
+ * `FF FE FF` field the 16.16 reader skips, so it reads `instanceName === ''`
+ * (whereas a 16.16 placement reads its real name there). For those we swap in
+ * `altMediaRef` when it is an actual symbol-stream number. Genuine 16.16
+ * placements keep their decoded `mediaRef`: either their structural name is
+ * non-empty, or their `altMediaRef` is out of range (e.g. btnstrob's `+72 = 0`).
+ *
+ * MUST run before {@link attachInstanceNames} (which fills `instanceName` from the
+ * byte-offset join and would defeat the empty-name FP8 test).
+ */
+export function correctFp8Refs(
+  insts: DecodedInstance[],
+  symbolNumbers: Set<number>
+): DecodedInstance[] {
+  return insts.map((i) =>
+    i.instanceName === '' && i.altMediaRef !== i.mediaRef && symbolNumbers.has(i.altMediaRef)
+      ? { ...i, mediaRef: i.altMediaRef, refCorrected: true }
+      : i
+  );
+}
+
+export function markUnreliableRefs(insts: DecodedInstance[]): DecodedInstance[] {
+  // A ref corrected by correctFp8Refs is validated (a real symbol number), so it
+  // is trusted even when shared by repeated instances — only the UN-corrected
+  // FP8 misreads (still the constant ref) are candidates for the shared-ref test.
+  const namedPerRef = new Map<number, number>();
+  for (const i of insts) {
+    if (i.instanceName && !i.refCorrected) {
+      namedPerRef.set(i.mediaRef, (namedPerRef.get(i.mediaRef) ?? 0) + 1);
+    }
+  }
+  return insts.map((i) =>
+    i.instanceName && !i.refCorrected && (namedPerRef.get(i.mediaRef) ?? 0) >= 2
+      ? { ...i, unreliableRef: true }
+      : i
+  );
+}
+
+/** A named placement recovered from a stream (instance name + kind only). */
+export interface NamedInstance {
+  /** Authoring instance name — the AS identifier on the timeline. */
+  name: string;
+  /** Element kind, from the placement class. */
+  type: 'symbol' | 'text';
+  /** For symbol instances, the symbol kind. */
+  symbolType?: 'movieclip' | 'button' | 'graphic';
+  /** Byte offset of the placement, to match a decoded geometry instance / frame. */
+  bodyStart: number;
+}
+
+/** Placement classes whose records carry an instance name (incl. CPicText). */
+const NAMED_PLACEMENT_CLASSES = ['CPicSprite', 'CPicButton', 'CPicShapeObj', 'CPicText'] as const;
+
+function placementKind(cls: string): Pick<NamedInstance, 'type' | 'symbolType'> {
+  switch (cls) {
+    case 'CPicText':
+      return { type: 'text' };
+    case 'CPicButton':
+      return { type: 'symbol', symbolType: 'button' };
+    case 'CPicShapeObj':
+      return { type: 'symbol', symbolType: 'graphic' };
+    case 'CPicSprite':
+    default:
+      return { type: 'symbol', symbolType: 'movieclip' };
+  }
+}
+
+const NAMED_INSTANCE_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Flash device-font aliases — these are font names, never instance names. */
+const DEVICE_FONTS = new Set(['_sans', '_serif', '_typewriter']);
+/**
+ * Tokens that aren't instance names but can be picked up by the heuristic name
+ * scan: button/clip frame-label state words (which live on CPicFrame records, not
+ * placements), boolean literal component-param values, and similar labels.
+ */
+const NON_INSTANCE = new Set([
+  // button/clip states
+  'Up', 'Over', 'Down', 'Hit', '_up', '_over', '_down', '_hit',
+  'Normal', 'Selected', 'Hover', 'Disabled', 'Off', 'On', 'Blink',
+  'up', 'over', 'down', 'hover', 'select', 'normal', 'selected', 'disabled', 'off', 'on',
+  // equip-state labels
+  'Equipped', 'Unequipped', 'LeftEquip', 'RightEquip', 'LeftAndRightEquip',
+  // meter labels
+  'Full', 'Empty',
+  // platform-art labels (siblings of PS3Art/XBoxArt)
+  'PCArt', 'XBoxArt', 'PS3Art', 'PS3_A', 'PS3_B', 'PS3_R3', 'PS3_L3',
+  // "none" labels and boolean-literal component-param values
+  'None', 'NONE', 'none', 'true', 'false',
+]);
+/** Embedded-font face names (e.g. TimesNewRomanPSMT, ArialMT) — never instances. */
+const FONT_NAME_RE = /MT$/;
+
+/** Whether a clean identifier string is a plausible instance name. */
+function isInstanceName(s: string, classRefs: Set<string>): boolean {
+  if (!NAMED_INSTANCE_RE.test(s)) return false;
+  if (s.startsWith('$') || DEVICE_FONTS.has(s) || FONT_NAME_RE.test(s)) return false; // fonts
+  if (classRefs.has(s) || NON_INSTANCE.has(s)) return false; // class refs / labels
+  return true;
+}
+
+/**
+ * The instance name within a placement body [start, end): the first identifier-
+ * like Flash string (`FF FE FF <u8 len> <UTF-16LE>`), excluding font tokens
+ * (`$…*`) and MFC class refs. Returns '' for an unnamed placement.
+ */
+function placementName(data: Uint8Array, start: number, end: number, classRefs: Set<string>): string {
+  for (let p = start; p + 4 <= end; p++) {
+    if (data[p] !== 0xff || data[p + 1] !== 0xfe || data[p + 2] !== 0xff) continue;
+    const len = data[p + 3];
+    if (len === 0 || len > 40 || p + 4 + len * 2 > end) continue;
+    let s = '';
+    let ok = true;
+    for (let i = 0; i < len; i++) {
+      const c = data[p + 4 + i * 2] | (data[p + 4 + i * 2 + 1] << 8);
+      if (c < 0x20 || c > 0x7e) { ok = false; break; }
+      s += String.fromCharCode(c);
+    }
+    p += 3 + len * 2;
+    if (!ok || !isInstanceName(s, classRefs)) continue;
+    return s;
+  }
+  return '';
+}
+
+/**
+ * Recover NAMED placements (instance name + kind) from one `Symbol N` / `Page N`
+ * stream. Complements {@link scanForInstances}, which decodes placement geometry
+ * (matrix + media_ref) for the older 16.16/ASCII format but rejects the FP8
+ * variant (float32 matrix + `FF FE FF` UTF-16 name) used by newer files — which
+ * drops the instance names a language tool needs.
+ *
+ * Locates each placement by its CArchive class tag (NEWCLASS declaration or
+ * 0x80NN back-reference) and reads the instance name from the placement body,
+ * skipping the version-specific matrix entirely. Unnamed placements are omitted.
+ */
+export function scanNamedInstances(data: Uint8Array): NamedInstance[] {
+  const combined = buildCombinedClassTable(data);
+  const classRefs = new Set(combined);
+  const named = new Set<string>(NAMED_PLACEMENT_CLASSES);
+
+  const starts: Array<{ pos: number; cls: string }> = [];
+
+  // 1) class-declaration recovery — the first placement of each class.
+  for (const cls of NAMED_PLACEMENT_CLASSES) {
+    const tail = classDeclTail(cls);
+    let from = 0;
+    for (;;) {
+      const m = indexOf(data, tail, from);
+      if (m < 0) break;
+      from = m + 1;
+      if (m < 4 || data[m - 4] !== 0xff || data[m - 3] !== 0xff) continue;
+      starts.push({ pos: m + tail.length, cls });
+    }
+  }
+
+  // 2) back-reference recovery — 0x80NN tag whose index resolves to a placement class.
+  const placementIndex = new Map<number, string>();
+  for (let k = 0; k < combined.length; k++) {
+    if (named.has(combined[k])) placementIndex.set(k + 1, combined[k]);
+  }
+  for (let i = 2; i < data.length - 2; i++) {
+    const tag = data[i - 2] | (data[i - 1] << 8);
+    if (!(tag & 0x8000)) continue;
+    const cls = placementIndex.get(tag & 0x7fff);
+    if (cls) starts.push({ pos: i, cls });
+  }
+
+  starts.sort((a, b) => a.pos - b.pos);
+
+  const out: NamedInstance[] = [];
+  const seen = new Set<string>();
+  for (let s = 0; s < starts.length; s++) {
+    const { pos, cls } = starts[s];
+    const end = s + 1 < starts.length ? starts[s + 1].pos : data.length;
+    const name = placementName(data, pos, end, classRefs);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ ...placementKind(cls), name, bodyStart: pos });
+  }
+
+  // 3) Text-field recovery. Class-index back-refs find the FIRST CPicText of a
+  //    stream; later text fields reference a prior CPicText OBJECT by a high MFC
+  //    load-array index (e.g. 0x8083), which the class-index filter misses — so
+  //    their names get swallowed into a preceding sprite's range. A text field
+  //    references a font (`$…*` or a device font) immediately before its instance
+  //    name, so recover the name as the next identifier after each font token.
+  for (let p = 0; p + 4 <= data.length; p++) {
+    if (data[p] !== 0xff || data[p + 1] !== 0xfe || data[p + 2] !== 0xff) continue;
+    const len = data[p + 3];
+    if (len === 0 || len > 40 || p + 4 + len * 2 > data.length) continue;
+    let f = '';
+    let ok = true;
+    for (let i = 0; i < len; i++) {
+      const c = data[p + 4 + i * 2] | (data[p + 4 + i * 2 + 1] << 8);
+      if (c < 0x20 || c > 0x7e) { ok = false; break; }
+      f += String.fromCharCode(c);
+    }
+    p += 3 + len * 2;
+    if (!ok || !(f.startsWith('$') || DEVICE_FONTS.has(f))) continue;
+    // The name is the next identifier within the same text record (bounded window).
+    const name = placementName(data, p + 1, Math.min(data.length, p + 200), classRefs);
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      out.push({ type: 'text', name, bodyStart: p });
+    }
+  }
+
+  // 4) Name-field recovery. A CPicSymbol instance name is serialized as an EMPTY
+  //    Flash string immediately followed by the name Flash string
+  //    (FF FE FF 00 · FF FE FF <name>). Catches sprite/button placements whose
+  //    object-index back-ref start wasn't detected (e.g. prevBtn, a sibling of an
+  //    already-found nextBtn). Only ADDS missed names (existing ones are deduped).
+  for (let p = 0; p + 8 <= data.length; p++) {
+    if (data[p] !== 0xff || data[p + 1] !== 0xfe || data[p + 2] !== 0xff || data[p + 3] !== 0x00) continue;
+    const q = p + 4;
+    if (data[q] !== 0xff || data[q + 1] !== 0xfe || data[q + 2] !== 0xff) continue;
+    const len = data[q + 3];
+    if (len === 0 || len > 40 || q + 4 + len * 2 > data.length) continue;
+    let s = '';
+    let ok = true;
+    for (let i = 0; i < len; i++) {
+      const c = data[q + 4 + i * 2] | (data[q + 4 + i * 2 + 1] << 8);
+      if (c < 0x20 || c > 0x7e) { ok = false; break; }
+      s += String.fromCharCode(c);
+    }
+    p = q + 3 + len * 2;
+    if (!ok || seen.has(s) || !isInstanceName(s, classRefs)) continue;
+    seen.add(s);
+    out.push({ type: 'symbol', symbolType: 'movieclip', name: s, bodyStart: p });
   }
   return out;
 }

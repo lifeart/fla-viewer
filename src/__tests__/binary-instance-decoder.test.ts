@@ -8,12 +8,18 @@ import btnstrobUrl from './fixtures/btnstrob.fla?url';
 import { OLE2File } from '../ole2-reader';
 import { parseBinaryFLA } from '../binary-fla-parser';
 import {
+  attachInstanceNames,
   buildCombinedClassTable,
+  correctFp8Refs,
   dedupeInstances,
   instanceSymbolType,
+  markUnreliableRefs,
   scanForInstances,
+  scanNamedInstances,
   tryParseInstanceAt,
+  unjoinedNames,
   type DecodedInstance,
+  type NamedInstance,
 } from '../binary-instance-decoder';
 
 async function loadBtnstrob(): Promise<Uint8Array> {
@@ -277,6 +283,7 @@ describe('binary-instance-decoder: dedupeInstances', () => {
       recoveredVia: 'backref',
       bodyStart: 0,
       endPos: 0,
+      altMediaRef: 0,
     };
     const m = (tx: number): DecodedInstance['matrix'] => ({
       a: 1,
@@ -328,12 +335,34 @@ describe('binary-instance-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () =>
     });
   });
 
+  it('attaches the instance name to the placement by byte offset (no new placements)', async () => {
+    const bytes = await loadBtnstrob();
+    const page1 = new OLE2File(bytes).readStream('Page 1');
+    const raw = scanForInstances(page1);
+    // The structural read leaves the placement name empty for this file…
+    expect(raw[0].instanceName).toBe('');
+    // …and the name scanner finds it at the SAME body offset.
+    const named = scanNamedInstances(page1);
+    expect(named.some((n) => n.name === 'mvcBtnStrobe' && n.bodyStart === raw[0].bodyStart)).toBe(true);
+
+    const enriched = attachInstanceNames(raw, named);
+    // The join only fills the name — count, order, geometry are unchanged.
+    expect(enriched).toHaveLength(raw.length);
+    expect(enriched[0].instanceName).toBe('mvcBtnStrobe');
+    expect(enriched[0].mediaRef).toBe(raw[0].mediaRef);
+    expect(enriched[0].matrix).toEqual(raw[0].matrix);
+  });
+
   it('parseBinaryFLA composites Symbol 1 onto the scene (was empty)', async () => {
     const bytes = await loadBtnstrob();
     const doc = parseBinaryFLA(bytes);
 
     // The library still decodes its symbols (geometry PR).
     expect(doc.symbols.has('Symbol 1')).toBe(true);
+
+    // btnstrob carries no AS linkage table, so the optional document field is
+    // omitted (only populated for binary FLAs that actually have linkage records).
+    expect(doc.linkage).toBeUndefined();
 
     // The scene now carries a SymbolInstance referencing Symbol 1 — previously
     // the scene's frames were entirely empty.
@@ -347,6 +376,9 @@ describe('binary-instance-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () =>
     expect(placed.type).toBe('symbol');
     if (placed.type === 'symbol') {
       expect(placed.libraryItemName).toBe('Symbol 1');
+      // The placement's authoring instance name is folded in by byte offset from
+      // the higher-recall name scanner (the structural read leaves it empty here).
+      expect(placed.name).toBe('mvcBtnStrobe');
       expect(placed.matrix.tx).toBe(300);
       expect(placed.matrix.ty).toBe(150);
       // The referenced symbol exists and carries the green square geometry.
@@ -367,5 +399,83 @@ describe('binary-instance-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () =>
     expect(hostLayer.layerType === 'guide' || hostLayer.layerType === 'folder').toBe(
       false
     );
+  });
+});
+
+// ── unjoinedNames: which recovered names become name-only "ghost" elements ───
+describe('binary-instance-decoder: unjoinedNames (ghost-name selection)', () => {
+  it('returns only names whose bodyStart matches no decoded placement', () => {
+    const named: NamedInstance[] = [
+      { name: 'joinedClip', type: 'symbol', symbolType: 'movieclip', bodyStart: 100 },
+      { name: 'ghostText', type: 'text', bodyStart: 200 },
+      { name: 'ghostButton', type: 'symbol', symbolType: 'button', bodyStart: 300 },
+    ];
+    // Two decoded placements; only bodyStart 100 overlaps a named entry.
+    const insts = [{ bodyStart: 100 }, { bodyStart: 999 }] as unknown as DecodedInstance[];
+    const ghosts = unjoinedNames(named, insts);
+    expect(ghosts.map((g) => g.name)).toEqual(['ghostText', 'ghostButton']);
+    // The joined name is excluded (it rides on its decoded placement instead).
+    expect(ghosts.some((g) => g.name === 'joinedClip')).toBe(false);
+  });
+
+  it('returns the input unchanged when there are no names', () => {
+    expect(unjoinedNames([], [{ bodyStart: 5 }] as unknown as DecodedInstance[])).toEqual([]);
+  });
+});
+
+// ── markUnreliableRefs: distrust an FP8 mediaRef shared by named siblings ─────
+describe('binary-instance-decoder: markUnreliableRefs', () => {
+  it('flags a mediaRef shared by 2+ named placements (FP8 misread)', () => {
+    const insts = [
+      { mediaRef: 1, instanceName: 'background' },
+      { mediaRef: 1, instanceName: 'icon' },
+      { mediaRef: 5, instanceName: 'solo' },
+    ] as unknown as DecodedInstance[];
+    const out = markUnreliableRefs(insts);
+    expect(out.find((i) => i.instanceName === 'background')?.unreliableRef).toBe(true);
+    expect(out.find((i) => i.instanceName === 'icon')?.unreliableRef).toBe(true);
+    // A ref used by a single named placement is trusted (e.g. btnstrob's scene instance).
+    expect(out.find((i) => i.instanceName === 'solo')?.unreliableRef).toBeUndefined();
+  });
+
+  it('does not flag unnamed repeated copies of the same symbol', () => {
+    const insts = [
+      { mediaRef: 7, instanceName: '' },
+      { mediaRef: 7, instanceName: '' },
+      { mediaRef: 1, instanceName: 'only' },
+    ] as unknown as DecodedInstance[];
+    expect(markUnreliableRefs(insts).some((i) => i.unreliableRef)).toBe(false);
+  });
+
+  it('trusts a corrected (refCorrected) shared ref — repeated list entries keep it', () => {
+    // Entry0..2 all legitimately reference the same renderer symbol after the FP8
+    // mediaRef was corrected; they must NOT be mistaken for the misread.
+    const insts = [
+      { mediaRef: 8, instanceName: 'Entry0', refCorrected: true },
+      { mediaRef: 8, instanceName: 'Entry1', refCorrected: true },
+      { mediaRef: 8, instanceName: 'Entry2', refCorrected: true },
+    ] as unknown as DecodedInstance[];
+    expect(markUnreliableRefs(insts).some((i) => i.unreliableRef)).toBe(false);
+  });
+});
+
+// ── correctFp8Refs: recover the real FP8 placement mediaRef from +72 ──────────
+describe('binary-instance-decoder: correctFp8Refs', () => {
+  it('swaps in altMediaRef for an FP8 placement when it is a real symbol number', () => {
+    const insts = [
+      // FP8: structural name empty, alt is a real symbol → corrected.
+      { instanceName: '', mediaRef: 1, altMediaRef: 8 },
+      // alt is not a real symbol stream → keep the (misread) ref, not corrected.
+      { instanceName: '', mediaRef: 1, altMediaRef: 999 },
+      // 16.16: structural name present → never touched.
+      { instanceName: 'realName', mediaRef: 5, altMediaRef: 8 },
+    ] as unknown as DecodedInstance[];
+    const out = correctFp8Refs(insts, new Set([8, 46]));
+    expect(out[0].mediaRef).toBe(8);
+    expect(out[0].refCorrected).toBe(true);
+    expect(out[1].mediaRef).toBe(1);
+    expect(out[1].refCorrected).toBeUndefined();
+    expect(out[2].mediaRef).toBe(5);
+    expect(out[2].refCorrected).toBeUndefined();
   });
 });

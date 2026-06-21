@@ -1,6 +1,7 @@
 node_modules/
 sample/
 dist/
+scripts/.inspect-bundle.mjs
 coverage/
 src/__tests__/__screenshots__/
 .env

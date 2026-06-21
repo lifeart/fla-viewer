@@ -10,6 +10,35 @@ export interface FLADocument {
   bitmaps: Map<string, BitmapItem>;
   sounds: Map<string, SoundItem>;
   videos: Map<string, VideoItem>;
+  /**
+   * The full ActionScript linkage table for *binary* (pre-CS5) FLAs only —
+   * undefined for XFL, whose linkage lives per-symbol on
+   * `Symbol.linkageClassName`. Most records are ALSO resolved onto their library
+   * symbol's `Symbol.linkageClassName` (the binary path joins each record to its
+   * Symbol number via the u32 the library-item record writes after the item
+   * name — see the binary linkage decoder), so a consumer reading per-symbol
+   * linkage works the same for binary and XFL. This document-level table is kept
+   * for the records that have no local symbol stream (imported/shared classes)
+   * and the document/root class. Out of the extractor's `doc.binary` side-channel.
+   */
+  linkage?: BinaryLinkage[];
+}
+
+/**
+ * One ActionScript linkage record from a binary FLA's `Contents` table:
+ * an export identifier bound to an AS class.
+ */
+export interface BinaryLinkage {
+  /** Export/linkage identifier (e.g. attachMovie id). */
+  identifier: string;
+  /** Bound AS class path (may be empty when only an export id is set). */
+  className: string;
+  /**
+   * 'document' = the main-timeline/root class (bound to character 0); 'library'
+   * = a regular library symbol. Lets a resolver avoid mistaking the document
+   * class for a library symbol.
+   */
+  kind: 'document' | 'library';
 }
 
 export interface BitmapItem {
@@ -99,6 +128,14 @@ export interface Frame {
   morphShape?: MorphShape; // For shape tweens
   label?: string; // Frame label name
   labelType?: 'name' | 'comment' | 'anchor'; // Type of frame label
+  /**
+   * Raw ActionScript source attached to this keyframe (the frame action). XFL:
+   * `<DOMFrame><Actionscript><script>`; binary: the frame's DoAction-equivalent
+   * source block. Captured for tooling (AS code intelligence); the renderer does
+   * not execute it. Instance-level `on()`/`onClipEvent()` handlers live on the
+   * instance, not here.
+   */
+  actionScript?: string;
   // Motion tween properties
   motionTweenRotate?: 'cw' | 'ccw' | 'none'; // Rotation direction
   motionTweenRotateTimes?: number; // Number of full rotations
@@ -167,10 +204,27 @@ export type BlendMode =
   | 'alpha'
   | 'erase';
 
+/**
+ * A single author-time component parameter (<PD> element under <persistentData>).
+ * `type` is the raw XFL persistent-data type code (e.g. "0"=string/number).
+ */
+export interface ComponentParameter {
+  name: string;
+  value: string;
+  type?: string;
+}
+
 export interface SymbolInstance {
   type: 'symbol';
   libraryItemName: string;
   symbolType: 'graphic' | 'movieclip' | 'button';
+  /**
+   * Instance name set in the Properties panel — the identifier ActionScript
+   * uses to reference this object on the timeline (e.g. `myClip._x`). Absent for
+   * unnamed instances. Captured for tooling (e.g. code completion); the renderer
+   * does not use it.
+   */
+  name?: string;
   matrix: Matrix;
   transformationPoint: Point;
   centerPoint3D?: Point; // 3D transformation center point
@@ -181,6 +235,13 @@ export interface SymbolInstance {
   filters?: Filter[];
   blendMode?: BlendMode;
   isVisible?: boolean; // Instance visibility (default true)
+  /**
+   * Component (Component Inspector) parameters set at author time, read from
+   * <persistentData><PD .../></persistentData> on the instance. Present only for
+   * component instances. Captured for tooling (author-time property validation);
+   * the renderer does not use it.
+   */
+  componentParameters?: ComponentParameter[];
   // 3D transform properties
   rotationX?: number; // 3D rotation around X-axis (degrees)
   rotationY?: number; // 3D rotation around Y-axis (degrees)
@@ -205,6 +266,14 @@ export interface BitmapInstance {
 
 export interface TextInstance {
   type: 'text';
+  /**
+   * Instance name of a dynamic/input text field — the AS identifier used to
+   * reference it (e.g. `label_tf.text`). Absent for static text. Captured for
+   * tooling; the renderer does not use it.
+   */
+  name?: string;
+  /** Which kind of text field: static (no script access), dynamic, or input. */
+  textType?: 'static' | 'dynamic' | 'input';
   matrix: Matrix;
   left: number;
   width: number;
@@ -338,6 +407,13 @@ export interface Symbol {
   // Button-specific: frame index containing the hit area (typically frame 4)
   // The hit area defines the clickable region and is never rendered
   hitAreaFrame?: number;
+  // ActionScript linkage (Properties panel > "Export for ActionScript"). Read
+  // from <DOMSymbolItem>. Captured for tooling (resolving instances to their AS
+  // class); the renderer does not use these.
+  linkageExportForAS?: boolean; // linkageExportForAS="true"
+  linkageClassName?: string; // AS class path, e.g. "skyui.components.ItemCard"
+  linkageIdentifier?: string; // export id used by attachMovie("ItemCard", ...)
+  linkageBaseClass?: string; // declared base class, when present
 }
 
 export interface Rectangle {
