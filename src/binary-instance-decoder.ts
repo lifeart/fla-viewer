@@ -122,6 +122,24 @@ export interface DecodedInstance {
   /** Byte offset just past the body. */
   endPos: number;
   /**
+   * The u32 at `bodyStart + 72` — the REAL library symbol number for an FP8
+   * (float32-matrix) placement, which {@link tryParseInstanceAt}'s 16.16 reader
+   * mis-reads as the constant `mediaRef`. The parser prefers this (validated
+   * against the actual symbol-stream numbers) for FP8 placements so a container
+   * instance keeps the correct `libraryItemName`. Verified against the linkage
+   * ground truth (e.g. favoritesmenu `Entry0..6` → S8 = FavoritesListEntry,
+   * `btnAll` → S169 = AllButton). 0 when out of range. See memory.
+   */
+  altMediaRef: number;
+  /**
+   * Set when {@link correctFp8Refs} replaced `mediaRef` with the validated
+   * `altMediaRef` (an actual symbol-stream number). A corrected ref is trusted —
+   * {@link markUnreliableRefs} never flags it, so legitimately-repeated instances
+   * (e.g. a list's `Entry0..6`, all the same renderer symbol) keep their shared
+   * reference instead of being mistaken for the FP8 misread.
+   */
+  refCorrected?: boolean;
+  /**
    * Set when this placement's `mediaRef` can't be trusted — an FP8 placement
    * mis-decodes the library reference (it lands on a constant), so when several
    * NAMED siblings share one ref it cannot be the real symbol. The parser then
@@ -228,6 +246,15 @@ export function tryParseInstanceAt(
     const mediaRef = r.u32();
     if (mediaRef < 1 || mediaRef > MAX_MEDIA_REF) return null;
 
+    // The real symbol number for an FP8 placement sits at a fixed offset from the
+    // body start (the 16.16 reader above mis-reads `mediaRef`). Read it raw; the
+    // parser validates it against the actual symbol-stream numbers.
+    const a = bodyStart + 72;
+    const altMediaRef =
+      a + 4 <= data.length
+        ? data[a] | (data[a + 1] << 8) | (data[a + 2] << 16) | data[a + 3] * 0x1000000
+        : 0;
+
     return {
       className,
       mediaRef,
@@ -236,6 +263,7 @@ export function tryParseInstanceAt(
       recoveredVia,
       bodyStart,
       endPos: r.pos,
+      altMediaRef,
     };
   } catch (err) {
     if (err instanceof EndOfStreamError || err instanceof Error) return null;
@@ -485,13 +513,45 @@ export function unjoinedNames(
  * symbol the constant resolves to (e.g. the document/root class). A lone named
  * placement (e.g. a real scene instance) keeps its reference.
  */
+/**
+ * Correct the mis-read `mediaRef` of FP8 (float32-matrix) placements. The 16.16
+ * reader in {@link tryParseInstanceAt} lands `mediaRef` on a constant for these,
+ * so a container instance would reference the wrong (often root) symbol. The real
+ * symbol number is `altMediaRef` (the u32 at `bodyStart + 72`).
+ *
+ * A placement is FP8 when its STRUCTURAL name read empty — the FP8 name lives in a
+ * `FF FE FF` field the 16.16 reader skips, so it reads `instanceName === ''`
+ * (whereas a 16.16 placement reads its real name there). For those we swap in
+ * `altMediaRef` when it is an actual symbol-stream number. Genuine 16.16
+ * placements keep their decoded `mediaRef`: either their structural name is
+ * non-empty, or their `altMediaRef` is out of range (e.g. btnstrob's `+72 = 0`).
+ *
+ * MUST run before {@link attachInstanceNames} (which fills `instanceName` from the
+ * byte-offset join and would defeat the empty-name FP8 test).
+ */
+export function correctFp8Refs(
+  insts: DecodedInstance[],
+  symbolNumbers: Set<number>
+): DecodedInstance[] {
+  return insts.map((i) =>
+    i.instanceName === '' && i.altMediaRef !== i.mediaRef && symbolNumbers.has(i.altMediaRef)
+      ? { ...i, mediaRef: i.altMediaRef, refCorrected: true }
+      : i
+  );
+}
+
 export function markUnreliableRefs(insts: DecodedInstance[]): DecodedInstance[] {
+  // A ref corrected by correctFp8Refs is validated (a real symbol number), so it
+  // is trusted even when shared by repeated instances — only the UN-corrected
+  // FP8 misreads (still the constant ref) are candidates for the shared-ref test.
   const namedPerRef = new Map<number, number>();
   for (const i of insts) {
-    if (i.instanceName) namedPerRef.set(i.mediaRef, (namedPerRef.get(i.mediaRef) ?? 0) + 1);
+    if (i.instanceName && !i.refCorrected) {
+      namedPerRef.set(i.mediaRef, (namedPerRef.get(i.mediaRef) ?? 0) + 1);
+    }
   }
   return insts.map((i) =>
-    i.instanceName && (namedPerRef.get(i.mediaRef) ?? 0) >= 2
+    i.instanceName && !i.refCorrected && (namedPerRef.get(i.mediaRef) ?? 0) >= 2
       ? { ...i, unreliableRef: true }
       : i
   );

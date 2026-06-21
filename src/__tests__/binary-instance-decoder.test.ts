@@ -10,6 +10,7 @@ import { parseBinaryFLA } from '../binary-fla-parser';
 import {
   attachInstanceNames,
   buildCombinedClassTable,
+  correctFp8Refs,
   dedupeInstances,
   instanceSymbolType,
   markUnreliableRefs,
@@ -282,6 +283,7 @@ describe('binary-instance-decoder: dedupeInstances', () => {
       recoveredVia: 'backref',
       bodyStart: 0,
       endPos: 0,
+      altMediaRef: 0,
     };
     const m = (tx: number): DecodedInstance['matrix'] => ({
       a: 1,
@@ -443,5 +445,37 @@ describe('binary-instance-decoder: markUnreliableRefs', () => {
       { mediaRef: 1, instanceName: 'only' },
     ] as unknown as DecodedInstance[];
     expect(markUnreliableRefs(insts).some((i) => i.unreliableRef)).toBe(false);
+  });
+
+  it('trusts a corrected (refCorrected) shared ref — repeated list entries keep it', () => {
+    // Entry0..2 all legitimately reference the same renderer symbol after the FP8
+    // mediaRef was corrected; they must NOT be mistaken for the misread.
+    const insts = [
+      { mediaRef: 8, instanceName: 'Entry0', refCorrected: true },
+      { mediaRef: 8, instanceName: 'Entry1', refCorrected: true },
+      { mediaRef: 8, instanceName: 'Entry2', refCorrected: true },
+    ] as unknown as DecodedInstance[];
+    expect(markUnreliableRefs(insts).some((i) => i.unreliableRef)).toBe(false);
+  });
+});
+
+// ── correctFp8Refs: recover the real FP8 placement mediaRef from +72 ──────────
+describe('binary-instance-decoder: correctFp8Refs', () => {
+  it('swaps in altMediaRef for an FP8 placement when it is a real symbol number', () => {
+    const insts = [
+      // FP8: structural name empty, alt is a real symbol → corrected.
+      { instanceName: '', mediaRef: 1, altMediaRef: 8 },
+      // alt is not a real symbol stream → keep the (misread) ref, not corrected.
+      { instanceName: '', mediaRef: 1, altMediaRef: 999 },
+      // 16.16: structural name present → never touched.
+      { instanceName: 'realName', mediaRef: 5, altMediaRef: 8 },
+    ] as unknown as DecodedInstance[];
+    const out = correctFp8Refs(insts, new Set([8, 46]));
+    expect(out[0].mediaRef).toBe(8);
+    expect(out[0].refCorrected).toBe(true);
+    expect(out[1].mediaRef).toBe(1);
+    expect(out[1].refCorrected).toBeUndefined();
+    expect(out[2].mediaRef).toBe(5);
+    expect(out[2].refCorrected).toBeUndefined();
   });
 });

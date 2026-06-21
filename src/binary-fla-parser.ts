@@ -58,6 +58,7 @@ import {
 } from './binary-shape-decoder';
 import {
   attachInstanceNames,
+  correctFp8Refs,
   dedupeInstances,
   instanceSymbolType,
   markUnreliableRefs,
@@ -397,6 +398,14 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
   const library = extractLibrary(contents);
   const linkage = extractLinkage(contents);
 
+  // The set of library symbol stream numbers, used both to correct FP8
+  // placement mediaRefs and to join the linkage table to symbol numbers.
+  const symbolNumbers = new Set<number>();
+  for (const name of streams) {
+    const n = parseSymbolStreamNumber(name);
+    if (n !== null) symbolNumbers.add(n);
+  }
+
   // ── Decode the layer structure of every scene (`Page N`) and library item
   // (`Symbol N`) stream. Only the layer list is reliably decodable (see
   // binary-fla-structure.ts); frame content is intentionally not read.
@@ -430,7 +439,10 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
       const named = scanNamedInstances(streamData);
       if (named.length > 0) sceneNamed.set(pageNum, named);
       const insts = markUnreliableRefs(
-        attachInstanceNames(scanForInstances(streamData), named)
+        attachInstanceNames(
+          correctFp8Refs(scanForInstances(streamData), symbolNumbers),
+          named
+        )
       );
       const deduped = dedupeInstances(insts);
       if (deduped.length > 0) sceneInstances.set(pageNum, deduped);
@@ -456,7 +468,10 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
       const named = scanNamedInstances(streamData);
       if (named.length > 0) symbolNamed.set(symNum, named);
       const insts = markUnreliableRefs(
-        attachInstanceNames(scanForInstances(streamData), named)
+        attachInstanceNames(
+          correctFp8Refs(scanForInstances(streamData), symbolNumbers),
+          named
+        )
       );
       const deduped = dedupeInstances(insts);
       if (deduped.length > 0) symbolInstances.set(symNum, deduped);
@@ -471,11 +486,6 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
 
   // Join the linkage table to library symbol NUMBERS so the parser can set
   // per-symbol linkageClassName (the binary path then matches the XFL shape).
-  const symbolNumbers = new Set<number>();
-  for (const name of streams) {
-    const n = parseSymbolStreamNumber(name);
-    if (n !== null) symbolNumbers.add(n);
-  }
   const linkageBySymbol = joinLinkageToSymbolNumbers(contents, linkage, symbolNumbers);
 
   return {
@@ -522,19 +532,23 @@ function buildSymbolInstance(
   // An FP8 placement mis-decodes its mediaRef (see markUnreliableRefs), so emit
   // the named child WITHOUT a libraryItemName — the consumer types it MovieClip
   // (or the placement-class kind) instead of inheriting a wrong class.
-  if (inst.unreliableRef) {
+  const entry = libraryByNumber.get(inst.mediaRef);
+  // No resolvable library item: for an UNNAMED placement we drop it (never
+  // fabricate a reference); for a NAMED one (unreliable FP8 ref, or a corrected
+  // ref whose symbol carries no decoded content) we still emit a name-only
+  // element so its instance name reaches the timeline for tooling.
+  if (inst.unreliableRef || !entry) {
+    if (!inst.instanceName) return null;
     return {
       type: 'symbol',
       libraryItemName: '',
-      ...(inst.instanceName && { name: inst.instanceName }),
+      name: inst.instanceName,
       symbolType: instanceSymbolType(inst.className),
       matrix: inst.matrix,
       transformationPoint: { x: 0, y: 0 },
       loop: 'play once',
     };
   }
-  const entry = libraryByNumber.get(inst.mediaRef);
-  if (!entry) return null;
   // Prefer the library item's real kind; when the library type is unknown,
   // fall back to the kind implied by the placement's class.
   const symbolType: SymbolInstance['symbolType'] =
@@ -926,6 +940,23 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
         name: `Symbol ${num}`,
         symbolType: 'unknown',
       });
+    }
+  }
+
+  // A placement's (FP8-corrected) mediaRef references a real library symbol even
+  // when we decoded no renderable content for it — synthesise an entry so the
+  // instance keeps its libraryItemName and a consumer can descend into the
+  // container (e.g. panelContainer → its children). The ref is a real symbol
+  // stream number, so this is faithful, not fabricated.
+  for (const insts of [...info.sceneInstances.values(), ...info.symbolInstances.values()]) {
+    for (const inst of insts) {
+      if (inst.refCorrected && !libraryByNumber.has(inst.mediaRef)) {
+        libraryByNumber.set(inst.mediaRef, {
+          symbolNumber: inst.mediaRef,
+          name: `Symbol ${inst.mediaRef}`,
+          symbolType: 'unknown',
+        });
+      }
     }
   }
 
