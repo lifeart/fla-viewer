@@ -12,10 +12,6 @@ const IDENTITY: [number, number, number, number, number, number] = [
   0,
 ];
 
-function u8(...values: number[]): number[] {
-  return values.map((value) => value & 0xff);
-}
-
 function u16le(value: number): number[] {
   return [value & 0xff, (value >> 8) & 0xff];
 }

@@ -78,13 +78,6 @@ function nearestEditName(d: Uint8Array, identifierStart: number): { num: number;
   return null;
 }
 
-/** True iff the nearest edit-name before the identifier is exactly "Symbol 0" — the
- *  record binds the root (character 0) = the document class. */
-function boundToRoot(d: Uint8Array, identifierStart: number): boolean {
-  const e = nearestEditName(d, identifierStart);
-  return e !== null && e.isSymbol && e.num === 0;
-}
-
 /**
  * Extract the ActionScript linkage table from a binary FLA's `Contents` stream.
  * Marker = `<schema u8> 02 00 00 00`; the className Flash string ends right at
