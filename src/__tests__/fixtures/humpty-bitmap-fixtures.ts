@@ -41,6 +41,14 @@ function createSyntheticPixelPlane(width: number, height: number): Uint8Array {
     pixels[index * 4 + 2] = (index * 29 + 31) & 0xff; // green
     pixels[index * 4 + 3] = (index * 11 + 47) & 0xff; // blue
   }
+  if (width * height > 1) {
+    // Semi-transparent premultiplied A,R,G,B sample. The parser should decode
+    // this to RGBA [64, 96, 128, 128].
+    pixels[4] = 129;
+    pixels[5] = 32;
+    pixels[6] = 48;
+    pixels[7] = 64;
+  }
   return pixels;
 }
 

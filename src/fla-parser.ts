@@ -1613,7 +1613,21 @@ export class FLAParser {
       // Chunks start at offset 26 with [UI16 length][data]... [UI16 0x0000]
       let compData: Uint8Array;
       const expectedSize = headerWidth * headerHeight * 4;
-      const isRawPixelPlane = variant === 0 && bytes.length - 26 === expectedSize;
+      const maxBitmapOutput = 512 * 1024 * 1024;
+      if (expectedSize > maxBitmapOutput) {
+        console.warn(`FLA bitmap dimensions exceed the safe decode limit: ${headerWidth}x${headerHeight}`);
+        return null;
+      }
+      const maxOutput = Math.min(
+        Math.max(expectedSize, headerRowSize * headerHeight) + 64 * 1024,
+        maxBitmapOutput,
+      );
+      const rawPayloadLength = bytes.length - 26;
+      const rawPaddingLength = rawPayloadLength - expectedSize;
+      const hasValidRawPadding = rawPaddingLength >= 0
+        && rawPaddingLength <= 3
+        && bytes.subarray(26 + expectedSize).every((value) => value === 0);
+      const isRawPixelPlane = variant === 0 && hasValidRawPadding;
 
       if (variant === 1) {
         // Chunked format: read and concatenate all chunks
@@ -1652,7 +1666,7 @@ export class FLAParser {
         // Animate can store variant-0 32-bit bitmaps as a verbatim A,R,G,B
         // pixel plane. Do not interpret exact-size data as deflate: arbitrary
         // pixels may look like a valid stream and expand without bound.
-        compData = bytes.slice(26);
+        compData = bytes.slice(26, 26 + expectedSize);
       } else {
         // Non-chunked: raw data starts at offset 26
         // Skip zlib header if present
@@ -1706,7 +1720,6 @@ export class FLAParser {
         if (typeof DecompressionStream === 'undefined') return { status: 'unavailable' };
 
         try {
-          const maxOutput = Math.max(expectedSize, headerRowSize * headerHeight) + 64 * 1024;
           const input = new Uint8Array(compData);
           const stream = new Blob([input]).stream().pipeThrough(
             new DecompressionStream('deflate-raw' as CompressionFormat)
@@ -1725,7 +1738,7 @@ export class FLAParser {
               await reader.cancel('FLA bitmap exceeds declared dimensions');
               return { status: 'output_limit' };
             }
-            chunks.push(new Uint8Array(value));
+            chunks.push(value);
           }
 
           const result = new Uint8Array(totalSize);
@@ -1740,12 +1753,49 @@ export class FLAParser {
         }
       };
 
+      const outputLimitError = 'FLA_BITMAP_OUTPUT_LIMIT';
+      const inflateRawWithLimit = (useDict: boolean = false): Uint8Array => {
+        const chunks: Uint8Array[] = [];
+        const options: pako.InflateOptions = { raw: true, chunkSize: 16384 };
+        if (useDict) options.dictionary = zeroDict;
+        const inflater = new pako.Inflate(options);
+        let totalSize = 0;
+        let outputLimitExceeded = false;
+
+        inflater.onData = (chunk: Uint8Array) => {
+          totalSize += chunk.length;
+          if (totalSize > maxOutput) {
+            outputLimitExceeded = true;
+            return;
+          }
+          chunks.push(new Uint8Array(chunk));
+        };
+
+        const inputChunkSize = 4096;
+        for (let offset = 0; offset < compData.length; offset += inputChunkSize) {
+          const end = Math.min(offset + inputChunkSize, compData.length);
+          inflater.push(compData.subarray(offset, end), end === compData.length);
+          if (outputLimitExceeded) throw new Error(outputLimitError);
+          if (inflater.err) throw new Error(inflater.msg || 'Raw deflate failed');
+        }
+
+        const result = new Uint8Array(totalSize);
+        let offset = 0;
+        for (const chunk of chunks) {
+          result.set(chunk, offset);
+          offset += chunk.length;
+        }
+        return result;
+      };
+
       // Helper function for streaming partial recovery
       // Uses onData callback to capture chunks as they're produced,
       // allowing recovery of partial data when decompression errors occur mid-stream
       const tryStreamingRecovery = (useDict: boolean = false): Uint8Array | null => {
         try {
           const chunks: Uint8Array[] = [];
+          let totalSize = 0;
+          let outputLimitExceeded = false;
           const options: pako.InflateOptions = { raw: true, chunkSize: 16384 };
           if (useDict) {
             options.dictionary = zeroDict;
@@ -1754,6 +1804,11 @@ export class FLAParser {
 
           // Capture chunks via onData callback - this is key for partial recovery
           inflater.onData = (chunk: Uint8Array) => {
+            totalSize += chunk.length;
+            if (totalSize > maxOutput) {
+              outputLimitExceeded = true;
+              return;
+            }
             chunks.push(new Uint8Array(chunk));
           };
 
@@ -1769,6 +1824,7 @@ export class FLAParser {
               break;
             }
 
+            if (outputLimitExceeded) return null;
             if (inflater.err) {
               break;
             }
@@ -1776,9 +1832,6 @@ export class FLAParser {
 
           // Combine collected chunks
           if (chunks.length === 0) return null;
-
-          let totalSize = 0;
-          for (const chunk of chunks) totalSize += chunk.length;
 
           const result = new Uint8Array(totalSize);
           let offset = 0;
@@ -1895,7 +1948,6 @@ export class FLAParser {
         algoProgress('raw');
         pixelData = compData;
       } else {
-        algoProgress('deflate');
         const nativeInflate = await tryNativeInflateRaw();
         if (nativeInflate.status === 'output_limit') {
           console.warn(`FLA bitmap output exceeds declared dimensions for ${headerWidth}x${headerHeight}`);
@@ -1905,19 +1957,22 @@ export class FLAParser {
           if (nativeInflate.status === 'decoded') {
             algoProgress('native-deflate');
             pixelData = nativeInflate.data;
-          } else if (nativeInflate.status === 'unavailable') {
-            pixelData = pako.inflateRaw(compData);
           } else {
-            throw new Error('Native raw deflate failed');
+            algoProgress('deflate');
+            pixelData = inflateRawWithLimit();
           }
         } catch (rawError) {
-        // Raw deflate failed - try dictionary first (gives complete results for some files)
-        algoProgress('dictionary');
-        if (DEBUG) console.log(`Raw deflate failed for ${headerWidth}x${headerHeight}, trying dictionary...`);
-        try {
-          pixelData = pako.inflateRaw(compData, { dictionary: zeroDict } as pako.InflateOptions);
-          if (DEBUG) console.log(`Dictionary decompress: ${pixelData.length} bytes for ${headerWidth}x${headerHeight}`);
-        } catch (dictError) {
+          if (rawError instanceof Error && rawError.message === outputLimitError) {
+            console.warn(`FLA bitmap output exceeds declared dimensions for ${headerWidth}x${headerHeight}`);
+            return null;
+          }
+          // Raw deflate failed - try dictionary first (gives complete results for some files)
+          algoProgress('dictionary');
+          if (DEBUG) console.log(`Raw deflate failed for ${headerWidth}x${headerHeight}, trying dictionary...`);
+          try {
+            pixelData = inflateRawWithLimit(true);
+            if (DEBUG) console.log(`Dictionary decompress: ${pixelData.length} bytes for ${headerWidth}x${headerHeight}`);
+          } catch (dictError) {
           // Dictionary failed - try streaming recovery (gets partial data)
           algoProgress('streaming');
           if (DEBUG) console.log(`Dictionary failed, trying streaming for ${headerWidth}x${headerHeight}...`);

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import JSZip from 'jszip';
 import pako from 'pako';
 import { FLAParser, setParserDebug } from '../fla-parser';
@@ -2024,9 +2024,98 @@ describe('FLAParser', () => {
       const progressMessages: string[] = [];
 
       const doc = await parser.parse(fla, (message) => progressMessages.push(message));
+      const image = doc.bitmaps.get('humpty-compatible-chunked.png')?.imageData as HTMLImageElement;
 
-      expect(doc.bitmaps.get('humpty-compatible-chunked.png')?.imageData).toBeDefined();
+      expect(image).toBeDefined();
       expect(progressMessages).toContain('Fixing images 1/1 [native-deflate]');
+      expect(progressMessages).not.toContain('Fixing images 1/1 [deflate]');
+      if (!image.complete) {
+        await new Promise<void>((resolve) => { image.onload = () => resolve(); });
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = fixture.width;
+      canvas.height = fixture.height;
+      const context = canvas.getContext('2d')!;
+      context.drawImage(image, 0, 0);
+      expect(Array.from(context.getImageData(0, 0, 2, 1).data)).toEqual([
+        fixture.pixelData[1],
+        fixture.pixelData[2],
+        fixture.pixelData[3],
+        fixture.pixelData[0],
+        64,
+        96,
+        128,
+        128,
+      ]);
+    });
+
+    it('falls back to bounded pako when deflate-raw is unsupported', async () => {
+      const fixture = createHumptyCompatibleChunkedBitmapFixture();
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-fallback.png" href="humpty-compatible-fallback.png"
+            bitmapDataHRef="M synthetic fallback.dat"
+            frameRight="${fixture.width * 20}" frameBottom="${fixture.height * 20}"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic fallback.dat': fixture.dat },
+      );
+      const progressMessages: string[] = [];
+      vi.stubGlobal('DecompressionStream', class UnsupportedDecompressionStream {
+        constructor() {
+          throw new TypeError('deflate-raw is unsupported');
+        }
+      });
+
+      try {
+        const doc = await parser.parse(fla, (message) => progressMessages.push(message));
+        expect(doc.bitmaps.get('humpty-compatible-fallback.png')?.imageData).toBeDefined();
+        expect(progressMessages).toContain('Fixing images 1/1 [deflate]');
+        expect(progressMessages).not.toContain('Fixing images 1/1 [dictionary]');
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('rejects native output that exceeds declared bitmap dimensions', async () => {
+      const oversized = createHumptyCompatibleChunkedBitmapFixture(200, 100);
+      const dat = oversized.dat.slice();
+      dat[2] = 4;
+      dat[3] = 0;
+      dat[4] = 1;
+      dat[5] = 0;
+      dat[6] = 1;
+      dat[7] = 0;
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-oversized.png" href="humpty-compatible-oversized.png"
+            bitmapDataHRef="M synthetic oversized.dat"
+            frameRight="20" frameBottom="20"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic oversized.dat': dat },
+      );
+
+      const doc = await parser.parse(fla);
+
+      expect(doc.bitmaps.get('humpty-compatible-oversized.png')?.imageData).toBeUndefined();
+
+      vi.stubGlobal('DecompressionStream', class UnsupportedDecompressionStream {
+        constructor() {
+          throw new TypeError('deflate-raw is unsupported');
+        }
+      });
+      try {
+        const fallbackProgress: string[] = [];
+        const fallbackDoc = await parser.parse(fla, (message) => fallbackProgress.push(message));
+        expect(fallbackDoc.bitmaps.get('humpty-compatible-oversized.png')?.imageData).toBeUndefined();
+        expect(fallbackProgress).toContain('Fixing images 1/1 [deflate]');
+        expect(fallbackProgress).not.toContain('Fixing images 1/1 [dictionary]');
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
 
     it('treats a synthetic Humpty-compatible exact-size variant-0 bitmap as raw pixels', async () => {
@@ -2063,6 +2152,47 @@ describe('FLAParser', () => {
         fixture.pixelData[3],
         fixture.pixelData[0],
       ]);
+      const semiTransparent = context.getImageData(1, 0, 1, 1).data;
+      expect(Array.from(semiTransparent)).toEqual([64, 96, 128, 128]);
+    });
+
+    it('accepts an all-zero exact-size variant-0 transparent pixel plane', async () => {
+      const fixture = createHumptyCompatibleRawBitmapFixture(2, 2);
+      fixture.dat.fill(0, 26);
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-transparent.png" href="humpty-compatible-transparent.png"
+            bitmapDataHRef="M synthetic transparent.dat"
+            frameRight="40" frameBottom="40"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic transparent.dat': fixture.dat },
+      );
+
+      const doc = await parser.parse(fla);
+
+      expect(doc.bitmaps.get('humpty-compatible-transparent.png')?.imageData).toBeDefined();
+    });
+
+    it('accepts zero alignment padding after a variant-0 raw pixel plane', async () => {
+      const fixture = createHumptyCompatibleRawBitmapFixture(2, 2);
+      const padded = new Uint8Array(fixture.dat.length + 3);
+      padded.set(fixture.dat);
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-padded.png" href="humpty-compatible-padded.png"
+            bitmapDataHRef="M synthetic padded.dat"
+            frameRight="40" frameBottom="40"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic padded.dat': padded },
+      );
+
+      const doc = await parser.parse(fla);
+
+      expect(doc.bitmaps.get('humpty-compatible-padded.png')?.imageData).toBeDefined();
     });
 
     it('should decompress valid FLA bitmap with different dimensions', async () => {
