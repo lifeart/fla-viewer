@@ -1612,6 +1612,8 @@ export class FLAParser {
       // Per JPEXS: variant=1 means chunked compression
       // Chunks start at offset 26 with [UI16 length][data]... [UI16 0x0000]
       let compData: Uint8Array;
+      const expectedSize = headerWidth * headerHeight * 4;
+      const isRawPixelPlane = variant === 0 && bytes.length - 26 === expectedSize;
 
       if (variant === 1) {
         // Chunked format: read and concatenate all chunks
@@ -1646,6 +1648,11 @@ export class FLAParser {
         if (DEBUG) {
           console.log(`Chunked format: ${chunks.length} chunks, ${totalLen} bytes total`);
         }
+      } else if (isRawPixelPlane) {
+        // Animate can store variant-0 32-bit bitmaps as a verbatim A,R,G,B
+        // pixel plane. Do not interpret exact-size data as deflate: arbitrary
+        // pixels may look like a valid stream and expand without bound.
+        compData = bytes.slice(26);
       } else {
         // Non-chunked: raw data starts at offset 26
         // Skip zlib header if present
@@ -1656,7 +1663,9 @@ export class FLAParser {
         compData = bytes.slice(offset);
       }
 
-      // Validate we have enough compressed data to work with
+      // Validate we have enough compressed data to work with. A raw pixel
+      // plane may legitimately be all zero (fully transparent), so compressed
+      // stream heuristics apply only to data that will be inflated.
       // Empty or very small data (< 4 bytes) cannot be valid deflate stream
       if (compData.length < 4) {
         if (DEBUG) {
@@ -1667,21 +1676,69 @@ export class FLAParser {
 
       // Check if data looks like valid deflate (not all zeros)
       // First byte of deflate has block type bits that are rarely all zero
-      let hasNonZero = false;
-      for (let i = 0; i < Math.min(compData.length, 16); i++) {
-        if (compData[i] !== 0) {
-          hasNonZero = true;
-          break;
+      if (!isRawPixelPlane) {
+        let hasNonZero = false;
+        for (let i = 0; i < Math.min(compData.length, 16); i++) {
+          if (compData[i] !== 0) {
+            hasNonZero = true;
+            break;
+          }
         }
-      }
-      if (!hasNonZero) {
-        if (DEBUG) {
-          console.warn('Compressed data appears to be all zeros (invalid)');
+        if (!hasNonZero) {
+          if (DEBUG) {
+            console.warn('Compressed data appears to be all zeros (invalid)');
+          }
+          return null;
         }
-        return null;
       }
 
-      const expectedSize = headerWidth * headerHeight * 4;
+      type NativeInflateResult =
+        | { status: 'unavailable' }
+        | { status: 'decoded'; data: Uint8Array }
+        | { status: 'decode_error' }
+        | { status: 'output_limit' };
+
+      // Chromium's native inflater is dramatically faster and more memory
+      // efficient for large Animate bitmap streams than pako's one-shot path.
+      // Consume it incrementally and stop if output exceeds the dimensions
+      // declared by the bitmap header plus a small padding allowance.
+      const tryNativeInflateRaw = async (): Promise<NativeInflateResult> => {
+        if (typeof DecompressionStream === 'undefined') return { status: 'unavailable' };
+
+        try {
+          const maxOutput = Math.max(expectedSize, headerRowSize * headerHeight) + 64 * 1024;
+          const input = new Uint8Array(compData);
+          const stream = new Blob([input]).stream().pipeThrough(
+            new DecompressionStream('deflate-raw' as CompressionFormat)
+          );
+          const reader = stream.getReader();
+          const chunks: Uint8Array[] = [];
+          let totalSize = 0;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+
+            totalSize += value.length;
+            if (totalSize > maxOutput) {
+              await reader.cancel('FLA bitmap exceeds declared dimensions');
+              return { status: 'output_limit' };
+            }
+            chunks.push(new Uint8Array(value));
+          }
+
+          const result = new Uint8Array(totalSize);
+          let offset = 0;
+          for (const chunk of chunks) {
+            result.set(chunk, offset);
+            offset += chunk.length;
+          }
+          return { status: 'decoded', data: result };
+        } catch {
+          return { status: 'decode_error' };
+        }
+      };
 
       // Helper function for streaming partial recovery
       // Uses onData callback to capture chunks as they're produced,
@@ -1832,11 +1889,28 @@ export class FLAParser {
         return result;
       };
 
-      // Try raw deflate first (most common)
-      algoProgress('deflate');
-      try {
-        pixelData = pako.inflateRaw(compData);
-      } catch (rawError) {
+      // Exact-size variant-0 data is already the pixel plane. Otherwise prefer
+      // native raw deflate and retain pako only for browsers without the API.
+      if (isRawPixelPlane) {
+        algoProgress('raw');
+        pixelData = compData;
+      } else {
+        algoProgress('deflate');
+        const nativeInflate = await tryNativeInflateRaw();
+        if (nativeInflate.status === 'output_limit') {
+          console.warn(`FLA bitmap output exceeds declared dimensions for ${headerWidth}x${headerHeight}`);
+          return null;
+        }
+        try {
+          if (nativeInflate.status === 'decoded') {
+            algoProgress('native-deflate');
+            pixelData = nativeInflate.data;
+          } else if (nativeInflate.status === 'unavailable') {
+            pixelData = pako.inflateRaw(compData);
+          } else {
+            throw new Error('Native raw deflate failed');
+          }
+        } catch (rawError) {
         // Raw deflate failed - try dictionary first (gives complete results for some files)
         algoProgress('dictionary');
         if (DEBUG) console.log(`Raw deflate failed for ${headerWidth}x${headerHeight}, trying dictionary...`);
@@ -1901,6 +1975,7 @@ export class FLAParser {
               }
             }
           }
+        }
         }
       }
 

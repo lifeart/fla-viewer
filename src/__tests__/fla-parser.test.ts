@@ -4,6 +4,10 @@ import pako from 'pako';
 import { FLAParser, setParserDebug } from '../fla-parser';
 import { FLARenderer } from '../renderer';
 import { createConsoleSpy, expectLogContaining, type ConsoleSpy } from './test-utils';
+import {
+  createHumptyCompatibleChunkedBitmapFixture,
+  createHumptyCompatibleRawBitmapFixture,
+} from './fixtures/humpty-bitmap-fixtures';
 // A small real MP3 stream (frame-aligned slice of a real Animate sound .dat),
 // used to prove MP3 carried under a PCM-style format string decodes correctly.
 import mp3SoundUrl from './fixtures/mp3-sound.mp3?url';
@@ -2003,6 +2007,62 @@ describe('FLAParser', () => {
       expect(bitmap?.height).toBe(height);
       // imageData should be loaded (not null/undefined) for valid decompression
       expect(bitmap?.imageData).toBeDefined();
+    });
+
+    it('decodes a synthetic Humpty-compatible multi-chunk bitmap with native deflate', async () => {
+      const fixture = createHumptyCompatibleChunkedBitmapFixture();
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-chunked.png" href="humpty-compatible-chunked.png"
+            bitmapDataHRef="M synthetic chunked.dat"
+            frameRight="${fixture.width * 20}" frameBottom="${fixture.height * 20}"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic chunked.dat': fixture.dat },
+      );
+      const progressMessages: string[] = [];
+
+      const doc = await parser.parse(fla, (message) => progressMessages.push(message));
+
+      expect(doc.bitmaps.get('humpty-compatible-chunked.png')?.imageData).toBeDefined();
+      expect(progressMessages).toContain('Fixing images 1/1 [native-deflate]');
+    });
+
+    it('treats a synthetic Humpty-compatible exact-size variant-0 bitmap as raw pixels', async () => {
+      const fixture = createHumptyCompatibleRawBitmapFixture();
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-raw.png" href="humpty-compatible-raw.png"
+            bitmapDataHRef="M synthetic raw.dat"
+            frameRight="${fixture.width * 20}" frameBottom="${fixture.height * 20}"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic raw.dat': fixture.dat },
+      );
+      const progressMessages: string[] = [];
+
+      const doc = await parser.parse(fla, (message) => progressMessages.push(message));
+      const image = doc.bitmaps.get('humpty-compatible-raw.png')?.imageData as HTMLImageElement;
+
+      expect(image).toBeDefined();
+      expect(progressMessages).toContain('Fixing images 1/1 [raw]');
+      if (!image.complete) {
+        await new Promise<void>((resolve) => { image.onload = () => resolve(); });
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = fixture.width;
+      canvas.height = fixture.height;
+      const context = canvas.getContext('2d')!;
+      context.drawImage(image, 0, 0);
+      const [red, green, blue, alpha] = context.getImageData(0, 0, 1, 1).data;
+      expect([red, green, blue, alpha]).toEqual([
+        fixture.pixelData[1],
+        fixture.pixelData[2],
+        fixture.pixelData[3],
+        fixture.pixelData[0],
+      ]);
     });
 
     it('should decompress valid FLA bitmap with different dimensions', async () => {
