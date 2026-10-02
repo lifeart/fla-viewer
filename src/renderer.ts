@@ -807,6 +807,8 @@ export class FLARenderer {
   renderFrame(frameIndex: number): void {
     if (!this.doc) return;
 
+    this.rigMatrixCache = new WeakMap();
+
     const ctx = this.ctx;
     const doc = this.doc;
 
@@ -1514,14 +1516,13 @@ export class FLARenderer {
     if (parentIndex === undefined) return null;
     if (frame.tweenType === 'shape') return null;
 
-    const seen = new Set<number>([layerIndex]);
-    const parentNow = this.getRigLayerWorldMatrix(layers, parentIndex, frameIndex, seen);
-    const parentAtStart = this.getRigLayerWorldMatrix(layers, parentIndex, frame.index, seen);
+    const parentNow = this.getRigLayerWorldMatrix(layers, parentIndex, frameIndex);
+    const parentAtStart = this.getRigLayerWorldMatrix(layers, parentIndex, frame.index);
     if (!parentNow || !parentAtStart) return null;
 
     let parentAtEnd: Matrix | null = null;
     if (frame.tweenType === 'motion' && nextKeyframe && nextKeyframe.elements.length > 0) {
-      parentAtEnd = this.getRigLayerWorldMatrix(layers, parentIndex, nextKeyframe.index, seen);
+      parentAtEnd = this.getRigLayerWorldMatrix(layers, parentIndex, nextKeyframe.index);
       if (!parentAtEnd) return null;
     }
 
@@ -1536,56 +1537,59 @@ export class FLARenderer {
     return { parentNow, startInverse, endInverse };
   }
 
+  // Per-renderFrame memo of rig layer world matrices, keyed by timeline layers
+  // array then "layerIndex:frameIndex". Each rig level needs its parent at up to
+  // three frames (t, k0, k1), so without this a chain of depth n costs 3^n.
+  private rigMatrixCache = new WeakMap<Layer[], Map<string, Matrix | null>>();
+
   /**
-   * World matrix of a rig layer's single symbol instance at `frameIndex`
-   * (motion-tween interpolated, and itself rig-composed if that layer has a
-   * rig parent). Null when the layer's frame does not hold exactly one symbol
-   * instance, i.e. the rig transform is undeterminable.
+   * World matrix of a rig layer's single symbol instance at `frameIndex`, i.e.
+   * exactly the matrix renderLayer draws it with (motion-tween interpolated and
+   * itself rig-composed via getRigCorrection). Null when the layer's frame does
+   * not hold exactly one symbol instance, i.e. the rig transform is
+   * undeterminable. Cycles are impossible: getRigParentIndex breaks them.
    */
-  private getRigLayerWorldMatrix(layers: Layer[], layerIndex: number, frameIndex: number, seen: Set<number>): Matrix | null {
-    if (seen.has(layerIndex) || seen.size > 64) return null; // cycle / runaway guard
+  private getRigLayerWorldMatrix(layers: Layer[], layerIndex: number, frameIndex: number): Matrix | null {
+    let cache = this.rigMatrixCache.get(layers);
+    if (!cache) {
+      cache = new Map();
+      this.rigMatrixCache.set(layers, cache);
+    }
+    const key = `${layerIndex}:${frameIndex}`;
+    const cached = cache.get(key);
+    if (cached !== undefined) return cached;
+
+    let result: Matrix | null = null;
     const layer = layers[layerIndex];
-    if (!layer) return null;
-    const frame = this.findFrameAtIndex(layer.frames, frameIndex);
-    if (!frame || frame.elements.length !== 1) return null;
-    const element = frame.elements[0];
-    if (element.type !== 'symbol') return null;
-
-    const start: Matrix = element.matrix;
-    let end: Matrix | null = null;
-    let progress = 0;
-    let nextKeyframe: Frame | null = null;
-    if (frame.tweenType === 'motion') {
-      nextKeyframe = this.findNextKeyframe(layer.frames, frame);
-      if (nextKeyframe && nextKeyframe.elements.length > 0) {
-        const partner = this.findTweenPartner(element, 0, nextKeyframe);
-        if (partner.type === 'symbol') {
-          end = partner.matrix;
-          progress = this.calculateTweenProgress(frameIndex, frame, nextKeyframe, frame.acceleration, frame.tweens);
-        }
-      }
-    }
-
-    const parentIndex = getRigParentIndex(layers, layerIndex);
-    if (parentIndex !== undefined) {
-      const nextSeen = new Set(seen).add(layerIndex);
-      const pNow = this.getRigLayerWorldMatrix(layers, parentIndex, frameIndex, nextSeen);
-      const pStart = this.getRigLayerWorldMatrix(layers, parentIndex, frame.index, nextSeen);
-      const pEnd = end && nextKeyframe
-        ? this.getRigLayerWorldMatrix(layers, parentIndex, nextKeyframe.index, nextSeen)
+    const frame = layer ? this.findFrameAtIndex(layer.frames, frameIndex) : null;
+    const element = frame && frame.elements.length === 1 ? frame.elements[0] : null;
+    if (layer && frame && element && element.type === 'symbol') {
+      const nextKeyframe = this.findNextKeyframe(layer.frames, frame);
+      // Mirror renderLayer's branches so the rig follows what is drawn.
+      const rig = this.getRigCorrection(layers, layerIndex, frameIndex, frame, nextKeyframe);
+      const partner = frame.tweenType === 'motion' && nextKeyframe && nextKeyframe.elements.length > 0
+        ? this.findTweenPartner(element, 0, nextKeyframe)
         : null;
-      const invStart = pStart ? invertMatrix(pStart) : null;
-      const invEnd = pEnd ? invertMatrix(pEnd) : null;
-      if (pNow && invStart && (!end || invEnd)) {
-        const localStart = multiplyMatrices(invStart, start);
-        const local = end && invEnd
-          ? this.interpolateTweenMatrix(localStart, multiplyMatrices(invEnd, end), progress, frame)
-          : localStart;
-        return multiplyMatrices(pNow, local);
+      if (partner && partner.type === 'symbol') {
+        const progress = this.calculateTweenProgress(frameIndex, frame, nextKeyframe!, frame.acceleration, frame.tweens);
+        if (rig && rig.endInverse) {
+          result = multiplyMatrices(rig.parentNow, this.interpolateTweenMatrix(
+            multiplyMatrices(rig.startInverse, element.matrix),
+            multiplyMatrices(rig.endInverse, partner.matrix),
+            progress, frame
+          ));
+        } else {
+          result = this.interpolateTweenMatrix(element.matrix, partner.matrix, progress, frame);
+          if (rig) result = multiplyMatrices(multiplyMatrices(rig.parentNow, rig.startInverse), result);
+        }
+      } else {
+        result = rig
+          ? multiplyMatrices(multiplyMatrices(rig.parentNow, rig.startInverse), element.matrix)
+          : element.matrix;
       }
     }
-
-    return end ? this.interpolateTweenMatrix(start, end, progress, frame) : start;
+    cache.set(key, result);
+    return result;
   }
 
   private findFrameAtIndex(frames: Frame[], index: number): Frame | null {

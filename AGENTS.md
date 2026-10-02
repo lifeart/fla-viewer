@@ -825,10 +825,15 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   Only normal→normal links count (`getRigParentIndex` in `src/layer-utils.ts`; folder/mask/
   guide links are ignored), and only when the parent frame holds exactly ONE symbol instance;
   otherwise it falls back to stored matrices. Shape-tween child spans are not composed.
+  Parent world matrices come from `getRigLayerWorldMatrix`, which mirrors renderLayer (same
+  tween easing/rotation) and is memoized per `renderFrame` (each level needs its parent at t, k0
+  and k1, so an unmemoized chain is 3^depth). `getRigParentIndex` drops layers on a rig cycle.
+  A missing/empty/singular parent frame at t, k0 or k1 falls back to stored matrices.
   Do NOT add blanket `childWorld = parentWorld × childStored` — that double-transforms.
   Known gaps: Animate's rig parent is per-keyframe (JSFL `setRigParentAtFrame`), but the parser
   only reads layer-level `parentLayerIndex`; the SVG exporter does not compose (it also does
-  not interpolate tweens).
+  not interpolate tweens); a parent drawn with a 3D transform (rotationX/Y/Z, z) is rigged by
+  its 2D `matrix` only.
 
 ### Masks (issue #47)
 - `renderMaskGroup` builds ONE `Path2D` from the mask layer's **fill area** and clips once.

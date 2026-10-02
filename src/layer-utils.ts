@@ -76,6 +76,19 @@ export function getMaskLayerIndex(layers: Layer[], index: number): number | unde
  * transform and are ignored here.
  */
 export function getRigParentIndex(layers: Layer[], index: number): number | undefined {
+  const pIdx = rigLink(layers, index);
+  if (pIdx === undefined) return undefined;
+  // A layer on a rig cycle (malformed data; Animate cannot author one) has no
+  // rig parent, so every chain the renderer walks terminates.
+  let i: number | undefined = pIdx;
+  for (let steps = 0; i !== undefined && steps < layers.length; steps++) {
+    if (i === index) return undefined;
+    i = rigLink(layers, i);
+  }
+  return pIdx;
+}
+
+function rigLink(layers: Layer[], index: number): number | undefined {
   const layer = layers[index];
   if (!layer || layer.parentLayerIndex === undefined) return undefined;
   if (!isNormalLayerType(layer.layerType)) return undefined;
