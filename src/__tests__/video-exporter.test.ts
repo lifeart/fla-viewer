@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF, exportWebM, exportSVG, selectMp4AudioCodec } from '../video-exporter';
+import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF, exportWebM, exportSVG, selectMp4AudioCodec, mixAudio } from '../video-exporter';
+import type { SoundItem } from '../types';
 import JSZip from 'jszip';
 import {
   createMinimalDoc,
@@ -764,6 +765,174 @@ describe('video-exporter', () => {
         await audioContext.close();
       }
     });
+
+    /** Bytes of the blob and the offset just past the first `needle`, or -1. */
+    async function findAscii(blob: Blob, needle: string): Promise<{ bytes: Uint8Array; end: number }> {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const pat = Array.from(needle, (ch) => ch.charCodeAt(0));
+      outer: for (let i = 0; i <= bytes.length - pat.length; i++) {
+        for (let j = 0; j < pat.length; j++) {
+          if (bytes[i + j] !== pat[j]) continue outer;
+        }
+        return { bytes, end: i + pat.length };
+      }
+      return { bytes, end: -1 };
+    }
+
+    it('writes an Opus track whose dOps rate/channels match the 48 kHz encoder config', async () => {
+      stubSupport((c) => (isAac(c) ? false : 'real'));
+      const audioContext = new AudioContext();
+      try {
+        const blob = await exportVideo(createDocWithAudio(audioContext));
+        const { bytes, end } = await findAscii(blob, 'dOps');
+        expect(end).toBeGreaterThan(0);
+        const view = new DataView(bytes.buffer, end);
+        expect(view.getUint8(0)).toBe(0); // version
+        expect(view.getUint8(1)).toBe(2); // OutputChannelCount
+        expect(view.getUint32(4)).toBe(48000); // InputSampleRate
+      } finally {
+        await audioContext.close();
+      }
+    });
+
+    it('exports an Opus track at 44.1 kHz when only 44.1 kHz Opus is accepted', async () => {
+      stubSupport((c) => (isOpus(c) && c.sampleRate === 44100 ? 'real' : false));
+      const warnings: string[] = [];
+      const audioContext = new AudioContext();
+      try {
+        const blob = await exportVideo(createDocWithAudio(audioContext), undefined, undefined, (m) => warnings.push(m));
+        const { bytes, end } = await findAscii(blob, 'dOps');
+        expect(end).toBeGreaterThan(0);
+        expect(new DataView(bytes.buffer, end).getUint32(4)).toBe(44100);
+        expect(warnings).toEqual([]);
+      } finally {
+        await audioContext.close();
+      }
+    });
+
+    it('rejects the export when the AudioEncoder errors (does not hang)', async () => {
+      stubSupport((c) => (isAac(c) ? false : 'real'));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      // Make the real encoder fail asynchronously (NotSupportedError via its
+      // error callback), as a broken/unsupported encoder would.
+      const realConfigure = AudioEncoder.prototype.configure;
+      vi.spyOn(AudioEncoder.prototype, 'configure').mockImplementation(function (this: AudioEncoder, config) {
+        realConfigure.call(this, { ...config, codec: 'bogus-codec' });
+      });
+      const audioContext = new AudioContext();
+      try {
+        await expect(exportVideo(createDocWithAudio(audioContext))).rejects.toMatchObject({ name: 'NotSupportedError' });
+      } finally {
+        await audioContext.close();
+      }
+    });
+
+    it('rejects the export when the muxer rejects an audio chunk', async () => {
+      stubSupport((c) => (isAac(c) ? false : 'real'));
+      const { Muxer } = await import('mp4-muxer');
+      vi.spyOn(Muxer.prototype, 'addAudioChunk').mockImplementation(() => {
+        throw new Error('muxer refused chunk');
+      });
+      const audioContext = new AudioContext();
+      try {
+        await expect(exportVideo(createDocWithAudio(audioContext))).rejects.toThrow('muxer refused chunk');
+      } finally {
+        await audioContext.close();
+      }
+    });
+
+    it('adds no audio track and no warning when the document has no sounds', async () => {
+      const support = stubSupport(() => 'real');
+      const warnings: string[] = [];
+      const stages: string[] = [];
+      const doc = createMinimalDoc({
+        width: 80,
+        height: 60,
+        frameRate: 12,
+        timelines: [createTimeline({ totalFrames: 3, layers: [createLayer({ frames: [createFrame({ duration: 3 })] })] })],
+      });
+      const blob = await exportVideo(doc, (p) => stages.push(p.stage), undefined, (m) => warnings.push(m));
+      expect(blob.size).toBeGreaterThan(0);
+      expect(stages).not.toContain('encoding-audio');
+      expect(await containsAscii(blob, 'soun')).toBe(false);
+      expect(warnings).toEqual([]);
+      // No codec probing at all when there is nothing to encode.
+      expect(support).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('mixAudio', () => {
+    function makeStream(buffer: AudioBuffer, startFrame: number, duration: number, inPoint44 = 0) {
+      return {
+        sound: { name: 's', sync: 'stream' as const, inPoint44 },
+        soundItem: { name: 's', audioData: buffer } as unknown as SoundItem,
+        startFrame,
+        duration,
+      };
+    }
+
+    function ramp(channels: number, length: number, sampleRate: number): AudioBuffer {
+      const buffer = new AudioBuffer({ numberOfChannels: channels, length, sampleRate });
+      for (let ch = 0; ch < channels; ch++) {
+        const data = buffer.getChannelData(ch);
+        // Distinct per-channel values in [-1, 1] that identify the source index.
+        for (let i = 0; i < length; i++) data[i] = (ch === 0 ? 1 : -1) * (i / length);
+      }
+      return buffer;
+    }
+
+    it('mixes at 48 kHz: correct length, start placement and resampled content', () => {
+      const src = ramp(2, 44100, 44100); // 1 s @ 44.1 kHz
+      const frameRate = 10;
+      const { data, sampleRate } = mixAudio([makeStream(src, 5, 10)], 20, frameRate, 48000);
+      expect(sampleRate).toBe(48000);
+      // 20 frames @ 10 fps = 2 s -> 96000 stereo frames, interleaved.
+      expect(data.length).toBe(96000 * 2);
+
+      const start = 24000; // frame 5 @ 10 fps = 0.5 s
+      // Silence before the sound starts.
+      expect(data[(start - 1) * 2]).toBe(0);
+      expect(data[(start - 1) * 2 + 1]).toBe(0);
+      // Output sample i maps to source sample floor(i * 44100 / 48000).
+      const L = src.getChannelData(0);
+      const R = src.getChannelData(1);
+      for (const i of [0, 1, 1000, 30000, 47999]) {
+        const s = Math.floor(i * 44100 / 48000);
+        expect(data[(start + i) * 2]).toBeCloseTo(L[s], 6);
+        expect(data[(start + i) * 2 + 1]).toBeCloseTo(R[s], 6);
+      }
+      // The sound lasts 1 s (10 frames, and the whole source): silence after.
+      expect(data[(start + 48000) * 2]).toBe(0);
+      expect(data[(data.length / 2 - 1) * 2]).toBe(0);
+    });
+
+    it('honours inPoint44 when mixing at 48 kHz', () => {
+      const src = ramp(2, 44100, 44100);
+      const { data } = mixAudio([makeStream(src, 0, 10, 22050)], 10, 10, 48000);
+      const L = src.getChannelData(0);
+      // Output sample 0 is the source at the in-point (0.5 s).
+      expect(data[0]).toBeCloseTo(L[22050], 6);
+      expect(data[100 * 2]).toBeCloseTo(L[22050 + Math.floor(100 * 44100 / 48000)], 6);
+      // Only 0.5 s of source remains after the in-point.
+      expect(data[24000 * 2]).toBe(0);
+    });
+
+    it('duplicates a mono source into both channels', () => {
+      const src = ramp(1, 4800, 48000);
+      const { data } = mixAudio([makeStream(src, 0, 1)], 1, 10, 48000);
+      const M = src.getChannelData(0);
+      for (const i of [0, 7, 2400, 4799]) {
+        expect(data[i * 2]).toBeCloseTo(M[i], 6);
+        expect(data[i * 2 + 1]).toBeCloseTo(M[i], 6);
+      }
+    });
+
+    it('defaults to 44.1 kHz', () => {
+      const src = ramp(2, 441, 44100);
+      const { data, sampleRate } = mixAudio([makeStream(src, 0, 1)], 1, 100);
+      expect(sampleRate).toBe(44100);
+      expect(data.length).toBe(441 * 2);
+    });
   });
 
   describe('exportPNGSequence', () => {
@@ -1478,6 +1647,90 @@ describe('video-exporter', () => {
       expect(progressCalls.some(p => p.stage === 'encoding-audio')).toBe(true);
 
       await audioContext.close();
+    });
+
+    // The shared encodeAudioTrack refactor (issue #46) must keep WebM audio.
+    describe('audio track (shared encoder path)', () => {
+      async function hasAscii(blob: Blob, needle: string): Promise<boolean> {
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        const pat = Array.from(needle, (ch) => ch.charCodeAt(0));
+        outer: for (let i = 0; i <= bytes.length - pat.length; i++) {
+          for (let j = 0; j < pat.length; j++) {
+            if (bytes[i + j] !== pat[j]) continue outer;
+          }
+          return true;
+        }
+        return false;
+      }
+
+      function docWith(sounds: Map<string, unknown>, withSound: boolean) {
+        return createMinimalDoc({
+          width: 80,
+          height: 60,
+          frameRate: 12,
+          sounds: sounds as never,
+          timelines: [createTimeline({
+            totalFrames: 6,
+            layers: [createLayer({
+              frames: [createFrame({
+                index: 0,
+                duration: 6,
+                ...(withSound ? { sound: { name: 'a.mp3', sync: 'stream' as const, inPoint44: 0 } } : {}),
+              })],
+            })],
+          })],
+        });
+      }
+
+      function monoSounds(ctx: AudioContext) {
+        const buffer = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * 0.5), ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < data.length; i++) data[i] = Math.sin(2 * Math.PI * 440 * i / ctx.sampleRate) * 0.5;
+        return new Map([['a.mp3', { name: 'a.mp3', audioData: buffer }]]);
+      }
+
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      it('writes an Opus audio track (from a mono source) and reports no warning', async () => {
+        const ctx = new AudioContext();
+        try {
+          const warnings: string[] = [];
+          const blob = await exportWebM(docWith(monoSounds(ctx), true), undefined, undefined, (m) => warnings.push(m));
+          expect(await hasAscii(blob, 'A_OPUS')).toBe(true);
+          expect(await hasAscii(blob, 'OpusHead')).toBe(true);
+          expect(warnings).toEqual([]);
+        } finally {
+          await ctx.close();
+        }
+      });
+
+      it('writes no audio track and no warning when there are no sounds', async () => {
+        const warnings: string[] = [];
+        const blob = await exportWebM(docWith(new Map(), false), undefined, undefined, (m) => warnings.push(m));
+        expect(blob.size).toBeGreaterThan(0);
+        expect(await hasAscii(blob, 'A_OPUS')).toBe(false);
+        expect(warnings).toEqual([]);
+      });
+
+      it('exports video-only with exactly one warning when Opus is unsupported', async () => {
+        vi.spyOn(AudioEncoder, 'isConfigSupported').mockResolvedValue({ supported: false } as AudioEncoderSupport);
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const ctx = new AudioContext();
+        try {
+          const warnings: string[] = [];
+          const stages: string[] = [];
+          const blob = await exportWebM(docWith(monoSounds(ctx), true), (p) => stages.push(p.stage), undefined, (m) => warnings.push(m));
+          expect(blob.size).toBeGreaterThan(0);
+          expect(stages).not.toContain('encoding-audio');
+          expect(await hasAscii(blob, 'A_OPUS')).toBe(false);
+          expect(warnings).toHaveLength(1);
+          expect(warnings[0]).toMatch(/without sound/);
+        } finally {
+          await ctx.close();
+        }
+      });
     });
   });
 

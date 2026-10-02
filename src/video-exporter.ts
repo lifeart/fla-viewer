@@ -181,6 +181,10 @@ export async function exportVideo(
       height,
     },
     fastStart: 'in-memory',
+    // Like the WebM path: tolerate an encoder whose first chunk isn't at t=0
+    // (e.g. Opus pre-skip handling differs between browsers) instead of
+    // having mp4-muxer throw on it.
+    firstTimestampBehavior: 'offset',
   };
 
   if (audioChoice) {
@@ -494,7 +498,8 @@ function findStreamSounds(doc: FLADocument): StreamSound[] {
   return streamSounds;
 }
 
-function mixAudio(
+/** @internal Exported for tests. */
+export function mixAudio(
   streamSounds: StreamSound[],
   totalFrames: number,
   frameRate: number,
@@ -566,51 +571,64 @@ async function encodeAudioTrack(
 ): Promise<void> {
   const { sampleRate, numberOfChannels } = config;
   let encoderError: unknown = null;
+  // Exceptions thrown from a WebCodecs output callback are only reported to
+  // the console, never to flush(); capture muxer failures so the export
+  // rejects instead of silently producing a file without audio.
+  let outputError: unknown = null;
   const audioEncoder = new AudioEncoder({
-    output: onChunk,
+    output: (chunk, meta) => {
+      if (outputError) return;
+      try {
+        onChunk(chunk, meta);
+      } catch (e) {
+        outputError = e;
+      }
+    },
     error: (e) => {
       encoderError = e;
       console.error('AudioEncoder error:', e);
     },
   });
 
-  audioEncoder.configure(config);
+  try {
+    audioEncoder.configure(config);
 
-  // Encode audio in chunks
-  const samplesPerChunk = 1024;
-  const totalSamples = audioData.length / 2; // stereo
-  let sampleOffset = 0;
+    // Encode audio in chunks
+    const samplesPerChunk = 1024;
+    const totalSamples = audioData.length / 2; // stereo
+    let sampleOffset = 0;
 
-  while (sampleOffset < totalSamples && !encoderError) {
-    const chunkSamples = Math.min(samplesPerChunk, totalSamples - sampleOffset);
-    const chunkData = audioData.subarray(sampleOffset * 2, (sampleOffset + chunkSamples) * 2);
+    while (sampleOffset < totalSamples && !encoderError && !outputError) {
+      const chunkSamples = Math.min(samplesPerChunk, totalSamples - sampleOffset);
+      const chunkData = audioData.subarray(sampleOffset * 2, (sampleOffset + chunkSamples) * 2);
 
-    const planarData = interleaveToPlanes(chunkData, chunkSamples);
-    const audioFrame = new AudioData({
-      format: 'f32-planar',
-      sampleRate,
-      numberOfFrames: chunkSamples,
-      numberOfChannels,
-      timestamp: Math.round((sampleOffset / sampleRate) * 1_000_000),
-      data: planarData.buffer as ArrayBuffer,
-    });
+      const planarData = interleaveToPlanes(chunkData, chunkSamples);
+      const audioFrame = new AudioData({
+        format: 'f32-planar',
+        sampleRate,
+        numberOfFrames: chunkSamples,
+        numberOfChannels,
+        timestamp: Math.round((sampleOffset / sampleRate) * 1_000_000),
+        data: planarData.buffer as ArrayBuffer,
+      });
 
-    audioEncoder.encode(audioFrame);
-    audioFrame.close();
+      audioEncoder.encode(audioFrame);
+      audioFrame.close();
 
-    sampleOffset += chunkSamples;
+      sampleOffset += chunkSamples;
 
-    // Yield periodically
-    if (sampleOffset % (samplesPerChunk * 100) === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Yield periodically
+      if (sampleOffset % (samplesPerChunk * 100) === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
     }
-  }
 
-  if (encoderError) {
-    throw encoderError;
+    if (encoderError) throw encoderError;
+    if (!outputError) await audioEncoder.flush();
+    if (outputError) throw outputError;
+  } finally {
+    if (audioEncoder.state !== 'closed') audioEncoder.close();
   }
-  await audioEncoder.flush();
-  audioEncoder.close();
 }
 
 function interleaveToPlanes(interleaved: Float32Array, frames: number): Float32Array {
