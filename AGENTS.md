@@ -813,11 +813,22 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
 - The renderer honors `layer.visible` and cascades a hidden folder/parent to its children
   via `isLayerVisibleInFla` (`src/layer-utils.ts`, shared with the SVG/video exporter).
   Mask groups honor visibility too (guarded inside `renderMaskGroup`).
-- **Not implemented:** layer-parenting *transforms* (composing a parent layer's transform
-  onto its children). In observed files the child keyframe matrices are already world-space,
-  so the rig renders correctly without composition; the open gap is interpolation when a
-  parent tweens while a child holds a single keyframe. Do NOT blindly add
-  `childWorld = parentWorld × childLocal` — it double-transforms world-space children.
+- **Rig transforms (layer parenting):** child keyframe matrices are stored **world-space**
+  (Animate bakes the parent in at author time: Weird Al sample; editing a parent rewrites only
+  the child key under the playhead; JSFL edits to a parent don't move children), but Animate
+  evaluates the rig **live between child keyframes** (that's why CS6, which ignores parenting,
+  shows "offset issues" and people bake every frame before archiving). The renderer
+  (`getRigCorrection` in `src/renderer.ts`) composes, per child keyframe span [k0,k1):
+  holding child `world(t) = P(t)·inv(P(k0))·C0`; tweening child
+  `world(t) = P(t)·lerp(inv(P(k0))·C0, inv(P(k1))·C1)`. This is exact at child keys and the
+  identity when the parent is static over the span, so it never double-transforms.
+  Only normal→normal links count (`getRigParentIndex` in `src/layer-utils.ts`; folder/mask/
+  guide links are ignored), and only when the parent frame holds exactly ONE symbol instance;
+  otherwise it falls back to stored matrices. Shape-tween child spans are not composed.
+  Do NOT add blanket `childWorld = parentWorld × childStored` — that double-transforms.
+  Known gaps: Animate's rig parent is per-keyframe (JSFL `setRigParentAtFrame`), but the parser
+  only reads layer-level `parentLayerIndex`; the SVG exporter does not compose (it also does
+  not interpolate tweens).
 
 ### Masks (issue #47)
 - `renderMaskGroup` builds ONE `Path2D` from the mask layer's **fill area** and clips once.

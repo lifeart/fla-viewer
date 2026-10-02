@@ -1,4 +1,4 @@
-import type { Layer } from './types';
+import type { Layer, Matrix } from './types';
 
 /**
  * A layer is hidden in the FLA if it — or any ancestor it is linked under via
@@ -7,13 +7,8 @@ import type { Layer } from './types';
  * folder or a parent layer hides everything linked beneath it (issue #12:
  * "group / parent child link layer" support).
  *
- * Note on layer-parenting *transforms*: this helper only cascades the visibility
- * flag. It does NOT compose a parent layer's transform onto its children. In a
- * source `.fla` each child stores a *local* matrix and Animate composes
- * parent→child live, so a tweening parent with a holding child would not move the
- * child here. Implementing parent-transform composition is a known gap / out of
- * scope; it is intentionally NOT handled (and is not "baked" into child
- * keyframes, contrary to an earlier claim).
+ * Layer-parenting *transforms* are handled separately (see `getRigParentIndex`
+ * and the renderer's rig composition); this helper only cascades visibility.
  *
  * Shared by the canvas renderer and the SVG/video exporter so both agree.
  */
@@ -69,4 +64,68 @@ export function getMaskLayerIndex(layers: Layer[], index: number): number | unde
     }
   }
   return undefined;
+}
+
+/**
+ * Index of the layer that `layers[index]` is RIG-parented to (Adobe Animate
+ * "Layer Parenting"), or undefined.
+ *
+ * `parentLayerIndex` is overloaded in XFL: it also links a layer to its folder,
+ * its mask, or its motion guide. Only a link from a normal layer to another
+ * normal layer is a rig (transform) parent; folder / mask / guide links carry no
+ * transform and are ignored here.
+ */
+export function getRigParentIndex(layers: Layer[], index: number): number | undefined {
+  const layer = layers[index];
+  if (!layer || layer.parentLayerIndex === undefined) return undefined;
+  if (!isNormalLayerType(layer.layerType)) return undefined;
+  if (layer.maskLayerIndex !== undefined) return undefined;
+  const pIdx = layer.parentLayerIndex;
+  if (pIdx === index) return undefined;
+  const parent = layers[pIdx];
+  if (!parent || !isNormalLayerType(parent.layerType)) return undefined;
+  return pIdx;
+}
+
+function isNormalLayerType(t: Layer['layerType'] | undefined): boolean {
+  return t === undefined || (t as string).toLowerCase() === 'normal';
+}
+
+/** result = m1 * m2 (apply m2 first, then m1). */
+export function multiplyMatrices(m1: Matrix, m2: Matrix): Matrix {
+  return {
+    a: m1.a * m2.a + m1.c * m2.b,
+    b: m1.b * m2.a + m1.d * m2.b,
+    c: m1.a * m2.c + m1.c * m2.d,
+    d: m1.b * m2.c + m1.d * m2.d,
+    tx: m1.a * m2.tx + m1.c * m2.ty + m1.tx,
+    ty: m1.b * m2.tx + m1.d * m2.ty + m1.ty,
+  };
+}
+
+/** Inverse of a 2D affine matrix, or null when it is (near-)singular. */
+export function invertMatrix(m: Matrix): Matrix | null {
+  const det = m.a * m.d - m.b * m.c;
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-9) return null;
+  const inv = 1 / det;
+  return {
+    a: m.d * inv,
+    b: -m.b * inv,
+    c: -m.c * inv,
+    d: m.a * inv,
+    tx: (m.c * m.ty - m.d * m.tx) * inv,
+    ty: (m.b * m.tx - m.a * m.ty) * inv,
+  };
+}
+
+/** True when two matrices are equal within a small tolerance. */
+export function matricesNearlyEqual(m1: Matrix, m2: Matrix, eps = 1e-6): boolean {
+  return (
+    Math.abs(m1.a - m2.a) < eps &&
+    Math.abs(m1.b - m2.b) < eps &&
+    Math.abs(m1.c - m2.c) < eps &&
+    Math.abs(m1.d - m2.d) < eps &&
+    Math.abs(m1.tx - m2.tx) < eps * 1000 &&
+    Math.abs(m1.ty - m2.ty) < eps * 1000
+  );
 }

@@ -29,7 +29,7 @@ import type {
   MovieClipInstanceState
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
-import { isLayerVisibleInFla, getMaskLayerIndex } from './layer-utils';
+import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -897,9 +897,8 @@ export class FLARenderer {
   // canvas renderer and the SVG/video exporter agree on which layers are hidden.
   // A layer is hidden if it — or any ancestor it is linked under via
   // parentLayerIndex (its folder/group, or the layer it is parented to) — is
-  // marked visible="false". NOTE: only the visibility *flag* cascades here;
-  // parent-layer *transforms* are not composed onto children (a known gap / out
-  // of scope — not "baked" into child keyframes; see layer-utils.ts).
+  // marked visible="false". Only the visibility *flag* cascades here; rig
+  // (layer-parenting) transforms are composed in renderLayer via getRigCorrection.
   private isLayerVisibleInFla(layers: Layer[], index: number): boolean {
     return isLayerVisibleInFla(layers, index);
   }
@@ -983,7 +982,7 @@ export class FLARenderer {
         continue;
       }
 
-      this.renderLayer(layer, frameIndex, depth, i);
+      this.renderLayer(layer, frameIndex, depth, i, timeline.layers);
     }
   }
 
@@ -1009,7 +1008,7 @@ export class FLARenderer {
         if (!this.isLayerVisibleInFla(timeline.layers, maskedIdx)) continue;
         const maskedLayer = timeline.layers[maskedIdx];
         if (maskedLayer) {
-          this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx);
+          this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx, timeline.layers);
         }
       }
       return;
@@ -1034,7 +1033,7 @@ export class FLARenderer {
       if (depth === 0 && this.hiddenLayers.has(maskedIdx)) continue;
       const maskedLayer = timeline.layers[maskedIdx];
       if (maskedLayer) {
-        this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx);
+        this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx, timeline.layers);
       }
     }
 
@@ -1268,7 +1267,7 @@ export class FLARenderer {
         continue;
       }
 
-      this.renderLayer(layer, frameIndex, depth, i);
+      this.renderLayer(layer, frameIndex, depth, i, timeline.layers);
     }
 
     if (hasCameraTransform) {
@@ -1377,7 +1376,7 @@ export class FLARenderer {
     this.ctx.transform(invA, invB, invC, invD, invTx, invTy);
   }
 
-  private renderLayer(layer: Layer, frameIndex: number, depth: number, layerIndex?: number): void {
+  private renderLayer(layer: Layer, frameIndex: number, depth: number, layerIndex?: number, layers?: Layer[]): void {
     // Find the frame at the current index
     const frame = this.findFrameAtIndex(layer.frames, frameIndex);
     if (!frame) return;
@@ -1401,11 +1400,22 @@ export class FLARenderer {
       ? [...Array(frame.elements.length).keys()].reverse()
       : [...Array(frame.elements.length).keys()];
 
+    // Layer parenting (Animate "rig"): compose the parent's motion since this
+    // child keyframe was authored. Null when not parented / parent static /
+    // undeterminable — then the stored (world-space) matrices are used as-is.
+    const rig = layers && layerIndex !== undefined
+      ? this.getRigCorrection(layers, layerIndex, frameIndex, frame, nextKeyframe)
+      : null;
+
     for (const elementIndex of elementIndices) {
       // Skip hidden elements (only for main timeline, depth 0)
       if (depth === 0 && hiddenSet?.has(elementIndex)) continue;
 
       const element = frame.elements[elementIndex];
+
+      if (rig) {
+        this.ctx.save();
+      }
 
       // Handle shape tweens with morphShape
       if (frame.tweenType === 'shape' && frame.morphShape && element.type === 'shape') {
@@ -1433,23 +1443,149 @@ export class FLARenderer {
 
         // Find matching element in next keyframe
         // For symbols, match by libraryItemName; otherwise use same index or first element
-        let nextDisplayElement = nextKeyframe.elements[0];
-        if (element.type === 'symbol') {
-          const matchingElement = nextKeyframe.elements.find(
-            (e) => e.type === 'symbol' && e.libraryItemName === element.libraryItemName
-          );
-          if (matchingElement) {
-            nextDisplayElement = matchingElement;
-          }
-        } else if (elementIndex < nextKeyframe.elements.length) {
-          nextDisplayElement = nextKeyframe.elements[elementIndex];
-        }
+        const nextDisplayElement = this.findTweenPartner(element, elementIndex, nextKeyframe);
 
-        this.renderDisplayElementWithTween(element, nextDisplayElement, progress, depth, frameIndex, frame, elementIndex);
+        if (rig && rig.endInverse && element.type === 'symbol' && nextDisplayElement.type === 'symbol') {
+          // Interpolate in the parent's local space, then place under the
+          // parent's current world transform:
+          //   world(t) = P(t) * lerp(inv(P(k0)) * C0, inv(P(k1)) * C1)
+          this.applyMatrix(rig.parentNow);
+          this.renderDisplayElementWithTween(
+            { ...element, matrix: multiplyMatrices(rig.startInverse, element.matrix) },
+            { ...nextDisplayElement, matrix: multiplyMatrices(rig.endInverse, nextDisplayElement.matrix) },
+            progress, depth, frameIndex, frame, elementIndex
+          );
+        } else {
+          if (rig) this.applyMatrix(multiplyMatrices(rig.parentNow, rig.startInverse));
+          this.renderDisplayElementWithTween(element, nextDisplayElement, progress, depth, frameIndex, frame, elementIndex);
+        }
       } else {
+        if (rig) this.applyMatrix(multiplyMatrices(rig.parentNow, rig.startInverse));
         this.renderDisplayElement(element, depth, frameIndex, elementIndex);
       }
+
+      if (rig) {
+        this.ctx.restore();
+      }
     }
+  }
+
+  // The element a motion tween interpolates `element` towards in the next keyframe.
+  private findTweenPartner(element: DisplayElement, elementIndex: number, nextKeyframe: Frame): DisplayElement {
+    if (element.type === 'symbol') {
+      const matchingElement = nextKeyframe.elements.find(
+        (e) => e.type === 'symbol' && e.libraryItemName === element.libraryItemName
+      );
+      if (matchingElement) return matchingElement;
+    } else if (elementIndex < nextKeyframe.elements.length) {
+      return nextKeyframe.elements[elementIndex];
+    }
+    return nextKeyframe.elements[0];
+  }
+
+  /**
+   * Layer-parenting ("rig") correction for a child layer's current keyframe span
+   * (issue #12).
+   *
+   * Animate stores a parented child's keyframe matrices in WORLD space (the
+   * parent's transform is baked in at author time), but evaluates the rig live
+   * between keyframes: the child keeps its offset *relative to the parent* as the
+   * parent moves. With P(t) the parent's world matrix at frame t and the child
+   * keyframe span [k0, k1):
+   *   - holding child:  world(t) = P(t) * inv(P(k0)) * C0
+   *   - tweening child: world(t) = P(t) * lerp(inv(P(k0)) * C0, inv(P(k1)) * C1)
+   * At t = k0 (and k1) this reproduces the stored matrix exactly, and when the
+   * parent is static across the span it is the identity, so world-space keys
+   * are never double-transformed.
+   *
+   * Returns null (no composition) when the layer is not rig-parented, when the
+   * parent's transform cannot be determined (parent frame is not exactly one
+   * symbol instance), for shape tweens, or when the parent does not move across
+   * the span.
+   */
+  private getRigCorrection(
+    layers: Layer[],
+    layerIndex: number,
+    frameIndex: number,
+    frame: Frame,
+    nextKeyframe: Frame | null
+  ): { parentNow: Matrix; startInverse: Matrix; endInverse: Matrix | null } | null {
+    const parentIndex = getRigParentIndex(layers, layerIndex);
+    if (parentIndex === undefined) return null;
+    if (frame.tweenType === 'shape') return null;
+
+    const seen = new Set<number>([layerIndex]);
+    const parentNow = this.getRigLayerWorldMatrix(layers, parentIndex, frameIndex, seen);
+    const parentAtStart = this.getRigLayerWorldMatrix(layers, parentIndex, frame.index, seen);
+    if (!parentNow || !parentAtStart) return null;
+
+    let parentAtEnd: Matrix | null = null;
+    if (frame.tweenType === 'motion' && nextKeyframe && nextKeyframe.elements.length > 0) {
+      parentAtEnd = this.getRigLayerWorldMatrix(layers, parentIndex, nextKeyframe.index, seen);
+      if (!parentAtEnd) return null;
+    }
+
+    if (matricesNearlyEqual(parentNow, parentAtStart) &&
+        (!parentAtEnd || matricesNearlyEqual(parentAtEnd, parentAtStart))) {
+      return null; // parent static across the span: stored matrices are exact
+    }
+
+    const startInverse = invertMatrix(parentAtStart);
+    const endInverse = parentAtEnd ? invertMatrix(parentAtEnd) : null;
+    if (!startInverse || (parentAtEnd && !endInverse)) return null;
+    return { parentNow, startInverse, endInverse };
+  }
+
+  /**
+   * World matrix of a rig layer's single symbol instance at `frameIndex`
+   * (motion-tween interpolated, and itself rig-composed if that layer has a
+   * rig parent). Null when the layer's frame does not hold exactly one symbol
+   * instance, i.e. the rig transform is undeterminable.
+   */
+  private getRigLayerWorldMatrix(layers: Layer[], layerIndex: number, frameIndex: number, seen: Set<number>): Matrix | null {
+    if (seen.has(layerIndex) || seen.size > 64) return null; // cycle / runaway guard
+    const layer = layers[layerIndex];
+    if (!layer) return null;
+    const frame = this.findFrameAtIndex(layer.frames, frameIndex);
+    if (!frame || frame.elements.length !== 1) return null;
+    const element = frame.elements[0];
+    if (element.type !== 'symbol') return null;
+
+    const start: Matrix = element.matrix;
+    let end: Matrix | null = null;
+    let progress = 0;
+    let nextKeyframe: Frame | null = null;
+    if (frame.tweenType === 'motion') {
+      nextKeyframe = this.findNextKeyframe(layer.frames, frame);
+      if (nextKeyframe && nextKeyframe.elements.length > 0) {
+        const partner = this.findTweenPartner(element, 0, nextKeyframe);
+        if (partner.type === 'symbol') {
+          end = partner.matrix;
+          progress = this.calculateTweenProgress(frameIndex, frame, nextKeyframe, frame.acceleration, frame.tweens);
+        }
+      }
+    }
+
+    const parentIndex = getRigParentIndex(layers, layerIndex);
+    if (parentIndex !== undefined) {
+      const nextSeen = new Set(seen).add(layerIndex);
+      const pNow = this.getRigLayerWorldMatrix(layers, parentIndex, frameIndex, nextSeen);
+      const pStart = this.getRigLayerWorldMatrix(layers, parentIndex, frame.index, nextSeen);
+      const pEnd = end && nextKeyframe
+        ? this.getRigLayerWorldMatrix(layers, parentIndex, nextKeyframe.index, nextSeen)
+        : null;
+      const invStart = pStart ? invertMatrix(pStart) : null;
+      const invEnd = pEnd ? invertMatrix(pEnd) : null;
+      if (pNow && invStart && (!end || invEnd)) {
+        const localStart = multiplyMatrices(invStart, start);
+        const local = end && invEnd
+          ? this.interpolateTweenMatrix(localStart, multiplyMatrices(invEnd, end), progress, frame)
+          : localStart;
+        return multiplyMatrices(pNow, local);
+      }
+    }
+
+    return end ? this.interpolateTweenMatrix(start, end, progress, frame) : start;
   }
 
   private findFrameAtIndex(frames: Frame[], index: number): Frame | null {
