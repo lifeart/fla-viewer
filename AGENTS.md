@@ -842,11 +842,22 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
 - Mask geometry comes from `addLayerToMaskPath`/`addElementToMaskPath`: shapes, shapes nested
   in symbols at their current frame (transforms composed via `Path2D.addPath(p, matrix)`),
   motion/shape tweens, and text/bitmap/video bounding boxes. Strokes never contribute.
-- Mask membership is `getMaskLayerIndex` (`src/layer-utils.ts`): explicit `maskLayerIndex`, else
-  the `parentLayerIndex` chain through folders, else (binary FLAs) the nearest mask above a
+- Mask membership is `getMaskLayerIndex` (`src/layer-utils.ts`): explicit `maskLayerIndex` (only if
+  it names a mask layer), else the `parentLayerIndex` chain through folders, else (binary FLAs) the nearest mask above a
   contiguous run of `masked` layers. Guide/folder children of a mask are never re-typed `masked`.
+- **Winding:** mask regions wind either way (fillStyle0 vs fillStyle1 sides, mirrored instances,
+  `Path2D.rect()` text/bitmap/video bounds), and in one nonzero path opposite windings CANCEL
+  where they overlap. Each region is therefore sorted by on-screen direction (`fillAreas` signed
+  area from `getOrComputeShapePaths` / `morphSegmentArea` × the transform's determinant) and
+  `buildMaskClipPath` repeats the smaller direction group (larger-group count + 1) times so the
+  union is exact. Don't go back to a plain single `addPath` union.
+- An empty mask keyframe (or a frame past the mask layer's end) leaves masked layers unclipped;
+  a mask whose content has no fill area (stroke-only, empty symbol frame) hides them.
+- The SVG exporter (`exportSVG` in `src/video-exporter.ts`) has its own `<clipPath>` mask path:
+  membership uses `getMaskLayerIndex`, the shape matrix goes on each clip `<path>` (`<g>` is not
+  allowed in `<clipPath>`), but symbol/text/bitmap masks still don't clip there.
 - Known approximations: masked layers *inside* a symbol used as a mask contribute unclipped;
-  a mirrored (negative-determinant) mask instance overlapping another can cancel under nonzero.
+  9-slice and 3D (`rotationX/Y/Z`, `z`) mask instances use their plain 2D matrix.
 
 ### Pre-CS5 binary FLA (issue #8)
 - Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not

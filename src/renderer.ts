@@ -55,8 +55,17 @@ interface DebugElement {
 }
 
 // Cache for computed shape paths (avoids recomputing every frame)
+// A mask's fill regions, split by winding direction (see buildMaskClipPath).
+interface MaskClipPaths {
+  positive: Path2D;
+  negative: Path2D;
+  positiveCount: number;
+  negativeCount: number;
+}
+
 interface CachedShapePaths {
   fillPaths: Map<number, Path2D>;
+  fillAreas: Map<number, number>; // signed area of each fill path (winding direction)
   strokePaths: Map<number, Path2D>;
   combinedPath: Path2D;
 }
@@ -999,57 +1008,82 @@ export class FLARenderer {
     const ctx = this.ctx;
     const maskLayer = timeline.layers[maskLayerIndex];
 
-    // Find the frame at the current index for the mask layer
+    // Find the frame at the current index for the mask layer. With no mask
+    // content (empty keyframe, or past the mask layer's last frame) the masked
+    // layers render unclipped, as in a published SWF.
     const maskFrame = this.findFrameAtIndex(maskLayer.frames, frameIndex);
-    if (!maskFrame || maskFrame.elements.length === 0) {
-      // No mask content, just render masked layers normally
-      for (const maskedIdx of maskedLayerIndices) {
-        // Honor each masked child's own visibility (and its parent cascade —
-        // its parentLayerIndex points at the mask, so a hidden mask also hides
-        // it here).
-        if (!this.isLayerVisibleInFla(timeline.layers, maskedIdx)) continue;
-        const maskedLayer = timeline.layers[maskedIdx];
-        if (maskedLayer) {
-          this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx, timeline.layers);
-        }
-      }
-      return;
+    const hasMask = !!maskFrame && maskFrame.elements.length > 0;
+
+    if (hasMask) {
+      ctx.save();
+      // Clip to the union of the mask's fill area. Everything on the mask layer
+      // contributes (shapes, shapes nested in symbol instances at their current
+      // frame, motion/shape-tweened content, text/bitmap/video bounds), collected
+      // into ONE path so overlapping/separate mask shapes union. (Calling
+      // ctx.clip() once per shape intersects them instead.)
+      const clip: MaskClipPaths = { positive: new Path2D(), negative: new Path2D(), positiveCount: 0, negativeCount: 0 };
+      this.addLayerToMaskPath(maskLayer, frameIndex, new DOMMatrix(), clip, depth);
+      ctx.clip(this.buildMaskClipPath(clip), 'nonzero');
     }
 
-    ctx.save();
-
-    // Clip to the union of the mask's fill area. Everything on the mask layer
-    // contributes (shapes, shapes nested in symbol instances at their current
-    // frame, motion/shape-tweened content, text/bitmap/video bounds), collected
-    // into ONE path so overlapping/separate mask shapes union. (Calling
-    // ctx.clip() once per shape intersects them instead.)
-    const clipPath = new Path2D();
-    this.addLayerToMaskPath(maskLayer, frameIndex, new DOMMatrix(), clipPath, depth);
-    ctx.clip(clipPath, 'nonzero');
-
-    // Render masked layers within the clip
+    // Render masked layers (within the clip, if any)
     for (const maskedIdx of maskedLayerIndices) {
       // Honor each masked child's own visibility (and its parent cascade — its
       // parentLayerIndex points at the mask, so a hidden mask also hides it).
       if (!this.isLayerVisibleInFla(timeline.layers, maskedIdx)) continue;
       if (depth === 0 && this.hiddenLayers.has(maskedIdx)) continue;
+      if (timeline.referenceLayers.has(maskedIdx)) continue;
       const maskedLayer = timeline.layers[maskedIdx];
       if (maskedLayer) {
         this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx, timeline.layers);
       }
     }
 
-    ctx.restore();
+    if (hasMask) {
+      ctx.restore();
+    }
   }
 
-  // Add the fill area of a layer's content at `frameIndex` to a mask clip path.
+  // Add one fill region to a mask clip, sorted by its on-screen winding
+  // direction (sign of its signed area times the transform's determinant).
+  private addMaskRegion(clip: MaskClipPaths, region: Path2D, transform: DOMMatrix, signedArea: number): void {
+    const det = transform.a * transform.d - transform.b * transform.c;
+    if (signedArea * det < 0) {
+      clip.negative.addPath(region, transform);
+      clip.negativeCount++;
+    } else {
+      clip.positive.addPath(region, transform);
+      clip.positiveCount++;
+    }
+  }
+
+  // Combine a mask's regions into one path whose nonzero fill is their UNION,
+  // whatever direction each region winds in. Regions of one direction never
+  // cancel each other, but a clockwise and a counter-clockwise region cancel
+  // where they overlap (mirrored instances, text/bitmap bounds next to shapes,
+  // shapes whose fills are on opposite edge sides). So the smaller group is
+  // repeated more times than the larger group can wind (each region winds at
+  // most once), leaving every covered point with a nonzero total.
+  private buildMaskClipPath(clip: MaskClipPaths): Path2D {
+    if (clip.negativeCount === 0) return clip.positive;
+    if (clip.positiveCount === 0) return clip.negative;
+    const positiveIsBase = clip.positiveCount >= clip.negativeCount;
+    const base = positiveIsBase ? clip.positive : clip.negative;
+    const repeated = positiveIsBase ? clip.negative : clip.positive;
+    const repeats = (positiveIsBase ? clip.positiveCount : clip.negativeCount) + 1;
+    const path = new Path2D(base);
+    for (let i = 0; i < repeats; i++) path.addPath(repeated);
+    return path;
+  }
+
+  // Add the fill area of a layer's content at `frameIndex` to a mask clip.
   // `transform` maps the layer's coordinate space into the space the clip is
   // applied in. Mirrors renderLayer's frame/tween resolution.
   private addLayerToMaskPath(
     layer: Layer,
     frameIndex: number,
     transform: DOMMatrix,
-    path: Path2D,
+    clip: MaskClipPaths,
     depth: number
   ): void {
     const frame = this.findFrameAtIndex(layer.frames, frameIndex);
@@ -1064,23 +1098,25 @@ export class FLARenderer {
     frame.elements.forEach((element, elementIndex) => {
       this.currentKeyframeStart = frame.index;
 
-      // Shape tween: the interpolated morph segments are the mask geometry.
+      // Shape tween: the interpolated morph segments renderMorphShape fills
+      // are the mask geometry.
       if (frame.tweenType === 'shape' && frame.morphShape && element.type === 'shape') {
         const m = transform.multiply(this.toDOMMatrix(element.matrix));
         for (const segment of frame.morphShape.segments) {
-          if ((segment.fillIndex1 ?? segment.fillIndex2) === undefined) continue;
-          path.addPath(this.buildMorphSegmentPath(segment, progress), m);
+          const fillIndex = segment.fillIndex1 ?? segment.fillIndex2;
+          if (fillIndex === undefined || !element.fills.some((f) => f.index === fillIndex)) continue;
+          const region = this.buildMorphSegmentPath(segment, progress);
+          this.addMaskRegion(clip, region, m, this.morphSegmentArea(segment, progress));
         }
         return;
       }
 
       // Motion tween: interpolate the symbol's matrix like renderLayer does.
       let maskElement: DisplayElement = element;
-      if (frame.tweenType === 'motion' && nextKeyframe && element.type === 'symbol') {
-        const next = nextKeyframe.elements.find(
-          (e) => e.type === 'symbol' && e.libraryItemName === element.libraryItemName
-        ) ?? nextKeyframe.elements[0];
-        if (next && next.type === 'symbol') {
+      if (frame.tweenType === 'motion' && nextKeyframe && nextKeyframe.elements.length > 0 &&
+          element.type === 'symbol') {
+        const next = this.findTweenPartner(element, elementIndex, nextKeyframe);
+        if (next.type === 'symbol') {
           maskElement = {
             ...element,
             matrix: this.interpolateTweenMatrix(element.matrix, next.matrix, progress, frame),
@@ -1088,16 +1124,16 @@ export class FLARenderer {
         }
       }
 
-      this.addElementToMaskPath(maskElement, transform, path, depth, frameIndex, elementIndex);
+      this.addElementToMaskPath(maskElement, transform, clip, depth, frameIndex, elementIndex);
     });
   }
 
-  // Add one display element's fill area to a mask clip path. Strokes are
-  // ignored: in Animate only fills define a mask.
+  // Add one display element's fill area to a mask clip. Strokes are ignored:
+  // in Animate only fills define a mask.
   private addElementToMaskPath(
     element: DisplayElement,
     transform: DOMMatrix,
-    path: Path2D,
+    clip: MaskClipPaths,
     depth: number,
     parentFrameIndex: number,
     elementIndex: number
@@ -1105,8 +1141,11 @@ export class FLARenderer {
     const m = transform.multiply(this.toDOMMatrix(element.matrix));
 
     if (element.type === 'shape') {
-      for (const [, fillPath] of this.getOrComputeShapePaths(element).fillPaths) {
-        path.addPath(fillPath, m);
+      // Only the fills renderShape paints (the index has a FillStyle).
+      const { fillPaths, fillAreas } = this.getOrComputeShapePaths(element);
+      for (const [styleIndex, fillPath] of fillPaths) {
+        if (!element.fills.some((f) => f.index === styleIndex)) continue;
+        this.addMaskRegion(clip, fillPath, m, fillAreas.get(styleIndex) ?? 0);
       }
     } else if (element.type === 'symbol') {
       if (!this.doc || depth > 50 || element.isVisible === false) return;
@@ -1125,26 +1164,32 @@ export class FLARenderer {
         if (type === 'guide' || type === 'folder' || type === 'mask') continue;
         if (symbol.timeline.referenceLayers.has(i)) continue;
         if (!this.isLayerVisibleInFla(layers, i)) continue;
-        this.addLayerToMaskPath(layers[i], symbolFrame, m, path, depth + 1);
+        this.addLayerToMaskPath(layers[i], symbolFrame, m, clip, depth + 1);
       }
       if (element.symbolType === 'movieclip') {
         this.currentInstancePath.pop();
       }
     } else {
       // Text, bitmaps and video mask by their bounding box.
-      const rect = new Path2D();
+      let x = 0;
+      let width: number;
+      let height: number;
       if (element.type === 'text') {
-        rect.rect(element.left, 0, element.width, element.height);
+        x = element.left;
+        width = element.width;
+        height = element.height;
       } else if (element.type === 'bitmap') {
         const bitmapItem = this.doc ? getWithNormalizedPath(this.doc.bitmaps, element.libraryItemName) : undefined;
         const img = bitmapItem?.imageData;
-        const width = img ? (img.naturalWidth || img.width) : (bitmapItem?.width ?? 0);
-        const height = img ? (img.naturalHeight || img.height) : (bitmapItem?.height ?? 0);
-        rect.rect(0, 0, width, height);
+        width = img ? (img.naturalWidth || img.width) : (bitmapItem?.width ?? 0);
+        height = img ? (img.naturalHeight || img.height) : (bitmapItem?.height ?? 0);
       } else {
-        rect.rect(0, 0, element.width, element.height);
+        width = element.width;
+        height = element.height;
       }
-      path.addPath(rect, m);
+      const rect = new Path2D();
+      rect.rect(x, 0, width, height);
+      this.addMaskRegion(clip, rect, m, width * height);
     }
   }
 
@@ -3493,6 +3538,7 @@ export class FLARenderer {
 
     // Build fill paths by sorting edges into connected chains
     const fillPaths = new Map<number, Path2D>();
+    const fillAreas = new Map<number, number>();
     const EPSILON = 8.0;
 
     for (const [styleIndex, contributions] of fillEdgeContributions) {
@@ -3503,6 +3549,19 @@ export class FLARenderer {
       let currentY = NaN;
       let subpathStartX = NaN;
       let subpathStartY = NaN;
+
+      // Signed area of the path (shoelace over its control polygon): its sign
+      // is the fill's winding direction, which mask clips need to union
+      // regions correctly (see buildMaskClipPath).
+      let area = 0;
+      let lastX = NaN;
+      let lastY = NaN;
+      const visit = (x: number, y: number) => {
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+        if (!Number.isNaN(lastX)) area += lastX * y - x * lastY;
+        lastX = x;
+        lastY = y;
+      };
 
       for (let i = 0; i < sortedContributions.length; i++) {
         const contrib = sortedContributions[i];
@@ -3517,17 +3576,30 @@ export class FLARenderer {
             path.lineTo(subpathStartX, subpathStartY);
           }
           path.closePath();
+          visit(subpathStartX, subpathStartY);
         }
 
         if (isNewSubpath) {
           path.moveTo(contrib.startX, contrib.startY);
           subpathStartX = contrib.startX;
           subpathStartY = contrib.startY;
+          lastX = NaN;
+          visit(contrib.startX, contrib.startY);
         }
 
         for (const cmd of contrib.commands) {
           if (cmd.type === 'M') continue;
           this.addCommandToPath(path, cmd);
+          if (cmd.type === 'Q' && Number.isFinite(cmd.cx) && Number.isFinite(cmd.cy)) {
+            visit(cmd.cx, cmd.cy);
+            visit(cmd.x, cmd.y);
+          } else if (cmd.type === 'C' && Number.isFinite(cmd.c1x) && Number.isFinite(cmd.c2x)) {
+            visit(cmd.c1x, cmd.c1y);
+            visit(cmd.c2x, cmd.c2y);
+            visit(cmd.x, cmd.y);
+          } else if (cmd.type === 'L') {
+            visit(cmd.x, cmd.y);
+          }
         }
 
         currentX = contrib.endX;
@@ -3541,9 +3613,11 @@ export class FLARenderer {
           path.lineTo(subpathStartX, subpathStartY);
         }
         path.closePath();
+        visit(subpathStartX, subpathStartY);
       }
 
       fillPaths.set(styleIndex, path);
+      fillAreas.set(styleIndex, area / 2);
     }
 
     // Handle strokes separately (they don't need sorting)
@@ -3558,7 +3632,7 @@ export class FLARenderer {
     }
 
     // Cache the result
-    const result: CachedShapePaths = { fillPaths, strokePaths, combinedPath };
+    const result: CachedShapePaths = { fillPaths, fillAreas, strokePaths, combinedPath };
     this.shapePathCache.set(shape, result);
     return result;
   }
@@ -4547,6 +4621,31 @@ export class FLARenderer {
 
     path.closePath();
     return path;
+  }
+
+  // Signed area (winding direction) of one morph segment at `progress`, using
+  // the control polygon (same shoelace convention as getOrComputeShapePaths).
+  private morphSegmentArea(segment: MorphSegment, progress: number): number {
+    const startX = this.lerp(segment.startPointA.x, segment.startPointB.x, progress);
+    const startY = this.lerp(segment.startPointA.y, segment.startPointB.y, progress);
+    let area = 0;
+    let px = startX;
+    let py = startY;
+    const visit = (x: number, y: number) => {
+      area += px * y - x * py;
+      px = x;
+      py = y;
+    };
+    for (const curve of segment.curves) {
+      if (!curve.isLine) {
+        visit(this.lerp(curve.controlPointA.x, curve.controlPointB.x, progress),
+          this.lerp(curve.controlPointA.y, curve.controlPointB.y, progress));
+      }
+      visit(this.lerp(curve.anchorPointA.x, curve.anchorPointB.x, progress),
+        this.lerp(curve.anchorPointA.y, curve.anchorPointB.y, progress));
+    }
+    visit(startX, startY);
+    return area / 2;
   }
 
   // Render a morph shape (shape tween) at the given progress

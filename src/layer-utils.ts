@@ -29,7 +29,8 @@ export function isLayerVisibleInFla(layers: Layer[], index: number): boolean {
  * Resolve the mask layer that clips layer `index`, or undefined if it is not
  * masked. Mirrors Animate's mask grouping:
  *
- * - An explicit `maskLayerIndex` (set by the XFL parser) wins.
+ * - An explicit `maskLayerIndex` (set by the XFL parser) wins if it names a
+ *   mask layer.
  * - Otherwise the `parentLayerIndex` chain is walked up through folders: a
  *   layer parented to a mask — directly, or via a folder nested inside the mask
  *   group — is masked by it.
@@ -44,7 +45,13 @@ export function getMaskLayerIndex(layers: Layer[], index: number): number | unde
   if (!layer) return undefined;
   const type = (layer.layerType as string | undefined)?.toLowerCase();
   if (type === 'guide' || type === 'folder' || type === 'mask') return undefined;
-  if (layer.maskLayerIndex !== undefined) return layer.maskLayerIndex;
+  // A malformed link to a layer that is not a mask is ignored: honoring it
+  // would hide the layer (skipped as masked, but no mask group draws it).
+  const explicit = layer.maskLayerIndex;
+  if (explicit !== undefined && explicit !== index &&
+      (layers[explicit]?.layerType as string | undefined)?.toLowerCase() === 'mask') {
+    return explicit;
+  }
 
   const seen = new Set<number>();
   let p = layer.parentLayerIndex;

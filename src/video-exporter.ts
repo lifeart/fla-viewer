@@ -1,5 +1,5 @@
 import type { FLADocument, SoundItem, FrameSound } from './types';
-import { isLayerVisibleInFla } from './layer-utils';
+import { isLayerVisibleInFla, getMaskLayerIndex } from './layer-utils';
 import { FLARenderer } from './renderer';
 
 export interface ExportProgress {
@@ -1541,6 +1541,10 @@ export async function exportSVG(
   // exactly like fillPaths in the renderer. clip-path ignores fill/stroke
   // paint, so we emit pure `d` geometry without paint attributes.
   const maskShapeToClipPaths = (shape: import('./types').Shape): string => {
+    // <clipPath> may only hold shapes/text/<use> — a wrapping <g> is ignored —
+    // so the shape matrix goes on each <path>.
+    const transform = matrixToTransform(shape.matrix);
+    const transformAttr = transform ? ` transform="${transform}"` : '';
     const paths: string[] = [];
     for (const edge of shape.edges) {
       // A mask clips by FILLED regions only (mirror renderer fillPaths).
@@ -1549,13 +1553,7 @@ export async function exportSVG(
       }
       const pathData = commandsToPath(edge.commands);
       if (!pathData) continue;
-      paths.push(`<path d="${pathData}"/>`);
-    }
-    if (paths.length === 0) return '';
-    const transform = matrixToTransform(shape.matrix);
-    const transformAttr = transform ? ` transform="${transform}"` : '';
-    if (transformAttr) {
-      return `<g${transformAttr}>${paths.join('')}</g>`;
+      paths.push(`<path d="${pathData}"${transformAttr}/>`);
     }
     return paths.join('');
   };
@@ -1795,8 +1793,8 @@ export async function exportSVG(
   // last) to match the renderer and the prior export behavior.
   //
   // Mask handling:
-  //  - Build masked-layer -> mask-layer grouping from layer.maskLayerIndex
-  //    (renderer.ts:833-837).
+  //  - Build masked-layer -> mask-layer grouping with getMaskLayerIndex
+  //    (src/layer-utils.ts), the same resolution the renderer uses.
   //  - A `mask` layer: if hidden, the WHOLE group is omitted (renderer.ts:874-
   //    875). Otherwise its shape geometry becomes a <clipPath> and its masked
   //    children render inside one <g clip-path="url(#...)">.
@@ -1813,11 +1811,12 @@ export async function exportSVG(
     referenceLayers: Set<number>,
     out: string[]
   ): void => {
-    // masked layer index -> mask layer index (renderer.ts:833-837)
+    // masked layer index -> mask layer index
     const maskedLayers = new Map<number, number>();
     for (let i = 0; i < layers.length; i++) {
-      if (layers[i].maskLayerIndex !== undefined) {
-        maskedLayers.set(i, layers[i].maskLayerIndex!);
+      const maskIndex = getMaskLayerIndex(layers, i);
+      if (maskIndex !== undefined) {
+        maskedLayers.set(i, maskIndex);
       }
     }
 

@@ -2903,6 +2903,43 @@ describe('video-exporter', () => {
       expect(outside[3]).toBeLessThan(20);    // clipped => transparent
     });
 
+    // Rasterize an exported SVG and return the alpha at each (x, y).
+    const rasterAlpha = async (doc: ReturnType<typeof buildMaskDoc>, points: [number, number][]) => {
+      doc.backgroundColor = 'transparent';
+      const svgText = await (await exportSVG(doc, 0)).text();
+      const img = new Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('SVG image failed to load'));
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);
+      });
+      const canvas = document.createElement('canvas');
+      canvas.width = 200;
+      canvas.height = 200;
+      const c = canvas.getContext('2d')!;
+      c.drawImage(img, 0, 0, 200, 200);
+      return points.map(([x, y]) => c.getImageData(x, y, 1, 1).data[3]);
+    };
+
+    it('clips with a transformed mask shape (transform on the clip geometry)', async () => {
+      // <g> is not allowed inside <clipPath>; a mask shape's matrix must still
+      // move the clip.
+      const doc = buildMaskDoc();
+      const maskShape = doc.timelines[0].layers[0].frames[0].elements[0];
+      maskShape.matrix = createMatrix({ tx: 100, ty: 100 });
+      const [inside, outside] = await rasterAlpha(doc, [[125, 125], [25, 25]]);
+      expect(inside).toBeGreaterThan(200);
+      expect(outside).toBeLessThan(20);
+    });
+
+    it('clips a masked layer linked only by parentLayerIndex (shared getMaskLayerIndex)', async () => {
+      const doc = buildMaskDoc();
+      doc.timelines[0].layers[1].maskLayerIndex = undefined;
+      const [inside, outside] = await rasterAlpha(doc, [[25, 25], [100, 100]]);
+      expect(inside).toBeGreaterThan(200);
+      expect(outside).toBeLessThan(20);
+    });
+
     // --- Color-transform (tint) parity with the canvas renderer -------------
     // The instance RGB color transform (tint) is emitted as a <feColorMatrix>
     // PREPENDED into the SAME instance <filter> chain as blur/glow/etc. (see
