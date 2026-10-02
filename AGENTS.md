@@ -844,3 +844,8 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
 - The exporter checks `AudioEncoder.isConfigSupported` and **degrades to video-only** (with a
   `console.warn`) when the audio codec is unavailable — headless CI lacks the AAC encoder, and
   this also prevents a real user-facing crash. Don't reintroduce an unconditional `AudioEncoder`.
+- **MP4 audio codec fallback (issue #46):** Firefox's WebCodecs has **no AAC encoder**, so MP4
+  exports were silent while WebM (Opus) had sound. `selectMp4AudioCodec` tries AAC@44.1k, then
+  **Opus-in-MP4** @48k (then @44.1k); audio is mixed at the chosen rate so encoder, `AudioData` and
+  muxer configs agree. Only if none is supported does it go video-only, and it then reports the
+  degrade via the `onWarning` callback (main.ts shows an `alert`).

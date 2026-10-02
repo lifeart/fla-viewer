@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF, exportWebM, exportSVG } from '../video-exporter';
+import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF, exportWebM, exportSVG, selectMp4AudioCodec } from '../video-exporter';
 import JSZip from 'jszip';
 import {
   createMinimalDoc,
@@ -374,19 +374,12 @@ describe('video-exporter', () => {
       expect(blob.type).toBe('video/mp4');
       expect(blob.size).toBeGreaterThan(0);
 
-      // Only assert the audio-encoding stage ran when the AAC codec is actually
-      // supported here; otherwise the exporter degrades to video-only.
-      const aacSupported =
-        typeof AudioEncoder !== 'undefined' &&
-        typeof AudioEncoder.isConfigSupported === 'function' &&
-        (await AudioEncoder.isConfigSupported({
-          codec: 'mp4a.40.2',
-          numberOfChannels: 2,
-          sampleRate,
-          bitrate: 128_000,
-        })).supported === true;
+      // Only assert the audio-encoding stage ran when an MP4 audio codec (AAC,
+      // or the Opus fallback) is actually supported here; otherwise the
+      // exporter degrades to video-only.
+      const mp4AudioSupported = (await selectMp4AudioCodec()) !== null;
 
-      if (aacSupported) {
+      if (mp4AudioSupported) {
         expect(progressCalls.some(p => p.stage === 'encoding-audio')).toBe(true);
       } else {
         // Graceful video-only degradation: no audio stage was emitted.
@@ -586,6 +579,188 @@ describe('video-exporter', () => {
       } finally {
         isConfigSupportedSpy.mockRestore();
         warnSpy.mockRestore();
+        await audioContext.close();
+      }
+    });
+  });
+
+  // Issue #46: Firefox's WebCodecs has no AAC encoder, so MP4 exports were
+  // silently video-only while WebM (Opus) kept its sound. The MP4 path must
+  // try AAC, then Opus-in-MP4, and only then degrade to video-only.
+  describe('MP4 audio codec selection (issue #46)', () => {
+    type SupportFn = (config: AudioEncoderConfig) => boolean | 'throw' | 'real';
+
+    function stubSupport(fn: SupportFn) {
+      const real = AudioEncoder.isConfigSupported.bind(AudioEncoder);
+      return vi.spyOn(AudioEncoder, 'isConfigSupported').mockImplementation(async (config) => {
+        const verdict = fn(config);
+        if (verdict === 'throw') throw new TypeError('invalid config');
+        if (verdict === 'real') return real(config);
+        return { supported: verdict, config } as AudioEncoderSupport;
+      });
+    }
+
+    const isAac = (c: AudioEncoderConfig) => c.codec.startsWith('mp4a');
+    const isOpus = (c: AudioEncoderConfig) => c.codec === 'opus';
+
+    function createDocWithAudio(audioContext: AudioContext) {
+      const sampleRate = audioContext.sampleRate;
+      const audioBuffer = audioContext.createBuffer(2, Math.ceil(sampleRate * 0.5), sampleRate);
+      for (let ch = 0; ch < 2; ch++) {
+        const data = audioBuffer.getChannelData(ch);
+        for (let i = 0; i < data.length; i++) {
+          data[i] = Math.sin(2 * Math.PI * 440 * i / sampleRate) * 0.5;
+        }
+      }
+      const sounds = new Map();
+      sounds.set('test.mp3', { name: 'test.mp3', audioData: audioBuffer });
+      return createMinimalDoc({
+        width: 80,
+        height: 60,
+        frameRate: 12,
+        sounds,
+        timelines: [createTimeline({
+          totalFrames: 6,
+          layers: [createLayer({
+            frames: [createFrame({
+              index: 0,
+              duration: 6,
+              sound: { name: 'test.mp3', sync: 'stream', inPoint44: 0 },
+            })],
+          })],
+        })],
+      });
+    }
+
+    async function containsAscii(blob: Blob, needle: string): Promise<boolean> {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const pat = Array.from(needle, (ch) => ch.charCodeAt(0));
+      outer: for (let i = 0; i <= bytes.length - pat.length; i++) {
+        for (let j = 0; j < pat.length; j++) {
+          if (bytes[i + j] !== pat[j]) continue outer;
+        }
+        return true;
+      }
+      return false;
+    }
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('selects AAC when AAC is supported', async () => {
+      stubSupport(() => true);
+      const choice = await selectMp4AudioCodec();
+      expect(choice).not.toBeNull();
+      expect(choice!.muxerCodec).toBe('aac');
+      expect(choice!.encoderConfig.codec).toBe('mp4a.40.2');
+      expect(choice!.encoderConfig.numberOfChannels).toBe(2);
+      expect(choice!.encoderConfig.sampleRate).toBe(44100);
+    });
+
+    it('falls back to Opus (48 kHz) when AAC is unsupported', async () => {
+      stubSupport((c) => isOpus(c));
+      const choice = await selectMp4AudioCodec();
+      expect(choice).not.toBeNull();
+      expect(choice!.muxerCodec).toBe('opus');
+      expect(choice!.encoderConfig.codec).toBe('opus');
+      expect(choice!.encoderConfig.sampleRate).toBe(48000);
+      expect(choice!.encoderConfig.numberOfChannels).toBe(2);
+    });
+
+    it('treats a rejecting isConfigSupported as unsupported and keeps trying', async () => {
+      stubSupport((c) => (isAac(c) ? 'throw' : isOpus(c)));
+      const choice = await selectMp4AudioCodec();
+      expect(choice?.muxerCodec).toBe('opus');
+    });
+
+    it('falls back to Opus at 44.1 kHz if 48 kHz Opus is rejected', async () => {
+      stubSupport((c) => isOpus(c) && c.sampleRate === 44100);
+      const choice = await selectMp4AudioCodec();
+      expect(choice?.muxerCodec).toBe('opus');
+      expect(choice?.encoderConfig.sampleRate).toBe(44100);
+    });
+
+    it('returns null when neither AAC nor Opus is supported', async () => {
+      stubSupport(() => false);
+      expect(await selectMp4AudioCodec()).toBeNull();
+    });
+
+    it('exports an MP4 with an AAC track when AAC is supported', async () => {
+      // Only meaningful where the real AAC encoder exists (not in headless CI
+      // Chromium); the selection itself is covered by the unit test above.
+      const realAac = (await AudioEncoder.isConfigSupported({
+        codec: 'mp4a.40.2', numberOfChannels: 2, sampleRate: 44100, bitrate: 128_000,
+      })).supported;
+      if (!realAac) return;
+
+      const audioContext = new AudioContext();
+      try {
+        const stages: string[] = [];
+        const blob = await exportVideo(createDocWithAudio(audioContext), (p) => stages.push(p.stage));
+        expect(stages).toContain('encoding-audio');
+        expect(await containsAscii(blob, 'mp4a')).toBe(true);
+        expect(await containsAscii(blob, 'dOps')).toBe(false);
+      } finally {
+        await audioContext.close();
+      }
+    });
+
+    it('exports an MP4 with an Opus track when AAC is unsupported (Firefox)', async () => {
+      const realOpus = (await AudioEncoder.isConfigSupported({
+        codec: 'opus', numberOfChannels: 2, sampleRate: 48000, bitrate: 128_000,
+      })).supported;
+      expect(realOpus).toBe(true); // headless Chromium ships an Opus encoder
+
+      // Simulate Firefox: AAC reported unsupported; Opus answered by the real
+      // implementation so the real encoder + muxer path is exercised.
+      stubSupport((c) => (isAac(c) ? false : 'real'));
+      const warnings: string[] = [];
+      const audioContext = new AudioContext();
+      try {
+        const stages: string[] = [];
+        const blob = await exportVideo(
+          createDocWithAudio(audioContext),
+          (p) => stages.push(p.stage),
+          undefined,
+          (m) => warnings.push(m)
+        );
+
+        expect(blob.type).toBe('video/mp4');
+        expect(stages).toContain('encoding-audio');
+        // Opus sample entry + its decoder config box are present; no AAC.
+        expect(await containsAscii(blob, 'Opus')).toBe(true);
+        expect(await containsAscii(blob, 'dOps')).toBe(true);
+        expect(await containsAscii(blob, 'mp4a')).toBe(false);
+        // An audio (sound handler) track exists alongside the video track.
+        expect(await containsAscii(blob, 'soun')).toBe(true);
+        expect(warnings).toEqual([]);
+      } finally {
+        await audioContext.close();
+      }
+    });
+
+    it('exports video-only and reports a user-facing warning when neither codec is supported', async () => {
+      stubSupport(() => false);
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const warnings: string[] = [];
+      const audioContext = new AudioContext();
+      try {
+        const stages: string[] = [];
+        const blob = await exportVideo(
+          createDocWithAudio(audioContext),
+          (p) => stages.push(p.stage),
+          undefined,
+          (m) => warnings.push(m)
+        );
+
+        expect(blob.type).toBe('video/mp4');
+        expect(blob.size).toBeGreaterThan(0);
+        expect(stages).not.toContain('encoding-audio');
+        expect(await containsAscii(blob, 'soun')).toBe(false);
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toMatch(/without sound/);
+      } finally {
         await audioContext.close();
       }
     });

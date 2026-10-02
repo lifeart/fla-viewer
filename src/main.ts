@@ -1189,6 +1189,13 @@ export class FLAViewerApp {
     this.exportProgressFill.style.width = '0%';
     this.exportStatus.textContent = 'Preparing...';
 
+    // Non-fatal degradations reported by the exporter (e.g. audio dropped
+    // because the browser has no suitable AudioEncoder -- issue #46).
+    const exportWarnings: string[] = [];
+    const onExportWarning = (message: string) => {
+      exportWarnings.push(message);
+    };
+
     try {
       if (format === 'mp4') {
         this.exportHeader.textContent = 'Exporting Video';
@@ -1206,11 +1213,15 @@ export class FLAViewerApp {
               this.exportStatus.textContent = 'Finalizing video...';
             }
           },
-          () => this.exportCancelled
+          () => this.exportCancelled,
+          onExportWarning
         );
 
         if (!this.exportCancelled) {
           downloadBlob(blob, `${this.currentFileName}.mp4`);
+          if (exportWarnings.length > 0) {
+            alert(exportWarnings.join('\n'));
+          }
         }
       } else if (format === 'webm') {
         this.exportHeader.textContent = 'Exporting WebM Video';
@@ -1228,11 +1239,15 @@ export class FLAViewerApp {
               this.exportStatus.textContent = 'Finalizing video...';
             }
           },
-          () => this.exportCancelled
+          () => this.exportCancelled,
+          onExportWarning
         );
 
         if (!this.exportCancelled) {
           downloadBlob(blob, `${this.currentFileName}.webm`);
+          if (exportWarnings.length > 0) {
+            alert(exportWarnings.join('\n'));
+          }
         }
       } else if (format === 'png-sequence') {
         this.exportHeader.textContent = 'Exporting PNG Sequence';
