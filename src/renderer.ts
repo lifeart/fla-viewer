@@ -21,6 +21,7 @@ import type {
   PathCommand,
   Filter,
   MorphShape,
+  MorphSegment,
   ColorTransform,
   BlendMode,
   Rectangle,
@@ -28,7 +29,7 @@ import type {
   MovieClipInstanceState
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
-import { isLayerVisibleInFla } from './layer-utils';
+import { isLayerVisibleInFla, getMaskLayerIndex } from './layer-utils';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -918,9 +919,9 @@ export class FLARenderer {
     // Track which layers are masked and their mask layer index
     const maskedLayers = new Map<number, number>(); // masked layer index -> mask layer index
     for (let i = 0; i < timeline.layers.length; i++) {
-      const layer = timeline.layers[i];
-      if (layer.maskLayerIndex !== undefined) {
-        maskedLayers.set(i, layer.maskLayerIndex);
+      const maskIndex = getMaskLayerIndex(timeline.layers, i);
+      if (maskIndex !== undefined) {
+        maskedLayers.set(i, maskIndex);
       }
     }
 
@@ -960,10 +961,11 @@ export class FLARenderer {
         // by it). Honor the mask layer's own visibility before rendering.
         if (layer.visible === false) continue;
 
-        // Find all layers masked by this layer
+        // Find all layers masked by this layer, in the same paint order as the
+        // timeline (so masked layers keep their relative stacking).
         const maskedByThis: number[] = [];
-        for (const [maskedIdx, maskIdx] of maskedLayers) {
-          if (maskIdx === i) {
+        for (const maskedIdx of indices) {
+          if (maskedLayers.get(maskedIdx) === i) {
             maskedByThis.push(maskedIdx);
             renderedMasked.add(maskedIdx);
           }
@@ -1015,35 +1017,21 @@ export class FLARenderer {
 
     ctx.save();
 
-    // Create clip path from mask layer content
-    ctx.beginPath();
-    for (const element of maskFrame.elements) {
-      if (element.type === 'shape') {
-        // Apply shape's matrix
-        ctx.save();
-        this.applyMatrix(element.matrix);
-
-        // Add shape edges to clip path
-        const cached = this.getOrComputeShapePaths(element);
-        for (const [, path] of cached.fillPaths) {
-          ctx.clip(path, 'nonzero');
-        }
-
-        ctx.restore();
-      } else if (element.type === 'symbol') {
-        // For symbol masks, we need to render the symbol's shapes as clip paths
-        // This is a simplified version - complex symbol masks may need more work
-        const path = new Path2D();
-        path.rect(-10000, -10000, 20000, 20000); // Fallback full rect
-        ctx.clip(path);
-      }
-    }
+    // Clip to the union of the mask's fill area. Everything on the mask layer
+    // contributes (shapes, shapes nested in symbol instances at their current
+    // frame, motion/shape-tweened content, text/bitmap/video bounds), collected
+    // into ONE path so overlapping/separate mask shapes union. (Calling
+    // ctx.clip() once per shape intersects them instead.)
+    const clipPath = new Path2D();
+    this.addLayerToMaskPath(maskLayer, frameIndex, new DOMMatrix(), clipPath, depth);
+    ctx.clip(clipPath, 'nonzero');
 
     // Render masked layers within the clip
     for (const maskedIdx of maskedLayerIndices) {
       // Honor each masked child's own visibility (and its parent cascade — its
       // parentLayerIndex points at the mask, so a hidden mask also hides it).
       if (!this.isLayerVisibleInFla(timeline.layers, maskedIdx)) continue;
+      if (depth === 0 && this.hiddenLayers.has(maskedIdx)) continue;
       const maskedLayer = timeline.layers[maskedIdx];
       if (maskedLayer) {
         this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx);
@@ -1051,6 +1039,116 @@ export class FLARenderer {
     }
 
     ctx.restore();
+  }
+
+  // Add the fill area of a layer's content at `frameIndex` to a mask clip path.
+  // `transform` maps the layer's coordinate space into the space the clip is
+  // applied in. Mirrors renderLayer's frame/tween resolution.
+  private addLayerToMaskPath(
+    layer: Layer,
+    frameIndex: number,
+    transform: DOMMatrix,
+    path: Path2D,
+    depth: number
+  ): void {
+    const frame = this.findFrameAtIndex(layer.frames, frameIndex);
+    if (!frame) return;
+
+    const nextKeyframe = this.findNextKeyframe(layer.frames, frame);
+    const isTween = frame.tweenType === 'motion' || frame.tweenType === 'shape';
+    const progress = isTween && nextKeyframe
+      ? this.calculateTweenProgress(frameIndex, frame, nextKeyframe, frame.acceleration, frame.tweens)
+      : 0;
+
+    frame.elements.forEach((element, elementIndex) => {
+      this.currentKeyframeStart = frame.index;
+
+      // Shape tween: the interpolated morph segments are the mask geometry.
+      if (frame.tweenType === 'shape' && frame.morphShape && element.type === 'shape') {
+        const m = transform.multiply(this.toDOMMatrix(element.matrix));
+        for (const segment of frame.morphShape.segments) {
+          if ((segment.fillIndex1 ?? segment.fillIndex2) === undefined) continue;
+          path.addPath(this.buildMorphSegmentPath(segment, progress), m);
+        }
+        return;
+      }
+
+      // Motion tween: interpolate the symbol's matrix like renderLayer does.
+      let maskElement: DisplayElement = element;
+      if (frame.tweenType === 'motion' && nextKeyframe && element.type === 'symbol') {
+        const next = nextKeyframe.elements.find(
+          (e) => e.type === 'symbol' && e.libraryItemName === element.libraryItemName
+        ) ?? nextKeyframe.elements[0];
+        if (next && next.type === 'symbol') {
+          maskElement = {
+            ...element,
+            matrix: this.interpolateTweenMatrix(element.matrix, next.matrix, progress, frame),
+          };
+        }
+      }
+
+      this.addElementToMaskPath(maskElement, transform, path, depth, frameIndex, elementIndex);
+    });
+  }
+
+  // Add one display element's fill area to a mask clip path. Strokes are
+  // ignored: in Animate only fills define a mask.
+  private addElementToMaskPath(
+    element: DisplayElement,
+    transform: DOMMatrix,
+    path: Path2D,
+    depth: number,
+    parentFrameIndex: number,
+    elementIndex: number
+  ): void {
+    const m = transform.multiply(this.toDOMMatrix(element.matrix));
+
+    if (element.type === 'shape') {
+      for (const [, fillPath] of this.getOrComputeShapePaths(element).fillPaths) {
+        path.addPath(fillPath, m);
+      }
+    } else if (element.type === 'symbol') {
+      if (!this.doc || depth > 50 || element.isVisible === false) return;
+      const symbol = getWithNormalizedPath(this.doc.symbols, element.libraryItemName);
+      if (!symbol) return;
+
+      const symbolFrame = this.getSymbolFrame(element, symbol, parentFrameIndex, elementIndex);
+      if (element.symbolType === 'movieclip') {
+        this.currentInstancePath.push(`${element.libraryItemName}@${elementIndex}`);
+      }
+      const layers = symbol.timeline.layers;
+      for (let i = 0; i < layers.length; i++) {
+        const type = (layers[i].layerType as string | undefined)?.toLowerCase();
+        // Guides/folders never render; a nested mask layer's own content is
+        // not drawn either (its masked layers still contribute).
+        if (type === 'guide' || type === 'folder' || type === 'mask') continue;
+        if (symbol.timeline.referenceLayers.has(i)) continue;
+        if (!this.isLayerVisibleInFla(layers, i)) continue;
+        this.addLayerToMaskPath(layers[i], symbolFrame, m, path, depth + 1);
+      }
+      if (element.symbolType === 'movieclip') {
+        this.currentInstancePath.pop();
+      }
+    } else {
+      // Text, bitmaps and video mask by their bounding box.
+      const rect = new Path2D();
+      if (element.type === 'text') {
+        rect.rect(element.left, 0, element.width, element.height);
+      } else if (element.type === 'bitmap') {
+        const bitmapItem = this.doc ? getWithNormalizedPath(this.doc.bitmaps, element.libraryItemName) : undefined;
+        const img = bitmapItem?.imageData;
+        const width = img ? (img.naturalWidth || img.width) : (bitmapItem?.width ?? 0);
+        const height = img ? (img.naturalHeight || img.height) : (bitmapItem?.height ?? 0);
+        rect.rect(0, 0, width, height);
+      } else {
+        rect.rect(0, 0, element.width, element.height);
+      }
+      path.addPath(rect, m);
+    }
+  }
+
+  private toDOMMatrix(matrix: Matrix): DOMMatrix {
+    return new DOMMatrix([matrix.a, matrix.b, matrix.c, matrix.d, matrix.tx, matrix.ty]);
   }
 
   private renderTimeline(timeline: Timeline, frameIndex: number, depth: number = 0): void {
@@ -1093,9 +1191,9 @@ export class FLARenderer {
     // Track which layers are masked and their mask layer index
     const maskedLayers = new Map<number, number>(); // masked layer index -> mask layer index
     for (let i = 0; i < timeline.layers.length; i++) {
-      const layer = timeline.layers[i];
-      if (layer.maskLayerIndex !== undefined) {
-        maskedLayers.set(i, layer.maskLayerIndex);
+      const maskIndex = getMaskLayerIndex(timeline.layers, i);
+      if (maskIndex !== undefined) {
+        maskedLayers.set(i, maskIndex);
       }
     }
 
@@ -1148,10 +1246,11 @@ export class FLARenderer {
         // by it). Honor the mask layer's own visibility before rendering.
         if (layer.visible === false) continue;
 
-        // Find all layers masked by this layer
+        // Find all layers masked by this layer, in the same paint order as the
+        // timeline (so masked layers keep their relative stacking).
         const maskedByThis: number[] = [];
-        for (const [maskedIdx, maskIdx] of maskedLayers) {
-          if (maskIdx === i) {
+        for (const maskedIdx of indices) {
+          if (maskedLayers.get(maskedIdx) === i) {
             maskedByThis.push(maskedIdx);
             renderedMasked.add(maskedIdx);
           }
@@ -1656,36 +1755,7 @@ export class FLARenderer {
       const startMatrix = element.matrix;
       const endMatrix = nextDisplayElement.matrix;
 
-      let interpolatedMatrix: Matrix;
-
-      // Check for rotation tween (CW/CCW with additional rotations)
-      if (frame?.motionTweenRotate && frame.motionTweenRotate !== 'none') {
-        interpolatedMatrix = this.interpolateMatrixWithRotation(
-          startMatrix,
-          endMatrix,
-          progress,
-          frame.motionTweenRotate,
-          frame.motionTweenRotateTimes || 0
-        );
-      } else {
-        interpolatedMatrix = {
-          a: this.lerp(startMatrix.a, endMatrix.a, progress),
-          b: this.lerp(startMatrix.b, endMatrix.b, progress),
-          c: this.lerp(startMatrix.c, endMatrix.c, progress),
-          d: this.lerp(startMatrix.d, endMatrix.d, progress),
-          tx: this.lerp(startMatrix.tx, endMatrix.tx, progress),
-          ty: this.lerp(startMatrix.ty, endMatrix.ty, progress)
-        };
-      }
-
-      // Apply orient-to-path rotation if enabled
-      if (frame?.motionTweenOrientToPath) {
-        interpolatedMatrix = this.applyOrientToPath(
-          interpolatedMatrix,
-          startMatrix,
-          endMatrix
-        );
-      }
+      const interpolatedMatrix = this.interpolateTweenMatrix(startMatrix, endMatrix, progress, frame);
 
       // Interpolate color transform if either element has one
       const interpolatedColorTransform = this.lerpColorTransform(
@@ -1708,6 +1778,43 @@ export class FLARenderer {
     } else {
       this.renderDisplayElement(element, depth, parentFrameIndex, elementIndex);
     }
+  }
+
+  // Interpolate a symbol's matrix across a motion tween (honors rotation and
+  // orient-to-path settings on the tween's start frame).
+  private interpolateTweenMatrix(startMatrix: Matrix, endMatrix: Matrix, progress: number, frame?: Frame): Matrix {
+    let interpolatedMatrix: Matrix;
+
+    // Check for rotation tween (CW/CCW with additional rotations)
+    if (frame?.motionTweenRotate && frame.motionTweenRotate !== 'none') {
+      interpolatedMatrix = this.interpolateMatrixWithRotation(
+        startMatrix,
+        endMatrix,
+        progress,
+        frame.motionTweenRotate,
+        frame.motionTweenRotateTimes || 0
+      );
+    } else {
+      interpolatedMatrix = {
+        a: this.lerp(startMatrix.a, endMatrix.a, progress),
+        b: this.lerp(startMatrix.b, endMatrix.b, progress),
+        c: this.lerp(startMatrix.c, endMatrix.c, progress),
+        d: this.lerp(startMatrix.d, endMatrix.d, progress),
+        tx: this.lerp(startMatrix.tx, endMatrix.tx, progress),
+        ty: this.lerp(startMatrix.ty, endMatrix.ty, progress)
+      };
+    }
+
+    // Apply orient-to-path rotation if enabled
+    if (frame?.motionTweenOrientToPath) {
+      interpolatedMatrix = this.applyOrientToPath(
+        interpolatedMatrix,
+        startMatrix,
+        endMatrix
+      );
+    }
+
+    return interpolatedMatrix;
   }
 
   private interpolateMatrixWithRotation(
@@ -1866,6 +1973,64 @@ export class FLARenderer {
   private missingSymbols = new Set<string>();
   private currentKeyframeStart: number = 0;  // Track keyframe start for loop calculation
 
+  // Calculate which frame of a symbol's timeline an instance shows.
+  // In Flash:
+  // - Graphic symbols: sync with parent timeline based on loop mode
+  //   - 'single frame': Always shows the specified firstFrame
+  //   - 'loop': Internal timeline advances with parent, loops when done
+  //   - 'play once': Internal timeline advances, stops at last frame
+  // - MovieClip symbols: play their own timeline independently (use 'play once' for static rendering)
+  // - Button symbols: show first frame (up state)
+  private getSymbolFrame(instance: SymbolInstance, symbol: Symbol, parentFrameIndex: number, elementIndex: number): number {
+    const firstFrame = instance.firstFrame || 0;
+    const lastFrame = instance.lastFrame;
+    const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
+
+    // Determine effective frame range
+    // If lastFrame is specified, it limits the playback range
+    const effectiveLastFrame = lastFrame !== undefined
+      ? Math.min(lastFrame, totalSymbolFrames - 1)
+      : totalSymbolFrames - 1;
+    const frameRange = effectiveLastFrame - firstFrame + 1;
+
+    // MovieClips play independently from parent timeline with their own playhead
+    if (instance.symbolType === 'movieclip') {
+      // Generate unique instance key for this MovieClip
+      const instanceKey = this.generateInstanceKey(instance.libraryItemName, elementIndex);
+
+      // Get or create instance state
+      const state = this.getOrCreateMovieClipState(
+        instanceKey,
+        totalSymbolFrames,
+        parentFrameIndex
+      );
+
+      // Use the instance's independent playhead
+      return state.playhead % totalSymbolFrames;
+    }
+
+    // Buttons show first frame (up state) without ActionScript
+    if (instance.symbolType === 'button') {
+      return 0;
+    }
+
+    // Graphic symbols sync with parent timeline based on loop mode
+    if (instance.loop === 'single frame') {
+      // Always show the specified firstFrame
+      return firstFrame % totalSymbolFrames;
+    }
+    const frameOffset = parentFrameIndex - this.currentKeyframeStart;
+    if (instance.loop === 'loop') {
+      // Sync with parent timeline: advance from firstFrame based on parent frame offset
+      // Loop within the specified frame range (firstFrame to lastFrame)
+      return lastFrame !== undefined
+        ? firstFrame + (frameOffset % frameRange)
+        : (firstFrame + frameOffset) % totalSymbolFrames;
+    }
+    // 'play once' - advance but clamp at last frame (or effectiveLastFrame)
+    return Math.min(firstFrame + frameOffset, effectiveLastFrame);
+  }
+
   private renderSymbolInstance(instance: SymbolInstance, depth: number, parentFrameIndex: number, elementIndex: number = 0): void {
     if (!this.doc) return;
 
@@ -1969,48 +2134,12 @@ export class FLARenderer {
       }
     }
 
-    // Calculate which frame to render based on symbol type and loop mode
-    // In Flash:
-    // - Graphic symbols: sync with parent timeline based on loop mode
-    //   - 'single frame': Always shows the specified firstFrame
-    //   - 'loop': Internal timeline advances with parent, loops when done
-    //   - 'play once': Internal timeline advances, stops at last frame
-    // - MovieClip symbols: play their own timeline independently (use 'play once' for static rendering)
-    // - Button symbols: show first frame (up state)
-    const firstFrame = instance.firstFrame || 0;
-    const lastFrame = instance.lastFrame;
-    const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
+    const symbolFrame = this.getSymbolFrame(instance, symbol, parentFrameIndex, elementIndex);
 
-    // Determine effective frame range
-    // If lastFrame is specified, it limits the playback range
-    const effectiveLastFrame = lastFrame !== undefined
-      ? Math.min(lastFrame, totalSymbolFrames - 1)
-      : totalSymbolFrames - 1;
-    const frameRange = effectiveLastFrame - firstFrame + 1;
-
-    let symbolFrame: number;
-
-    // MovieClips play independently from parent timeline with their own playhead
     if (instance.symbolType === 'movieclip') {
-      // Generate unique instance key for this MovieClip
-      const instanceKey = this.generateInstanceKey(instance.libraryItemName, elementIndex);
-
-      // Get or create instance state
-      const state = this.getOrCreateMovieClipState(
-        instanceKey,
-        totalSymbolFrames,
-        parentFrameIndex
-      );
-
-      // Use the instance's independent playhead
-      symbolFrame = state.playhead % totalSymbolFrames;
-
       // Push this instance onto the path for nested MovieClips
       this.currentInstancePath.push(`${instance.libraryItemName}@${elementIndex}`);
     } else if (instance.symbolType === 'button') {
-      // Buttons show first frame (up state) without ActionScript
-      symbolFrame = 0;
-
       // Track button hit area for debug click detection
       if (this.debugMode && symbol.hitAreaFrame !== undefined) {
         const hitAreaPath = this.buildButtonHitAreaPath(symbol, symbol.hitAreaFrame);
@@ -2026,26 +2155,6 @@ export class FLARenderer {
             symbolName: symbol.name
           });
         }
-      }
-    } else {
-      // Graphic symbols sync with parent timeline based on loop mode
-      if (instance.loop === 'single frame') {
-        // Always show the specified firstFrame
-        symbolFrame = firstFrame % totalSymbolFrames;
-      } else if (instance.loop === 'loop') {
-        // Sync with parent timeline: advance from firstFrame based on parent frame offset
-        // Loop within the specified frame range (firstFrame to lastFrame)
-        const frameOffset = parentFrameIndex - this.currentKeyframeStart;
-        if (lastFrame !== undefined) {
-          // Loop within the specified range
-          symbolFrame = firstFrame + (frameOffset % frameRange);
-        } else {
-          symbolFrame = (firstFrame + frameOffset) % totalSymbolFrames;
-        }
-      } else {
-        // 'play once' - advance but clamp at last frame (or effectiveLastFrame)
-        const frameOffset = parentFrameIndex - this.currentKeyframeStart;
-        symbolFrame = Math.min(firstFrame + frameOffset, effectiveLastFrame);
       }
     }
 
@@ -4273,6 +4382,33 @@ export class FLARenderer {
     offCtx.putImageData(image, x, y);
   }
 
+  // Build the closed path of one morph segment interpolated at `progress`.
+  private buildMorphSegmentPath(segment: MorphSegment, progress: number): Path2D {
+    const path = new Path2D();
+
+    // Interpolate start point
+    const startX = this.lerp(segment.startPointA.x, segment.startPointB.x, progress);
+    const startY = this.lerp(segment.startPointA.y, segment.startPointB.y, progress);
+    path.moveTo(startX, startY);
+
+    // Interpolate each curve
+    for (const curve of segment.curves) {
+      const ctrlX = this.lerp(curve.controlPointA.x, curve.controlPointB.x, progress);
+      const ctrlY = this.lerp(curve.controlPointA.y, curve.controlPointB.y, progress);
+      const anchorX = this.lerp(curve.anchorPointA.x, curve.anchorPointB.x, progress);
+      const anchorY = this.lerp(curve.anchorPointA.y, curve.anchorPointB.y, progress);
+
+      if (curve.isLine) {
+        path.lineTo(anchorX, anchorY);
+      } else {
+        path.quadraticCurveTo(ctrlX, ctrlY, anchorX, anchorY);
+      }
+    }
+
+    path.closePath();
+    return path;
+  }
+
   // Render a morph shape (shape tween) at the given progress
   private renderMorphShape(
     morphShape: MorphShape,
@@ -4300,28 +4436,7 @@ export class FLARenderer {
 
     // Render each segment
     for (const segment of morphShape.segments) {
-      const path = new Path2D();
-
-      // Interpolate start point
-      const startX = this.lerp(segment.startPointA.x, segment.startPointB.x, progress);
-      const startY = this.lerp(segment.startPointA.y, segment.startPointB.y, progress);
-      path.moveTo(startX, startY);
-
-      // Interpolate each curve
-      for (const curve of segment.curves) {
-        const ctrlX = this.lerp(curve.controlPointA.x, curve.controlPointB.x, progress);
-        const ctrlY = this.lerp(curve.controlPointA.y, curve.controlPointB.y, progress);
-        const anchorX = this.lerp(curve.anchorPointA.x, curve.anchorPointB.x, progress);
-        const anchorY = this.lerp(curve.anchorPointA.y, curve.anchorPointB.y, progress);
-
-        if (curve.isLine) {
-          path.lineTo(anchorX, anchorY);
-        } else {
-          path.quadraticCurveTo(ctrlX, ctrlY, anchorX, anchorY);
-        }
-      }
-
-      path.closePath();
+      const path = this.buildMorphSegmentPath(segment, progress);
 
       // Apply fill from segment indices
       const fillIndex = segment.fillIndex1 ?? segment.fillIndex2;

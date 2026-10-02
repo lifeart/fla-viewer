@@ -819,6 +819,19 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   parent tweens while a child holds a single keyframe. Do NOT blindly add
   `childWorld = parentWorld × childLocal` — it double-transforms world-space children.
 
+### Masks (issue #47)
+- `renderMaskGroup` builds ONE `Path2D` from the mask layer's **fill area** and clips once.
+  Never call `ctx.clip()` inside a `save()/restore()` pair (restore discards the clip — the
+  original bug), and never clip once per shape (successive clips **intersect**; masks union).
+- Mask geometry comes from `addLayerToMaskPath`/`addElementToMaskPath`: shapes, shapes nested
+  in symbols at their current frame (transforms composed via `Path2D.addPath(p, matrix)`),
+  motion/shape tweens, and text/bitmap/video bounding boxes. Strokes never contribute.
+- Mask membership is `getMaskLayerIndex` (`src/layer-utils.ts`): explicit `maskLayerIndex`, else
+  the `parentLayerIndex` chain through folders, else (binary FLAs) the nearest mask above a
+  contiguous run of `masked` layers. Guide/folder children of a mask are never re-typed `masked`.
+- Known approximations: masked layers *inside* a symbol used as a mask contribute unclipped;
+  a mirrored (negative-determinant) mask instance overlapping another can cancel under nonzero.
+
 ### Pre-CS5 binary FLA (issue #8)
 - Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not
   ZIP. `src/fla-parser.ts` detects the magic and routes to `src/binary-fla-parser.ts` (via

@@ -29,3 +29,44 @@ export function isLayerVisibleInFla(layers: Layer[], index: number): boolean {
   }
   return true;
 }
+
+/**
+ * Resolve the mask layer that clips layer `index`, or undefined if it is not
+ * masked. Mirrors Animate's mask grouping:
+ *
+ * - An explicit `maskLayerIndex` (set by the XFL parser) wins.
+ * - Otherwise the `parentLayerIndex` chain is walked up through folders: a
+ *   layer parented to a mask — directly, or via a folder nested inside the mask
+ *   group — is masked by it.
+ * - A `layerType="masked"` layer with no usable parent link (e.g. the pre-CS5
+ *   binary format, which only records the layer type) is masked by the nearest
+ *   mask layer above it, across a contiguous run of masked layers.
+ *
+ * Guide and folder layers are never masked (they do not render).
+ */
+export function getMaskLayerIndex(layers: Layer[], index: number): number | undefined {
+  const layer = layers[index];
+  if (!layer) return undefined;
+  const type = (layer.layerType as string | undefined)?.toLowerCase();
+  if (type === 'guide' || type === 'folder' || type === 'mask') return undefined;
+  if (layer.maskLayerIndex !== undefined) return layer.maskLayerIndex;
+
+  const seen = new Set<number>();
+  let p = layer.parentLayerIndex;
+  while (p !== undefined && p >= 0 && p < layers.length && !seen.has(p)) {
+    seen.add(p);
+    const parentType = (layers[p].layerType as string | undefined)?.toLowerCase();
+    if (parentType === 'mask') return p;
+    if (parentType !== 'folder') break;
+    p = layers[p].parentLayerIndex;
+  }
+
+  if (type === 'masked' && layer.parentLayerIndex === undefined) {
+    for (let i = index - 1; i >= 0; i--) {
+      const aboveType = (layers[i].layerType as string | undefined)?.toLowerCase();
+      if (aboveType === 'mask') return i;
+      if (aboveType !== 'masked') break;
+    }
+  }
+  return undefined;
+}
