@@ -100,3 +100,52 @@ export function collectFlashStrings(data: Uint8Array): string[] {
   }
   return strings;
 }
+
+export interface ReadStrictFlashStringOptions extends ReadFlashStringOptions {
+  /** Reject strings longer than this many code units. */
+  maxChars?: number;
+}
+
+/**
+ * Stricter {@link readFlashStringAt} used by the CPic object walker (PR #45),
+ * which probes many offsets and needs false matches to fail: rejects a string
+ * containing a NUL code unit, one longer than `maxChars`, and an `FF FE FF FF`
+ * marker unless `allowExtended` is set (instead of reading 0xFF as a length).
+ */
+export function readStrictFlashStringAt(
+  data: Uint8Array,
+  pos: number,
+  opts: ReadStrictFlashStringOptions = {}
+): FlashString | null {
+  if (!opts.allowExtended && hasFlashStringMarker(data, pos) && data[pos + 3] === 0xff) {
+    return null;
+  }
+  const s = readFlashStringAt(data, pos, opts);
+  if (!s) return null;
+  if (opts.maxChars !== undefined && s.charLength > opts.maxChars) return null;
+  for (let i = 0; i < s.charLength; i++) {
+    if ((data[s.textStart + i * 2] | data[s.textStart + i * 2 + 1]) === 0) return null;
+  }
+  return s;
+}
+
+/**
+ * Read NUL-terminated raw UTF-16LE at `pos` (no length prefix). Returns null
+ * when the first code unit is NUL or missing; `end` is just past the NUL, or
+ * the end of `data` when there is none.
+ */
+export function decodeRawUtf16UntilNull(
+  data: Uint8Array,
+  pos: number
+): { value: string; end: number } | null {
+  let i = pos;
+  if (i + 2 > data.length || (data[i] | (data[i + 1] << 8)) === 0) return null;
+  let value = '';
+  while (i + 2 <= data.length) {
+    const c = data[i] | (data[i + 1] << 8);
+    if (c === 0) break;
+    value += String.fromCharCode(c);
+    i += 2;
+  }
+  return { value, end: Math.min(i + 2, data.length) };
+}

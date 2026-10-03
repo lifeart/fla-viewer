@@ -546,6 +546,7 @@ Edge contributions are collected per fill style, then sorted into connected chai
 | `src/ole2-reader.ts` | OLE2 / Compound File Binary reader |
 | `src/binary-fla-parser.ts` | Pre-CS5 binary FLA entry point |
 | `src/binary-fla-structure.ts`, `src/binary-shape-decoder.ts`, `src/binary-instance-decoder.ts`, `src/binary-timeline-decoder.ts` | Binary FLA layers, shapes, instances, keyframes |
+| `src/binary-carchive.ts`, `src/binary-flash-string.ts`, `src/binary-cpic-*.ts`, `src/binary-native-timeline.ts` | Binary FLA object reading; second timeline walker (CS3/CS4) |
 | `src/sample-generator.ts` | Built-in sample FLA |
 | `src/main.ts` | Application entry point and UI |
 | `src/__tests__/` | Vitest tests (browser mode, Chromium) and fixtures |
@@ -830,6 +831,19 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   later index (the old reader did this). Synthetic test streams must number slots the same way.
 - Flash strings (`FF FE FF <u8 len> <UTF-16LE>`, extended `FF FE FF FF <u16 len>`) go through
   `src/binary-flash-string.ts`.
+- **Second timeline walker for CS3/CS4** (`src/binary-native-timeline.ts`, ported from PR #45):
+  used only when `decodeStreamTimeline` returns null. It reads CPic objects through
+  `CArchiveReader` (`binary-carchive.ts`) and the `binary-cpic-*.ts` readers, and resyncs by
+  scanning for frame tails and object tags when a body doesn't parse; that is heuristic and
+  tuned on SkyUI CS4 files (layer schema 13, frame schema 29). It fails on older schemas, so
+  the old walker stays first. Its output is kept only if every layer's keyframe count equals
+  the number of CPicFrame objects a flat scan finds in that layer (declarations and class
+  references only: a class-bit tag landing on an object slot is byte noise): a misread shape
+  makes the walker resync on a later frame tail and merge the frames in between. The scan is
+  indexed per stream; the walker's per-byte resync lookups must stay binary searches. The walker supplies
+  structure only (keyframe spans, byte ranges, motion tween flag); content still comes from
+  the shape/instance scanners. Not used yet: its decoded placements, text and parent-layer
+  (mask) references.
 
 ### Headless / tooling parse (issue #42)
 - `new FLAParser({ DOMParser })` takes any WHATWG-compatible `DOMParser` (e.g. linkedom in

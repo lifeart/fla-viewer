@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   ArchiveReader,
   ByteReader,
+  CArchiveReader,
   EndOfStreamError,
   readNewClassNameAt,
+  scanCArchiveObjectStarts,
   scanDeclaredClasses,
 } from '../binary-carchive';
 import { buildCombinedClassTable } from '../binary-instance-decoder';
@@ -130,6 +132,128 @@ describe('readNewClassNameAt / scanDeclaredClasses', () => {
     // The instance decoder's forward table keeps two slots per declaration.
     expect(buildCombinedClassTable(data)).toEqual([
       'CPicPage', 'CPicPage', 'CPicLayer', 'CPicLayer', 'CPicFrame', 'CPicFrame',
+    ]);
+  });
+});
+
+describe('CArchiveReader', () => {
+  const reader = (bytes: number[]) => new CArchiveReader(Uint8Array.from(bytes));
+
+  it('reads declarations and numbers new objects like the load array', () => {
+    const r = reader([
+      ...classDecl('CPicFrame', 7), // slots 1 (class), 2 (object)
+      ...classRef(1), // new CPicFrame: slot 3
+      ...objectRef(2), // the first CPicFrame again: no new slot
+      ...classDecl('CPicShape'), // slots 4, 5
+      0x00, 0x00,
+    ]);
+    expect(r.readObjectHeader()).toMatchObject({
+      tagStart: 0, className: 'CPicFrame', schema: 7, referenceKind: 'new_class', objectIndex: 2,
+    });
+    expect(r.readObjectHeader()).toMatchObject({ className: 'CPicFrame', referenceKind: 'class_backref', objectIndex: 3, referenceIndex: 1 });
+    expect(r.readObjectHeader()).toMatchObject({ className: 'CPicFrame', referenceKind: 'object_backref', referenceIndex: 2 });
+    expect(r.readObjectHeader()).toMatchObject({ className: 'CPicShape', objectIndex: 5 });
+    expect(r.combinedClassTable()).toEqual(['CPicFrame', 'CPicFrame', 'CPicFrame', 'CPicShape', 'CPicShape']);
+    expect(r.readObjectHeader()).toBeNull();
+    expect(r.remaining).toBe(0);
+  });
+
+  it('resolves a reference by the slot it lands on, not the tag bit', () => {
+    // 0x0001 has no class bit but slot 1 is a class: still a new object.
+    const r = reader([...classDecl('CPicLayer'), ...objectRef(1)]);
+    r.readObjectHeader();
+    expect(r.readObjectHeader()).toMatchObject({ className: 'CPicLayer', referenceKind: 'class_backref', objectIndex: 3 });
+  });
+
+  it('reads big references, ignoring the class bit of the u32', () => {
+    const r = reader([...classDecl('CPicSprite'), ...bigClassRef(1), ...bigObjectRef(2)]);
+    r.readObjectHeader();
+    expect(r.readObjectHeader()).toMatchObject({ referenceKind: 'class_backref', referenceIndex: 1 });
+    expect(r.readObjectHeader()).toMatchObject({ referenceKind: 'object_backref', referenceIndex: 2 });
+  });
+
+  it('throws on an unresolvable reference or an implausible class name', () => {
+    const r = reader([...classDecl('CPicPage'), ...classRef(9)]);
+    r.readObjectHeader();
+    expect(() => r.readObjectHeader()).toThrow(/invalid backref index 9/);
+    expect(() => reader([0xff, 0xff, 1, 0, 0, 0]).readObjectHeader()).toThrow(/class name length 0/);
+    expect(() => reader([0xff]).readObjectHeader()).toThrow(/need 2 bytes/);
+  });
+
+  it('peeks and restores without changing position or load array', () => {
+    const r = reader([...classDecl('CPicPage'), ...classRef(1)]);
+    expect(r.peekObjectHeader()?.className).toBe('CPicPage');
+    expect(r.pos).toBe(0);
+    expect(r.combinedClassTable()).toEqual([]);
+    r.readObjectHeader();
+    const cp = r.checkpoint();
+    r.readObjectHeader();
+    expect(r.combinedClassTable()).toHaveLength(3);
+    r.restore(cp);
+    expect(r.combinedClassTable()).toHaveLength(2);
+    expect(r.pos).toBe(cp.pos);
+  });
+
+  it('corrects the class of the object it just read', () => {
+    const r = reader([...classDecl('CPicPage'), ...classDecl('CPicSprite'), ...classRef(1)]);
+    r.readObjectHeader();
+    r.readObjectHeader();
+    const h = r.readObjectHeader()!; // misread as a new CPicPage
+    const fixed = r.correctLastObjectHeader(h, 'CPicSprite', 'class_backref');
+    expect(fixed).toMatchObject({ className: 'CPicSprite', objectIndex: 5 });
+    expect(r.combinedClassTable()).toEqual(['CPicPage', 'CPicPage', 'CPicSprite', 'CPicSprite', 'CPicSprite']);
+  });
+
+  it('resyncs its load array over a range it skipped', () => {
+    const bytes = [...classDecl('CPicFrame'), 0x99, ...classDecl('CPicShape'), ...classRef(3), 0x42];
+    const r = reader(bytes);
+    r.syncObjectHeadersInRange(0, bytes.length);
+    // Two declarations plus one new CPicShape object.
+    expect(r.combinedClassTable()).toEqual(['CPicFrame', 'CPicFrame', 'CPicShape', 'CPicShape', 'CPicShape']);
+    // A class filter skips unknown declarations.
+    const filtered = reader(bytes);
+    filtered.syncObjectHeadersInRange(0, bytes.length, new Set(['CPicShape']));
+    expect(filtered.combinedClassTable()).toEqual(['CPicShape', 'CPicShape']);
+  });
+
+  it('readObject parses the body and reports where it ends', () => {
+    const r = reader([...classDecl('CPicLayer'), 0x2a, 0x00]);
+    const obj = r.readObject((h, rr) => `${h.className}:${rr.readU16()}`);
+    expect(obj).toMatchObject({ value: 'CPicLayer:42', bodyEnd: 6 + 9 + 2 });
+  });
+});
+
+describe('scanCArchiveObjectStarts', () => {
+  it('lists every object body with how it was found', () => {
+    const data = Uint8Array.from([
+      0x01, ...classDecl('CPicPage'), 0x05, ...classDecl('CPicFrame'), 0x00, ...classRef(3), 0x00,
+      // The scan only matches tags with the class bit (a plain small index is
+      // indistinguishable from data). One that lands on an object slot is
+      // reported as object_backref; MFC never writes that, so callers that
+      // count objects skip it.
+      ...classRef(4), 0x00,
+    ]);
+    const starts = scanCArchiveObjectStarts(data);
+    expect(starts.map((s) => [s.className, s.recoveredVia, s.referenceKind])).toEqual([
+      ['CPicPage', 'class_decl', 'new_class'],
+      ['CPicFrame', 'class_decl', 'new_class'],
+      ['CPicFrame', 'backref', 'class_backref'],
+      ['CPicFrame', 'backref', 'object_backref'],
+    ]);
+    expect(starts[0].bodyStart).toBe(1 + 6 + 8);
+    expect(starts.every((s, i) => i === 0 || s.bodyStart > starts[i - 1].bodyStart)).toBe(true);
+  });
+
+  it('keeps only the classes asked for, but still numbers the others', () => {
+    // MFIFoo takes slots 3 and 4 and its new object slot 5, so 0x8006 names
+    // the CPicFrame declared after it.
+    const data = Uint8Array.from([
+      ...classDecl('CPicPage'), ...classDecl('MFIFoo'), ...classRef(3), 0x00, ...classDecl('CPicFrame'), 0x00, ...classRef(6), 0, 0,
+    ]);
+    expect(scanCArchiveObjectStarts(data, new Set(['CPicPage', 'CPicFrame'])).map((s) => [s.className, s.referenceKind])).toEqual([
+      ['CPicPage', 'new_class'],
+      ['CPicFrame', 'new_class'],
+      ['CPicFrame', 'class_backref'],
     ]);
   });
 });

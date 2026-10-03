@@ -625,7 +625,7 @@ function consumeCPicPage(
 }
 
 /** A layer name is trusted only if it is short and fully printable ASCII/text. */
-function isPlausibleLayerName(name: string): boolean {
+export function isPlausibleLayerName(name: string): boolean {
   if (name.length === 0 || name.length > 64) return false;
   for (const ch of name) {
     const code = ch.charCodeAt(0);
