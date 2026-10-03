@@ -18,6 +18,7 @@ import { decodeStreamTimeline } from '../binary-timeline-decoder';
 import { extractBinaryFLAInfo, parseBinaryFLA } from '../binary-fla-parser';
 import { FLAParser } from '../fla-parser';
 import { FLARenderer } from '../renderer';
+import { OLE2File } from '../ole2-reader';
 import type { Edge, Frame, Shape } from '../types';
 
 // ── little-endian byte builders ─────────────────────────────────────────────
@@ -419,6 +420,43 @@ describe('§3 orphan content is placed once, on the first drawn layer', () => {
     expect(shapeTxs([scene.layers[0].frames[1]])).toEqual([140]);
     expect(shapeTxs(scene.layers[1].frames)).toEqual([40]);
   });
+
+  it('adds a drawn layer for orphans when every layer is a guide or folder', () => {
+    const page = pageStream(
+      [{ name: 'Guide: path', frames: [{ span: 1, x: 40 }, { span: 1, x: 140 }] }],
+      [...new Array(16).fill(0x11), ...shapeBody(340)]
+    );
+    const doc = parseBinaryFLA(
+      buildCFB([
+        { name: 'Contents', data: contentsStream({}) },
+        { name: 'Page 1', data: page },
+      ])
+    );
+    const scene = doc.timelines[0];
+    expect(scene.layers.map((l) => l.name)).toEqual(['Guide: path', 'Recovered Content']);
+    expect([...scene.referenceLayers]).toEqual([0]);
+    expect(shapeTxs(scene.layers[1].frames)).toEqual([340]);
+    expect(shapeTxs(scene.layers[0].frames).sort((a, b) => a - b)).toEqual([40, 140]);
+  });
+
+  it('treats only default "Folder N" names as folders', () => {
+    const page = pageStream([
+      { name: 'Folder art', frames: [{ span: 1, x: 40 }, { span: 1, x: 140 }] },
+      { name: 'Folder 3', frames: [{ span: 2 }] },
+    ]);
+    const doc = parseBinaryFLA(
+      buildCFB([
+        { name: 'Contents', data: contentsStream({}) },
+        { name: 'Page 1', data: page },
+      ])
+    );
+    const scene = doc.timelines[0];
+    expect(scene.layers.map((l) => [l.name, l.layerType])).toEqual([
+      ['Folder 3', 'folder'],
+      ['Folder art', 'normal'],
+    ]);
+    expect([...scene.referenceLayers]).toEqual([0]);
+  });
 });
 
 // ── §6 edge units ───────────────────────────────────────────────────────────
@@ -772,6 +810,18 @@ describe('§12 binary sound extraction', () => {
     expect(info.sounds.size).toBe(0);
     const msg = String((console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0]);
     expect(msg).toContain(`nor ${0x80000000 * 2}-byte PCM`);
+  });
+
+  it('skips a sound whose stream cannot be read and keeps the rest', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const real = OLE2File.prototype.readStream;
+    vi.spyOn(OLE2File.prototype, 'readStream').mockImplementation(function (this: OLE2File, name: string) {
+      if (name === 'Media 2') throw new Error('FAT chain loop');
+      return real.call(this, name);
+    });
+    const info = extractBinaryFLAInfo(await soundFla());
+    expect([...info.sounds.keys()].sort()).toEqual([1, 3]);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('stereo8.wav') && String(c[0]).includes('unreadable'))).toBe(true);
   });
 
   it('keeps two sounds with the same display name apart', () => {

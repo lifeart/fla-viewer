@@ -49,6 +49,7 @@
 import { OLE2File } from './ole2-reader';
 import {
   extractLayers,
+  FOLDER_NAME,
   type BinaryLayerInfo,
   type BinaryLayerType,
 } from './binary-fla-structure';
@@ -356,7 +357,13 @@ function extractSounds(
     const bitDepth = format & 2 ? 16 : 8;
     const sampleRate = SOUND_RATES[(format >> 2) & 3];
 
-    const data = ole.readStream(stream);
+    let data: Uint8Array;
+    try {
+      data = ole.readStream(stream);
+    } catch (err) {
+      console.warn(`binary-fla: sound "${name}" (${stream}) unreadable, skipped:`, err);
+      continue;
+    }
     const isMp3 =
       (data[0] === 0xff && (data[1] & 0xe0) === 0xe0) ||
       (data[0] === 0x49 && data[1] === 0x44 && data[2] === 0x33);
@@ -385,6 +392,22 @@ function extractSounds(
     p = footer;
   }
   return sounds;
+}
+
+/**
+ * Sound recovery is best-effort: a corrupt sound stream (e.g. a looping FAT
+ * chain) must not fail an otherwise readable file, so drop sounds instead.
+ */
+function extractSoundsSafely(
+  contents: Uint8Array,
+  ole: OLE2File
+): Map<number, BinarySound> {
+  try {
+    return extractSounds(contents, ole);
+  } catch (err) {
+    console.warn('binary-fla: could not read sounds; continuing without them:', err);
+    return new Map();
+  }
 }
 
 /**
@@ -576,7 +599,7 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
     symbolInstances,
     sceneTimelines,
     symbolTimelines,
-    sounds: extractSounds(contents, ole),
+    sounds: extractSoundsSafely(contents, ole),
   };
 }
 
@@ -765,13 +788,12 @@ function buildAttributedLayers(
   // The binary layer record carries no reliable type byte (see
   // binary-fla-structure), so use the UI name prefix like extractLayers.
   const typeOf = (name: string): 'guide' | 'folder' | 'normal' =>
-    name.startsWith('Guide: ') ? 'guide' : name.startsWith('Folder ') ? 'folder' : 'normal';
+    name.startsWith('Guide: ') ? 'guide' : FOLDER_NAME.test(name) ? 'folder' : 'normal';
   // Orphan content goes on the first layer that is drawn: a guide or folder
-  // is a reference layer, so content hosted there would never render.
-  const orphanHost = Math.max(
-    0,
-    timeline.layers.findIndex((dl) => typeOf(dl.name) === 'normal')
-  );
+  // is a reference layer, so content hosted there would never render. With
+  // no drawn layer at all, a synthetic one is added below.
+  const orphanHost = timeline.layers.findIndex((dl) => typeOf(dl.name) === 'normal');
+  const isOrphan = (d: { bodyStart: number }) => !inAnyKeyframe(d.bodyStart);
 
   const layers: Layer[] = timeline.layers.map((dl, index) => {
     const layerType = typeOf(dl.name);
@@ -851,6 +873,28 @@ function buildAttributedLayers(
       frames,
     };
   });
+
+  if (orphanHost < 0) {
+    const orphanElements = [
+      ...decodedShapes.filter(isOrphan).map((d) => d.shape),
+      ...buildSymbolInstances(decodedInstances.filter(isOrphan), libraryByNumber),
+    ] as Frame['elements'];
+    if (orphanElements.length > 0) {
+      // Stored-first = bottom; put it at the bottom of the stack.
+      layers.unshift({
+        name: 'Recovered Content',
+        color: '#4FFF4F',
+        visible: true,
+        locked: false,
+        outline: false,
+        layerType: 'normal',
+        frames: [{ index: 0, duration: 1, keyMode: 0, elements: orphanElements }],
+      });
+      const shifted = [...referenceLayers].map((i) => i + 1);
+      referenceLayers.clear();
+      shifted.forEach((i) => referenceLayers.add(i));
+    }
+  }
 
   if (!attributedAny) return null;
   return { ...toTopFirst(layers, referenceLayers), totalFrames: timeline.totalFrames };

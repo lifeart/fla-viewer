@@ -80,9 +80,12 @@ const LAYER_SIG = new Uint8Array([
 // Flash length-prefixed UTF-16LE string BOM: FF FE FF <u8 len>.
 const FLASH_STR_BOM = new Uint8Array([0xff, 0xfe, 0xff]);
 
-// CPicLayer.type byte → semantic kind (FORMAT.md §4). 0=normal, 1=guide,
-// 3=mask, 4=masked, 5=folder. Values we have not observed map to 'normal'.
 const utf16le = new TextDecoder('utf-16le');
+
+// Layer type comes from Flash's own naming: "Guide: <layer>" for guides and
+// "Folder N" for folders. Only the default folder name counts, so a normal
+// layer the user called e.g. "Folder art" is still drawn.
+export const FOLDER_NAME = /^Folder \d+$/;
 
 function matchesAt(hay: Uint8Array, needle: Uint8Array, at: number): boolean {
   if (at < 0 || at + needle.length > hay.length) return false;
@@ -153,7 +156,7 @@ export function extractLayers(streamData: Uint8Array): BinaryLayerInfo[] {
     // a useful disambiguator for guide/folder layers whose type byte the
     // reference does not always populate consistently.
     if (name.startsWith('Guide: ')) layerType = 'guide';
-    else if (name.startsWith('Folder ')) layerType = 'folder';
+    else if (FOLDER_NAME.test(name)) layerType = 'folder';
 
     layers.push({ name, schema, layerType, locked, visible });
     // Advance past this layer's name so the same record isn't re-matched.

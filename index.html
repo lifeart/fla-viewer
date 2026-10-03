@@ -624,6 +624,9 @@
       border-radius: 2px;
       cursor: pointer;
       position: relative;
+      /* Without this, html's touch-action: manipulation lets a horizontal
+         drag pan the page and cancel the scrub after a few pixels. */
+      touch-action: none;
     }
 
     .timeline:hover {

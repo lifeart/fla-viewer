@@ -723,6 +723,29 @@ describe('FLAPlayer', () => {
         player.pause();
       });
 
+      it('stacks an event sound when the loop comes back to its keyframe', async () => {
+        const p = await loadSounds(4, [
+          { name: 'long.mp3', seconds: 5, index: 0, duration: 1, sync: 'event' },
+        ]);
+        p.state.playing = true;
+        p.startAudio();
+        const first = p.activeSounds[0].source;
+        // Re-entering the keyframe directly...
+        p.startSoundsAtFrame(0);
+        expect(p.activeSounds).toHaveLength(2);
+        expect(p.activeSounds[0].source).toBe(first);
+        p.activeSounds[1].source.stop();
+        p.activeSounds.pop();
+        // ...and through a loop wrap.
+        for (let i = 0; i < 4; i++) tick(p); // wraps back to frame 0
+        expect(p.state.currentFrame).toBe(0);
+        // The first instance keeps playing; a second one starts on top.
+        expect(p.activeSounds).toHaveLength(2);
+        expect(p.activeSounds[0].source).toBe(first);
+        expect(p.activeSounds[1].source).not.toBe(first);
+        player.pause();
+      });
+
       it('uses the new scene\'s sounds after playback advances to it', async () => {
         const sounds = new Map([
           ['a.mp3', { name: 'a.mp3', href: 'a.mp3', audioData: buffer(5) }],

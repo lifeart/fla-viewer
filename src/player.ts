@@ -242,8 +242,9 @@ export class FLAPlayer {
   private playStreamSound(stream: StreamSound, fromFrame: number): void {
     if (!this.audioContext || !stream.soundItem.audioData) return;
 
-    // Restarting the same keyframe's sound replaces it (drift re-seek).
-    this.stopSound(stream);
+    // Re-seeking a stream sound replaces it (drift correction). Event sounds
+    // stack like Flash: re-entering their keyframe starts another instance.
+    if (stream.sound.sync === 'stream') this.stopSound(stream);
 
     const audioBuffer = stream.soundItem.audioData;
     const fps = Math.max(1, this.state.fps);
@@ -485,13 +486,14 @@ export class FLAPlayer {
     const timeline = this.doc.timelines[sceneIndex];
     if (!timeline) return;
 
+    const sceneChanged = sceneIndex !== this.state.currentScene;
     this.state.currentScene = sceneIndex;
     this.state.currentFrame = 0;
     this.state.totalFrames = timeline.totalFrames;
     this.state.sceneName = timeline.name;
     this.renderer.setCurrentScene(sceneIndex);
     // Each scene has its own sounds; keep the list in step with the scene.
-    this.findStreamSounds();
+    if (sceneChanged) this.findStreamSounds();
   }
 
   private animate = (): void => {
