@@ -425,3 +425,44 @@ describe('CS4+ object motion tweens (tweenType="motion object")', () => {
     expect(b).toBe(g);
   });
 });
+
+describe('reverse graphic loop modes (Animate 2021)', () => {
+  // A 3-frame graphic symbol: red, green, blue (one 20x20 box per frame).
+  const symbol = `<DOMSymbolItem xmlns="http://ns.adobe.com/xfl/2008/" name="RGB" symbolType="graphic">
+    <timeline><DOMTimeline name="RGB"><layers><DOMLayer name="Layer 1"><frames>
+      <DOMFrame index="0"><elements>${rectShape(0, 0, 20, 20, '#FF0000')}</elements></DOMFrame>
+      <DOMFrame index="1"><elements>${rectShape(0, 0, 20, 20, '#00FF00')}</elements></DOMFrame>
+      <DOMFrame index="2"><elements>${rectShape(0, 0, 20, 20, '#0000FF')}</elements></DOMFrame>
+    </frames></DOMLayer></layers></DOMTimeline></timeline>
+  </DOMSymbolItem>`;
+
+  async function colorsFor(loop: string, firstFrame: number): Promise<string[]> {
+    const doc = await parseXfl({
+      'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0" duration="5"><elements>
+        <DOMSymbolInstance libraryItemName="RGB" symbolType="graphic" loop="${loop}" firstFrame="${firstFrame}"><matrix><Matrix tx="100" ty="100"/></matrix></DOMSymbolInstance>
+      </elements></DOMFrame></frames></DOMLayer>`, ['RGB']),
+      'LIBRARY/RGB.xml': symbol,
+    });
+    const instance = doc.timelines[0].layers[0].frames[0].elements[0] as SymbolInstance;
+    expect(instance.loop).toBe(loop);
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(doc);
+    const colors: string[] = [];
+    for (let f = 0; f < 5; f++) {
+      renderer.renderFrame(f);
+      colors.push(colorAt(canvas, 110, 110));
+    }
+    return colors;
+  }
+
+  const R = '#FF0000', G = '#00FF00', B = '#0000FF';
+
+  it('plays a "loop reverse" graphic backwards and wraps', async () => {
+    expect(await colorsFor('loop reverse', 2)).toEqual([B, G, R, B, G]);
+  });
+
+  it('plays a "play once reverse" graphic backwards and stops on frame 0', async () => {
+    expect(await colorsFor('play once reverse', 2)).toEqual([B, G, R, R, R]);
+  });
+});

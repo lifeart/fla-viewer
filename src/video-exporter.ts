@@ -1,6 +1,7 @@
 import type { FLADocument, SoundItem, FrameSound } from './types';
 import { isLayerVisibleInFla, getMaskLayerIndex } from './layer-utils';
 import { FLARenderer } from './renderer';
+import { graphicSymbolFrame } from './symbol-loop';
 
 export interface ExportProgress {
   currentFrame: number;
@@ -1688,35 +1689,11 @@ export async function exportSVG(
     const lastFrame = instance.lastFrame;
     const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
 
-    // Determine effective frame range
-    const effectiveLastFrame = lastFrame !== undefined
-      ? Math.min(lastFrame, totalSymbolFrames - 1)
-      : totalSymbolFrames - 1;
-    const frameRange = effectiveLastFrame - firstFrame + 1;
-
-    let symbolFrame: number;
-
     // MovieClips and Buttons play independently - use firstFrame for static rendering
     const effectiveLoop = (instance.symbolType === 'movieclip' || instance.symbolType === 'button')
       ? 'single frame'
       : instance.loop;
-
-    if (effectiveLoop === 'single frame') {
-      // Always show the specified firstFrame
-      symbolFrame = firstFrame % totalSymbolFrames;
-    } else if (effectiveLoop === 'loop') {
-      // Sync with parent timeline: advance from firstFrame based on parent frame offset
-      const frameOffset = frameIndex - keyframeStart;
-      if (lastFrame !== undefined) {
-        symbolFrame = firstFrame + (frameOffset % frameRange);
-      } else {
-        symbolFrame = (firstFrame + frameOffset) % totalSymbolFrames;
-      }
-    } else {
-      // 'play once' - advance but clamp at last frame
-      const frameOffset = frameIndex - keyframeStart;
-      symbolFrame = Math.min(firstFrame + frameOffset, effectiveLastFrame);
-    }
+    const symbolFrame = graphicSymbolFrame(effectiveLoop, firstFrame, lastFrame, totalSymbolFrames, frameIndex - keyframeStart);
 
     // Collect elements from all layers at the symbolFrame, mask-aware (mask
     // grouping + <clipPath>) just like the main timeline. Symbol timelines

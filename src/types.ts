@@ -206,7 +206,8 @@ export interface SymbolInstance {
   matrix: Matrix;
   transformationPoint: Point;
   centerPoint3D?: Point; // 3D transformation center point
-  loop: 'loop' | 'play once' | 'single frame';
+  // Graphic playback mode; the reverse modes were added in Animate 2021.
+  loop: 'loop' | 'play once' | 'single frame' | 'loop reverse' | 'play once reverse';
   firstFrame?: number;
   lastFrame?: number; // End frame for graphic symbols (for limited playback range)
   colorTransform?: ColorTransform;

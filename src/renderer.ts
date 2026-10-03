@@ -30,6 +30,7 @@ import type {
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
 import { evaluateMotionObject } from './motion-object';
+import { graphicSymbolFrame } from './symbol-loop';
 import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
@@ -2196,13 +2197,6 @@ export class FLARenderer {
     const lastFrame = instance.lastFrame;
     const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
 
-    // Determine effective frame range
-    // If lastFrame is specified, it limits the playback range
-    const effectiveLastFrame = lastFrame !== undefined
-      ? Math.min(lastFrame, totalSymbolFrames - 1)
-      : totalSymbolFrames - 1;
-    const frameRange = effectiveLastFrame - firstFrame + 1;
-
     // MovieClips play independently from parent timeline with their own playhead
     if (instance.symbolType === 'movieclip') {
       // Generate unique instance key for this MovieClip
@@ -2224,21 +2218,10 @@ export class FLARenderer {
       return 0;
     }
 
-    // Graphic symbols sync with parent timeline based on loop mode
-    if (instance.loop === 'single frame') {
-      // Always show the specified firstFrame
-      return firstFrame % totalSymbolFrames;
-    }
-    const frameOffset = parentFrameIndex - this.currentKeyframeStart;
-    if (instance.loop === 'loop') {
-      // Sync with parent timeline: advance from firstFrame based on parent frame offset
-      // Loop within the specified frame range (firstFrame to lastFrame)
-      return lastFrame !== undefined
-        ? firstFrame + (frameOffset % frameRange)
-        : (firstFrame + frameOffset) % totalSymbolFrames;
-    }
-    // 'play once' - advance but clamp at last frame (or effectiveLastFrame)
-    return Math.min(firstFrame + frameOffset, effectiveLastFrame);
+    // Graphic symbols sync with the parent timeline based on their loop mode
+    // (loop / play once / single frame, and Animate 2021's reverse modes).
+    return graphicSymbolFrame(instance.loop, firstFrame, lastFrame, totalSymbolFrames,
+      parentFrameIndex - this.currentKeyframeStart);
   }
 
   private renderSymbolInstance(instance: SymbolInstance, depth: number, parentFrameIndex: number, elementIndex: number = 0): void {

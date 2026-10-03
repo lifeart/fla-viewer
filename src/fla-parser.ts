@@ -1010,7 +1010,7 @@ export class FLAParser {
     // instances default to graphic.
     const symbolType = (el.getAttribute('symbolType') ||
       (el.tagName === 'DOMComponentInstance' ? 'movieclip' : 'graphic')) as 'graphic' | 'movieclip' | 'button';
-    const loop = (el.getAttribute('loop') || 'loop') as 'loop' | 'play once' | 'single frame';
+    const loop = (el.getAttribute('loop') || 'loop') as SymbolInstance['loop'];
     const firstFrame = el.getAttribute('firstFrame');
     const lastFrame = el.getAttribute('lastFrame');
 
