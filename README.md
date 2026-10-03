@@ -1,319 +1,163 @@
 # FLA Viewer
 
 [![Deploy to GitHub Pages](https://github.com/lifeart/fla-viewer/actions/workflows/deploy.yml/badge.svg)](https://github.com/lifeart/fla-viewer/actions/workflows/deploy.yml)
+[![Tests](https://github.com/lifeart/fla-viewer/actions/workflows/test.yml/badge.svg)](https://github.com/lifeart/fla-viewer/actions/workflows/test.yml)
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](https://opensource.org/licenses/ISC)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Vite](https://img.shields.io/badge/Vite-7.x-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Vitest](https://img.shields.io/badge/Tested%20with-Vitest-6E9F18?logo=vitest&logoColor=white)](https://vitest.dev/)
 
-A browser-based viewer for Adobe Animate/Flash `.fla` files. No plugins, no installs — just drag and drop.
+Open Adobe Animate / Flash `.fla` files in the browser. Parsing, playback and export all run locally; the file never leaves your machine.
 
-<p align="center">
-  <strong><a href="https://lifeart.github.io/fla-viewer/">▶ Live Demo</a></strong>
-</p>
+**[Live demo](https://lifeart.github.io/fla-viewer/)**: drop a `.fla` file or click **Sample**.
 
----
+## Why
 
-## What is this?
+`.fla` is the editable source format of Flash Professional and Adobe Animate. Unlike a compiled `.swf`, it keeps the vector shapes, timelines, symbols, bitmaps and sounds. Without Animate there is no easy way to look at one. This viewer reads the file directly and draws it with Canvas 2D, so old projects can be previewed, inspected and exported to video without Adobe software or Flash Player.
 
-**FLA files** are the source/project files created by Adobe Flash Professional (now Adobe Animate). Unlike compiled `.swf` files, FLA contains the raw assets: vector shapes, timelines, symbols, bitmaps, and audio — everything needed to edit an animation.
+## Supported files
 
-**The problem:** Flash Player is dead (EOL 2020), and Adobe Animate costs $23/month. If you have old FLA files from the 2000s-2010s, you can't easily view them anymore.
-
-**This tool** parses FLA files directly in the browser and renders them using HTML5 Canvas. No Flash Player, no Adobe subscription, no uploads to servers — everything runs locally in your browser.
-
-### Use cases
-
-- **Archivists** — Preview legacy Flash animations without Adobe software
-- **Developers** — Inspect FLA structure, extract assets, debug timeline issues
-- **Designers** — Quick preview without launching Animate
-- **Studios** — Convert old animations to MP4 for modern platforms
-- **Educators** — Demonstrate Flash-era animation techniques
-
----
+| Format | Versions | Support |
+|--------|----------|---------|
+| XFL (ZIP + XML) | Flash CS5 and later, Animate | Full viewer (see below) |
+| Binary (OLE2 compound file) | Flash 5 to CS4 | Partial: stage size, frame rate, background, library, shapes, symbol instances and keyframes. No tweens, frame labels or sounds. Streams the decoder can't walk cleanly are shown as one frame. |
 
 ## Features
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  PARSING          │  RENDERING         │  EXPORT               │
-├───────────────────┼────────────────────┼───────────────────────┤
-│  ✓ FLA/XFL files  │  ✓ Vector shapes   │  ✓ MP4 video (H.264)  │
-│  ✓ Symbols        │  ✓ Gradients       │  ✓ WebM video (VP9)   │
-│  ✓ Timelines      │  ✓ Bitmap fills    │  ✓ Animated GIF       │
-│  ✓ Multiple scenes│  ✓ Filters         │  ✓ PNG sequence (ZIP) │
-│  ✓ Motion tweens  │  ✓ Blend modes     │  ✓ Sprite sheet+JSON  │
-│  ✓ Shape tweens   │  ✓ Masks           │  ✓ Single frame PNG   │
-│  ✓ Color tweens   │  ✓ Text (Google)   │  ✓ SVG vector export  │
-│  ✓ Rotation tweens│  ✓ 9-slice scaling │  ✓ WebCodecs API      │
-│  ✓ Audio (MP3)    │  ✓ 3D transforms   │                       │
-│  ✓ Audio (ADPCM)  │                    │                       │
-│  ✓ Bitmap (.dat)  │  ✓ Gradient strokes│                       │
-│  ✓ Orient to path │                    │                       │
-└───────────────────┴────────────────────┴───────────────────────┘
-```
+**Timeline**
+- Multiple scenes, frame labels, play / pause / scrub / step
+- Motion tweens with CreateJS-compatible easing (named eases, intensity eases, custom bezier eases), rotation (CW/CCW), orient to path
+- Shape tweens, color transform tweens
+- Graphic symbols (loop, play once, single frame) and movie clips with their own playheads
+- Layer parenting (Animate rig), evaluated between child keyframes
+- Hidden layers and folders, guide layers, auto-detected camera layer with optional follow mode
 
-### Core
+**Drawing**
+- Shapes from quadratic `edges` and cubic `cubics` data, solid / dashed strokes, caps, joints, miter limit
+- Linear and radial gradients (spread modes, focal point), gradient and bitmap strokes
+- Bitmap fills (repeating, clipped, non-smoothed)
+- Masks, including masks built from symbols, tweens and text
+- Filters: blur, glow, drop shadow, bevel, color matrix / adjust color, convolution, gradient glow, gradient bevel
+- Blend modes, color effects (alpha, tint, brightness, advanced)
+- 9-slice scaling, 3D transforms (simplified perspective), cache as bitmap
+- Static and dynamic text with runs, word wrap, alignment, line spacing, kerning, rotation
 
-| | Feature | Details |
-|:-:|---------|---------|
-| 📦 | **FLA Parsing** | Native Adobe XFL format (ZIP + XML) |
-| 🎬 | **Timeline** | Play, pause, scrub, frame-by-frame, multi-scene |
-| 🔷 | **Shapes** | Fills, strokes, gradients, bitmap patterns, gradient strokes |
-| 🎭 | **Symbols** | Graphic, MovieClip, Button with nesting, 3D transforms |
-| ✨ | **Tweens** | Motion (easing), shape morphing, orient to path |
-| 🎨 | **Effects** | Blur, glow, drop shadow, blend modes, masks |
-| 🖼️ | **Bitmaps** | PNG, JPG, GIF + Adobe `.dat` with recovery |
-| 🔤 | **Text** | Static/dynamic, word wrap, Google Fonts, kerning |
-| 🔊 | **Audio** | MP3, ADPCM, PCM (8/16/24/32-bit), stream sync with volume control |
-| 📽️ | **Embedded Video** | Native MP4 (H.264) / WebM playback on the timeline |
-| 📹 | **Export** | MP4, PNG sequence, sprite sheet, single frame |
-| 🎥 | **Camera** | Auto-detected camera layers with follow mode |
+**Media**
+- Bitmaps: PNG, JPEG, GIF and Adobe `.dat` lossless bitmaps (32-bit and 8-bit palette), with recovery for damaged data
+- Sound: MP3, ADPCM, PCM (8/16/24/32-bit), stream and event sync, in/out points, loops, volume
+- Embedded video: native MP4 / WebM plays (muted) on the timeline; FLV shows a placeholder with its metadata
 
-### UX
+**Export** (Download button)
 
-| | Feature | Details |
-|:-:|---------|---------|
-| 📊 | **Progress Stages** | Visual progress bar: Extract → Symbols → Images → Audio → Timeline |
-| ⏭️ | **Skip Recovery** | Skip slow image recovery with one click |
-| 🔍 | **Algorithm Display** | Shows current recovery method: `deflate` → `dictionary` → `streaming` → `multi-segment` |
-| 🐱 | **Sample File** | Built-in animated sample to test without uploading |
-| 🔧 | **Debug Panel** | Inspect layers, elements, toggle visibility |
-| ⌨️ | **Keyboard Controls** | Space, arrows, D, M, F shortcuts |
+| Format | Output |
+|--------|--------|
+| MP4 | H.264, 5 Mbps. Audio is AAC, or Opus where the browser has no AAC encoder (Firefox). Without either, it exports video only and warns. |
+| WebM | VP9, 5 Mbps, Opus audio |
+| Animated GIF | `.gif`, no audio |
+| PNG sequence | `.zip` of numbered frames |
+| Current frame | `.png` or `.svg` |
+| Sprite sheet | `.png` atlas + `.json` |
 
----
+The Download button only appears when the browser supports WebCodecs (`VideoEncoder` and `AudioEncoder`) and the document has more than one frame.
 
-## Quick Start
+## Controls
 
-### Online
-
-**[lifeart.github.io/fla-viewer](https://lifeart.github.io/fla-viewer/)** — drop a file or click **Sample**
-
-### Local
-
-```bash
-git clone https://github.com/lifeart/fla-viewer.git
-cd fla-viewer
-npm install
-npm run dev     # → localhost:3000
-```
-
----
-
-## Keyboard Shortcuts
-
-| Key | Action |
-|:---:|--------|
-| `Space` | Play / Pause |
-| `←` `→` | Previous / Next frame |
-| `Home` `End` | First / Last frame |
-| `PgUp` `PgDn` | Previous / Next scene |
+| Input | Action |
+|-------|--------|
+| `Space` | Play / pause |
+| `←` `→` | Previous / next frame |
+| `Home` `End` | First / last frame |
+| `PgUp` `PgDn` | Previous / next scene |
+| `+` `-` `0` | Zoom in / zoom out / reset view |
+| `Shift` + arrows, or drag the canvas | Pan |
 | `D` | Debug panel |
 | `M` | Mute |
 | `F` | Fullscreen |
 
----
+The upload widget can be dragged aside or closed once a file is open.
 
-## Export Options
+### Debug panel
 
-Click the **Download** button to open export options:
+Press `D`. It lists layers with visibility toggles, inspects elements (click on the canvas to pick one), expands nested symbols, changes render order, toggles camera follow, and has edge-decoder options (debug logging, implicit MoveTo after close, splitting on style changes).
 
-| Format | Output | Description |
-|--------|--------|-------------|
-| **MP4 Video** | `.mp4` | H.264 video with AAC audio |
-| **WebM Video** | `.webm` | VP9 video with Opus audio |
-| **Animated GIF** | `.gif` | Animated image (no audio) |
-| **PNG Sequence** | `.zip` | All frames as numbered PNGs |
-| **Current Frame (PNG)** | `.png` | Single frame raster snapshot |
-| **Current Frame (SVG)** | `.svg` | Single frame vector format |
-| **Sprite Sheet** | `.png` + `.json` | Texture atlas for game engines |
+### Embedding
 
-### Video Export Specs
-- **Video:** H.264 @ 5 Mbps
-- **Audio:** AAC @ 128 kbps
-- **Requires:** Chrome/Edge 94+ (WebCodecs API)
-
----
-
-## Bitmap Recovery
-
-Adobe `.dat` files use chunked deflate-compressed pixel data. 32-bit images store premultiplied **A,R,G,B** bytes (8-bit palettes store **R,G,B,A**) — reading 32-bit as ABGR swaps red and blue (issue #10). Some files are corrupted or use preset dictionaries.
-
-| Strategy | Recovery | Speed |
-|----------|:--------:|:-----:|
-| Raw Deflate | 100% | ⚡ |
-| Dictionary | 100% | ⚡ |
-| Streaming | 60-90% | 🐢 |
-| Stream+Dict | 60-90% | 🐢 |
-| Multi-Segment | 20-50% | 🐌 |
-
-Progress shows current algorithm: `Fixing images 3/10 [streaming]`
-
-Click **Skip images fix** to bypass slow recovery.
-
----
-
-## Debug Mode
-
-Press `D` to open. Features:
-
-- Layer list with visibility toggles
-- Element inspector (symbol, shape, bitmap, text, video)
-- Nested symbol expansion (3 levels)
-- Click-to-inspect on canvas
-- Render order controls
-- Camera follow toggle
-- Edge debug logging (console output)
-- Experimental edge parsing options:
-  - Implicit MoveTo after close path
-  - Edge splitting on style changes
-
----
-
-## Browser Support
-
-| Browser | Playback | Export |
-|---------|:--------:|:------:|
-| Chrome 94+ | ✓ | ✓ |
-| Edge 94+ | ✓ | ✓ |
-| Firefox | ✓ | ✗ |
-| Safari 16.4+ | ✓ | ✗ |
-
----
-
-## Embedding
+Add `?embed=true` to hide the header:
 
 ```html
-<iframe
-  src="https://lifeart.github.io/fla-viewer/?embed=true"
-  width="800" height="600"
-  frameborder="0" allowfullscreen>
-</iframe>
+<iframe src="https://lifeart.github.io/fla-viewer/?embed=true"
+  width="800" height="600" frameborder="0" allowfullscreen></iframe>
 ```
-
----
-
-## Architecture
-
-```
-src/
-├── main.ts            # UI & controls
-├── fla-parser.ts      # ZIP/XML parsing + bitmap recovery
-├── edge-decoder.ts    # XFL edge path decoder
-├── renderer.ts        # Canvas 2D rendering + 9-slice scaling
-├── player.ts          # Timeline & audio sync
-├── video-exporter.ts  # MP4/WebM/GIF/PNG export (WebCodecs)
-├── adpcm-decoder.ts   # SWF ADPCM audio decoder
-├── flv-parser.ts      # FLV video container parsing
-├── sample-generator.ts # Built-in sample FLA
-├── shape-utils.ts     # Shape fixing & path utilities
-├── path-utils.ts      # File path normalization
-├── types.ts           # TypeScript types
-└── __tests__/         # Test suite (10 test files)
-```
-
-```
-FLA (ZIP) → Parser → Document → Renderer → Canvas
-                         ↓
-                      Player → Audio (WebAudio)
-                         ↓
-                      Exporter → MP4 / PNG / ZIP
-```
-
----
-
-## Supported Elements
-
-| Element | Status |
-|---------|:------:|
-| DOMSymbolInstance | ✓ |
-| DOMShape | ✓ |
-| DOMGroup | ✓ |
-| DOMBitmapInstance | ✓ |
-| DOMStaticText | ✓ |
-| DOMDynamicText | ✓ |
-| DOMSoundItem | ✓ |
-| Motion Tweens | ✓ |
-| Shape Tweens | ✓ |
-| Color Transform Tweens | ✓ |
-| Rotation Tweens (CW/CCW) | ✓ |
-| Orient to Path | ✓ |
-| Filters | ✓ |
-| Masks | ✓ |
-| Color Effects | ✓ |
-| Blend Modes | ✓ |
-| Camera Layer | ✓ |
-| Bitmap Fills | ✓ |
-| Gradient/Bitmap Strokes | ✓ |
-| 9-Slice Scaling | ✓ |
-| 3D Transforms | ✓ |
-| Cache as Bitmap | ✓ |
-| Text Kerning | ✓ |
-| Text Rotation | ✓ |
-| Frame Labels | ✓ |
-| Multiple Scenes | ✓ |
-| FLV Video Parsing | ✓ |
-| Embedded Video Playback (MP4/WebM) | ✓ |
-| ActionScript | ✗ |
-
----
 
 ## Limitations
 
-- No ActionScript execution (no interactivity)
-- Embedded **native video** (MP4/WebM) plays muted on the timeline; per-frame seeking is best-effort (shows the nearest decoded frame) and embedded video isn't drawn into exports yet. Legacy **FLV** is parsed for metadata only (no pixels).
-- Fonts fall back to Google Fonts (external request) or system fonts
-- Some advanced filter options not fully supported
-- 3D transforms use simplified perspective projection
-
----
-
-## Tech Stack
-
-| Category | Technology |
-|----------|------------|
-| **Language** | TypeScript 5.x (strict mode) |
-| **Build** | Vite 7.x |
-| **Testing** | Vitest + Playwright |
-| **Rendering** | Canvas 2D API |
-| **Video Export** | WebCodecs API, mp4-muxer, webm-muxer, gifenc |
-| **Audio** | Web Audio API |
-| **Parsing** | JSZip, Pako (deflate) |
-
----
+- ActionScript is not executed. Buttons don't respond to the mouse (their hit areas show in the debug panel).
+- Embedded video isn't drawn into exports, and seeking it is best-effort. FLV video is not decoded.
+- Fonts are not embedded. Fonts that exist on Google Fonts are fetched from there (a network request); others fall back to system fonts.
+- Some filter options are approximated with Canvas and SVG filters.
+- Parsing runs on the main thread, so large files block the UI while loading.
 
 ## Development
+
+Requires Node.js 20 or later.
 
 ```bash
 git clone https://github.com/lifeart/fla-viewer.git
 cd fla-viewer
 npm install
-npm run dev           # start dev server → localhost:3000
-npm test              # run tests
-npm run test:watch    # run tests in watch mode
-npm run test:coverage # run tests with coverage report
-npm run build         # production build
+npm run dev            # dev server on http://localhost:3000
+npm run build          # type-check and build to dist/
+npm run preview        # serve the build
 ```
 
-### Testing
+### Tests
 
-The project includes comprehensive tests using Vitest with Playwright browser testing:
+Tests use Vitest in browser mode with Playwright Chromium, because the renderer needs a real Canvas.
 
-| Test File | Coverage |
-|-----------|----------|
-| `fla-parser.test.ts` | ZIP parsing, bitmap recovery, symbol loading |
-| `renderer.test.ts` | Shape rendering, tweens, filters, 9-slice |
-| `player.test.ts` | Timeline, scenes, audio sync |
-| `edge-decoder.test.ts` | XFL edge format parsing |
-| `video-exporter.test.ts` | MP4/WebM/GIF export |
-| `shape-utils.test.ts` | Path winding, shape repair |
-| `adpcm-decoder.test.ts` | ADPCM audio decoding |
-| `flv-parser.test.ts` | FLV container parsing |
-| `path-utils.test.ts` | Path normalization |
-| `main.test.ts` | UI integration |
+```bash
+npx playwright install chromium   # once
+npm test                          # run all tests
+npm run test:watch
+npm run test:coverage             # report in coverage/
+```
 
----
+Tests live in `src/__tests__/`, with sample FLAs in `src/__tests__/fixtures/`. Some fixtures are generated by scripts in `scripts/` (`gen-*.mjs`, `make-timeline-fixture.mjs`).
+
+CI runs the tests on every pull request (`.github/workflows/test.yml`). Pushes to `master` deploy the build to GitHub Pages (`.github/workflows/deploy.yml`).
+
+### Project layout
+
+```
+src/
+├── main.ts                  UI, controls, file loading
+├── fla-parser.ts            XFL parsing (ZIP + XML), bitmaps, sounds, video
+├── edge-decoder.ts          XFL edge / cubic path decoder
+├── shape-utils.ts           Shape repair and path helpers
+├── path-utils.ts            Library path normalization
+├── layer-utils.ts           Layer visibility, mask membership, rig parents
+├── renderer.ts              Canvas 2D renderer
+├── player.ts                Playback, scenes, audio sync, zoom and pan
+├── video-exporter.ts        MP4 / WebM / GIF / PNG / SVG / sprite sheet export
+├── adpcm-decoder.ts         ADPCM audio decoder
+├── flv-parser.ts            FLV metadata parser
+├── ole2-reader.ts           OLE2 compound file reader (binary FLA)
+├── binary-fla-parser.ts     Binary FLA entry point
+├── binary-fla-structure.ts  Binary FLA layer structure
+├── binary-shape-decoder.ts  Binary FLA shape geometry
+├── binary-instance-decoder.ts  Binary FLA symbol instances
+├── binary-timeline-decoder.ts  Binary FLA layers and keyframes
+├── sample-generator.ts      Built-in sample file
+├── types.ts                 Document types
+└── __tests__/               Tests and fixtures
+```
+
+```
+.fla ──► fla-parser (XFL) ─┐
+     └─► binary-fla-parser ┴─► FLADocument ──► Renderer ──► Canvas
+                                    │
+                                    ├──► Player ──► Web Audio
+                                    └──► Exporter ──► MP4 / WebM / GIF / PNG / SVG
+```
+
+[AGENTS.md](AGENTS.md) documents the XFL format details and decoding gotchas (easing, `.dat` bitmaps, sound codecs, masks, layer parenting). [TODO.md](TODO.md) tracks feature coverage against the JPEXS decompiler.
 
 ## License
 
-[ISC](LICENSE) © lifeart
+ISC (see `package.json`).

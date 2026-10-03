@@ -796,6 +796,14 @@ describe('§12 binary sound extraction', () => {
     expect(layers[1].frames.every((f) => f.sound === undefined)).toBe(true);
   });
 
+  it('leaves binary sounds undecoded in structure-only parsing', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const file = new File([(await soundFla()).slice().buffer as ArrayBuffer], 'sound.fla');
+    const doc = await new FLAParser().parse(file, undefined, undefined, { structureOnly: true });
+    expect([...doc.sounds.keys()].sort()).toEqual(['music.mp3', 'stereo8.wav', 'tone.wav']);
+    expect([...doc.sounds.values()].every((s) => s.audioData === undefined)).toBe(true);
+  });
+
   it('reads sample counts of 2^31 and above as unsigned', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const contents = contentsStream({ extra: soundRecord(1, 'huge.wav', 0x0e, 0x80000000) });
