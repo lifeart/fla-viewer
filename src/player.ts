@@ -105,14 +105,20 @@ export class FLAPlayer {
     if (!timeline) return;
     for (const layer of timeline.layers) {
       for (const frame of layer.frames) {
-        if (frame.sound && frame.sound.sync === 'stream') {
+        // 'event' (Flash's default) and 'start' sounds were previously ignored,
+        // leaving most files silent. They are scheduled like stream sounds but
+        // keep playing to the end of the sound even past their keyframe.
+        if (frame.sound && frame.sound.sync !== 'stop') {
           const soundItem = this.doc.sounds.get(frame.sound.name);
           if (soundItem && soundItem.audioData) {
+            const soundFrames = Math.ceil(soundItem.audioData.duration * this.doc.frameRate);
             this.streamSounds.push({
               sound: frame.sound,
               soundItem,
               startFrame: frame.index,
-              duration: frame.duration
+              duration: frame.sound.sync === 'stream'
+                ? frame.duration
+                : Math.max(frame.duration, soundFrames)
             });
           }
         }
@@ -148,6 +154,20 @@ export class FLAPlayer {
       this.animationId = null;
     }
     this.notifyStateChange();
+  }
+
+  /**
+   * Stop playback for good and release audio. Call before replacing this
+   * player: an abandoned player kept its animation loop and sound running, so
+   * loading a second file played two soundtracks at once.
+   */
+  destroy(): void {
+    this.onStateChange = null;
+    this.pause();
+    this.gainNode?.disconnect();
+    void this.audioContext?.close();
+    this.audioContext = null;
+    this.gainNode = null;
   }
 
   stop(): void {
