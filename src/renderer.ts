@@ -3067,6 +3067,10 @@ export class FLARenderer {
 
     // Each LINE is a list of styled tokens (wrapping may add more lines).
     const sourceLines: Token[][] = [[]];
+    // The run whose break started each source line, and the run whose break
+    // ended it: an empty line (a blank paragraph) takes its height from them.
+    const lineStartRuns: TextRun[] = [text.textRuns[0]];
+    const lineEndRuns: (TextRun | undefined)[] = [undefined];
 
     for (const run of text.textRuns) {
       const style = this.buildRunStyle(run);
@@ -3078,7 +3082,10 @@ export class FLARenderer {
       for (let s = 0; s < segments.length; s++) {
         if (s > 0) {
           // An explicit line break: start a fresh line.
+          lineEndRuns[lineEndRuns.length - 1] ??= run;
           sourceLines.push([]);
+          lineStartRuns.push(run);
+          lineEndRuns.push(undefined);
         }
         const segment = segments[s];
         if (segment.length === 0) {
@@ -3104,6 +3111,7 @@ export class FLARenderer {
     if (sourceLines.length > 1 && sourceLines[sourceLines.length - 1].length === 0) {
       sourceLines.pop();
     }
+    const emptyLineRuns = sourceLines.map((_, i) => lineEndRuns[i] ?? lineStartRuns[i]);
 
     // Use the first run's block-level metrics (margins/width) for the box, the
     // same width source the single-run path derives alignment from.
@@ -3121,10 +3129,13 @@ export class FLARenderer {
     // with a defined box width breaks between words on overflow; the leading
     // space of a wrapped line is dropped. Lines never break mid-word.
     const visualLines: Token[][] = [];
+    const visualLineRuns: TextRun[] = []; // sizes a visual line with no text
     const canWrap = effectiveWidth > 0 && isFinite(effectiveWidth);
-    for (const lineTokens of sourceLines) {
+    for (const [lineIndex, lineTokens] of sourceLines.entries()) {
+      const lineRun = emptyLineRuns[lineIndex];
       if (!canWrap) {
         visualLines.push(lineTokens);
+        visualLineRuns.push(lineRun);
         continue;
       }
       let current: Token[] = [];
@@ -3146,6 +3157,7 @@ export class FLARenderer {
             currentWidth -= measureToken(removed);
           }
           visualLines.push(current);
+          visualLineRuns.push(lineRun);
           current = [token];
           currentWidth = tokenWidth;
         } else {
@@ -3155,26 +3167,28 @@ export class FLARenderer {
       }
       // Always push the line, even when empty, so blank source lines preserved.
       visualLines.push(current);
+      visualLineRuns.push(lineRun);
     }
 
     const alignment = firstRun.alignment;
     let yOffset = 0;
 
-    for (const lineTokens of visualLines) {
+    for (const [lineIndex, lineTokens] of visualLines.entries()) {
       // Drop a trailing space so it does not affect alignment width.
       const trimmed = [...lineTokens];
       while (trimmed.length > 0 && trimmed[trimmed.length - 1].isSpace) {
         trimmed.pop();
       }
 
-      // Line advances by the tallest line-height among its spans (or the first
-      // run's line-height for an empty line). The leading (XFL lineSpacing) of
-      // that same dominant span is ADDED on top, matching the single-run path
-      // (advance = lineHeight + lineSpacing). Leading pairs with the span that
-      // sets the line height so the tallest run drives both. Absent/0
-      // lineSpacing => identical to prior behavior.
-      let lineHeight = firstRun.lineHeight || firstRun.size * 1.2;
-      let lineSpacing = firstRun.lineSpacing || 0;
+      // Line advances by the tallest line-height among its spans (an empty
+      // line by its own break's run, e.g. a blank paragraph's format). The
+      // leading (XFL lineSpacing) of that same dominant span is ADDED on top,
+      // matching the single-run path (advance = lineHeight + lineSpacing).
+      // Leading pairs with the span that sets the line height so the tallest
+      // run drives both. Absent/0 lineSpacing => identical to prior behavior.
+      const emptyRun = visualLineRuns[lineIndex];
+      let lineHeight = trimmed.length > 0 ? 0 : emptyRun.lineHeight || emptyRun.size * 1.2;
+      let lineSpacing = trimmed.length > 0 ? 0 : emptyRun.lineSpacing || 0;
       for (const token of trimmed) {
         if (token.style.lineHeight > lineHeight) {
           lineHeight = token.style.lineHeight;
