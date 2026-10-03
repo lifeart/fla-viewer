@@ -261,7 +261,7 @@ Edge elements can have either `edges` attribute (quadratic curves) or `cubics` a
 | `!` | `!x y` | MoveTo (start new subpath) |
 | `\|` | `\|x y` | LineTo |
 | `[` | `[cx cy x y` | QuadraticCurveTo (control point + end point) |
-| `/` | `/` | ClosePath |
+| `/` | `/x y` | LineTo (CS3+ "general line"); a bare `/` with no coordinates is ClosePath |
 | `S` | `Sn` | Style change indicator (followed by style index) |
 
 #### Cubic Format (`cubics` attribute)
@@ -427,6 +427,12 @@ suite. What is still open:
 - [ ] **Embedded video**: frame-accurate seeking and drawing video into exports (needs
   WebCodecs `VideoDecoder`); FLV pixels are not decoded
 - [ ] **Binary FLA**: tweens, frame labels, sounds (see "Pre-CS5 binary FLA" below)
+- [ ] **IK / bone armatures** (CS4-CS6): pose layers render their rest pose; Animate CC
+  converts IK to frame-by-frame on open, so only files last saved in CS4-CS6 are affected
+- [ ] **Object motion tweens**: filter curves, and Bounce/Spring/wave/custom time maps
+  (they fall back to linear)
+- [ ] **Variable-width strokes** (`<VariablePointWidth><WidthMarker>`) and art/pattern
+  brushes draw at constant width
 
 `TODO.md` has the detailed feature-by-feature status against JPEXS; `review.md` is an
 older code review checklist.
@@ -536,6 +542,10 @@ Edge contributions are collected per fill style, then sorted into connected chai
 | `src/fla-parser.ts` | ZIP extraction, XML parsing, bitmaps, sounds, video, reference layer detection; routes OLE2 files to the binary parser |
 | `src/edge-decoder.ts` | XFL edge path format decoder (quadratic and cubic) |
 | `src/shape-utils.ts` | Shape repair and path helpers |
+| `src/primitive-shapes.ts` | Outlines for rectangle/oval primitive shapes |
+| `src/motion-object.ts` | CS4+ object motion tweens (`<AnimationCore>`) |
+| `src/symbol-loop.ts` | Graphic symbol loop modes (frame an instance shows) |
+| `src/xfl-folder.ts` | Uncompressed XFL folders |
 | `src/path-utils.ts` | Library path normalization |
 | `src/layer-utils.ts` | Layer visibility cascade, mask membership, rig parent lookup (shared by renderer and exporter) |
 | `src/renderer.ts` | Canvas 2D rendering engine, edge sorting, path building, masks, rig transforms |
@@ -812,6 +822,29 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   allowed in `<clipPath>`), but symbol/text/bitmap masks still don't clip there.
 - Known approximations: masked layers *inside* a symbol used as a mask contribute unclipped;
   9-slice and 3D (`rotationX/Y/Z`, `z`) mask instances use their plain 2D matrix.
+
+### Version-specific XFL cases
+Checked against real Flash CS4-CS6 saves (jindrapetrik/flacomdoc test data, JPEXS fixtures,
+public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
+- **Spelled-out values.** `motionTweenRotate` is `"clockwise"`/`"counter-clockwise"` (not
+  `cw`/`ccw`; `parseMotionTweenRotate`). `<DashedStroke>` lengths are `dash1`/`dash2`.
+  Dotted strokes draw round dots `dotSpace` apart; Hatched/Ragged/Stipple draw solid.
+- **`/x y` edges** are lines (see the edge table); reading every `/` as ClosePath dropped them.
+- **Object motion tweens (CS4+).** One `<DOMFrame tweenType="motion object">` per span, the
+  curves in `<motionObjectXML><AnimationCore>`; parsed and evaluated in `src/motion-object.ts`,
+  applied by `applyMotionObject` in the renderer (draw, masks, rig, camera). `timevalue` is in
+  TimeScale ticks (TimeScale = fps x 1000); keys are cubic Beziers in (time, value) with
+  `next`/`previous` as "dt,value" handles; Motion_X/Y move the transformation point, Rotation/
+  Skew/Scale are absolute and rebuild the matrix (`a = sx cos(rot+skewY)`, `c = -sy sin(rot+skewX)`).
+  Reference implementation: Sony PSM `UIMotion`/`AnimationUtility`.
+- **Primitives (CS3+).** `<DOMRectangleObject>`/`<DOMOvalObject>` have parameters and a singular
+  `<fill>`/`<stroke>`, no edges; `src/primitive-shapes.ts` rebuilds the outline. x/y is the
+  top-left in the element's own space; oval angles are degrees from 3 o'clock, clockwise.
+- **Uncompressed XFL (CS5+).** A folder with DOMDocument.xml and a `.xfl` stub (`PROXY-CS5`);
+  `src/xfl-folder.ts` packs it into an in-memory zip. Drop the folder on the viewer.
+- **Reverse loops (Animate 2021).** `loop="loop reverse"`/`"play once reverse"`;
+  `graphicSymbolFrame` (`src/symbol-loop.ts`) is shared by the renderer and the SVG exporter.
+- **TLF text (CS5-CS6).** `<DOMTLFText>` is read as static text from its `<TextFlow>` spans.
 
 ### Pre-CS5 binary FLA (issue #8)
 - Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not
