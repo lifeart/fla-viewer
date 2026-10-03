@@ -235,3 +235,109 @@ describe('uncompressed XFL folders (CS5+ "Save as XFL")', () => {
     expect(doc.symbols.has('Box')).toBe(true);
   });
 });
+
+describe('primitive rectangles and ovals (DOMRectangleObject / DOMOvalObject)', () => {
+  const RED = '#FF0000';
+  const WHITE = '#FFFFFF';
+  const layerWith = (elements: string) =>
+    domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0"><elements>${elements}</elements></DOMFrame></frames></DOMLayer>`);
+  const redFill = `<fill><SolidColor color="${RED}"/></fill>`;
+
+  async function render(elements: string): Promise<HTMLCanvasElement> {
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(await parseXfl({ 'DOMDocument.xml': layerWith(elements) }));
+    renderer.renderFrame(0);
+    return canvas;
+  }
+
+  it('parses a rectangle primitive as a shape with its fill, stroke and matrix', async () => {
+    // As written by Flash CS5 (a component skin): x/y is the top-left corner in the
+    // element's own space, before <matrix>.
+    const doc = await parseXfl({ 'DOMDocument.xml': layerWith(`
+      <DOMRectangleObject objectWidth="225" objectHeight="335" x="110" y="-10" lockFlag="true" topLeftRadius="20" topRightRadius="20" bottomLeftRadius="20" bottomRightRadius="20">
+        <matrix><Matrix a="1.239990234375" tx="-136.4" ty="10"/></matrix>
+        <transformationPoint><Point x="222.5" y="157.5"/></transformationPoint>
+        <fill><SolidColor color="#EEEEEE"/></fill>
+        <stroke><SolidStroke scaleMode="normal" weight="2"><fill><SolidColor color="#CCCCCC"/></fill></SolidStroke></stroke>
+      </DOMRectangleObject>`) });
+    const shape = firstShape(doc);
+    expect(shape.type).toBe('shape');
+    expect(shape.matrix).toMatchObject({ a: 1.239990234375, tx: -136.4, ty: 10 });
+    expect(shape.fills).toMatchObject([{ index: 1, type: 'solid', color: '#EEEEEE' }]);
+    expect(shape.strokes).toMatchObject([{ index: 1, type: 'solid', color: '#CCCCCC', weight: 2 }]);
+    expect(shape.edges).toHaveLength(1);
+    expect(shape.edges[0]).toMatchObject({ fillStyle1: 1, strokeStyle: 1 });
+    const cmds = shape.edges[0].commands;
+    expect(cmds[0]).toEqual({ type: 'M', x: 130, y: -10 });
+    // Rounded corners are cubic arcs; the outline ends where it started.
+    expect(cmds.filter((c) => c.type === 'C')).toHaveLength(4);
+    expect(cmds[cmds.length - 1]).toMatchObject({ x: 130, y: -10 });
+  });
+
+  it('finds primitives inside groups', async () => {
+    const doc = await parseXfl({ 'DOMDocument.xml': layerWith(`
+      <DOMGroup><members>
+        <DOMRectangleObject objectWidth="10" objectHeight="10" x="0" y="0">${redFill}</DOMRectangleObject>
+        <DOMOvalObject objectWidth="10" objectHeight="10" x="0" y="0">${redFill}</DOMOvalObject>
+      </members></DOMGroup>`) });
+    const elements = doc.timelines[0].layers[0].frames[0].elements;
+    expect(elements.map((e) => e.type)).toEqual(['shape', 'shape']);
+  });
+
+  it('draws a rounded rectangle with its corners cut away', async () => {
+    const canvas = await render(`<DOMRectangleObject objectWidth="200" objectHeight="100" x="100" y="100" lockFlag="true" topLeftRadius="30">${redFill}</DOMRectangleObject>`);
+    expect(colorAt(canvas, 200, 150)).toBe(RED);
+    expect(colorAt(canvas, 102, 150)).toBe(RED);
+    // lockFlag applies the top-left radius to every corner.
+    for (const [x, y] of [[102, 102], [297, 102], [297, 197], [102, 197]]) {
+      expect(colorAt(canvas, x, y), `corner ${x},${y}`).toBe(WHITE);
+    }
+  });
+
+  it('draws square corners when there is no radius', async () => {
+    const canvas = await render(`<DOMRectangleObject objectWidth="200" objectHeight="100" x="100" y="100">${redFill}</DOMRectangleObject>`);
+    expect(colorAt(canvas, 103, 103)).toBe(RED);
+    expect(colorAt(canvas, 296, 196)).toBe(RED);
+    expect(colorAt(canvas, 305, 150)).toBe(WHITE);
+  });
+
+  it('cuts negative corner radii inwards', async () => {
+    const canvas = await render(`<DOMRectangleObject objectWidth="200" objectHeight="100" x="100" y="100" topLeftRadius="-30">${redFill}</DOMRectangleObject>`);
+    expect(colorAt(canvas, 110, 110)).toBe(WHITE); // within 30px of the corner
+    expect(colorAt(canvas, 128, 128)).toBe(RED);
+    expect(colorAt(canvas, 297, 102)).toBe(RED); // other corners stay square
+  });
+
+  it('draws an oval primitive as an ellipse', async () => {
+    const canvas = await render(`<DOMOvalObject objectWidth="200" objectHeight="100" x="100" y="100">${redFill}</DOMOvalObject>`);
+    expect(colorAt(canvas, 200, 150)).toBe(RED);
+    expect(colorAt(canvas, 105, 150)).toBe(RED);
+    expect(colorAt(canvas, 110, 108)).toBe(WHITE);
+  });
+
+  it('leaves the hole of an oval with an inner radius empty', async () => {
+    const canvas = await render(`<DOMOvalObject objectWidth="200" objectHeight="100" x="100" y="100" innerRadius="50">${redFill}</DOMOvalObject>`);
+    expect(colorAt(canvas, 200, 150)).toBe(WHITE);
+    expect(colorAt(canvas, 125, 150)).toBe(RED);
+    expect(colorAt(canvas, 275, 150)).toBe(RED);
+  });
+
+  it('draws a pie wedge between startAngle and endAngle, clockwise from 3 o\'clock', async () => {
+    const canvas = await render(`<DOMOvalObject objectWidth="200" objectHeight="200" x="100" y="100" startAngle="0" endAngle="90">${redFill}</DOMOvalObject>`);
+    expect(colorAt(canvas, 250, 250)).toBe(RED); // bottom-right quadrant
+    expect(colorAt(canvas, 250, 150)).toBe(WHITE);
+    expect(colorAt(canvas, 150, 250)).toBe(WHITE);
+  });
+
+  it('strokes but does not fill an open arc (closePath="false")', async () => {
+    const doc = await parseXfl({ 'DOMDocument.xml': layerWith(`
+      <DOMOvalObject objectWidth="200" objectHeight="200" x="100" y="100" startAngle="0" endAngle="90" closePath="false">
+        ${redFill}<stroke><SolidStroke weight="4"><fill><SolidColor color="#0000FF"/></fill></SolidStroke></stroke>
+      </DOMOvalObject>`) });
+    const shape = firstShape(doc);
+    expect(shape.fills).toEqual([]);
+    expect(shape.edges[0].fillStyle1).toBeUndefined();
+    expect(shape.edges[0].strokeStyle).toBe(1);
+  });
+});

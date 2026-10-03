@@ -25,6 +25,7 @@ import type {
   Point,
   Tween,
   Edge,
+  PathCommand,
   Filter,
   MorphShape,
   MorphSegment,
@@ -49,6 +50,7 @@ import { isOLE2, OLE2File } from './ole2-reader';
 import { parseBinaryFLA } from './binary-fla-parser';
 import { getMaskLayerIndex } from './layer-utils';
 import { isXFLStub, xflFolderToZip, type XFLFolderEntry } from './xfl-folder';
+import { rectanglePrimitivePath, ovalPrimitivePath } from './primitive-shapes';
 
 export type { XFLFolderEntry } from './xfl-folder';
 
@@ -912,6 +914,10 @@ export class FLAParser {
         case 'DOMShape':
           elements.push(this.parseShape(child, identityMatrix));
           break;
+        case 'DOMRectangleObject':
+        case 'DOMOvalObject':
+          elements.push(this.parsePrimitiveShape(child, identityMatrix));
+          break;
         case 'DOMGroup':
           this.parseGroupMembers(child, elements, identityMatrix);
           break;
@@ -947,6 +953,10 @@ export class FLAParser {
       switch (child.tagName) {
         case 'DOMShape':
           elements.push(this.parseShape(child, composedMatrix));
+          break;
+        case 'DOMRectangleObject':
+        case 'DOMOvalObject':
+          elements.push(this.parsePrimitiveShape(child, composedMatrix));
           break;
         case 'DOMGroup':
           this.parseGroupMembers(child, elements, composedMatrix);
@@ -1279,9 +1289,66 @@ export class FLAParser {
     };
   }
 
-  private parseFills(shape: globalThis.Element): FillStyle[] {
+  // `fillElements` defaults to the shape's <fills><FillStyle> list; primitive shapes
+  // pass their single <fill> (same children, no index attribute, so index 1).
+  /**
+   * <DOMRectangleObject>/<DOMOvalObject> (CS3+ primitive tools): parameters plus a
+   * singular <fill>/<stroke> and no edges. Rebuilt as an ordinary shape with fill
+   * style 1 and stroke style 1 so every renderer path (masks, hit tests, export)
+   * handles it like a drawn shape.
+   */
+  private parsePrimitiveShape(el: globalThis.Element, composedMatrix?: Matrix): Shape {
+    const matrixEl = el.querySelector(':scope > matrix > Matrix');
+    const matrix = matrixEl ? this.parseMatrix(matrixEl) : (composedMatrix || this.parseMatrix(null));
+    const num = (name: string, fallback = 0) => {
+      const v = parseFloat(el.getAttribute(name) ?? '');
+      return Number.isFinite(v) ? v : fallback;
+    };
+    const fillEl = el.querySelector(':scope > fill');
+    const strokeEl = el.querySelector(':scope > stroke');
+    const fills = fillEl ? this.parseFills(el, [fillEl]) : [];
+    const strokes = strokeEl ? this.parseStrokes(el, [strokeEl]) : [];
+    const box = { x: num('x'), y: num('y'), width: num('objectWidth'), height: num('objectHeight') };
+
+    let contours: PathCommand[][];
+    let closed = true;
+    if (el.tagName === 'DOMRectangleObject') {
+      const topLeftRadius = num('topLeftRadius');
+      // With the corner lock on, Flash uses the top-left radius for every corner.
+      const locked = el.getAttribute('lockFlag') === 'true';
+      const corner = (name: string) => (locked && el.getAttribute(name) === null ? topLeftRadius : num(name));
+      contours = [rectanglePrimitivePath({
+        ...box,
+        topLeftRadius,
+        topRightRadius: corner('topRightRadius'),
+        bottomRightRadius: corner('bottomRightRadius'),
+        bottomLeftRadius: corner('bottomLeftRadius'),
+      })];
+    } else {
+      const oval = ovalPrimitivePath({
+        ...box,
+        startAngle: num('startAngle'),
+        endAngle: num('endAngle'),
+        innerRadius: num('innerRadius'),
+        closePath: el.getAttribute('closePath') !== 'false',
+      });
+      contours = oval.contours;
+      closed = oval.closed;
+    }
+
+    const hasFill = closed && fills.length > 0;
+    const hasStroke = strokes.length > 0;
+    const edges: Edge[] = contours.map((commands) => ({
+      ...(hasFill && { fillStyle1: 1 }),
+      ...(hasStroke && { strokeStyle: 1 }),
+      commands,
+    }));
+
+    return { type: 'shape', matrix, fills: hasFill ? fills : [], strokes, edges };
+  }
+
+  private parseFills(shape: globalThis.Element, fillElements: Iterable<globalThis.Element> = shape.querySelectorAll('fills > FillStyle')): FillStyle[] {
     const fills: FillStyle[] = [];
-    const fillElements = shape.querySelectorAll('fills > FillStyle');
 
     for (const fillEl of fillElements) {
       const index = parseInt(fillEl.getAttribute('index') || '1');
@@ -1419,9 +1486,9 @@ export class FLAParser {
     return entries;
   }
 
-  private parseStrokes(shape: globalThis.Element): StrokeStyle[] {
+  // Like parseFills: primitive shapes pass their single <stroke> element.
+  private parseStrokes(shape: globalThis.Element, strokeElements: Iterable<globalThis.Element> = shape.querySelectorAll('strokes > StrokeStyle')): StrokeStyle[] {
     const strokes: StrokeStyle[] = [];
-    const strokeElements = shape.querySelectorAll('strokes > StrokeStyle');
 
     for (const strokeEl of strokeElements) {
       const index = parseInt(strokeEl.getAttribute('index') || '1');
