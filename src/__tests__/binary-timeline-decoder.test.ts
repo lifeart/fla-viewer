@@ -153,7 +153,7 @@ function streamBytes(layerName: string, spans: number[]): Uint8Array {
   // Layer tail, schema 11.
   out.push(...u8(11)); // layer_schema
   out.push(...flashStr(layerName));
-  out.push(...u8(0), ...u8(0), ...u8(1)); // type=normal, locked=0, visible=1
+  out.push(...u8(0), ...u8(0), ...u8(0)); // current=0, locked=0, hidden=0
   out.push(...u32(0xffffffff)); // color (schema>=5)
   out.push(...u32(0), ...u32(0)); // field_8c/90 (schema>=6)
   out.push(...u32(0)); // field_98 (schema>=8)

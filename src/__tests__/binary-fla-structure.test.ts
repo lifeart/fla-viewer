@@ -9,14 +9,15 @@ import {
 //   00 00 00 00 00 80 00 00 00 80   CPicObj NULL child tag + 2× INT_MIN point
 //   <u8 layer_schema>
 //   FF FE FF <u8 charLen> <UTF-16LE name>
-//   <u8 type> <u8 locked> <u8 visible>
+//   <u8 current> <u8 locked> <u8 hidden>   (byte 0 is the editor's current-
+//                                     layer flag, NOT the layer type)
 //   <u32 filler>                      (the post-triple color word, ignored)
 function layerRecord(
   name: string,
   schema: number,
-  type: number,
+  current: number,
   locked: number,
-  visible: number
+  hidden: number
 ): Uint8Array {
   const nameUtf16: number[] = [];
   for (const ch of name) {
@@ -29,7 +30,7 @@ function layerRecord(
     schema,
     0xff, 0xfe, 0xff, charLen,
     ...nameUtf16,
-    type, locked, visible,
+    current, locked, hidden,
     0x00, 0x00, 0x00, 0x00, // filler (color u32)
   ]);
 }
@@ -46,39 +47,35 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 }
 
 describe('extractLayers (binary FLA layer enumeration)', () => {
-  it('decodes name / type / locked / visible for a multi-layer stream', () => {
+  it('decodes name / locked / visible for a multi-layer stream', () => {
     const stream = concat(
       Uint8Array.from([0x01, 0xff, 0xff, 0x00, 0x01]), // some preamble noise
-      layerRecord('Layer 1', 11, 0, 0, 1),
+      layerRecord('Layer 1', 11, 0, 0, 0),
       Uint8Array.from([0xaa, 0xbb]), // inter-layer junk (frame tails we skip)
-      layerRecord('shaft', 11, 0, 1, 0),
-      layerRecord('Layer 3', 11, 3, 0, 1) // type 3 = mask
+      layerRecord('shaft', 11, 0, 1, 1),
+      layerRecord('Layer 3', 11, 1, 0, 0) // the current layer
     );
     const layers = extractLayers(stream);
     expect(layers).toEqual([
       { name: 'Layer 1', schema: 11, layerType: 'normal', locked: false, visible: true },
       { name: 'shaft', schema: 11, layerType: 'normal', locked: true, visible: false },
-      { name: 'Layer 3', schema: 11, layerType: 'mask', locked: false, visible: true },
+      { name: 'Layer 3', schema: 11, layerType: 'normal', locked: false, visible: true },
     ]);
   });
 
-  it('classifies guide / folder layers, including by name prefix', () => {
+  it('classifies guide / folder layers by name prefix, not the current flag', () => {
     const stream = concat(
-      // type byte 1 → guide
+      // byte 0 = 1 is the CURRENT-layer flag (every single-layer symbol in a
+      // real Flash 8 file has it); it must not make the layer a guide.
       layerRecord('Layer 2', 11, 1, 0, 0),
-      // type byte 0 but "Guide: " name prefix → still guide
-      layerRecord('Guide: Layer 8', 11, 0, 0, 1),
-      // type byte 5 → folder
-      layerRecord('My Folder', 11, 5, 0, 1),
-      // type byte 4 → masked
-      layerRecord('Masked Layer', 11, 4, 0, 1)
+      layerRecord('Guide: Layer 8', 11, 0, 0, 0),
+      layerRecord('Folder 1', 11, 0, 0, 0)
     );
     const layers = extractLayers(stream);
     expect(layers.map((l) => [l.name, l.layerType])).toEqual([
-      ['Layer 2', 'guide'],
+      ['Layer 2', 'normal'],
       ['Guide: Layer 8', 'guide'],
-      ['My Folder', 'folder'],
-      ['Masked Layer', 'masked'],
+      ['Folder 1', 'folder'],
     ]);
   });
 

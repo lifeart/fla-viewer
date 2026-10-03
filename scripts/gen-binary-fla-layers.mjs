@@ -11,7 +11,8 @@
 //   00 00 00 00 00 80 00 00 00 80   CPicObj NULL child tag + 2× INT_MIN point
 //   <u8 layer_schema=11>
 //   FF FE FF <u8 charLen> <UTF-16LE name>
-//   <u8 type> <u8 locked> <u8 visible> <u32 colour filler>
+//   <u8 current> <u8 locked> <u8 hidden> <u32 colour filler>
+//   (byte 0 is the editor current-layer flag; guide/folder come from the name)
 // plus a `Contents` stream with one library record (Symbol 1 → "Box", graphic)
 // and the Html publish-settings Width/Height.
 //
@@ -50,27 +51,27 @@ function utf16le(s) {
 function flashString(s) {
   return [0xff, 0xfe, 0xff, s.length, ...utf16le(s)];
 }
-function layerRecord(name, schema, type, locked, visible) {
+function layerRecord(name, schema, current, locked, hidden) {
   return [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x80, // SIG
     schema,
     ...flashString(name),
-    type, locked, visible,
+    current, locked, hidden,
     0x00, 0x00, 0x00, 0x00, // colour filler (ignored by the reader)
   ];
 }
 
 const page1 = Uint8Array.from([
   0x01, 0xff, 0xff, 0x00, 0x01,
-  ...layerRecord('Background', 11, 0, 0, 1),
+  ...layerRecord('Background', 11, 0, 0, 0),
   0xaa, 0xbb,
-  ...layerRecord('Guide: helper', 11, 1, 0, 1),
-  ...layerRecord('Actions', 11, 0, 1, 1),
+  ...layerRecord('Guide: helper', 11, 0, 0, 0),
+  ...layerRecord('Actions', 11, 1, 1, 0),
 ]);
 const symbol1 = Uint8Array.from([
   0x01, 0xff, 0xff, 0x00, 0x01,
-  ...layerRecord('Layer 1', 11, 0, 0, 1),
-  ...layerRecord('Layer 2', 11, 0, 1, 0),
+  ...layerRecord('Layer 1', 11, 1, 0, 0),
+  ...layerRecord('Layer 2', 11, 0, 1, 1),
 ]);
 function buildContents() {
   const bytes = [];

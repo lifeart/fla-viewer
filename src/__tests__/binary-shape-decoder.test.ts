@@ -200,7 +200,7 @@ describe('binary-shape-decoder: style-change records', () => {
     // edge_flags 0xE0 = style-change(0x40) + u8(0x80) + t3=2.
     const stream = Uint8Array.from([
       ...u8(0xe0),
-      ...u8(2, 0, 1), // fill0=2, fill1=0, line=1
+      ...u8(1, 0, 2), // line=1, fill1=0, fill0=2 (on-disk order)
       ...s32le(ULTRA_TWIPS_PER_PX),
       ...s32le(0),
       ...u8(0x00),

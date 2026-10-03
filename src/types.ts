@@ -247,6 +247,13 @@ export interface Shape {
   fills: FillStyle[];
   strokes: StrokeStyle[];
   edges: Edge[];
+  /**
+   * Edge endpoints are exact (binary pre-CS5 FLA: integer ultra-twips), so the
+   * renderer must stitch fill contours with exact vertex matching instead of
+   * the 8px gap tolerance used for XFL. With the tolerance, tiny separate
+   * fill islands (e.g. crust specks) get chained into one bogus polygon.
+   */
+  exactEdges?: boolean;
 }
 
 export interface Matrix {

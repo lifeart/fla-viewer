@@ -217,8 +217,28 @@ export function tryParseInstanceAt(
       instanceName += String.fromCharCode(ch);
     }
 
-    const mediaRef = r.u32();
+    let mediaRef = r.u32();
     if (mediaRef < 1 || mediaRef > MAX_MEDIA_REF) return null;
+
+    // Flash 8+ records (seen in real Flash 7 and 8 files) put a constant 1 in the
+    // slot above and write the real library reference after a UTF-16 name:
+    //   u32 1, u8×3 0, s32 -1, FF FE FF <u8 len> <UTF-16LE>, u32 media_ref
+    // Reading the placeholder made every placement point at Symbol 1.
+    const p = r.pos;
+    if (
+      p + 15 <= data.length &&
+      data[p + 11] === 0xff &&
+      data[p + 12] === 0xfe &&
+      data[p + 13] === 0xff
+    ) {
+      const nameEnd = p + 15 + data[p + 14] * 2;
+      if (nameEnd + 4 <= data.length) {
+        r.pos = nameEnd;
+        const ref = r.u32();
+        if (ref >= 1 && ref <= MAX_MEDIA_REF) mediaRef = ref;
+        else r.pos = p;
+      }
+    }
 
     return {
       className,

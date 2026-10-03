@@ -44,7 +44,7 @@ import {
   getAudioCodecName,
   getKeyframes
 } from './flv-parser';
-import { isOLE2 } from './ole2-reader';
+import { isOLE2, OLE2File } from './ole2-reader';
 import { parseBinaryFLA } from './binary-fla-parser';
 import { getMaskLayerIndex } from './layer-utils';
 
@@ -97,7 +97,12 @@ export class FLAParser {
       const fullBytes = new Uint8Array(await file.arrayBuffer());
       // parseBinaryFLA throws with a specific message on unrecognized binary
       // FLAs; let it propagate so the UI shows real feedback (no silent catch).
-      return parseBinaryFLA(fullBytes);
+      const binaryDoc = parseBinaryFLA(fullBytes);
+      if (binaryDoc.sounds.size > 0) {
+        progress('Loading sounds...');
+        await this.loadBinarySounds(binaryDoc.sounds, fullBytes);
+      }
+      return binaryDoc;
     }
 
     // Try to load ZIP, handling potentially corrupted files
@@ -2338,6 +2343,43 @@ export class FLAParser {
     } catch (e) {
       if (DEBUG) {
         console.warn(`Failed to decode audio: ${sourceRef}`, e);
+      }
+    }
+  }
+
+  /**
+   * Decode binary-FLA sounds: each SoundItem's `href` names the OLE2 stream
+   * (`Media N`) holding raw PCM or MP3 (see binary-fla-parser extractSounds).
+   */
+  private async loadBinarySounds(
+    sounds: Map<string, SoundItem>,
+    bytes: Uint8Array
+  ): Promise<void> {
+    if (typeof AudioContext === 'undefined') {
+      console.warn('Web Audio unavailable; binary FLA sounds not loaded');
+      return;
+    }
+    if (!this.audioContext) {
+      this.audioContext = new AudioContext();
+    }
+    const ole = new OLE2File(bytes);
+    for (const sound of sounds.values()) {
+      const data = ole.readStream(sound.href);
+      // Copy into a standalone ArrayBuffer (decodeAudioData detaches it).
+      const buffer = data.slice().buffer;
+      try {
+        if (sound.format === 'mp3') {
+          sound.audioData = await this.audioContext.decodeAudioData(buffer);
+        } else {
+          sound.audioData = this.convertPCMToAudioBuffer(
+            buffer,
+            sound.sampleRate!,
+            sound.bitDepth!,
+            sound.channels!
+          );
+        }
+      } catch (err) {
+        console.warn(`Failed to decode binary FLA sound "${sound.name}":`, err);
       }
     }
   }
