@@ -129,7 +129,7 @@ piecewise cubic bezier (3n+1 points), not a single 4-point curve.
 ```xml
 <DOMSymbolInstance
     libraryItemName="SymbolName"
-    symbolType="graphic"           <!-- graphic | movieclip | button -->
+    symbolType="graphic"           <!-- graphic | button; omitted for a movie clip -->
     loop="loop"                    <!-- loop | play once | single frame -->
     firstFrame="0"                 <!-- Starting frame for nested timeline -->
     centerPoint3DX="100"           <!-- 3D center point for transforms -->
@@ -261,7 +261,7 @@ Edge elements can have either `edges` attribute (quadratic curves) or `cubics` a
 | `!` | `!x y` | MoveTo (start new subpath) |
 | `\|` | `\|x y` | LineTo |
 | `[` | `[cx cy x y` | QuadraticCurveTo (control point + end point) |
-| `/` | `/` | ClosePath |
+| `/` | `/x y` | LineTo (CS3+ "general line"); a bare `/` with no coordinates is ClosePath |
 | `S` | `Sn` | Style change indicator (followed by style index) |
 
 #### Cubic Format (`cubics` attribute)
@@ -427,6 +427,16 @@ suite. What is still open:
 - [ ] **Embedded video**: frame-accurate seeking and drawing video into exports (needs
   WebCodecs `VideoDecoder`); FLV pixels are not decoded
 - [ ] **Binary FLA**: tweens, frame labels, sounds (see "Pre-CS5 binary FLA" below)
+- [ ] **IK / bone armatures** (CS4-CS6): pose layers render their rest pose; Animate CC
+  converts IK to frame-by-frame on open, so only files last saved in CS4-CS6 are affected
+- [ ] **Object motion tweens**: filter curves, and Bounce/Spring/wave/custom time maps
+  (they fall back to linear)
+- [ ] **Variable-width strokes** (`<VariablePointWidth><WidthMarker>`) and art/pattern
+  brushes draw at constant width
+- [ ] **Movie clips inside graphic symbols**: seeded from the graphic's current frame only,
+  so a seek or single-frame export of a one-frame or looping graphic can show a different
+  clip frame than continuous playback (whether Flash restarts such clips when the graphic
+  loops is unverified)
 
 `TODO.md` has the detailed feature-by-feature status against JPEXS; `review.md` is an
 older code review checklist.
@@ -536,6 +546,10 @@ Edge contributions are collected per fill style, then sorted into connected chai
 | `src/fla-parser.ts` | ZIP extraction, XML parsing, bitmaps, sounds, video, reference layer detection; routes OLE2 files to the binary parser |
 | `src/edge-decoder.ts` | XFL edge path format decoder (quadratic and cubic) |
 | `src/shape-utils.ts` | Shape repair and path helpers |
+| `src/primitive-shapes.ts` | Outlines for rectangle/oval primitive shapes |
+| `src/motion-object.ts` | CS4+ object motion tweens (`<AnimationCore>`) |
+| `src/symbol-loop.ts` | Graphic symbol loop modes (frame an instance shows) |
+| `src/xfl-folder.ts` | Uncompressed XFL folders |
 | `src/path-utils.ts` | Library path normalization |
 | `src/layer-utils.ts` | Layer visibility cascade, mask membership, rig parent lookup (shared by renderer and exporter) |
 | `src/renderer.ts` | Canvas 2D rendering engine, edge sorting, path building, masks, rig transforms |
@@ -813,6 +827,47 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   allowed in `<clipPath>`), but symbol/text/bitmap masks still don't clip there.
 - Known approximations: masked layers *inside* a symbol used as a mask contribute unclipped;
   9-slice and 3D (`rotationX/Y/Z`, `z`) mask instances use their plain 2D matrix.
+
+### Version-specific XFL cases
+Checked against real Flash CS4-CS6 saves (jindrapetrik/flacomdoc test data, JPEXS fixtures,
+public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
+- **Spelled-out values.** `motionTweenRotate` is `"clockwise"`/`"counter-clockwise"` (not
+  `cw`/`ccw`; `parseMotionTweenRotate`). `<DashedStroke>` lengths are `dash1`/`dash2`.
+  Dotted strokes draw round dots `dotSpace` apart; Hatched/Ragged/Stipple draw solid.
+- **`/x y` edges** are lines (see the edge table); reading every `/` as ClosePath dropped them.
+- **Object motion tweens (CS4+).** One `<DOMFrame tweenType="motion object">` per span, the
+  curves in `<motionObjectXML><AnimationCore>`; parsed and evaluated in `src/motion-object.ts`,
+  applied by `applyMotionObject` in the renderer (draw, masks, rig, camera). `timevalue` is in
+  TimeScale ticks (TimeScale = fps x 1000); keys are cubic Beziers in (time, value) with
+  `next`/`previous` as "dt,value" handles; Motion_X/Y move the transformation point, Rotation/
+  Skew/Scale are absolute and rebuild the matrix (`a = sx cos(rot+skewY)`, `c = -sy sin(rot+skewX)`).
+  Reference implementation: Sony PSM `UIMotion`/`AnimationUtility`.
+- **Primitives (CS3+).** `<DOMRectangleObject>`/`<DOMOvalObject>` have parameters and a singular
+  `<fill>`/`<stroke>`, no edges; `src/primitive-shapes.ts` rebuilds the outline. x/y is the
+  top-left in the element's own space; oval angles are degrees from 3 o'clock, clockwise.
+  The outline is exact (`exactEdges`): the 8px XFL stitch tolerance would close a thin ring's
+  hole onto its outer edge. Closed contours end in `Z` so strokes join at the start point.
+- **Uncompressed XFL (CS5+).** A folder with DOMDocument.xml and a `.xfl` stub (`PROXY-CS5`);
+  `src/xfl-folder.ts` packs it into an in-memory zip. Drop the folder on the viewer.
+- **Reverse loops (Animate 2021).** `loop="loop reverse"`/`"play once reverse"`;
+  `graphicSymbolFrame` (`src/symbol-loop.ts`) is shared by the renderer and the SVG exporter.
+- **TLF text (CS5-CS6).** `<DOMTLFText>` is read as static text from its `<TextFlow>` spans.
+- **Movie clips have no `symbolType`.** Animate writes it only for `graphic`/`button`
+  (instances and library items); a missing value is a movie clip (`parseSymbolType`). Movie
+  clips run their own playheads (`advanceMovieClipPlayheads`, called by the player on every
+  tick including a timeline wrap, and by every frame-sequence exporter) and hold on a keyframe
+  whose script calls their own `stop()` at frame entry (`callsStop` ignores comments, string
+  and regex literals, and function bodies including arrow expressions); other scripts are not
+  run. Playhead state is keyed by the instance path (symbol, layer, element index at each
+  level). A state is dropped at the end of a `renderFrame` that didn't reach it, and replaced
+  when the instance's run of back-to-back keyframes (`movieClipRun`) changes, e.g. when the
+  timeline loops back over a gap; either way a clip placed again starts over. A new state is
+  seeded to where continuous playback would be (`movieClipTicks` + `movieClipPlayhead`): ticks
+  since the run began, measured on the parent's frames, or inside another movie clip on that
+  clip's own elapsed ticks (it loops from frame 0 or holds at its first stop()). So a seek, a
+  single-frame/SVG/mid-range export, or a frame after a `cacheAsBitmap` frame agrees with
+  playback. A `cacheAsBitmap` frame itself still shows the cached subtree. A clip inside a
+  graphic symbol is seeded from the graphic's current frame only (see Remaining TODOs).
 
 ### Pre-CS5 binary FLA (issue #8)
 - Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not

@@ -1,5 +1,7 @@
 // Core FLA document types
 
+import type { MotionObjectTween } from './motion-object';
+
 export interface FLADocument {
   width: number;
   height: number;
@@ -91,8 +93,14 @@ export interface Frame {
   index: number;
   duration: number;
   keyMode: number;
-  tweenType?: 'motion' | 'shape' | 'none';
+  tweenType?: 'motion' | 'shape' | 'none' | 'motion object';
   acceleration?: number;
+  /**
+   * CS4+ object-based motion tween (`tweenType="motion object"`): the span's
+   * property curves from `<motionObjectXML><AnimationCore>`, applied to the
+   * frame's elements by the renderer.
+   */
+  motionObject?: MotionObjectTween;
   elements: DisplayElement[];
   tweens?: Tween[];
   sound?: FrameSound;
@@ -198,7 +206,8 @@ export interface SymbolInstance {
   matrix: Matrix;
   transformationPoint: Point;
   centerPoint3D?: Point; // 3D transformation center point
-  loop: 'loop' | 'play once' | 'single frame';
+  // Graphic playback mode; the reverse modes were added in Animate 2021.
+  loop: 'loop' | 'play once' | 'single frame' | 'loop reverse' | 'play once reverse';
   firstFrame?: number;
   lastFrame?: number; // End frame for graphic symbols (for limited playback range)
   colorTransform?: ColorTransform;
@@ -418,8 +427,10 @@ export interface PlayerState {
 export interface MovieClipInstanceState {
   playhead: number;        // Current frame within the MovieClip's timeline
   totalFrames: number;     // Total frames in this MovieClip
-  startParentFrame: number; // Parent frame when this instance first appeared
+  startParentFrame: number; // Parent frame where the instance's run of keyframes starts
   isPlaying: boolean;      // Whether this instance is currently playing
+  elapsed: number;         // Ticks since the instance appeared (including held ticks)
+  stopFrames?: ReadonlySet<number>; // Frames whose script calls stop(); the playhead holds there
 }
 
 // Filters

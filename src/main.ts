@@ -2,6 +2,7 @@ import { FLAParser } from './fla-parser';
 import { FLAPlayer } from './player';
 import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF, exportWebM, exportSVG } from './video-exporter';
 import { generateSampleFLA } from './sample-generator';
+import { readDirectoryEntry, type XFLFolderEntry } from './xfl-folder';
 import { setEdgeDecoderDebug, setImplicitMoveToAfterClose, setEdgeSplittingOnStyleChange } from './edge-decoder';
 import type { PlayerState, FLADocument, DisplayElement, Symbol } from './types';
 
@@ -186,6 +187,14 @@ export class FLAViewerApp {
     this.dropZone.addEventListener('drop', (e) => {
       e.preventDefault();
       this.dropZone.classList.remove('dragover');
+      // A dropped folder is an uncompressed XFL document (CS5+ "Save as XFL").
+      const entry = e.dataTransfer?.items?.[0]?.webkitGetAsEntry?.();
+      if (entry?.isDirectory) {
+        readDirectoryEntry(entry as FileSystemDirectoryEntry)
+          .then((entries) => this.loadFile({ name: entry.name, entries }))
+          .catch((error) => alert('Failed to read the dropped folder: ' + (error as Error).message));
+        return;
+      }
       const files = e.dataTransfer?.files;
       if (files && files.length > 0) {
         this.loadFile(files[0]);
@@ -1048,8 +1057,9 @@ export class FLAViewerApp {
     this.loadingProgressFill.style.width = '0%';
   }
 
-  private async loadFile(file: File): Promise<void> {
-    if (!file.name.toLowerCase().endsWith('.fla')) {
+  private async loadFile(file: File | { name: string; entries: XFLFolderEntry[] }): Promise<void> {
+    const isFolder = 'entries' in file;
+    if (!isFolder && !/\.(fla|xfl)$/i.test(file.name)) {
       alert(`Please select a valid FLA file.\nReceived: "${file.name}" (${file.type || 'unknown type'})`);
       return;
     }
@@ -1065,7 +1075,7 @@ export class FLAViewerApp {
       this.resetLoadingStages();
 
       // Parse FLA file with progress updates
-      const doc = await this.parser.parse(file, (message) => {
+      const doc = await this.parser.parse(isFolder ? file.entries : file, (message) => {
         this.loadingText.textContent = message;
         this.updateLoadingStage(message);
         // Show skip button when fixing images
@@ -1143,7 +1153,7 @@ export class FLAViewerApp {
       }
 
       // Show download button if WebCodecs supported and has multiple frames
-      this.currentFileName = file.name.replace(/\.fla$/i, '');
+      this.currentFileName = file.name.replace(/\.(fla|xfl)$/i, '');
       if (isWebCodecsSupported() && hasMultipleFrames) {
         this.downloadBtn.classList.remove('hidden');
       } else {

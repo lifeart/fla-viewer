@@ -25,6 +25,7 @@ import type {
   Point,
   Tween,
   Edge,
+  PathCommand,
   Filter,
   MorphShape,
   MorphSegment,
@@ -48,6 +49,11 @@ import {
 import { isOLE2, OLE2File } from './ole2-reader';
 import { parseBinaryFLA } from './binary-fla-parser';
 import { getMaskLayerIndex } from './layer-utils';
+import { isXFLStub, xflFolderToZip, type XFLFolderEntry } from './xfl-folder';
+import { rectanglePrimitivePath, ovalPrimitivePath } from './primitive-shapes';
+import { parseAnimationCore } from './motion-object';
+
+export type { XFLFolderEntry } from './xfl-folder';
 
 // Debug flag - enabled via ?debug=true URL parameter or setParserDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -97,13 +103,45 @@ async function toBytes(input: FLAInput): Promise<Uint8Array> {
   return new Uint8Array(await input.arrayBuffer());
 }
 
-// Animate's default "Dashed" line style when <DashedStroke> omits dashLength/spaceLength.
+// Animate's default "Dashed" line style when <DashedStroke> omits dash1/dash2.
 // Source: the Property Inspector "Dashed" stroke style (Stroke Style dialog) defaults; the
 // Adobe JSFL Stroke object documents dash1 (solid run) and dash2 (gap) as integers but does
 // not publish the absent-attribute defaults, so we mirror the UI default 4-unit dash + 4-unit
 // gap. Units match `weight` (1:1 with canvas lineWidth/user space), so no conversion is needed.
 const DEFAULT_DASH_LENGTH = 4;
 const DEFAULT_DASH_SPACE_LENGTH = 4;
+// Default gap between dots of a <DottedStroke> without `dotSpace` (flacomdoc's XFL reader).
+const DEFAULT_DOT_SPACE = 3;
+
+/**
+ * Normalize a classic tween's `motionTweenRotate`. Animate writes the long forms
+ * `"clockwise"` / `"counter-clockwise"` (JSFL `frame.motionTweenRotate`); the short
+ * `cw`/`ccw` forms are accepted too. Anything else (`"auto"`, absent) means no forced spin.
+ */
+export function parseMotionTweenRotate(value: string | null): 'cw' | 'ccw' | 'none' | undefined {
+  switch (value) {
+    case 'clockwise':
+    case 'cw':
+      return 'cw';
+    case 'counter-clockwise':
+    case 'ccw':
+      return 'ccw';
+    case 'none':
+      return 'none';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Normalize an XFL `symbolType` (on a DOMSymbolItem or a symbol instance).
+ * Animate writes it only for `"graphic"` and `"button"`; a movie clip is the
+ * default and has no attribute (JSFL spells that type `"movie clip"`, which is
+ * accepted too, as is the internal `"movieclip"`).
+ */
+export function parseSymbolType(value: string | null): 'graphic' | 'movieclip' | 'button' {
+  return value === 'graphic' || value === 'button' ? value : 'movieclip';
+}
 
 export class FLAParser {
   private zip: JSZip | null = null;
@@ -131,10 +169,31 @@ export class FLAParser {
     }
   }
 
-  async parse(input: FLAInput, onProgress?: ProgressCallback, isSkipImagesFix?: SkipCheckCallback, options: ParseOptions = {}): Promise<FLADocument> {
+  /**
+   * Parse a .fla (zipped XFL, or a pre-CS5 binary FLA) or, given the files of an
+   * uncompressed XFL folder (CS5+ "Save as XFL"), that folder.
+   */
+  async parse(input: FLAInput | XFLFolderEntry[], onProgress?: ProgressCallback, isSkipImagesFix?: SkipCheckCallback, options: ParseOptions = {}): Promise<FLADocument> {
     const progress = onProgress || (() => {});
     const shouldSkipImagesFix = isSkipImagesFix || (() => false);
 
+    if (Array.isArray(input)) {
+      progress('Reading XFL folder...');
+      this.zip = xflFolderToZip(input);
+    } else {
+      // A pre-CS5 binary FLA is parsed completely while opening.
+      const binaryDoc = await this.openArchive(input, progress, options);
+      if (binaryDoc) return binaryDoc;
+    }
+    this.symbolCache.clear();
+    return this.parseXfl(progress, shouldSkipImagesFix, options);
+  }
+
+  /**
+   * Load a .fla into `this.zip`. Returns the finished document instead when the
+   * input is a pre-CS5 binary FLA, which has no XFL inside.
+   */
+  private async openArchive(input: FLAInput, progress: ProgressCallback, options: ParseOptions): Promise<FLADocument | null> {
     const bytes = await toBytes(input);
 
     // Detect format by leading bytes. CS5+ FLAs are ZIP archives ("PK"…);
@@ -156,6 +215,13 @@ export class FLAParser {
       return binaryDoc;
     }
 
+    if (isXFLStub(bytes)) {
+      throw new Error(
+        'This is the .xfl file of an uncompressed XFL document (Flash CS5+ "Save as XFL"). ' +
+        'Open the whole folder that contains it instead.'
+      );
+    }
+
     // Try to load ZIP, handling potentially corrupted files
     progress('Extracting archive...');
     try {
@@ -170,8 +236,10 @@ export class FLAParser {
         throw e;
       }
     }
-    this.symbolCache.clear();
+    return null;
+  }
 
+  private async parseXfl(progress: ProgressCallback, shouldSkipImagesFix: SkipCheckCallback, options: ParseOptions): Promise<FLADocument> {
     // Parse main document
     progress('Parsing document...');
     const domDocXml = await this.getFileContent('DOMDocument.xml');
@@ -421,8 +489,8 @@ export class FLAParser {
         if (hasWithNormalizedPath(this.symbolCache, rawName)) return;
 
         const itemID = symbolRoot.getAttribute('itemID') || '';
-        // Compiled clips are movie clips; they carry no symbolType attribute.
-        const symbolType = (symbolRoot.getAttribute('symbolType') || (isCompiledClip ? 'movieclip' : 'graphic')) as 'graphic' | 'movieclip' | 'button';
+        // Movie clips (compiled clips included) carry no symbolType attribute.
+        const symbolType = parseSymbolType(symbolRoot.getAttribute('symbolType'));
 
         // ActionScript linkage (Export for ActionScript). Used by tooling to map
         // a library symbol to its AS class / attachMovie identifier.
@@ -731,11 +799,11 @@ export class FLAParser {
       // Duration must be at least 1 to avoid division by zero in tween calculations
       const duration = Math.max(1, parseInt(frameEl.getAttribute('duration') || '1') || 1);
       const keyMode = parseInt(frameEl.getAttribute('keyMode') || '0');
-      const tweenType = frameEl.getAttribute('tweenType') as 'motion' | 'shape' | undefined;
+      const tweenType = frameEl.getAttribute('tweenType') as Frame['tweenType'] | null;
       const acceleration = frameEl.getAttribute('acceleration');
 
       // Motion tween properties
-      const motionTweenRotate = frameEl.getAttribute('motionTweenRotate') as 'cw' | 'ccw' | 'none' | null;
+      const motionTweenRotate = parseMotionTweenRotate(frameEl.getAttribute('motionTweenRotate'));
       const motionTweenRotateTimes = frameEl.getAttribute('motionTweenRotateTimes');
       const motionTweenScale = frameEl.getAttribute('motionTweenScale');
       const motionTweenOrientToPath = frameEl.getAttribute('motionTweenOrientToPath');
@@ -748,6 +816,12 @@ export class FLAParser {
 
       // Parse morph shape for shape tweens
       const morphShape = tweenType === 'shape' ? this.parseMorphShape(frameEl) : undefined;
+
+      // CS4+ object motion tween: the property curves live in <motionObjectXML>.
+      const animationCore = tweenType === 'motion object'
+        ? frameEl.querySelector(':scope > motionObjectXML > AnimationCore')
+        : null;
+      const motionObject = animationCore ? parseAnimationCore(animationCore) : undefined;
 
       // Parse frame label (name attribute is the label text, labelType is the label kind)
       const label = frameEl.getAttribute('name') || undefined;
@@ -767,6 +841,7 @@ export class FLAParser {
         tweens,
         sound,
         ...(morphShape && { morphShape }),
+        ...(motionObject && { motionObject }),
         ...(label && { label }),
         ...(labelType && { labelType }),
         ...(actionScript && { actionScript }),
@@ -857,6 +932,10 @@ export class FLAParser {
         case 'DOMShape':
           elements.push(this.parseShape(child, identityMatrix));
           break;
+        case 'DOMRectangleObject':
+        case 'DOMOvalObject':
+          elements.push(this.parsePrimitiveShape(child, identityMatrix));
+          break;
         case 'DOMGroup':
           this.parseGroupMembers(child, elements, identityMatrix);
           break;
@@ -870,6 +949,9 @@ export class FLAParser {
         case 'DOMDynamicText':
         case 'DOMInputText':
           elements.push(this.parseTextInstance(child, identityMatrix));
+          break;
+        case 'DOMTLFText':
+          elements.push(this.parseTLFText(child, identityMatrix));
           break;
       }
     }
@@ -893,6 +975,10 @@ export class FLAParser {
         case 'DOMShape':
           elements.push(this.parseShape(child, composedMatrix));
           break;
+        case 'DOMRectangleObject':
+        case 'DOMOvalObject':
+          elements.push(this.parsePrimitiveShape(child, composedMatrix));
+          break;
         case 'DOMGroup':
           this.parseGroupMembers(child, elements, composedMatrix);
           break;
@@ -910,6 +996,9 @@ export class FLAParser {
         case 'DOMDynamicText':
         case 'DOMInputText':
           elements.push(this.parseTextInstance(child, composedMatrix));
+          break;
+        case 'DOMTLFText':
+          elements.push(this.parseTLFText(child, composedMatrix));
           break;
       }
     }
@@ -933,11 +1022,9 @@ export class FLAParser {
     // Instance name (Properties panel) — the AS identifier for this object.
     // The renderer ignores it; tooling (code completion) relies on it.
     const name = el.getAttribute('name') || undefined;
-    // Components have no symbolType attribute but are movie clips; symbol
-    // instances default to graphic.
-    const symbolType = (el.getAttribute('symbolType') ||
-      (el.tagName === 'DOMComponentInstance' ? 'movieclip' : 'graphic')) as 'graphic' | 'movieclip' | 'button';
-    const loop = (el.getAttribute('loop') || 'loop') as 'loop' | 'play once' | 'single frame';
+    // Movie clip instances (components included) carry no symbolType attribute.
+    const symbolType = parseSymbolType(el.getAttribute('symbolType'));
+    const loop = (el.getAttribute('loop') || 'loop') as SymbolInstance['loop'];
     const firstFrame = el.getAttribute('firstFrame');
     const lastFrame = el.getAttribute('lastFrame');
 
@@ -1197,6 +1284,122 @@ export class FLAParser {
     };
   }
 
+  /**
+   * <DOMTLFText> (TLF text, Flash CS5-CS6 only; Animate CC converts it to classic
+   * text on open). The box is `left/top/right/bottom` in twips plus the
+   * <tlfTextObject> padding; the content is a Text Layout Framework <TextFlow>
+   * of paragraphs (<p>) holding <span>s, with formats inherited from ancestors.
+   * Rendered as classic static text: one run per span, paragraphs separated by
+   * a line break.
+   */
+  private parseTLFText(el: globalThis.Element, composedMatrix?: Matrix): TextInstance {
+    const matrixEl = el.querySelector(':scope > matrix > Matrix');
+    const baseMatrix = matrixEl ? this.parseMatrix(matrixEl) : (composedMatrix || this.parseMatrix(null));
+    const twips = (name: string) => (parseFloat(el.getAttribute(name) || '0') || 0) / 20;
+    const textObject = Array.from(el.getElementsByTagName('*')).find((n) => n.localName === 'tlfTextObject');
+    const padding = (side: string) => parseFloat(textObject?.getAttribute(`padding${side}`) || '0') || 0;
+
+    const left = twips('left') + padding('Left');
+    const top = twips('top') + padding('Top');
+    const width = Math.max(0, twips('right') - twips('left') - padding('Left') - padding('Right'));
+    const height = Math.max(0, twips('bottom') - twips('top') - padding('Top') - padding('Bottom'));
+    // Text is laid out from y = 0 in its own space, so fold the box top into the matrix.
+    const matrix = { ...baseMatrix, tx: baseMatrix.tx + baseMatrix.c * top, ty: baseMatrix.ty + baseMatrix.d * top };
+
+    // TLF formats cascade from TextFlow > div > p > span; "inherit" defers upward.
+    const format = (node: globalThis.Element, name: string): string | undefined => {
+      for (let n: globalThis.Element | null = node; n && n !== el; n = n.parentElement) {
+        const v = n.getAttribute(name);
+        if (v !== null && v !== 'inherit') return v;
+        if (n.localName === 'TextFlow') break;
+      }
+      return undefined;
+    };
+    const alignOf = (p: globalThis.Element): TextRun['alignment'] => {
+      const a = format(p, 'textAlign');
+      return a === 'center' ? 'center' : a === 'right' || a === 'end' ? 'right' : a === 'justify' ? 'justify' : 'left';
+    };
+
+    const textRuns: TextRun[] = [];
+    const runFor = (leaf: globalThis.Element, characters: string, alignment: TextRun['alignment']): TextRun => {
+      const size = parseFloat(format(leaf, 'fontSize') || '12') || 12;
+      const lineHeightAttr = format(leaf, 'lineHeight') || '120%';
+      const lineHeight = lineHeightAttr.endsWith('%')
+        ? size * (parseFloat(lineHeightAttr) || 120) / 100
+        : parseFloat(lineHeightAttr) || size * 1.2;
+      const tracking = format(leaf, 'trackingRight');
+      const letterSpacing = tracking
+        ? (tracking.endsWith('%') ? size * (parseFloat(tracking) || 0) / 100 : parseFloat(tracking) || 0)
+        : 0;
+      const color = format(leaf, 'color') || '#000000';
+      const alpha = parseFloat(format(leaf, 'textAlpha') ?? '1');
+      const run: TextRun = {
+        characters,
+        alignment,
+        size,
+        lineHeight,
+        face: format(leaf, 'fontFamily'),
+        // textAlpha (0..1) becomes the hex color's alpha byte.
+        fillColor: alpha >= 0 && alpha < 1 && /^#[0-9a-f]{6}$/i.test(color)
+          ? color + Math.round(alpha * 255).toString(16).padStart(2, '0')
+          : color,
+        bold: format(leaf, 'fontWeight') === 'bold',
+        italic: format(leaf, 'fontStyle') === 'italic',
+        ...(letterSpacing !== 0 && { letterSpacing }),
+      };
+      if (format(leaf, 'textDecoration') === 'underline') run.underline = true;
+      return run;
+    };
+
+    const paragraphs = Array.from(el.getElementsByTagName('*')).filter((n) => n.localName === 'p');
+    paragraphs.forEach((p, pIndex) => {
+      const alignment = alignOf(p);
+      const runsBefore = textRuns.length;
+      // Walk the paragraph in document order: text inside <span>s becomes runs,
+      // <br/> a line break and <tab/> a tab (markup whitespace between tags is ignored).
+      const walk = (node: globalThis.Element) => {
+        for (const child of Array.from(node.childNodes)) {
+          if (child.nodeType === 3) {
+            const parent = child.parentElement;
+            if (parent && parent.localName === 'span' && child.textContent) {
+              textRuns.push(runFor(parent, child.textContent, alignment));
+            }
+          } else if (child.nodeType === 1) {
+            const element = child as globalThis.Element;
+            if (element.localName === 'br' || element.localName === 'tab') {
+              textRuns.push(runFor(element, element.localName === 'br' ? '\n' : '\t', alignment));
+            } else {
+              walk(element);
+            }
+          }
+        }
+      };
+      walk(p);
+      // A paragraph ends with a line break (the renderer breaks after a run's \r).
+      // An empty paragraph is a blank line, formatted by its (empty) span if it has one.
+      if (pIndex < paragraphs.length - 1) {
+        if (textRuns.length > runsBefore) {
+          textRuns[textRuns.length - 1].characters += '\r';
+        } else {
+          const span = Array.from(p.getElementsByTagName('*')).find((n) => n.localName === 'span');
+          textRuns.push(runFor(span ?? p, '\r', alignment));
+        }
+      }
+    });
+
+    const filters = this.parseFilters(el);
+    return {
+      type: 'text',
+      textType: 'static',
+      matrix,
+      left,
+      width,
+      height,
+      textRuns,
+      ...(filters.length > 0 && { filters }),
+    };
+  }
+
   private parseShape(el: globalThis.Element, composedMatrix?: Matrix): Shape {
     // Use :scope to only look for direct child matrix, not gradient matrices inside fills
     const matrixEl = el.querySelector(':scope > matrix > Matrix');
@@ -1224,9 +1427,70 @@ export class FLAParser {
     };
   }
 
-  private parseFills(shape: globalThis.Element): FillStyle[] {
+  // `fillElements` defaults to the shape's <fills><FillStyle> list; primitive shapes
+  // pass their single <fill> (same children, no index attribute, so index 1).
+  /**
+   * <DOMRectangleObject>/<DOMOvalObject> (CS3+ primitive tools): parameters plus a
+   * singular <fill>/<stroke> and no edges. Rebuilt as an ordinary shape with fill
+   * style 1 and stroke style 1 so every renderer path (masks, hit tests, export)
+   * handles it like a drawn shape.
+   */
+  private parsePrimitiveShape(el: globalThis.Element, composedMatrix?: Matrix): Shape {
+    const matrixEl = el.querySelector(':scope > matrix > Matrix');
+    const matrix = matrixEl ? this.parseMatrix(matrixEl) : (composedMatrix || this.parseMatrix(null));
+    const num = (name: string, fallback = 0) => {
+      const v = parseFloat(el.getAttribute(name) ?? '');
+      return Number.isFinite(v) ? v : fallback;
+    };
+    const fillEl = el.querySelector(':scope > fill');
+    const strokeEl = el.querySelector(':scope > stroke');
+    const fills = fillEl ? this.parseFills(el, [fillEl]) : [];
+    const strokes = strokeEl ? this.parseStrokes(el, [strokeEl]) : [];
+    const box = { x: num('x'), y: num('y'), width: num('objectWidth'), height: num('objectHeight') };
+
+    let contours: PathCommand[][];
+    let closed = true;
+    if (el.tagName === 'DOMRectangleObject') {
+      const topLeftRadius = num('topLeftRadius');
+      // With the corner lock on, Flash uses the top-left radius for every corner.
+      const locked = el.getAttribute('lockFlag') === 'true';
+      const corner = (name: string) => (locked && el.getAttribute(name) === null ? topLeftRadius : num(name));
+      contours = [rectanglePrimitivePath({
+        ...box,
+        topLeftRadius,
+        topRightRadius: corner('topRightRadius'),
+        bottomRightRadius: corner('bottomRightRadius'),
+        bottomLeftRadius: corner('bottomLeftRadius'),
+      })];
+    } else {
+      const oval = ovalPrimitivePath({
+        ...box,
+        startAngle: num('startAngle'),
+        endAngle: num('endAngle'),
+        innerRadius: num('innerRadius'),
+        closePath: el.getAttribute('closePath') !== 'false',
+      });
+      contours = oval.contours;
+      closed = oval.closed;
+    }
+
+    const hasFill = closed && fills.length > 0;
+    const hasStroke = strokes.length > 0;
+    // One edge for all contours, so exporters that fill edge by edge (SVG) keep
+    // a ring's hole as part of the same nonzero path.
+    const edges: Edge[] = [{
+      ...(hasFill && { fillStyle1: 1 }),
+      ...(hasStroke && { strokeStyle: 1 }),
+      commands: contours.flat(),
+    }];
+
+    // The outline is exact, so contours are stitched without the 8px XFL gap
+    // tolerance (which would join a thin ring's hole onto its outer edge).
+    return { type: 'shape', matrix, fills: hasFill ? fills : [], strokes, edges, exactEdges: true };
+  }
+
+  private parseFills(shape: globalThis.Element, fillElements: Iterable<globalThis.Element> = shape.querySelectorAll('fills > FillStyle')): FillStyle[] {
     const fills: FillStyle[] = [];
-    const fillElements = shape.querySelectorAll('fills > FillStyle');
 
     for (const fillEl of fillElements) {
       const index = parseInt(fillEl.getAttribute('index') || '1');
@@ -1364,9 +1628,9 @@ export class FLAParser {
     return entries;
   }
 
-  private parseStrokes(shape: globalThis.Element): StrokeStyle[] {
+  // Like parseFills: primitive shapes pass their single <stroke> element.
+  private parseStrokes(shape: globalThis.Element, strokeElements: Iterable<globalThis.Element> = shape.querySelectorAll('strokes > StrokeStyle')): StrokeStyle[] {
     const strokes: StrokeStyle[] = [];
-    const strokeElements = shape.querySelectorAll('strokes > StrokeStyle');
 
     for (const strokeEl of strokeElements) {
       const index = parseInt(strokeEl.getAttribute('index') || '1');
@@ -1483,28 +1747,47 @@ export class FLAParser {
         continue;
       }
 
-      // Check for DashedStroke (a solid-colored line drawn with a dash pattern)
-      const dashedStroke = strokeEl.querySelector('DashedStroke');
-      if (dashedStroke) {
-        const commonProps = parseCommonStrokeProps(dashedStroke);
-        const solidColor = dashedStroke.querySelector('fill > SolidColor');
+      // Patterned strokes: Dashed plus the older "artistic" styles (Dotted, Hatched,
+      // Ragged, Stipple) that Flash MX..CS6 could draw and that still appear in
+      // XFL files. They are solid-colored; only Dashed and Dotted map to a canvas
+      // dash pattern, the rest are drawn as a plain line so the outline is not lost.
+      const styledStroke = strokeEl.querySelector(
+        ':scope > DashedStroke, :scope > DottedStroke, :scope > HatchedStroke, :scope > RaggedStroke, :scope > StippleStroke'
+      );
+      if (styledStroke) {
+        const commonProps = parseCommonStrokeProps(styledStroke);
+        const solidColor = styledStroke.querySelector('fill > SolidColor');
         const color = solidColor?.getAttribute('color') || '#000000';
 
-        // XFL <DashedStroke dashLength="…" spaceLength="…"> — lengths are in the
-        // same user-space units as `weight`, so they map 1:1 to canvas setLineDash.
-        // Real Animate files routinely omit both attributes and rely on the UI
-        // default "Dashed" line style, which is a 4-unit dash + 4-unit gap.
-        const dashLengthAttr = dashedStroke.getAttribute('dashLength');
-        const spaceLengthAttr = dashedStroke.getAttribute('spaceLength');
-        const dashLength = dashLengthAttr !== null ? parseFloat(dashLengthAttr) : DEFAULT_DASH_LENGTH;
-        const spaceLength = spaceLengthAttr !== null ? parseFloat(spaceLengthAttr) : DEFAULT_DASH_SPACE_LENGTH;
+        let dash: number[] | undefined;
+        let caps = commonProps.caps;
+        if (styledStroke.tagName === 'DashedStroke') {
+          // Animate writes <DashedStroke dash1="…" dash2="…"> (JSFL stroke.dash1/dash2:
+          // solid run, then gap). `dashLength`/`spaceLength` are accepted as aliases.
+          // Lengths are in the same user-space units as `weight`, so they map 1:1 to
+          // canvas setLineDash. Files often omit both and rely on the UI default.
+          const dash1 = styledStroke.getAttribute('dash1') ?? styledStroke.getAttribute('dashLength');
+          const dash2 = styledStroke.getAttribute('dash2') ?? styledStroke.getAttribute('spaceLength');
+          dash = [
+            dash1 !== null ? parseFloat(dash1) : DEFAULT_DASH_LENGTH,
+            dash2 !== null ? parseFloat(dash2) : DEFAULT_DASH_SPACE_LENGTH,
+          ];
+        } else if (styledStroke.tagName === 'DottedStroke') {
+          // Round dots `weight` wide with `dotSpace` between them (JSFL stroke.dotSpace).
+          // A zero-length dash with round caps draws one dot per period.
+          const dotSpaceAttr = styledStroke.getAttribute('dotSpace');
+          const dotSpace = dotSpaceAttr !== null ? parseFloat(dotSpaceAttr) : DEFAULT_DOT_SPACE;
+          dash = [0, (commonProps.weight ?? 1) + dotSpace];
+          caps = 'round';
+        }
 
         strokes.push({
           index,
           type: 'solid',
           color,
-          dash: [dashLength, spaceLength],
-          ...commonProps
+          ...commonProps,
+          ...(caps && { caps }),
+          ...(dash && { dash }),
         } as StrokeStyle);
         continue;
       }

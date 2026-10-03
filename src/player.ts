@@ -388,7 +388,8 @@ export class FLAPlayer {
     this.state.currentFrame = Math.max(0, Math.min(frame, this.state.totalFrames - 1));
     // Update global frame
     this.state.globalFrame = this.sceneFrameOffsets[this.state.currentScene] + this.state.currentFrame;
-    // Reset MovieClip playheads when seeking (accurate state would require full replay)
+    // Reset MovieClip playheads when seeking: each clip restarts where playing
+    // since its keyframe began would put it (scripts other than stop() aside).
     this.renderer.resetMovieClipPlayheads();
     this.render();
     this.notifyStateChange();
@@ -521,8 +522,12 @@ export class FLAPlayer {
           // Loop back to first scene
           this.switchToScene(0);
           this.state.globalFrame = 0;
-          // Reset MovieClip playheads when looping
-          this.renderer.resetMovieClipPlayheads();
+        }
+        // Movie clips still on stage after the wrap keep playing, as in Flash
+        // (a one-frame timeline wraps on every tick). Clips that are not on
+        // the new frame are dropped by the renderer and start over if placed again.
+        if (this.state.currentScene === previousScene) {
+          this.renderer.advanceMovieClipPlayheads();
         }
         // Stream sounds belong to the frames they span, so they stop at the
         // wrap; event sounds already playing carry on. Frame 0's sounds then

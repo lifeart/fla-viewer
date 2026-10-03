@@ -1,6 +1,7 @@
 import type { FLADocument, SoundItem, FrameSound } from './types';
 import { isLayerVisibleInFla, getMaskLayerIndex } from './layer-utils';
 import { FLARenderer } from './renderer';
+import { graphicSymbolFrame, movieClipPlayhead, movieClipRun, movieClipStopFrames, movieClipTicks, type EnclosingClip } from './symbol-loop';
 
 export interface ExportProgress {
   currentFrame: number;
@@ -235,6 +236,8 @@ export async function exportVideo(
 
     // Render frame to canvas
     renderer.renderFrame(frameIndex);
+    // Movie clips step their own timelines once per exported frame, as in the player.
+    renderer.advanceMovieClipPlayheads();
 
     // Force canvas to complete rendering (prevents black frames when tab is hidden)
     // Reading a pixel forces the GPU to flush all pending operations
@@ -422,6 +425,8 @@ export async function exportWebM(
 
     // Render frame to canvas
     renderer.renderFrame(frameIndex);
+    // Movie clips step their own timelines once per exported frame, as in the player.
+    renderer.advanceMovieClipPlayheads();
 
     // Force canvas to complete rendering
     ctx.getImageData(0, 0, 1, 1);
@@ -738,6 +743,8 @@ export async function exportPNGSequence(
 
     // Render frame to canvas
     renderer.renderFrame(frameIndex);
+    // Movie clips step their own timelines once per exported frame, as in the player.
+    renderer.advanceMovieClipPlayheads();
 
     // Convert to PNG blob
     const blob = await canvas.convertToBlob({ type: 'image/png' });
@@ -903,6 +910,8 @@ export async function exportGIF(
 
     // Render frame
     renderer.renderFrame(frameIndex);
+    // Movie clips step their own timelines once per exported frame, as in the player.
+    renderer.advanceMovieClipPlayheads();
 
     // Get pixel data
     const ctx = canvas.getContext('2d')!;
@@ -1015,6 +1024,8 @@ export async function exportSpriteSheet(
 
     // Render frame
     renderer.renderFrame(frameIndex);
+    // Movie clips step their own timelines once per exported frame, as in the player.
+    renderer.advanceMovieClipPlayheads();
 
     // Calculate position on sprite sheet
     const col = i % columns;
@@ -1610,7 +1621,11 @@ export async function exportSVG(
       const fontFamily = run.face || 'Arial';
       const fontWeight = run.bold ? 'bold' : 'normal';
       const fontStyle = run.italic ? 'italic' : 'normal';
-      const fill = run.fillColor;
+      // #RRGGBBAA (TLF textAlpha) as fill + fill-opacity, which more SVG tools read.
+      const rgba = /^(#[0-9a-f]{6})([0-9a-f]{2})$/i.exec(run.fillColor);
+      const fill = rgba
+        ? `${rgba[1]}" fill-opacity="${+(parseInt(rgba[2], 16) / 255).toFixed(3)}`
+        : run.fillColor;
       const anchor = run.alignment === 'center' ? 'middle' : run.alignment === 'right' ? 'end' : 'start';
 
       // Handle multi-line text
@@ -1650,8 +1665,18 @@ export async function exportSVG(
     return `<image${transformAttr} href="${dataUrl}" width="${bitmapItem.width}" height="${bitmapItem.height}"/>`;
   };
 
+  // Where an element sits: its timeline's current frame, layer, keyframe and
+  // element index, and how long the enclosing movie clip (if any) has played.
+  type ElementPlace = {
+    frame: number;
+    layer: import('./types').Layer;
+    keyframe: import('./types').Frame;
+    elementIndex: number;
+    enclosing?: EnclosingClip;
+  };
+
   // Render element with keyframe start tracking for symbol frame calculation
-  const renderElementWithKeyframe = (element: import('./types').DisplayElement, depth: number, keyframeStart: number): string => {
+  const renderElementWithKeyframe = (element: import('./types').DisplayElement, depth: number, place: ElementPlace): string => {
     if (depth > 10) return ''; // Prevent infinite recursion
 
     switch (element.type) {
@@ -1662,7 +1687,7 @@ export async function exportSVG(
       case 'bitmap':
         return renderBitmap(element);
       case 'symbol':
-        return renderSymbol(element, depth, keyframeStart);
+        return renderSymbol(element, depth, place);
       case 'video':
         // Video placeholder
         const transform = matrixToTransform(element.matrix);
@@ -1673,7 +1698,7 @@ export async function exportSVG(
   };
 
   // Render symbol instance to SVG
-  const renderSymbol = (instance: import('./types').SymbolInstance, depth: number, keyframeStart: number = 0): string => {
+  const renderSymbol = (instance: import('./types').SymbolInstance, depth: number, place: ElementPlace): string => {
     if (instance.isVisible === false) return '';
 
     const symbol = doc.symbols.get(instance.libraryItemName);
@@ -1688,34 +1713,21 @@ export async function exportSVG(
     const lastFrame = instance.lastFrame;
     const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
 
-    // Determine effective frame range
-    const effectiveLastFrame = lastFrame !== undefined
-      ? Math.min(lastFrame, totalSymbolFrames - 1)
-      : totalSymbolFrames - 1;
-    const frameRange = effectiveLastFrame - firstFrame + 1;
-
+    // Same frame choice as the renderer for an instance first drawn here: a movie
+    // clip has played since its run of keyframes began (holding at a stop()
+    // frame), a button shows its up state, a graphic follows its timeline.
     let symbolFrame: number;
-
-    // MovieClips and Buttons play independently - use firstFrame for static rendering
-    const effectiveLoop = (instance.symbolType === 'movieclip' || instance.symbolType === 'button')
-      ? 'single frame'
-      : instance.loop;
-
-    if (effectiveLoop === 'single frame') {
-      // Always show the specified firstFrame
-      symbolFrame = firstFrame % totalSymbolFrames;
-    } else if (effectiveLoop === 'loop') {
-      // Sync with parent timeline: advance from firstFrame based on parent frame offset
-      const frameOffset = frameIndex - keyframeStart;
-      if (lastFrame !== undefined) {
-        symbolFrame = firstFrame + (frameOffset % frameRange);
-      } else {
-        symbolFrame = (firstFrame + frameOffset) % totalSymbolFrames;
-      }
+    let enclosing: EnclosingClip | undefined;
+    if (instance.symbolType === 'movieclip') {
+      const run = movieClipRun(place.layer.frames, place.keyframe, place.elementIndex, instance.libraryItemName);
+      const ticks = movieClipTicks(place.frame, run, place.enclosing);
+      const stopFrames = movieClipStopFrames(symbol.timeline);
+      symbolFrame = movieClipPlayhead(ticks, totalSymbolFrames, stopFrames).frame;
+      enclosing = { ticks, totalFrames: totalSymbolFrames, stopFrames };
+    } else if (instance.symbolType === 'button') {
+      symbolFrame = 0;
     } else {
-      // 'play once' - advance but clamp at last frame
-      const frameOffset = frameIndex - keyframeStart;
-      symbolFrame = Math.min(firstFrame + frameOffset, effectiveLastFrame);
+      symbolFrame = graphicSymbolFrame(instance.loop, firstFrame, lastFrame, totalSymbolFrames, place.frame - place.keyframe.index);
     }
 
     // Collect elements from all layers at the symbolFrame, mask-aware (mask
@@ -1728,7 +1740,8 @@ export async function exportSVG(
       symbolFrame,
       depth + 1,
       new Set<number>(),
-      elements
+      elements,
+      enclosing
     );
 
     if (elements.length === 0) return '';
@@ -1782,14 +1795,16 @@ export async function exportSVG(
     layer: import('./types').Layer,
     atFrameIndex: number,
     depth: number,
-    out: string[]
+    out: string[],
+    enclosing?: EnclosingClip
   ): void => {
     const currentFrame = findActiveFrame(layer, atFrameIndex);
     if (!currentFrame) return;
-    for (const element of currentFrame.elements) {
-      const rendered = renderElementWithKeyframe(element, depth, currentFrame.index);
+    currentFrame.elements.forEach((element, elementIndex) => {
+      const rendered = renderElementWithKeyframe(element, depth,
+        { frame: atFrameIndex, layer, keyframe: currentFrame, elementIndex, enclosing });
       if (rendered) out.push(rendered);
-    }
+    });
   };
 
   // Render a stack of timeline layers (main timeline or a symbol's timeline)
@@ -1814,7 +1829,8 @@ export async function exportSVG(
     atFrameIndex: number,
     depth: number,
     referenceLayers: Set<number>,
-    out: string[]
+    out: string[],
+    enclosing?: EnclosingClip
   ): void => {
     // masked layer index -> mask layer index
     const maskedLayers = new Map<number, number>();
@@ -1849,7 +1865,7 @@ export async function exportSVG(
         const childOut: string[] = [];
         for (const maskedIdx of [...maskedByThis].sort((a, b) => b - a)) {
           if (!isLayerVisibleInFla(layers, maskedIdx)) continue;
-          renderLayerElements(layers[maskedIdx], atFrameIndex, depth, childOut);
+          renderLayerElements(layers[maskedIdx], atFrameIndex, depth, childOut, enclosing);
         }
         if (childOut.length === 0) continue; // nothing visible to clip
 
@@ -1870,7 +1886,7 @@ export async function exportSVG(
 
       // Normal layer: honor visibility cascade.
       if (!isLayerVisibleInFla(layers, layerIndex)) continue;
-      renderLayerElements(layer, atFrameIndex, depth, out);
+      renderLayerElements(layer, atFrameIndex, depth, out, enclosing);
     }
   };
 

@@ -449,12 +449,27 @@ describe('mask rendering: review coverage (issue #47)', () => {
     expect(visible()).toEqual([RED, WHITE, WHITE]);
   });
 
-  it('starts a movieclip mask on its own playhead (frame 0)', async () => {
+  it('runs a movieclip mask on its own playhead', async () => {
+    // At parent frame 0 a graphic would stay on its frame 0; the movie clip's
+    // playhead moves on with each tick.
+    await render(
+      [maskWith([createSymbolInstance('Moving', { symbolType: 'movieclip' })]), cells()],
+      [movingSymbol('Moving', 2, 4)], 0
+    );
+    expect(visible()).toEqual([RED, WHITE, WHITE]);
+    renderer.advanceMovieClipPlayheads();
+    renderer.advanceMovieClipPlayheads();
+    renderer.renderFrame(0);
+    expect(visible()).toEqual([WHITE, WHITE, BLUE]);
+  });
+
+  it('seeds a movieclip mask first seen mid-keyframe to its continuous-playback frame', async () => {
+    // Placed at frame 0 and first rendered at 15: 15 ticks into a 4-frame clip is frame 3.
     await render(
       [maskWith([createSymbolInstance('Moving', { symbolType: 'movieclip' })]), cells()],
       [movingSymbol('Moving', 2, 4)], 15
     );
-    expect(visible()).toEqual([RED, WHITE, WHITE]);
+    expect(visible()).toEqual([WHITE, WHITE, BLUE]);
   });
 
   it('renders masked layers unclipped on an empty mask keyframe', async () => {
