@@ -823,6 +823,11 @@ export class FLAParser {
         : null;
       const motionObject = animationCore ? parseAnimationCore(animationCore) : undefined;
 
+      // IK pose span (Bone tool armature): Flash's baked per-frame transforms.
+      const ikPoseMatrices = tweenType === 'IK pose'
+        ? this.parseIKPoseMatrices(frameEl, elements.length, duration)
+        : undefined;
+
       // Parse frame label (name attribute is the label text, labelType is the label kind)
       const label = frameEl.getAttribute('name') || undefined;
       const labelType = frameEl.getAttribute('labelType') as 'name' | 'comment' | 'anchor' | null;
@@ -842,6 +847,7 @@ export class FLAParser {
         sound,
         ...(morphShape && { morphShape }),
         ...(motionObject && { motionObject }),
+        ...(ikPoseMatrices && { ikPoseMatrices }),
         ...(label && { label }),
         ...(labelType && { labelType }),
         ...(actionScript && { actionScript }),
@@ -853,6 +859,30 @@ export class FLAParser {
     }
 
     return frames;
+  }
+
+  /**
+   * The `<betweenFrameMatrixList>` of an IK pose span (`tweenType="IK pose"`),
+   * split per element. Flash writes one `<Matrix>` per element per frame of the
+   * span, element-major: every frame of the first element in `<elements>`, then
+   * the second's, and so on. Each matrix is applied in the parent's space on top
+   * of the element's stored matrix; the first is the identity. Checked on a CS6
+   * save, where `pose * matrix` reproduces the per-frame position and angle each
+   * `<IKTree>` node stores (`xArray`, `yArray`, `angleArray`) and the bone
+   * lengths of its pose `<State>`s. Undefined when the count doesn't fit the
+   * parsed elements, so the lists can't be matched to them (this also catches
+   * a group in `<elements>`, which flattens into several elements).
+   */
+  private parseIKPoseMatrices(frameEl: globalThis.Element, elementCount: number, duration: number): Matrix[][] | undefined {
+    const matrixEls = frameEl.querySelectorAll(':scope > betweenFrameMatrixList > Matrix');
+    if (elementCount === 0 || matrixEls.length !== elementCount * duration) return undefined;
+    const perElement: Matrix[][] = [];
+    for (let e = 0; e < elementCount; e++) {
+      const poses: Matrix[] = [];
+      for (let f = 0; f < duration; f++) poses.push(this.parseMatrix(matrixEls[e * duration + f]));
+      perElement.push(poses);
+    }
+    return perElement;
   }
 
   private parseFrameSound(frame: globalThis.Element): FrameSound | undefined {

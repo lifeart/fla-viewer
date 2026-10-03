@@ -93,7 +93,7 @@ export interface Frame {
   index: number;
   duration: number;
   keyMode: number;
-  tweenType?: 'motion' | 'shape' | 'none' | 'motion object';
+  tweenType?: 'motion' | 'shape' | 'none' | 'motion object' | 'IK pose';
   acceleration?: number;
   /**
    * CS4+ object-based motion tween (`tweenType="motion object"`): the span's
@@ -101,6 +101,13 @@ export interface Frame {
    * frame's elements by the renderer.
    */
   motionObject?: MotionObjectTween;
+  /**
+   * IK pose span (`tweenType="IK pose"`, a Bone tool armature): the per-frame
+   * transforms Flash baked into `<betweenFrameMatrixList>`, indexed
+   * `[elementIndex][frameIndex - index]`. Each applies in the parent's space on
+   * top of the element's own matrix (`pose * matrix`); the first is the identity.
+   */
+  ikPoseMatrices?: Matrix[][];
   elements: DisplayElement[];
   tweens?: Tween[];
   sound?: FrameSound;

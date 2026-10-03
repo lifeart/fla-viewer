@@ -30,6 +30,7 @@ import type {
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
 import { evaluateMotionObject } from './motion-object';
+import { applyIKPose } from './ik-pose';
 import {
   graphicSymbolFrame, instanceClock, movieClipClock, movieClipPlayhead, movieClipRun, movieClipStopFrames,
   movieClipTicks, rootClock, type TimelineClock
@@ -1212,6 +1213,7 @@ export class FLARenderer {
       if (frame.motionObject) {
         maskElement = this.applyMotionObject(frame, element, frameIndex);
       }
+      maskElement = applyIKPose(frame, maskElement, elementIndex, frameIndex);
 
       this.addElementToMaskPath(maskElement, transform, clip, depth, frameIndex, elementIndex);
     });
@@ -1612,7 +1614,8 @@ export class FLARenderer {
         }
       } else {
         if (rig) this.applyMatrix(multiplyMatrices(rig.parentNow, rig.startInverse));
-        this.renderDisplayElement(this.applyMotionObject(frame, element, frameIndex), depth, frameIndex, elementIndex);
+        const posed = applyIKPose(frame, this.applyMotionObject(frame, element, frameIndex), elementIndex, frameIndex);
+        this.renderDisplayElement(posed, depth, frameIndex, elementIndex);
       }
 
       if (rig) {
@@ -1732,7 +1735,7 @@ export class FLARenderer {
           if (rig) result = multiplyMatrices(multiplyMatrices(rig.parentNow, rig.startInverse), result);
         }
       } else {
-        const matrix = this.applyMotionObject(frame, element, frameIndex).matrix;
+        const matrix = applyIKPose(frame, this.applyMotionObject(frame, element, frameIndex), 0, frameIndex).matrix;
         result = rig
           ? multiplyMatrices(multiplyMatrices(rig.parentNow, rig.startInverse), matrix)
           : matrix;

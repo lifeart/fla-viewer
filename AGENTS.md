@@ -427,8 +427,9 @@ suite. What is still open:
 - [ ] **Embedded video**: frame-accurate seeking and drawing video into exports (needs
   WebCodecs `VideoDecoder`); FLV pixels are not decoded
 - [ ] **Binary FLA**: tweens, frame labels, sounds (see "Pre-CS5 binary FLA" below)
-- [ ] **IK / bone armatures** (CS4-CS6): pose layers render their rest pose; Animate CC
-  converts IK to frame-by-frame on open, so only files last saved in CS4-CS6 are affected
+- [ ] **IK / bone armatures**: XFL pose layers play Flash's baked per-frame matrices (see
+  "IK pose layers" below); nothing solves IK, so a span whose matrix list is missing or
+  doesn't fit holds its first pose. Binary (pre-CS5) FLAs don't decode armatures.
 - [ ] **Object motion tweens**: filter curves, and Bounce/Spring/wave/custom time maps
   (they fall back to linear)
 - [ ] **Variable-width strokes** (`<VariablePointWidth><WidthMarker>`) and art/pattern
@@ -544,6 +545,7 @@ Edge contributions are collected per fill style, then sorted into connected chai
 | `src/shape-utils.ts` | Shape repair and path helpers |
 | `src/primitive-shapes.ts` | Outlines for rectangle/oval primitive shapes |
 | `src/motion-object.ts` | CS4+ object motion tweens (`<AnimationCore>`) |
+| `src/ik-pose.ts` | IK pose spans (Bone tool armatures): baked per-frame matrices |
 | `src/symbol-loop.ts` | Graphic symbol loop modes (frame an instance shows) |
 | `src/xfl-folder.ts` | Uncompressed XFL folders |
 | `src/path-utils.ts` | Library path normalization |
@@ -848,6 +850,20 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
 - **Reverse loops (Animate 2021).** `loop="loop reverse"`/`"play once reverse"`;
   `graphicSymbolFrame` (`src/symbol-loop.ts`) is shared by the renderer and the SVG exporter.
 - **TLF text (CS5-CS6).** `<DOMTLFText>` is read as static text from its `<TextFlow>` spans.
+- **IK pose layers (Bone tool).** Layer `animationType="IK pose"`; each span is one
+  `<DOMFrame tweenType="IK pose" isIKPose="true">` whose elements hold the armature's first
+  pose, an `<IKTree>`, and a `<betweenFrameMatrixList>` with one `<Matrix>` per element per
+  frame, element-major (every frame of element 0, then element 1, in `<elements>` order).
+  Element e at frame f of the span draws `list[e*duration + f] * matrix` (applied in the
+  parent's space; the first entry is the identity): `Frame.ikPoseMatrices`, applied by
+  `applyIKPose` (`src/ik-pose.ts`) in the renderer (draw, masks, rig) and the SVG exporter.
+  Checked on a CS6 save with four animated armatures: the result matches each IK node's
+  per-frame `xArray`/`yArray` (tx/ty in twips) and `angleArray` (radians) within 1.4 px and
+  0.001 rad, and at every pose the parent-to-child transformation-point distance matches the
+  bone vector of the node's `<State x y>`, so joints stay attached. Shape armatures bake one
+  keyframe per frame into an `"ik container"` symbol placed as a play-once graphic, so they
+  already played (flacomdoc 0023, a CS5 save). Animate 20.5 still saves pose layers, so not
+  only CS4-CS6 files have them. Tests: `src/__tests__/ik-pose.test.ts`.
 - **Movie clips have no `symbolType`.** Animate writes it only for `graphic`/`button`
   (instances and library items); a missing value is a movie clip (`parseSymbolType`). Movie
   clips run their own playheads (`advanceMovieClipPlayheads`, called by the player on every

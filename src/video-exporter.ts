@@ -5,6 +5,7 @@ import {
   graphicSymbolFrame, instanceClock, movieClipClock, movieClipPlayhead, movieClipRun, movieClipStopFrames,
   movieClipTicks, rootClock, type TimelineClock
 } from './symbol-loop';
+import { applyIKPose } from './ik-pose';
 
 export interface ExportProgress {
   currentFrame: number;
@@ -1804,7 +1805,9 @@ export async function exportSVG(
     const currentFrame = findActiveFrame(layer, atFrameIndex);
     if (!currentFrame) return;
     currentFrame.elements.forEach((element, elementIndex) => {
-      const rendered = renderElementWithKeyframe(element, depth,
+      // IK pose spans are baked per frame, so they pose here too (tweens don't).
+      const posed = applyIKPose(currentFrame, element, elementIndex, atFrameIndex);
+      const rendered = renderElementWithKeyframe(posed, depth,
         { frame: atFrameIndex, layer, keyframe: currentFrame, elementIndex, clock });
       if (rendered) out.push(rendered);
     });
