@@ -92,6 +92,8 @@ describe('movie clip stop() frames', () => {
     ['var r = /"/; stop();', true],
     ['var r = /[/]/g; stop();', true],
     ['var half = total / 2; stop();', true],
+    ['function quote(s) { return /"/.test(s); }\nstop();', true],
+    ['var x:XML = <a>b</a>; stop();', true],
   ])('callsStop(%j) is %s', (script, expected) => {
     expect(callsStop(script)).toBe(expected);
   });

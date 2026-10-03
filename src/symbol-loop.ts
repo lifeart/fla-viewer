@@ -53,6 +53,9 @@ export function graphicSymbolFrame(
  * string and regex literals are dropped, and so are function bodies, block or
  * arrow-expression (event handlers and callbacks run later, if ever).
  */
+// A `/` after one of these words starts a regex literal, not a division.
+const REGEX_AFTER_WORD = /(?:^|[^\w$.])(?:return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)\s*$/;
+
 function frameEntryCode(script: string): string {
   let code = '';
   const braces: boolean[] = []; // per open brace: is it (inside) a function body?
@@ -69,7 +72,10 @@ function frameEntryCode(script: string): string {
       if (!skipping()) code += ' ';
       continue;
     }
-    if (ch === '"' || ch === "'" || ch === '`' || (ch === '/' && (prev === '' || /[(,=:[!&|?{};+\-*%<>~^]/.test(prev)))) {
+    // (Not after `<`: that's an E4X closing tag, `</a>`.)
+    const regexStart = ch === '/' && (prev === '' || /[(,=:[!&|?{};+\-*%>~^]/.test(prev) ||
+      REGEX_AFTER_WORD.test(script.slice(Math.max(0, i - 16), i)));
+    if (ch === '"' || ch === "'" || ch === '`' || regexStart) {
       // String or regex literal: skip to its closing delimiter.
       let j = i + 1;
       let inClass = false;
