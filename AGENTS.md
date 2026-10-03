@@ -412,93 +412,24 @@ Decodes to:
 
 ## Remaining TODOs
 
-### Completed (Previously Listed as TODO)
+Done since this list was first written: gradient fills, 9-slice scaling, text, sound,
+frame labels and scenes, independent MovieClip playheads, zoom and pan, layer visibility
+toggles (debug panel), export (MP4, WebM, GIF, PNG, SVG, sprite sheet) and the Vitest
+suite. What is still open:
 
-- [x] **Gradient Fills**: Gradient rendering with matrix transforms
-  - Linear gradients with matrix transform via `createLinearGradient()`
-  - Radial gradients with focal point via `createRadialGradient()`
-  - Proper coordinate mapping from Flash gradient space (-819.2 to 819.2)
+- [ ] **Buttons**: Up/Over/Down states and mouse handling (hit areas are only used by the
+  debug panel's click-to-inspect)
+- [ ] **ActionScript**: no execution (`play()`, `stop()`, `gotoAndPlay()` etc.)
+- [ ] **Web Worker parsing**: parsing runs on the main thread and blocks the UI on large files
+- [ ] **Symbol caching**: only `cacheAsBitmap` instances are cached; static symbols are redrawn
+- [ ] **Timeline UI**: keyframe markers, layer thumbnails, onion skinning
+- [ ] **Error reporting**: parse failures are logged to the console, not shown to the user
+- [ ] **Embedded video**: frame-accurate seeking and drawing video into exports (needs
+  WebCodecs `VideoDecoder`); FLV pixels are not decoded
+- [ ] **Binary FLA**: tweens, frame labels, sounds (see "Pre-CS5 binary FLA" below)
 
-### Medium Priority
-
-- [ ] **9-Slice Scaling**: Support for scalable symbols
-  - Parse scale9Grid attribute
-  - Implement 9-slice rendering
-
-### Lower Priority
-
-- [x] **Text Fields**: Static and dynamic text
-  - Parse `<DOMStaticText>` and `<DOMDynamicText>`
-  - Font rendering with proper styling
-  - Text transforms and effects
-  - Word wrap, alignment, line spacing
-
-- [ ] **Buttons**: Interactive button symbols
-  - Up, Over, Down, Hit states
-  - Mouse event handling
-
-- [ ] **MovieClip Playback**: Independent nested timelines
-  - Each MovieClip instance has its own playhead
-  - Support `play()`, `stop()`, `gotoAndPlay()`
-
-- [ ] **ActionScript Labels**: Frame labels and scenes
-  - Parse frame labels for navigation
-  - Scene support
-
-- [x] **Sound**: Audio playback
-  - Parse audio references from media
-  - Sync sound to timeline (event, stream, start, stop)
-  - In/out points, loop count support
-
-- [x] **Video**: Embedded video support (placeholder rendering)
-  - Parse `<DOMVideoItem>` and `<DOMVideoInstance>` elements
-  - Renders placeholder rectangle with play button icon
-  - Full video playback requires FLV/H.263 decoder integration
-
-### Performance & UX
-
-- [ ] **Web Worker Parsing**: Move FLA parsing to web worker
-  - Prevent UI blocking on large files
-  - Progress reporting during load
-
-- [ ] **Symbol Caching**: Pre-render static symbols to off-screen canvas
-  - Cache symbols that don't animate
-  - Invalidate cache on color transform changes
-
-- [ ] **Layer Visibility Toggle**: UI to show/hide layers
-  - Layer panel with checkboxes
-  - Solo layer mode
-
-- [ ] **Zoom & Pan**: Canvas navigation
-  - Mouse wheel zoom
-  - Drag to pan
-  - Fit to window button
-
-- [ ] **Export**: Export rendered frames
-  - Export current frame as PNG
-  - Export animation as GIF/WebM
-  - Export sprite sheet
-
-- [ ] **Timeline UI**: Visual timeline editor
-  - Layer thumbnails
-  - Keyframe markers
-  - Onion skinning
-
-### Code Quality
-
-- [ ] **Error Handling**: Graceful degradation for unsupported features
-  - Log warnings for unimplemented elements
-  - Fallback rendering for complex features
-
-- [ ] **Unit Tests**: Test coverage for parser and renderer
-  - Edge decoder tests with known values
-  - Matrix transform tests
-  - Tween interpolation tests
-
-- [ ] **Documentation**: API documentation
-  - JSDoc comments for public methods
-  - Usage examples
-  - Browser compatibility notes
+`TODO.md` has the detailed feature-by-feature status against JPEXS; `review.md` is an
+older code review checklist.
 
 ---
 
@@ -549,11 +480,8 @@ Decodes to:
 
 | Element | Attribute | Impact |
 |---------|-----------|--------|
-| DOMFrame | `motionTweenRotate`, `motionTweenScale` | Advanced tween rotation/scale |
 | DOMFrame | `motionTweenSnap` | Snapping (editor behavior) |
-| SolidStroke | `scaleMode` | Stroke scale mode |
-| DashedStroke | `scaleMode` | Dashed stroke scale mode |
-| DOMBitmapInstance | all | Bitmap instances (not in samples) |
+| SolidStroke / DashedStroke | `scaleMode` | Parsed, but stroke width is not adjusted for scaling |
 
 ### Now Implemented
 
@@ -605,11 +533,29 @@ Edge contributions are collected per fill style, then sorted into connected chai
 | File | Purpose |
 |------|---------|
 | `src/types.ts` | TypeScript interfaces for FLA data structures |
-| `src/fla-parser.ts` | ZIP extraction, XML parsing, reference layer detection |
+| `src/fla-parser.ts` | ZIP extraction, XML parsing, bitmaps, sounds, video, reference layer detection; routes OLE2 files to the binary parser |
 | `src/edge-decoder.ts` | XFL edge path format decoder (quadratic and cubic) |
-| `src/renderer.ts` | Canvas 2D rendering engine, edge sorting, path building |
-| `src/player.ts` | Timeline playback controller |
+| `src/shape-utils.ts` | Shape repair and path helpers |
+| `src/path-utils.ts` | Library path normalization |
+| `src/layer-utils.ts` | Layer visibility cascade, mask membership, rig parent lookup (shared by renderer and exporter) |
+| `src/renderer.ts` | Canvas 2D rendering engine, edge sorting, path building, masks, rig transforms |
+| `src/player.ts` | Timeline playback, scenes, audio sync, zoom/pan |
+| `src/video-exporter.ts` | MP4/WebM (WebCodecs), GIF, PNG sequence, PNG/SVG frame, sprite sheet export |
+| `src/adpcm-decoder.ts` | SWF ADPCM audio decoder |
+| `src/flv-parser.ts` | FLV metadata parser |
+| `src/ole2-reader.ts` | OLE2 / Compound File Binary reader |
+| `src/binary-fla-parser.ts` | Pre-CS5 binary FLA entry point |
+| `src/binary-fla-structure.ts`, `src/binary-shape-decoder.ts`, `src/binary-instance-decoder.ts`, `src/binary-timeline-decoder.ts` | Binary FLA layers, shapes, instances, keyframes |
+| `src/sample-generator.ts` | Built-in sample FLA |
 | `src/main.ts` | Application entry point and UI |
+| `src/__tests__/` | Vitest tests (browser mode, Chromium) and fixtures |
+| `scripts/` | Fixture generators and probe scripts |
+
+## Development
+
+- `npm run dev` (port 3000), `npm run build` (`tsc` + Vite), `npm test`.
+- Tests run in real Chromium via `@vitest/browser-playwright`; run `npx playwright install chromium` first.
+- CI: `.github/workflows/test.yml` on PRs; `deploy.yml` publishes `dist/` to GitHub Pages on push to `master`.
 
 ## External Resources
 
@@ -863,8 +809,12 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
 - Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not
   ZIP. `src/fla-parser.ts` detects the magic and routes to `src/binary-fla-parser.ts` (via
   `src/ole2-reader.ts`) before JSZip. Sector byte offset is `(n + 1) * sectorSize` (works for
-  both v3=512 and v4=4096-byte sectors). Currently extracts document props + library only
-  (empty stage); timeline/geometry decoding is future work (reference: eddiemoore/fla-decoder).
+  both v3=512 and v4=4096-byte sectors). Decodes document props (size, frame rate,
+  background), the library, shape geometry (`binary-shape-decoder.ts`), symbol instance
+  placements (`binary-instance-decoder.ts`) and layers/keyframes (`binary-timeline-decoder.ts`).
+  The timeline walk is confidence-gated: a stream it can't decode cleanly falls back to one
+  frame with all recovered content. Not decoded yet: tweens, frame labels, sounds, and per-frame
+  placement matrices for instances inside movie clips (reference: eddiemoore/fla-decoder).
 
 ### Embedded video `.dat` (issue #10)
 - A `<DOMVideoItem videoDataHRef="…">` points at a `bin/…dat` that, in modern XFL, is **not**
