@@ -73,15 +73,20 @@ export function createHumptyCompatibleRawBitmapFixture(
  * Synthetic equivalent of Humpty's variant-1 records: zlib header plus a raw
  * deflate stream split into repeated UI16-length chunks and a zero terminator.
  * A tiny chunk size deliberately exercises concatenation of many records.
+ * `trailingPadding` appends that many zero bytes after the pixel plane inside
+ * the deflate stream (padding the decoder must drop, not reject).
  */
 export function createHumptyCompatibleChunkedBitmapFixture(
   width = 11,
   height = 9,
   chunkSize = 17,
+  trailingPadding = 0,
 ): SyntheticHumptyBitmapFixture {
   const header = createHeader(width, height, 1);
   const pixelData = createSyntheticPixelPlane(width, height);
-  const compressed = pako.deflateRaw(pixelData);
+  const plane = new Uint8Array(pixelData.length + trailingPadding);
+  plane.set(pixelData);
+  const compressed = pako.deflateRaw(plane);
   const stream = new Uint8Array(compressed.length + 2);
   stream[0] = 0x78;
   stream[1] = 0x01;

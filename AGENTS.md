@@ -781,7 +781,9 @@ b8 2e 00 00     frameBottom = 0x00002eb8 = 11960 twips (598 px)
   never send those arbitrary pixel bytes to a deflate decoder
 - Prefer bounded native `DecompressionStream('deflate-raw')` for large valid
   streams, with an equivalently bounded pako path retained for compatibility
-  and recovery fallbacks
+  and recovery fallbacks. Every inflate path stops at `max(w*h*4, rowSize*h) +
+  64 KB` and keeps what it has (the rest is trailing padding); never reject a
+  bitmap for running past it
 - Some files require preset zlib dictionary (32KB zeros) for decompression
 - Chunked format: concatenate all chunks before inflating, or inflate incrementally
 - JPEG files in bin/ are passed through directly (no conversion needed)

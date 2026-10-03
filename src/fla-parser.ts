@@ -1709,13 +1709,14 @@ export class FLAParser {
       type NativeInflateResult =
         | { status: 'unavailable' }
         | { status: 'decoded'; data: Uint8Array }
-        | { status: 'decode_error' }
-        | { status: 'output_limit' };
+        | { status: 'decode_error' };
 
       // Chromium's native inflater is dramatically faster and more memory
       // efficient for large Animate bitmap streams than pako's one-shot path.
-      // Consume it incrementally and stop if output exceeds the dimensions
-      // declared by the bitmap header plus a small padding allowance.
+      // Consume it incrementally and stop once output reaches the dimensions
+      // declared by the bitmap header plus a small padding allowance. Bytes
+      // past that are trailing padding, so they are dropped rather than
+      // failing the whole bitmap.
       const tryNativeInflateRaw = async (): Promise<NativeInflateResult> => {
         if (typeof DecompressionStream === 'undefined') return { status: 'unavailable' };
 
@@ -1733,12 +1734,13 @@ export class FLAParser {
             if (done) break;
             if (!value) continue;
 
-            totalSize += value.length;
-            if (totalSize > maxOutput) {
-              await reader.cancel('FLA bitmap exceeds declared dimensions');
-              return { status: 'output_limit' };
+            const kept = Math.min(value.length, maxOutput - totalSize);
+            chunks.push(kept === value.length ? value : value.subarray(0, kept));
+            totalSize += kept;
+            if (totalSize >= maxOutput) {
+              await reader.cancel('FLA bitmap output reached declared dimensions');
+              break;
             }
-            chunks.push(value);
           }
 
           const result = new Uint8Array(totalSize);
@@ -1753,29 +1755,27 @@ export class FLAParser {
         }
       };
 
-      const outputLimitError = 'FLA_BITMAP_OUTPUT_LIMIT';
       const inflateRawWithLimit = (useDict: boolean = false): Uint8Array => {
         const chunks: Uint8Array[] = [];
         const options: pako.InflateOptions = { raw: true, chunkSize: 16384 };
         if (useDict) options.dictionary = zeroDict;
         const inflater = new pako.Inflate(options);
         let totalSize = 0;
-        let outputLimitExceeded = false;
+        let outputLimitReached = false;
 
+        // Keep output up to maxOutput; anything past it is trailing padding.
         inflater.onData = (chunk: Uint8Array) => {
-          totalSize += chunk.length;
-          if (totalSize > maxOutput) {
-            outputLimitExceeded = true;
-            return;
-          }
-          chunks.push(new Uint8Array(chunk));
+          const kept = Math.min(chunk.length, maxOutput - totalSize);
+          if (kept > 0) chunks.push(new Uint8Array(chunk.subarray(0, kept)));
+          totalSize += kept;
+          if (totalSize >= maxOutput) outputLimitReached = true;
         };
 
         const inputChunkSize = 4096;
         for (let offset = 0; offset < compData.length; offset += inputChunkSize) {
           const end = Math.min(offset + inputChunkSize, compData.length);
           inflater.push(compData.subarray(offset, end), end === compData.length);
-          if (outputLimitExceeded) throw new Error(outputLimitError);
+          if (outputLimitReached) break;
           if (inflater.err) throw new Error(inflater.msg || 'Raw deflate failed');
         }
 
@@ -1795,7 +1795,7 @@ export class FLAParser {
         try {
           const chunks: Uint8Array[] = [];
           let totalSize = 0;
-          let outputLimitExceeded = false;
+          let outputLimitReached = false;
           const options: pako.InflateOptions = { raw: true, chunkSize: 16384 };
           if (useDict) {
             options.dictionary = zeroDict;
@@ -1804,12 +1804,10 @@ export class FLAParser {
 
           // Capture chunks via onData callback - this is key for partial recovery
           inflater.onData = (chunk: Uint8Array) => {
-            totalSize += chunk.length;
-            if (totalSize > maxOutput) {
-              outputLimitExceeded = true;
-              return;
-            }
-            chunks.push(new Uint8Array(chunk));
+            const kept = Math.min(chunk.length, maxOutput - totalSize);
+            if (kept > 0) chunks.push(new Uint8Array(chunk.subarray(0, kept)));
+            totalSize += kept;
+            if (totalSize >= maxOutput) outputLimitReached = true;
           };
 
           const chunkSize = 4096;
@@ -1824,7 +1822,7 @@ export class FLAParser {
               break;
             }
 
-            if (outputLimitExceeded) return null;
+            if (outputLimitReached) break;
             if (inflater.err) {
               break;
             }
@@ -1949,10 +1947,6 @@ export class FLAParser {
         pixelData = compData;
       } else {
         const nativeInflate = await tryNativeInflateRaw();
-        if (nativeInflate.status === 'output_limit') {
-          console.warn(`FLA bitmap output exceeds declared dimensions for ${headerWidth}x${headerHeight}`);
-          return null;
-        }
         try {
           if (nativeInflate.status === 'decoded') {
             algoProgress('native-deflate');
@@ -1961,11 +1955,7 @@ export class FLAParser {
             algoProgress('deflate');
             pixelData = inflateRawWithLimit();
           }
-        } catch (rawError) {
-          if (rawError instanceof Error && rawError.message === outputLimitError) {
-            console.warn(`FLA bitmap output exceeds declared dimensions for ${headerWidth}x${headerHeight}`);
-            return null;
-          }
+        } catch {
           // Raw deflate failed - try dictionary first (gives complete results for some files)
           algoProgress('dictionary');
           if (DEBUG) console.log(`Raw deflate failed for ${headerWidth}x${headerHeight}, trying dictionary...`);
