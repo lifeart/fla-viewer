@@ -505,6 +505,31 @@ describe('CS4+ object motion tweens (tweenType="motion object")', () => {
     expect(colorAt(canvas, 260, 110)).toBe('#FF0000');
     expect(colorAt(canvas, 260, below)).toBe('#0000FF');
   });
+
+  // A static shadow on the tween's first frame: 30 (canvas) pixels at `angle`.
+  const shadowAt = async (attrs: string, dx: number, dy: number) => {
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(await parseXfl(files(motionLayer('', '', '',
+      `<filters><DropShadowFilter blurX="0" blurY="0" distance="30" quality="1" ${attrs}/></filters>`))));
+    renderer.renderFrame(0);
+    const s = canvas.width / 550;
+    return colorAt(canvas, 60 + dx / s, 110 + dy / s);
+  };
+
+  it('draws a filter\'s strength as opacity, not spread', async () => {
+    const [r, g, b] = (await shadowAt('angle="90" strength="0.5"', 0, 30)).slice(1).match(/../g)!.map((v) => parseInt(v, 16));
+    // Half-opaque black over white.
+    expect(r).toBeGreaterThan(110);
+    expect(r).toBeLessThan(145);
+    expect(g).toBe(r);
+    expect(b).toBe(r);
+  });
+
+  it('casts a shadow at angle 0 straight to the right', async () => {
+    expect(await shadowAt('angle="0"', 30, 0)).toBe('#000000');
+    expect(await shadowAt('angle="0"', 22, 22)).toBe('#FFFFFF');
+  });
 });
 
 describe('reverse graphic loop modes (Animate 2021)', () => {

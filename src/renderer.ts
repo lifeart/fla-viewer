@@ -4426,8 +4426,12 @@ export class FLARenderer {
     ctx.translate(-centerX, -centerY);
   }
 
-  // Apply filters using Canvas 2D shadow and filter API
+  // Apply filters using Canvas 2D shadow and filter API. A filter's strength
+  // scales how opaque its shadow is (1 = 100%), not how far it spreads; a canvas
+  // shadow can't be denser than its color, so strengths above 1 draw as 1.
   private applyFilters(ctx: CanvasRenderingContext2D, filters: Filter[]): void {
+    const shadow = (color: string, alpha: number, strength: number | undefined) =>
+      this.colorWithAlpha(color, Math.min(1, Math.max(0, alpha * (strength ?? 1))));
     // Combine multiple blur filters
     let totalBlurX = 0;
     let totalBlurY = 0;
@@ -4441,15 +4445,15 @@ export class FLARenderer {
           break;
         case 'glow':
           // Use shadow for glow effect
-          ctx.shadowColor = this.colorWithAlpha(filter.color, filter.alpha ?? 1);
-          ctx.shadowBlur = Math.max(filter.blurX, filter.blurY) * (filter.strength ?? 1);
+          ctx.shadowColor = shadow(filter.color, filter.alpha ?? 1, filter.strength);
+          ctx.shadowBlur = Math.max(filter.blurX, filter.blurY);
           ctx.shadowOffsetX = 0;
           ctx.shadowOffsetY = 0;
           break;
         case 'dropShadow':
-          const dsAngle = (filter.angle || 45) * Math.PI / 180;
-          ctx.shadowColor = this.colorWithAlpha(filter.color, filter.alpha ?? 1);
-          ctx.shadowBlur = Math.max(filter.blurX, filter.blurY) * (filter.strength ?? 1);
+          const dsAngle = (filter.angle ?? 45) * Math.PI / 180;
+          ctx.shadowColor = shadow(filter.color, filter.alpha ?? 1, filter.strength);
+          ctx.shadowBlur = Math.max(filter.blurX, filter.blurY);
           ctx.shadowOffsetX = Math.cos(dsAngle) * filter.distance;
           ctx.shadowOffsetY = Math.sin(dsAngle) * filter.distance;
           break;
@@ -4457,13 +4461,13 @@ export class FLARenderer {
           // Bevel creates an embossed effect with highlight and shadow
           // We approximate this using two offset shadows rendered in sequence
           // For simplicity, we use the highlight color with offset
-          const bevelAngle = (filter.angle || 45) * Math.PI / 180;
+          const bevelAngle = (filter.angle ?? 45) * Math.PI / 180;
           const highlightOffsetX = -Math.cos(bevelAngle) * filter.distance;
           const highlightOffsetY = -Math.sin(bevelAngle) * filter.distance;
 
           // Use shadow color for the primary shadow effect
-          ctx.shadowColor = this.colorWithAlpha(filter.shadowColor, filter.shadowAlpha ?? 1);
-          ctx.shadowBlur = Math.max(filter.blurX, filter.blurY) * (filter.strength ?? 1);
+          ctx.shadowColor = shadow(filter.shadowColor, filter.shadowAlpha ?? 1, filter.strength);
+          ctx.shadowBlur = Math.max(filter.blurX, filter.blurY);
           ctx.shadowOffsetX = -highlightOffsetX;
           ctx.shadowOffsetY = -highlightOffsetY;
           break;
@@ -4500,8 +4504,8 @@ export class FLARenderer {
           const ggColors = filter.colors;
           if (ggColors && ggColors.length > 0) {
             const midColor = ggColors[Math.floor(ggColors.length / 2)];
-            ctx.shadowColor = this.colorWithAlpha(midColor.color, midColor.alpha);
-            ctx.shadowBlur = Math.max(filter.blurX, filter.blurY) * (filter.strength ?? 1);
+            ctx.shadowColor = shadow(midColor.color, midColor.alpha, filter.strength);
+            ctx.shadowBlur = Math.max(filter.blurX, filter.blurY);
             ctx.shadowOffsetX = 0;
             ctx.shadowOffsetY = 0;
           }
@@ -4509,11 +4513,11 @@ export class FLARenderer {
         case 'gradientBevel':
           // Gradient bevel is similar to regular bevel but with gradient colors
           const gbColors = filter.colors;
-          const gbAngle = (filter.angle || 45) * Math.PI / 180;
+          const gbAngle = (filter.angle ?? 45) * Math.PI / 180;
           if (gbColors && gbColors.length > 0) {
             const midColor = gbColors[Math.floor(gbColors.length / 2)];
-            ctx.shadowColor = this.colorWithAlpha(midColor.color, midColor.alpha);
-            ctx.shadowBlur = Math.max(filter.blurX, filter.blurY) * (filter.strength ?? 1);
+            ctx.shadowColor = shadow(midColor.color, midColor.alpha, filter.strength);
+            ctx.shadowBlur = Math.max(filter.blurX, filter.blurY);
             ctx.shadowOffsetX = Math.cos(gbAngle) * filter.distance;
             ctx.shadowOffsetY = Math.sin(gbAngle) * filter.distance;
           }
