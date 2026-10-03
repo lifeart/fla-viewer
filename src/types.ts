@@ -7,6 +7,8 @@ export interface FLADocument {
   height: number;
   frameRate: number;
   backgroundColor: string;
+  viewAngle3D?: number; // 3D perspective angle in degrees (CS4+); Flash's default is 55
+  vanishingPoint3D?: Point; // 3D vanishing point; default is the stage center
   timelines: Timeline[];
   symbols: Map<string, Symbol>;
   bitmaps: Map<string, BitmapItem>;
@@ -72,6 +74,12 @@ export interface Timeline {
   layers: Layer[];
   totalFrames: number;
   cameraLayerIndex?: number; // Index of the camera layer for camera transforms
+  /**
+   * Index of Animate's native camera layer (`layerType="camera"`, CC 2017+) when
+   * the timeline's camera is enabled. Its `__Camera__` instance drives the view
+   * of every layer not attached to the camera (src/native-camera.ts).
+   */
+  nativeCameraLayerIndex?: number;
   referenceLayers: Set<number>; // Indices of layers that should not be rendered (guides, camera frames, etc.)
 }
 
@@ -86,6 +94,7 @@ export interface Layer {
   layerType?: 'normal' | 'guide' | 'folder' | 'camera' | 'mask' | 'masked';
   parentLayerIndex?: number;
   maskLayerIndex?: number; // For masked layers, index of the mask layer
+  attachedToCamera?: boolean; // Pinned to the native camera: drawn without the camera's view
   frames: Frame[];
 }
 
@@ -93,7 +102,7 @@ export interface Frame {
   index: number;
   duration: number;
   keyMode: number;
-  tweenType?: 'motion' | 'shape' | 'none' | 'motion object';
+  tweenType?: 'motion' | 'shape' | 'none' | 'motion object' | 'IK pose';
   acceleration?: number;
   /**
    * CS4+ object-based motion tween (`tweenType="motion object"`): the span's
@@ -101,6 +110,18 @@ export interface Frame {
    * frame's elements by the renderer.
    */
   motionObject?: MotionObjectTween;
+  /**
+   * IK pose span (`tweenType="IK pose"`, a Bone tool armature): the per-frame
+   * transforms Flash baked into `<betweenFrameMatrixList>`, indexed
+   * `[elementIndex][frameIndex - index]`. Each applies in the parent's space on
+   * top of the element's own matrix (`pose * matrix`); the first is the identity.
+   */
+  ikPoseMatrices?: Matrix[][];
+  /**
+   * Layer depth at this keyframe (`frameZDepth`, Animate 2019+): negative is
+   * nearer the camera, positive further away. Absent means 0.
+   */
+  zDepth?: number;
   elements: DisplayElement[];
   tweens?: Tween[];
   sound?: FrameSound;
@@ -368,6 +389,23 @@ export interface StrokeStyle {
   bitmapPath?: string;
   bitmapIsClipped?: boolean;
   bitmapIsSmoothed?: boolean;
+  // Variable-width profile (<SolidStroke><VariablePointWidth><WidthMarker>), sorted by
+  // position. Absent for a constant-width stroke. Drawn as a filled outline
+  // (src/variable-width-stroke.ts).
+  widthMarkers?: WidthMarker[];
+}
+
+/**
+ * One point of a variable-width stroke profile (Animate CC Width tool / width profiles).
+ * `position` runs 0..1 along the length of each stroked path; `left`/`right` are the
+ * half-widths on either side as fractions of the stroke weight (0.5 + 0.5 = the full
+ * weight). `corner` is `type="corner"`: the width may change slope there.
+ */
+export interface WidthMarker {
+  position: number;
+  left: number;
+  right: number;
+  corner?: boolean;
 }
 
 export interface Edge {
@@ -446,7 +484,7 @@ export interface GlowFilter {
   blurX: number;
   blurY: number;
   color: string;
-  strength: number; // 0-1 (normalized from 0-255)
+  strength: number; // ratio, 1 = 100% (XFL `strength`, SWF FIXED8)
   alpha?: number;
   inner?: boolean;
   knockout?: boolean;
@@ -458,7 +496,7 @@ export interface DropShadowFilter {
   blurX: number;
   blurY: number;
   color: string;
-  strength: number; // 0-1 (normalized from 0-255)
+  strength: number; // ratio, 1 = 100% (XFL `strength`, SWF FIXED8)
   alpha?: number;
   distance: number;
   angle: number; // in degrees
@@ -472,7 +510,7 @@ export interface BevelFilter {
   type: 'bevel';
   blurX: number;
   blurY: number;
-  strength: number; // 0-1 (normalized from 0-255)
+  strength: number; // ratio, 1 = 100% (XFL `strength`, SWF FIXED8)
   highlightColor: string;
   highlightAlpha?: number;
   shadowColor: string;
@@ -538,7 +576,9 @@ export interface GradientFilterEntry {
   ratio: number; // 0-255 position in gradient
 }
 
-export type Filter = BlurFilter | GlowFilter | DropShadowFilter | BevelFilter | ColorMatrixFilter | ConvolutionFilter | GradientGlowFilter | GradientBevelFilter;
+// `enabled: false` is a filter switched off in the Filters panel: kept in the
+// list (object tween filter curves pair by position) but not drawn.
+export type Filter = (BlurFilter | GlowFilter | DropShadowFilter | BevelFilter | ColorMatrixFilter | ConvolutionFilter | GradientGlowFilter | GradientBevelFilter) & { enabled?: false };
 
 // Shape Tweens (MorphShape)
 export interface MorphCurve {

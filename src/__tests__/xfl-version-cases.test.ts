@@ -6,7 +6,8 @@ import { exportSingleFrame, exportSpriteSheet, exportSVG } from '../video-export
 import { FLAPlayer } from '../player';
 import { readDirectoryEntry, xflFolderToZip, isXFLStub, XFL_STUB_CONTENT, type XFLFolderEntry } from '../xfl-folder';
 import { ovalPrimitivePath } from '../primitive-shapes';
-import type { FLADocument, PathCommand, Shape, SymbolInstance, TextInstance } from '../types';
+import type { FLADocument, Matrix, PathCommand, Shape, SymbolInstance, TextInstance } from '../types';
+import { interpolateDecomposed } from '../layer-utils';
 
 // Version-specific XFL cases that real Flash CS4..Animate files contain. The XML
 // below mirrors what Flash CS5/CS6 writes (attribute names and value spellings
@@ -108,6 +109,113 @@ describe('classic tween rotation direction', () => {
       await renderHalfway('counter-clockwise');
       expect(colorAt(canvas, 200, 140)).toBe('#FF0000');
       expect(colorAt(canvas, 200, 260)).toBe('#FFFFFF');
+    });
+
+    it('keeps a turning instance its size without a forced direction', async () => {
+      // 0deg to 90deg: halfway the bar points down-right at 45deg, still 100px
+      // long. Lerping a..d would shrink it to about 71px.
+      const doc = await parseXfl({
+        'DOMDocument.xml': domDocument(`<DOMLayer name="Bar"><frames>
+          <DOMFrame index="0" duration="10" tweenType="motion" keyMode="22017">
+            <elements><DOMSymbolInstance libraryItemName="Bar" symbolType="graphic"><matrix><Matrix tx="200" ty="200"/></matrix></DOMSymbolInstance></elements>
+          </DOMFrame>
+          <DOMFrame index="10" duration="1" keyMode="9728">
+            <elements><DOMSymbolInstance libraryItemName="Bar" symbolType="graphic"><matrix><Matrix a="0" b="1" c="-1" d="0" tx="200" ty="200"/></matrix></DOMSymbolInstance></elements>
+          </DOMFrame>
+        </frames></DOMLayer>`, ['Bar']),
+        'LIBRARY/Bar.xml': symbolItem('Bar', rectShape(0, -5, 100, 10, '#FF0000')),
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(5);
+      expect(colorAt(canvas, 265, 265)).toBe('#FF0000');
+      expect(colorAt(canvas, 275, 275)).toBe('#FFFFFF');
+    });
+  });
+
+  describe('interpolating a classic tween\'s matrix', () => {
+    const turn = (deg: number, scale = 1) => {
+      const r = (deg * Math.PI) / 180;
+      return { a: scale * Math.cos(r), b: scale * Math.sin(r), c: -scale * Math.sin(r), d: scale * Math.cos(r), tx: 0, ty: 0 };
+    };
+    const close = (actual: Matrix, expected: Matrix) => {
+      for (const k of ['a', 'b', 'c', 'd', 'tx', 'ty'] as const) expect(actual[k]).toBeCloseTo(expected[k], 9);
+    };
+
+    it('turns and scales separately', () => {
+      close(interpolateDecomposed(turn(0), turn(90, 2), 0.5), turn(45, 1.5));
+      close(interpolateDecomposed(turn(0), turn(90, 2), 0), turn(0));
+      close(interpolateDecomposed(turn(0), turn(90, 2), 1), turn(90, 2));
+    });
+
+    it('turns the short way round', () => {
+      close(interpolateDecomposed(turn(170), turn(-170), 0.5), turn(180));
+    });
+
+    it('keeps a mirrored instance mirrored while it turns', () => {
+      const mirror = (m: Matrix) => ({ ...m, a: -m.a, b: -m.b });
+      close(interpolateDecomposed(mirror(turn(0)), mirror(turn(90)), 0.5), mirror(turn(45)));
+    });
+
+    it('keeps the shape through a half turn instead of shearing it flat', () => {
+      // A 150% x 100% instance turned 1 degree, tweened to 181 degrees: the
+      // determinant stays 1.5, so it never passes through zero width.
+      const from = { a: 1.499772, b: 0.026179, c: -0.017452, d: 0.999848, tx: 0, ty: 0 };
+      const to = { a: -1.499772, b: -0.026179, c: 0.017452, d: -0.999848, tx: 0, ty: 0 };
+      for (const t of [0.25, 0.5, 0.75]) {
+        const m = interpolateDecomposed(from, to, t);
+        expect(m.a * m.d - m.b * m.c).toBeCloseTo(1.5, 4);
+        expect(Math.hypot(m.a, m.b)).toBeCloseTo(1.5, 4);
+        expect(m.c).toBeCloseTo(-m.b / 1.5, 4);
+        expect(m.d).toBeCloseTo(m.a / 1.5, 4);
+      }
+      // A skewed half turn keeps its (small) skew rather than flipping.
+      const skewed = { a: -1, b: 0.02, c: 0.02, d: -1, tx: 0, ty: 0 };
+      for (const t of [0.25, 0.5, 0.75]) {
+        const m = interpolateDecomposed(turn(0), skewed, t);
+        expect(m.a * m.d - m.b * m.c).toBeGreaterThan(0.99);
+      }
+    });
+
+    it('spins the given way, with extra whole turns', () => {
+      close(interpolateDecomposed(turn(0), turn(90), 0.5, { direction: 'cw', turns: 1 }), turn(225));
+      close(interpolateDecomposed(turn(0), turn(90), 0.5, { direction: 'ccw', turns: 0 }), turn(-135));
+      close(interpolateDecomposed(turn(0), turn(0, 2), 0.25, { direction: 'cw', turns: 1 }), turn(90, 1.25));
+    });
+
+    it('keeps a mirrored instance mirrored while it spins', () => {
+      const mirror = (m: Matrix) => ({ ...m, a: -m.a, b: -m.b });
+      close(interpolateDecomposed(mirror(turn(0)), mirror(turn(90)), 0.5, { direction: 'cw', turns: 1 }), mirror(turn(225)));
+    });
+
+    it('turns a key scaled to nothing from angle 0', () => {
+      const zero = { a: 0, b: 0, c: 0, d: 0, tx: 0, ty: 0 };
+      close(interpolateDecomposed(zero, turn(90, 2), 0.5), turn(45, 1));
+    });
+
+    it('interpolates entry by entry between a mirrored key and one scaled flat', () => {
+      // The second half of a card flip, and its reverse; then a vertical flip.
+      const m = (a: number, d: number) => ({ a, b: 0, c: 0, d, tx: 0, ty: 0 });
+      close(interpolateDecomposed(m(0, 1), m(-1, 1), 0.5), m(-0.5, 1));
+      close(interpolateDecomposed(m(-1, 1), m(0, 1), 0.5), m(-0.5, 1));
+      close(interpolateDecomposed(m(1, 0), m(1, -1), 0.5), m(1, -0.5));
+    });
+
+    it('does not spin a whole turn between keys at the same angle', () => {
+      const nearly = turn(30 - 1e-9, 2);
+      close(interpolateDecomposed(turn(30), nearly, 0.5, { direction: 'cw', turns: 0 }), turn(30, 1.5));
+      close(interpolateDecomposed(turn(30), turn(30 + 1e-9, 2), 0.5, { direction: 'ccw', turns: 0 }), turn(30, 1.5));
+      close(interpolateDecomposed(turn(30), nearly, 0.5, { direction: 'cw', turns: 1 }), turn(210, 1.5));
+    });
+
+    it('interpolates entry by entry when the tween mirrors the instance', () => {
+      const flipped = { a: -1, b: 0, c: 0, d: 1, tx: 10, ty: 0 };
+      close(interpolateDecomposed(turn(0), flipped, 0.5), { a: 0, b: 0, c: 0, d: 1, tx: 5, ty: 0 });
+    });
+
+    it('matches plain interpolation for scale and position alone', () => {
+      const from = { a: 1, b: 0, c: 0, d: 2, tx: 0, ty: 0 };
+      const to = { a: 3, b: 0, c: 0, d: 0.5, tx: 40, ty: -20 };
+      close(interpolateDecomposed(from, to, 0.25), { a: 1.5, b: 0, c: 0, d: 1.625, tx: 10, ty: -5 });
     });
   });
 });
@@ -392,7 +500,7 @@ describe('primitive rectangles and ovals (DOMRectangleObject / DOMOvalObject)', 
 describe('CS4+ object motion tweens (tweenType="motion object")', () => {
   // A 20x20 red box symbol moved 200px right over a 11-frame span, as Flash CS5
   // saves it: one DOMFrame for the whole span, keys inside <AnimationCore>.
-  const motionLayer = (extraBasic = '', colors = '') => `<DOMLayer name="Tween" animationType="motion object"><frames>
+  const motionLayer = (extraBasic = '', colors = '', filters = '', elementFilters = '') => `<DOMLayer name="Tween" animationType="motion object"><frames>
     <DOMFrame index="0" duration="11" tweenType="motion object" motionTweenRotate="none" motionTweenScale="false" isMotionObject="true" visibleAnimationKeyframes="2097151" keyMode="8195">
       <motionObjectXML><AnimationCore TimeScale="24000" Version="1" duration="11000"><TimeMap strength="0" type="Quadratic"/><metadata><Settings orientToPath="0" xformPtXOffsetPct="0.5" xformPtYOffsetPct="0.5" xformPtZOffsetPixels="0"/></metadata>
         <PropertyContainer id="headContainer">
@@ -408,10 +516,10 @@ describe('CS4+ object motion tweens (tweenType="motion object")', () => {
             <Property enabled="1" id="Scale_X" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,100" next="0,100" previous="0,100" roving="0" timevalue="0"/></Property>
             <Property enabled="1" id="Scale_Y" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,100" next="0,100" previous="0,100" roving="0" timevalue="0"/></Property>
           </PropertyContainer>
-          <PropertyContainer id="Colors">${colors}</PropertyContainer><PropertyContainer id="Filters"/>
+          <PropertyContainer id="Colors">${colors}</PropertyContainer><PropertyContainer id="Filters">${filters}</PropertyContainer>
         </PropertyContainer></AnimationCore></motionObjectXML>
       <elements><DOMSymbolInstance libraryItemName="Box" name="" centerPoint3DX="60" centerPoint3DY="110">
-        <matrix><Matrix tx="50" ty="100"/></matrix><transformationPoint><Point x="10" y="10"/></transformationPoint>
+        <matrix><Matrix tx="50" ty="100"/></matrix><transformationPoint><Point x="10" y="10"/></transformationPoint>${elementFilters}
       </DOMSymbolInstance></elements>
     </DOMFrame>
   </frames></DOMLayer>`;
@@ -470,6 +578,83 @@ describe('CS4+ object motion tweens (tweenType="motion object")', () => {
     expect(g).toBeGreaterThan(110);
     expect(g).toBeLessThan(145);
     expect(b).toBe(g);
+  });
+
+  // Filter curves as Animate saves them: one <PropertyContainer id="<Kind>_Filter">
+  // per filter, constants as keyless <Property value>, colors as 0xRRGGBBAA.
+  const curve = (id: string, keys: string) =>
+    `<Property enabled="1" id="${id}" ignoreTimeMap="0" readonly="0" visible="1">${keys}</Property>`;
+  const keyAt = (t: number, v: number) => `<Keyframe anchor="0,${v}" next="0,${v}" previous="0,${v}" roving="0" timevalue="${t}"/>`;
+  const constant = (id: string, value: number) => `<Property enabled="1" id="${id}" readonly="0" value="${value}" visible="1"/>`;
+
+  it('animates a blur filter over the span', async () => {
+    const blur = `<PropertyContainer id="Blur_Filter">${curve('Blur_BlurX', keyAt(0, 10) + keyAt(10000, 0))}${curve('Blur_BlurY', keyAt(0, 10) + keyAt(10000, 0))}${constant('Blur_Quality', 3)}</PropertyContainer>`;
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(await parseXfl(files(motionLayer('', '', blur, '<filters><BlurFilter blurX="10" blurY="10" quality="3"/></filters>'))));
+    renderer.renderFrame(0);
+    expect(colorAt(canvas, 73, 110)).not.toBe('#FFFFFF'); // blurred past the box edge
+    renderer.renderFrame(10);
+    expect(colorAt(canvas, 260, 110)).toBe('#FF0000');
+    expect(colorAt(canvas, 273, 110)).toBe('#FFFFFF'); // sharp again
+  });
+
+  it('animates a drop shadow\'s color', async () => {
+    const shadow = `<PropertyContainer id="DropShadow_Filter">${curve('DropShadow_BlurX', keyAt(0, 0))}${curve('DropShadow_BlurY', keyAt(0, 0))}${curve('DropShadow_Strength', keyAt(0, 100))}${constant('DropShadow_Quality', 1)}${curve('DropShadow_Angle', keyAt(0, 90))}${curve('DropShadow_Distance', keyAt(0, 30))}${constant('DropShadow_Knockout', 0)}${constant('DropShadow_InnerShadow', 0)}${constant('DropShadow_HideObject', 0)}${curve('DropShadow_Color', '<Keyframe roving="0" timevalue="0" value="0x000000ff"/><Keyframe roving="0" timevalue="10000" value="0x0000ffff"/>')}</PropertyContainer>`;
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(await parseXfl(files(motionLayer('', '', shadow,
+      '<filters><DropShadowFilter angle="90" blurX="0" blurY="0" distance="30" quality="1"/></filters>'))));
+    // The shadow offset is in canvas pixels, 30 straight down.
+    const below = 110 + 30 / (canvas.width / 550);
+    renderer.renderFrame(0);
+    expect(colorAt(canvas, 60, below)).toBe('#000000');
+    renderer.renderFrame(10);
+    expect(colorAt(canvas, 260, 110)).toBe('#FF0000');
+    expect(colorAt(canvas, 260, below)).toBe('#0000FF');
+  });
+
+  // A static shadow on the tween's first frame: 30 (canvas) pixels at `angle`.
+  const shadowAt = async (attrs: string, dx: number, dy: number) => {
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(await parseXfl(files(motionLayer('', '', '',
+      `<filters><DropShadowFilter blurX="0" blurY="0" distance="30" quality="1" ${attrs}/></filters>`))));
+    renderer.renderFrame(0);
+    const s = canvas.width / 550;
+    return colorAt(canvas, 60 + dx / s, 110 + dy / s);
+  };
+
+  it('draws a filter\'s strength as opacity, not spread', async () => {
+    const [r, g, b] = (await shadowAt('angle="90" strength="0.5"', 0, 30)).slice(1).match(/../g)!.map((v) => parseInt(v, 16));
+    // Half-opaque black over white.
+    expect(r).toBeGreaterThan(110);
+    expect(r).toBeLessThan(145);
+    expect(g).toBe(r);
+    expect(b).toBe(r);
+  });
+
+  it('casts a shadow at angle 0 straight to the right', async () => {
+    expect(await shadowAt('angle="0"', 30, 0)).toBe('#000000');
+    expect(await shadowAt('angle="0"', 22, 22)).toBe('#FFFFFF');
+  });
+
+  it('does not draw a filter switched off in the Filters panel', async () => {
+    expect(await shadowAt('angle="0" isEnabled="false"', 30, 0)).toBe('#FFFFFF');
+  });
+
+  it('pairs filter curves with a switched-off filter by position', async () => {
+    // Two shadows, the second switched off. Its curves (blue, to the right)
+    // stay on the switched-off shadow; the first set (black, down) is drawn.
+    const shadowCurves = (angle: number, color: string) => `<PropertyContainer id="DropShadow_Filter">${curve('DropShadow_BlurX', keyAt(0, 0))}${curve('DropShadow_BlurY', keyAt(0, 0))}${curve('DropShadow_Angle', keyAt(0, angle))}${curve('DropShadow_Distance', keyAt(0, 30))}${curve('DropShadow_Color', `<Keyframe roving="0" timevalue="0" value="${color}"/>`)}</PropertyContainer>`;
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(await parseXfl(files(motionLayer('', '', shadowCurves(90, '0x000000ff') + shadowCurves(0, '0x0000ffff'),
+      '<filters><DropShadowFilter angle="90" blurX="0" blurY="0" distance="30"/><DropShadowFilter isEnabled="false" blurX="0" blurY="0" distance="30" angle="0" color="#0000FF"/></filters>'))));
+    renderer.renderFrame(0);
+    const s = canvas.width / 550;
+    expect(colorAt(canvas, 60, 110 + 30 / s)).toBe('#000000');
+    expect(colorAt(canvas, 60 + 30 / s, 110)).toBe('#FFFFFF');
   });
 });
 
@@ -771,27 +956,40 @@ describe('movie clip instances (no symbolType attribute)', () => {
     expect(colors).toEqual([R, G, B, R, R]);
   });
 
-  describe('movie clips inside movie clips', () => {
-    // Main timeline: 10 frames holding Outer at (100,100). Outer: 4 frames whose
-    // keyframes are `outerFrames`, holding Inner (3 frames: red, green, blue).
-    const innerItem = clipItem().replace(/name="Clip"/g, 'name="Inner"');
-    const nested = (outerFrames: string, outerAttrs = '') => parseXfl({
-      'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0" duration="10"><elements>
-        <DOMSymbolInstance libraryItemName="Outer" ${outerAttrs}><matrix><Matrix tx="100" ty="100"/></matrix></DOMSymbolInstance>
-      </elements></DOMFrame></frames></DOMLayer>`, ['Outer', 'Inner']),
-      'LIBRARY/Inner.xml': innerItem,
-      'LIBRARY/Outer.xml': `<DOMSymbolItem xmlns="http://ns.adobe.com/xfl/2008/" name="Outer">
-        <timeline><DOMTimeline name="Outer"><layers><DOMLayer name="Layer 1"><frames>${outerFrames}</frames></DOMLayer></layers></DOMTimeline></timeline>
-      </DOMSymbolItem>`,
-    });
-    const inner = '<DOMSymbolInstance libraryItemName="Inner"><matrix><Matrix/></matrix></DOMSymbolInstance>';
-    const frames = [...Array(10).keys()];
-    const coldColors = async (doc: FLADocument) => {
-      const colors: string[] = [];
-      for (const f of frames) colors.push(...await playFrames(doc, [f]));
-      return colors;
-    };
+  // Main timeline: 10 frames holding Outer at (100,100). Outer's keyframes are
+  // `outerFrames`, holding Inner (a 3-frame clip: red, green, blue). Outer is a
+  // movie clip unless `outerAttrs` sets a symbolType.
+  const innerItem = clipItem().replace(/name="Clip"/g, 'name="Inner"');
+  const nested = (outerFrames: string, outerAttrs = '') => parseXfl({
+    'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0" duration="10"><elements>
+      <DOMSymbolInstance libraryItemName="Outer" ${outerAttrs}><matrix><Matrix tx="100" ty="100"/></matrix></DOMSymbolInstance>
+    </elements></DOMFrame></frames></DOMLayer>`, ['Outer', 'Inner']),
+    'LIBRARY/Inner.xml': innerItem,
+    'LIBRARY/Outer.xml': `<DOMSymbolItem xmlns="http://ns.adobe.com/xfl/2008/" name="Outer">
+      <timeline><DOMTimeline name="Outer"><layers><DOMLayer name="Layer 1"><frames>${outerFrames}</frames></DOMLayer></layers></DOMTimeline></timeline>
+    </DOMSymbolItem>`,
+  });
+  const inner = '<DOMSymbolInstance libraryItemName="Inner"><matrix><Matrix/></matrix></DOMSymbolInstance>';
+  const frames = [...Array(10).keys()];
+  /** Each frame rendered by a fresh renderer, as after a seek. */
+  const coldColors = async (doc: FLADocument) => {
+    const colors: string[] = [];
+    for (const f of frames) colors.push(...await playFrames(doc, [f]));
+    return colors;
+  };
+  /** The color in single-frame PNG and SVG exports of `frame` (or which of R/G/B the SVG holds). */
+  const exportedColors = async (doc: FLADocument, frame: number) => {
+    const bitmap = await createImageBitmap(await exportSingleFrame(doc, frame));
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(bitmap, 0, 0);
+    const [r, g, b] = ctx.getImageData(110, 110, 1, 1).data;
+    const hex = (v: number) => v.toString(16).padStart(2, '0').toUpperCase();
+    const svg = await (await exportSVG(doc, frame)).text();
+    return { png: `#${hex(r)}${hex(g)}${hex(b)}`, svg: [R, G, B].filter((c) => svg.includes(c)) };
+  };
 
+  describe('movie clips inside movie clips', () => {
     it('agrees between playback and seeking when the outer clip loops', async () => {
       const doc = await nested(`<DOMFrame index="0" duration="4"><elements>${inner}</elements></DOMFrame>`);
       const played = await playFrames(doc, frames);
@@ -822,14 +1020,88 @@ describe('movie clip instances (no symbolType attribute)', () => {
       expect(svg).not.toContain(R);
     });
 
-    it('keeps the inner clip in step after frames drawn from a cacheAsBitmap cache', async () => {
-      // Outer frame 0 (ticks 0, 4, 8) is drawn from the cached bitmap, which never
-      // reaches the inner clip; the live frames after it must still be in step.
+    it('keeps the inner clip playing when the outer clip is cached as a bitmap', async () => {
+      // A cached bitmap of Outer's frame 0 would freeze Inner on every pass.
       const outer = `<DOMFrame index="0" duration="4"><elements>${inner}</elements></DOMFrame>`;
       const plain = await playFrames(await nested(outer), frames);
-      const cached = await playFrames(await nested(outer, 'cacheAsBitmap="true"'), frames);
-      const live = (colors: string[]) => colors.filter((_, tick) => tick % 4 !== 0);
-      expect(live(cached)).toEqual(live(plain));
+      expect(await playFrames(await nested(outer, 'cacheAsBitmap="true"'), frames)).toEqual(plain);
+      const oneFrame = `<DOMFrame index="0"><elements>${inner}</elements></DOMFrame>`;
+      expect(await playFrames(await nested(oneFrame, 'symbolType="graphic" cacheAsBitmap="true"'), frames))
+        .toEqual([R, G, B, R, G, B, R, G, B, R]);
+    });
+
+    it('finds a clip through a symbol cycle whichever symbol is asked first', async () => {
+      // A holds B and Inner, B holds A. Asking about A first reaches B while A
+      // is still being searched; B must not be remembered as clip-free.
+      const graphicOf = (name: string) => `<DOMSymbolInstance libraryItemName="${name}" symbolType="graphic"><matrix><Matrix/></matrix></DOMSymbolInstance>`;
+      const doc = await parseXfl({
+        'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0"><elements>${graphicOf('A')}</elements></DOMFrame></frames></DOMLayer>`,
+          ['A', 'B', 'Inner']),
+        'LIBRARY/A.xml': symbolItem('A', graphicOf('B') + inner),
+        'LIBRARY/B.xml': symbolItem('B', graphicOf('A')),
+        'LIBRARY/Inner.xml': innerItem,
+      });
+      const renderer = new FLARenderer(document.createElement('canvas'));
+      await renderer.setDocument(doc);
+      const has = (name: string) => (renderer as any).hasMovieClipInside(doc.symbols.get(name));
+      expect(has('A')).toBe(true);
+      expect(has('B')).toBe(true);
+    });
+
+    it('searches each symbol once when a cycle keeps results from being remembered', async () => {
+      // S0..S23 each hold S(i+1) twice and S24 holds S0: without a memo for the
+      // search, every path is walked, 2^24 of them.
+      const graphicOf = (name: string) => `<DOMSymbolInstance libraryItemName="${name}" symbolType="graphic"><matrix><Matrix/></matrix></DOMSymbolInstance>`;
+      const names = Array.from({ length: 25 }, (_, i) => `S${i}`);
+      const files: Record<string, string> = {
+        'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0"><elements></elements></DOMFrame></frames></DOMLayer>`, names),
+      };
+      names.forEach((name, i) => {
+        files[`LIBRARY/${name}.xml`] = symbolItem(name, i < 24 ? graphicOf(`S${i + 1}`) + graphicOf(`S${i + 1}`) : graphicOf('S0'));
+      });
+      const doc = await parseXfl(files);
+      const renderer = new FLARenderer(document.createElement('canvas'));
+      await renderer.setDocument(doc);
+      const t0 = performance.now();
+      expect((renderer as any).hasMovieClipInside(doc.symbols.get('S0'))).toBe(false);
+      expect(performance.now() - t0).toBeLessThan(500);
+    });
+  });
+
+  describe('movie clips inside graphic symbols and buttons', () => {
+    const graphic = 'symbolType="graphic" loop="loop"';
+
+    it('keeps a clip playing in a one-frame graphic when seeking and exporting', async () => {
+      const doc = await nested(`<DOMFrame index="0"><elements>${inner}</elements></DOMFrame>`, graphic);
+      const played = await playFrames(doc, frames);
+      expect(played).toEqual([R, G, B, R, G, B, R, G, B, R]);
+      expect(await coldColors(doc)).toEqual(played);
+      expect(await exportedColors(doc, 7)).toEqual({ png: G, svg: [G] });
+    });
+
+    it('keeps the clip across a looping graphic\'s wrap when it covers the whole graphic', async () => {
+      const doc = await nested(`<DOMFrame index="0" duration="4"><elements>${inner}</elements></DOMFrame>`, graphic);
+      const played = await playFrames(doc, frames);
+      expect(played).toEqual([R, G, B, R, G, B, R, G, B, R]);
+      expect(await coldColors(doc)).toEqual(played);
+      expect(await exportedColors(doc, 8)).toEqual({ png: B, svg: [B] });
+    });
+
+    it('restarts the clip on each pass when it covers only part of a looping graphic', async () => {
+      const doc = await nested(`<DOMFrame index="0" duration="2"><elements>${inner}</elements></DOMFrame>
+        <DOMFrame index="2" duration="2"><elements></elements></DOMFrame>`, graphic);
+      const played = await playFrames(doc, frames);
+      expect(played).toEqual([R, G, WHITE, WHITE, R, G, WHITE, WHITE, R, G]);
+      expect(await coldColors(doc)).toEqual(played);
+      expect(await exportedColors(doc, 5)).toEqual({ png: G, svg: [G] });
+    });
+
+    it('keeps a clip playing inside a button\'s up state', async () => {
+      const doc = await nested(`<DOMFrame index="0"><elements>${inner}</elements></DOMFrame>`, 'symbolType="button"');
+      const played = await playFrames(doc, frames);
+      expect(played).toEqual([R, G, B, R, G, B, R, G, B, R]);
+      expect(await coldColors(doc)).toEqual(played);
+      expect(await exportedColors(doc, 4)).toEqual({ png: G, svg: [G] });
     });
   });
 

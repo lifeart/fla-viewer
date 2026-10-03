@@ -48,6 +48,20 @@ export function graphicSymbolFrame(
   return mod(first + step * k);
 }
 
+// A `/` after one of these words starts a regex literal, not a division.
+const REGEX_AFTER_WORDS = new Set([
+  'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else',
+  'yield', 'await',
+]);
+
+/** The identifier that ends just before `end` (skipping whitespace), unless it is a property name. */
+function wordBefore(script: string, end: number): string {
+  while (end > 0 && /\s/.test(script[end - 1])) end--;
+  let start = end;
+  while (start > 0 && /[\w$]/.test(script[start - 1])) start--;
+  return start > 0 && script[start - 1] === '.' ? '' : script.slice(start, end);
+}
+
 /**
  * The part of a frame script that runs when the frame is entered: comments,
  * string and regex literals are dropped, and so are function bodies, block or
@@ -69,7 +83,10 @@ function frameEntryCode(script: string): string {
       if (!skipping()) code += ' ';
       continue;
     }
-    if (ch === '"' || ch === "'" || ch === '`' || (ch === '/' && (prev === '' || /[(,=:[!&|?{};+\-*%<>~^]/.test(prev)))) {
+    // (Not after `<`: that's an E4X closing tag, `</a>`.)
+    const regexStart = ch === '/' && (prev === '' || /[(,=:[!&|?{};+\-*%>~^]/.test(prev) ||
+      REGEX_AFTER_WORDS.has(wordBefore(script, i)));
+    if (ch === '"' || ch === "'" || ch === '`' || regexStart) {
       // String or regex literal: skip to its closing delimiter.
       let j = i + 1;
       let inClass = false;
@@ -161,13 +178,9 @@ export function movieClipPlayhead(
   if (n === 1) return { frame: 0, stopped: false };
   const stops = [...stopFrames].filter((f) => f >= 0 && f < n);
   if (stops.length === 0) return { frame: t % n, stopped: false };
-  // With a stop on the timeline, playback reaches it within one pass.
-  let frame = 0;
-  for (let i = 0; i < t; i++) {
-    if (stopFrames.has(frame)) return { frame, stopped: true };
-    frame = (frame + 1) % n;
-  }
-  return { frame, stopped: false };
+  // Playing forward from frame 0, the clip holds at its first stop frame.
+  const first = Math.min(...stops);
+  return t <= first ? { frame: t, stopped: false } : { frame: first, stopped: true };
 }
 
 /**
@@ -197,30 +210,84 @@ export function movieClipRun(
   return { start: frames[first].index, end: frames[k].index + frames[k].duration };
 }
 
-/** How long an enclosing movie clip has played: ticks since it appeared, and its timeline. */
-export interface EnclosingClip {
-  ticks: number;
-  totalFrames: number;
-  stopFrames: ReadonlySet<number>;
+/**
+ * The frame a timeline showed `ticksAgo` ticks before now (0 = now), or
+ * undefined when the instance playing it wasn't on stage yet. A movie clip's
+ * playhead is seeded by walking its parent's clock back.
+ */
+export type TimelineClock = (ticksAgo: number) => number | undefined;
+
+/** The main timeline (a scene) at `frame`, played from frame 0. */
+export function rootClock(frame: number): TimelineClock {
+  return (k) => (k <= frame ? frame - k : undefined);
+}
+
+/** A movie clip that has been on stage for `ticks` ticks (see movieClipPlayhead). */
+export function movieClipClock(ticks: number, totalFrames: number, stopFrames: ReadonlySet<number>): TimelineClock {
+  return (k) => (k <= ticks ? movieClipPlayhead(ticks - k, totalFrames, stopFrames).frame : undefined);
 }
 
 /**
- * How many ticks a movie clip has been on stage, from the run of keyframes that
- * holds it in its parent timeline. On the main timeline (or inside a graphic)
- * that is the parent's frame minus the run start. Inside another movie clip it
- * is the time since that clip's playhead last entered the run: the enclosing
- * clip plays from frame 0, looping, or holds at its first stop() frame.
+ * A graphic or button instance at `elementIndex` of a layer in the timeline
+ * `parent` plays: the frame the graphic followed (a button shows frame 0),
+ * for as long as the layer's keyframes held that symbol in that slot.
  */
-export function movieClipTicks(
-  parentFrame: number,
-  run: { start: number; end: number },
-  enclosing?: EnclosingClip
-): number {
-  if (!enclosing) return Math.max(0, parentFrame - run.start);
-  const n = Math.max(1, enclosing.totalFrames);
-  const holds = n === 1 || [...enclosing.stopFrames].some((f) => f >= 0 && f < n);
-  // A holding clip went through the run once; a looping one that never leaves
-  // the run has kept the instance since it appeared itself.
-  if (holds || (run.start <= 0 && run.end >= n)) return Math.max(0, enclosing.ticks - run.start);
-  return Math.max(0, (enclosing.ticks % n) - run.start);
+export function instanceClock(
+  parent: TimelineClock,
+  frames: readonly Frame[],
+  elementIndex: number,
+  instance: SymbolInstance,
+  totalFrames: number
+): TimelineClock {
+  // Walks step back one frame at a time, so the keyframe is usually the one
+  // found last or its neighbour; otherwise binary-search (frames are sorted by
+  // index), and scan only if that misses. Keyframes that overlap (a duration
+  // running past the next index) are always scanned, so the first one wins, as
+  // in the renderer.
+  let last = -1;
+  let overlapping: boolean | undefined;
+  return (k) => {
+    const p = parent(k);
+    if (p === undefined) return undefined;
+    overlapping ??= frames.some((f, i) => i > 0 && frames[i - 1].index + frames[i - 1].duration > f.index);
+    const inFrame = (i: number) => i >= 0 && i < frames.length && p >= frames[i].index &&
+      p < frames[i].index + frames[i].duration;
+    let found = overlapping ? -1 : [last, last - 1, last + 1].find(inFrame) ?? -1;
+    if (found < 0 && !overlapping) {
+      let lo = 0;
+      let hi = frames.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (p < frames[mid].index) hi = mid - 1;
+        else if (p >= frames[mid].index + frames[mid].duration) lo = mid + 1;
+        else { found = mid; break; }
+      }
+    }
+    if (found < 0) found = frames.findIndex((_, i) => inFrame(i));
+    if (found < 0) return undefined;
+    last = found;
+    const keyframe = frames[found];
+    const element = keyframe.elements[elementIndex];
+    if (!element || element.type !== 'symbol' || element.symbolType !== instance.symbolType ||
+        element.libraryItemName !== instance.libraryItemName) return undefined;
+    if (element.symbolType === 'button') return 0;
+    return graphicSymbolFrame(element.loop, element.firstFrame || 0, element.lastFrame, totalFrames,
+      p - keyframe.index);
+  };
+}
+
+/**
+ * How many ticks a movie clip has been on stage: how long its parent timeline,
+ * read back on `clock`, has stayed inside the clip's run of keyframes. That is
+ * how long continuous playback keeps the instance (it starts over whenever its
+ * parent enters the run anew), so a seek or a one-frame export shows the frame
+ * playback would.
+ */
+export function movieClipTicks(run: { start: number; end: number }, clock: TimelineClock): number {
+  let k = 0;
+  for (;;) {
+    const frame = clock(k + 1);
+    if (frame === undefined || frame < run.start || frame >= run.end) return k;
+    k++;
+  }
 }

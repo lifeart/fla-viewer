@@ -31,7 +31,8 @@ import type {
   MorphSegment,
   ColorTransform,
   BlendMode,
-  Rectangle
+  Rectangle,
+  WidthMarker
 } from './types';
 import { decodeEdgesWithStyleChanges } from './edge-decoder';
 import {
@@ -112,6 +113,37 @@ const DEFAULT_DASH_LENGTH = 4;
 const DEFAULT_DASH_SPACE_LENGTH = 4;
 // Default gap between dots of a <DottedStroke> without `dotSpace` (flacomdoc's XFL reader).
 const DEFAULT_DOT_SPACE = 3;
+
+/**
+ * A variable-width stroke profile (Animate CC Width tool and width profiles), as saved:
+ *   <SolidStroke weight="3"><fill>…</fill>
+ *     <VariablePointWidth>
+ *       <WidthMarker position="0" left="0" right="0" type="corner"/>
+ *       <WidthMarker position="0.5" left="0.5" right="0.5"/>
+ *       <WidthMarker position="1" left="0" right="0" type="corner"/>
+ *     </VariablePointWidth></SolidStroke>
+ * Real files only carry it on <SolidStroke>. Returns {} for a constant-width stroke.
+ */
+function parseWidthProfile(solidStroke: globalThis.Element): { widthMarkers?: WidthMarker[] } {
+  const markers: WidthMarker[] = [];
+  for (const el of solidStroke.querySelectorAll(':scope > VariablePointWidth > WidthMarker')) {
+    const num = (name: string, fallback: number) => {
+      const v = parseFloat(el.getAttribute(name) ?? '');
+      return Number.isFinite(v) ? v : fallback;
+    };
+    const position = num('position', NaN);
+    if (Number.isNaN(position)) continue;
+    markers.push({
+      position: Math.min(1, Math.max(0, position)),
+      left: Math.max(0, num('left', 0.5)),
+      right: Math.max(0, num('right', 0.5)),
+      ...(el.getAttribute('type') === 'corner' && { corner: true }),
+    });
+  }
+  if (markers.length === 0) return {};
+  markers.sort((a, b) => a.position - b.position);
+  return { widthMarkers: markers };
+}
 
 /**
  * Normalize a classic tween's `motionTweenRotate`. Animate writes the long forms
@@ -255,6 +287,13 @@ export class FLAParser {
     const height = parseFloat(root.getAttribute('height') || '400') || 400;
     const frameRate = parseFloat(root.getAttribute('frameRate') || '24') || 24;
     const backgroundColor = root.getAttribute('backgroundColor') || '#FFFFFF';
+    // 3D perspective (CS4+): perspective angle and vanishing point.
+    const viewAngle3D = parseFloat(root.getAttribute('viewAngle3D') ?? '');
+    const vanishingX = parseFloat(root.getAttribute('vanishingPoint3DX') ?? '');
+    const vanishingY = parseFloat(root.getAttribute('vanishingPoint3DY') ?? '');
+    const vanishingPoint3D = Number.isFinite(vanishingX) || Number.isFinite(vanishingY)
+      ? { x: Number.isFinite(vanishingX) ? vanishingX : width / 2, y: Number.isFinite(vanishingY) ? vanishingY : height / 2 }
+      : undefined;
 
     // Parse symbol references and load them
     await this.loadSymbols(root, progress);
@@ -280,6 +319,8 @@ export class FLAParser {
       height,
       frameRate,
       backgroundColor,
+      ...(Number.isFinite(viewAngle3D) && { viewAngle3D }),
+      ...(vanishingPoint3D && { vanishingPoint3D }),
       timelines,
       symbols: this.symbolCache,
       bitmaps,
@@ -613,6 +654,13 @@ export class FLAParser {
       // Find camera layer using generic detection
       const cameraLayerIndex = this.detectCameraLayer(layers, docWidth, docHeight);
 
+      // Animate's native camera layer, unless the timeline marks the camera
+      // disabled (files with a camera write cameraLayerEnabled="true").
+      const nativeCameraIndex = layers.findIndex((layer) => layer.layerType === 'camera');
+      const nativeCameraLayerIndex = nativeCameraIndex >= 0 && tl.getAttribute('cameraLayerEnabled') !== 'false'
+        ? nativeCameraIndex
+        : undefined;
+
       // Detect all reference layers that should not be rendered
       const referenceLayers = this.detectReferenceLayers(layers, docWidth, docHeight);
 
@@ -621,7 +669,10 @@ export class FLAParser {
         referenceLayers.add(cameraLayerIndex);
       }
 
-      timelines.push({ name, layers, totalFrames, cameraLayerIndex, referenceLayers });
+      timelines.push({
+        name, layers, totalFrames, cameraLayerIndex, referenceLayers,
+        ...(nativeCameraLayerIndex !== undefined && { nativeCameraLayerIndex })
+      });
     }
 
     return timelines;
@@ -650,7 +701,8 @@ export class FLAParser {
                            layerNameLower.includes('camera') ||
                            layerNameLower.includes('viewport');
 
-      if (!isCameraName) continue;
+      // Animate's native camera layer is applied on its own (nativeCameraLayerIndex).
+      if (!isCameraName || layer.layerType === 'camera') continue;
 
       // Check if layer has frames with elements
       if (layer.frames.length === 0) continue;
@@ -755,6 +807,7 @@ export class FLAParser {
       const alphaPercent = alphaPercentAttr ? parseInt(alphaPercentAttr) : undefined;
       const layerType = layerEl.getAttribute('layerType') as Layer['layerType'];
       const parentLayerIndex = layerEl.getAttribute('parentLayerIndex');
+      const attachedToCamera = layerEl.getAttribute('attachedToCamera') === 'true';
 
       const frames = await this.parseFrames(layerEl);
 
@@ -768,6 +821,7 @@ export class FLAParser {
         alphaPercent,
         layerType: layerType || 'normal',
         parentLayerIndex: parentLayerIndex ? parseInt(parentLayerIndex) : undefined,
+        ...(attachedToCamera && { attachedToCamera }),
         frames
       });
     }
@@ -801,6 +855,8 @@ export class FLAParser {
       const keyMode = parseInt(frameEl.getAttribute('keyMode') || '0');
       const tweenType = frameEl.getAttribute('tweenType') as Frame['tweenType'] | null;
       const acceleration = frameEl.getAttribute('acceleration');
+      // Layer depth (Animate 2019+); a missing value is depth 0.
+      const zDepth = parseFloat(frameEl.getAttribute('frameZDepth') ?? '');
 
       // Motion tween properties
       const motionTweenRotate = parseMotionTweenRotate(frameEl.getAttribute('motionTweenRotate'));
@@ -823,6 +879,11 @@ export class FLAParser {
         : null;
       const motionObject = animationCore ? parseAnimationCore(animationCore) : undefined;
 
+      // IK pose span (Bone tool armature): Flash's baked per-frame transforms.
+      const ikPoseMatrices = tweenType === 'IK pose'
+        ? this.parseIKPoseMatrices(frameEl, elements.length, duration)
+        : undefined;
+
       // Parse frame label (name attribute is the label text, labelType is the label kind)
       const label = frameEl.getAttribute('name') || undefined;
       const labelType = frameEl.getAttribute('labelType') as 'name' | 'comment' | 'anchor' | null;
@@ -842,6 +903,8 @@ export class FLAParser {
         sound,
         ...(morphShape && { morphShape }),
         ...(motionObject && { motionObject }),
+        ...(ikPoseMatrices && { ikPoseMatrices }),
+        ...(Number.isFinite(zDepth) && zDepth !== 0 && { zDepth }),
         ...(label && { label }),
         ...(labelType && { labelType }),
         ...(actionScript && { actionScript }),
@@ -853,6 +916,30 @@ export class FLAParser {
     }
 
     return frames;
+  }
+
+  /**
+   * The `<betweenFrameMatrixList>` of an IK pose span (`tweenType="IK pose"`),
+   * split per element. Flash writes one `<Matrix>` per element per frame of the
+   * span, element-major: every frame of the first element in `<elements>`, then
+   * the second's, and so on. Each matrix is applied in the parent's space on top
+   * of the element's stored matrix; the first is the identity. Checked on a CS6
+   * save, where `pose * matrix` reproduces the per-frame position and angle each
+   * `<IKTree>` node stores (`xArray`, `yArray`, `angleArray`) and the bone
+   * lengths of its pose `<State>`s. Undefined when the count doesn't fit the
+   * parsed elements, so the lists can't be matched to them (this also catches
+   * a group in `<elements>`, which flattens into several elements).
+   */
+  private parseIKPoseMatrices(frameEl: globalThis.Element, elementCount: number, duration: number): Matrix[][] | undefined {
+    const matrixEls = frameEl.querySelectorAll(':scope > betweenFrameMatrixList > Matrix');
+    if (elementCount === 0 || matrixEls.length !== elementCount * duration) return undefined;
+    const perElement: Matrix[][] = [];
+    for (let e = 0; e < elementCount; e++) {
+      const poses: Matrix[] = [];
+      for (let f = 0; f < duration; f++) poses.push(this.parseMatrix(matrixEls[e * duration + f]));
+      perElement.push(poses);
+    }
+    return perElement;
   }
 
   private parseFrameSound(frame: globalThis.Element): FrameSound | undefined {
@@ -1044,20 +1131,28 @@ export class FLAParser {
     // Parse 3D center point if present
     const centerPoint3DX = el.getAttribute('centerPoint3DX');
     const centerPoint3DY = el.getAttribute('centerPoint3DY');
-    const centerPoint3D = (centerPoint3DX || centerPoint3DY)
-      ? { x: parseFloat(centerPoint3DX || '0'), y: parseFloat(centerPoint3DY || '0') }
+    const center3D = { x: parseFloat(centerPoint3DX || '0'), y: parseFloat(centerPoint3DY || '0') };
+    const centerPoint3D = (centerPoint3DX || centerPoint3DY) && Number.isFinite(center3D.x) && Number.isFinite(center3D.y)
+      ? center3D
       : undefined;
 
     // Parse 3D rotation properties
     const rotationXAttr = el.getAttribute('rotationX');
     const rotationYAttr = el.getAttribute('rotationY');
     const rotationZAttr = el.getAttribute('rotationZ');
-    const zAttr = el.getAttribute('z');
+    // Depth: Flash saves it as the 3D center's z (`centerPoint3DZ`, the same
+    // value as the z translation of the instance's `matrix3D`).
+    const zAttr = el.getAttribute('z') || el.getAttribute('centerPoint3DZ');
 
-    const rotationX = rotationXAttr ? parseFloat(rotationXAttr) : undefined;
-    const rotationY = rotationYAttr ? parseFloat(rotationYAttr) : undefined;
-    const rotationZ = rotationZAttr ? parseFloat(rotationZAttr) : undefined;
-    const z = zAttr ? parseFloat(zAttr) : undefined;
+    const angle = (attr: string | null) => {
+      const value = attr ? parseFloat(attr) : NaN;
+      return Number.isFinite(value) ? value : undefined;
+    };
+    const rotationX = angle(rotationXAttr);
+    const rotationY = angle(rotationYAttr);
+    const rotationZ = angle(rotationZAttr);
+    const zValue = parseFloat(zAttr ?? '');
+    const z = Number.isFinite(zValue) && zValue !== 0 ? zValue : undefined;
 
     // Parse cache as bitmap
     const cacheAsBitmapAttr = el.getAttribute('cacheAsBitmap');
@@ -1657,7 +1752,7 @@ export class FLAParser {
       // Check for SolidStroke
       const solidStroke = strokeEl.querySelector('SolidStroke');
       if (solidStroke) {
-        const commonProps = parseCommonStrokeProps(solidStroke);
+        const commonProps = { ...parseCommonStrokeProps(solidStroke), ...parseWidthProfile(solidStroke) };
         const fillEl = solidStroke.querySelector('fill');
 
         if (fillEl) {
@@ -3206,32 +3301,41 @@ export class FLAParser {
     };
   }
 
-  // Parse filters from <filters> element
+  // Parse filters from <filters> element. `strength` is a ratio (1 = 100%, the
+  // default): JPEXS writes SWF's FIXED8 strength as is, and Animate saves a 60%
+  // drop shadow as strength="0.6" (its object tween curve says 60).
   private parseFilters(el: globalThis.Element): Filter[] {
     const filtersEl = el.querySelector(':scope > filters');
     if (!filtersEl) return [];
 
     const filters: Filter[] = [];
 
+    // Animate omits attributes at their defaults: blur 5, distance 5, angle 45,
+    // strength 1 (100%), quality 1 (low). A filter switched off in the Filters
+    // panel is saved with isEnabled="false": it is kept, marked enabled: false,
+    // so an object tween's filter curves still line up with the list, and is
+    // not drawn.
     for (const child of filtersEl.children) {
+      const count = filters.length;
       switch (child.tagName) {
         case 'BlurFilter':
           filters.push({
             type: 'blur',
-            blurX: parseFloat(child.getAttribute('blurX') || '0'),
-            blurY: parseFloat(child.getAttribute('blurY') || '0'),
+            blurX: parseFloat(child.getAttribute('blurX') || '5'),
+            blurY: parseFloat(child.getAttribute('blurY') || '5'),
             quality: parseInt(child.getAttribute('quality') || '1')
           });
           break;
 
         case 'GlowFilter':
+          // A saved <GlowFilter quality="3"/> tweens from blur 5, strength 100%
+          // and opaque red (its object tween's Glow_* curves).
           filters.push({
             type: 'glow',
-            blurX: parseFloat(child.getAttribute('blurX') || '0'),
-            blurY: parseFloat(child.getAttribute('blurY') || '0'),
-            color: child.getAttribute('color') || '#000000',
-            // Strength is stored as 0-255 in XFL, normalize to 0-1
-            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            blurX: parseFloat(child.getAttribute('blurX') || '5'),
+            blurY: parseFloat(child.getAttribute('blurY') || '5'),
+            color: child.getAttribute('color') || '#FF0000',
+            strength: parseFloat(child.getAttribute('strength') || '1'),
             alpha: parseFloat(child.getAttribute('alpha') || '1'),
             inner: child.getAttribute('inner') === 'true',
             knockout: child.getAttribute('knockout') === 'true',
@@ -3242,12 +3346,12 @@ export class FLAParser {
         case 'DropShadowFilter':
           filters.push({
             type: 'dropShadow',
-            blurX: parseFloat(child.getAttribute('blurX') || '0'),
-            blurY: parseFloat(child.getAttribute('blurY') || '0'),
+            blurX: parseFloat(child.getAttribute('blurX') || '5'),
+            blurY: parseFloat(child.getAttribute('blurY') || '5'),
             color: child.getAttribute('color') || '#000000',
-            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            strength: parseFloat(child.getAttribute('strength') || '1'),
             alpha: parseFloat(child.getAttribute('alpha') || '1'),
-            distance: parseFloat(child.getAttribute('distance') || '4'),
+            distance: parseFloat(child.getAttribute('distance') || '5'),
             angle: parseFloat(child.getAttribute('angle') || '45'),
             inner: child.getAttribute('inner') === 'true',
             knockout: child.getAttribute('knockout') === 'true',
@@ -3259,14 +3363,14 @@ export class FLAParser {
         case 'BevelFilter':
           filters.push({
             type: 'bevel',
-            blurX: parseFloat(child.getAttribute('blurX') || '4'),
-            blurY: parseFloat(child.getAttribute('blurY') || '4'),
-            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            blurX: parseFloat(child.getAttribute('blurX') || '5'),
+            blurY: parseFloat(child.getAttribute('blurY') || '5'),
+            strength: parseFloat(child.getAttribute('strength') || '1'),
             highlightColor: child.getAttribute('highlightColor') || '#FFFFFF',
             highlightAlpha: parseFloat(child.getAttribute('highlightAlpha') || '1'),
             shadowColor: child.getAttribute('shadowColor') || '#000000',
             shadowAlpha: parseFloat(child.getAttribute('shadowAlpha') || '1'),
-            distance: parseFloat(child.getAttribute('distance') || '4'),
+            distance: parseFloat(child.getAttribute('distance') || '5'),
             angle: parseFloat(child.getAttribute('angle') || '45'),
             inner: child.getAttribute('inner') === 'true',
             knockout: child.getAttribute('knockout') === 'true',
@@ -3332,10 +3436,10 @@ export class FLAParser {
         case 'GradientGlowFilter':
           filters.push({
             type: 'gradientGlow',
-            blurX: parseFloat(child.getAttribute('blurX') || '4'),
-            blurY: parseFloat(child.getAttribute('blurY') || '4'),
-            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
-            distance: parseFloat(child.getAttribute('distance') || '4'),
+            blurX: parseFloat(child.getAttribute('blurX') || '5'),
+            blurY: parseFloat(child.getAttribute('blurY') || '5'),
+            strength: parseFloat(child.getAttribute('strength') || '1'),
+            distance: parseFloat(child.getAttribute('distance') || '5'),
             angle: parseFloat(child.getAttribute('angle') || '45'),
             colors: this.parseGradientFilterColors(child),
             inner: child.getAttribute('inner') === 'true',
@@ -3347,10 +3451,10 @@ export class FLAParser {
         case 'GradientBevelFilter':
           filters.push({
             type: 'gradientBevel',
-            blurX: parseFloat(child.getAttribute('blurX') || '4'),
-            blurY: parseFloat(child.getAttribute('blurY') || '4'),
-            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
-            distance: parseFloat(child.getAttribute('distance') || '4'),
+            blurX: parseFloat(child.getAttribute('blurX') || '5'),
+            blurY: parseFloat(child.getAttribute('blurY') || '5'),
+            strength: parseFloat(child.getAttribute('strength') || '1'),
+            distance: parseFloat(child.getAttribute('distance') || '5'),
             angle: parseFloat(child.getAttribute('angle') || '45'),
             colors: this.parseGradientFilterColors(child),
             inner: child.getAttribute('inner') === 'true',
@@ -3358,6 +3462,9 @@ export class FLAParser {
             quality: parseInt(child.getAttribute('quality') || '1')
           });
           break;
+      }
+      if (filters.length > count && child.getAttribute('isEnabled') === 'false') {
+        filters[count] = { ...filters[count], enabled: false };
       }
     }
 

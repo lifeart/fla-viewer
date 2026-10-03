@@ -6,6 +6,7 @@ import {
   applyTimeMap,
   type MotionObjectTween,
 } from '../motion-object';
+import type { Filter } from '../types';
 
 // CS4+ object motion tweens (<motionObjectXML><AnimationCore>). Sample XML follows
 // what Flash CS5 writes (e.g. TimeScale 24000 at 24fps, 1000 ticks per frame).
@@ -15,20 +16,32 @@ const key = (t: number, v: number, next = `0,${v}`, previous = `0,${v}`) =>
 const prop = (id: string, keys: string, attrs = '') =>
   `<Property enabled="1" id="${id}" ignoreTimeMap="0" readonly="0" visible="1"${attrs}>${keys}</Property>`;
 
-function core(basic: string, transformation = '', colors = '', timeMap = '<TimeMap strength="0" type="Quadratic"/>'): Element {
+function core(basic: string, transformation = '', colors = '', timeMap = '<TimeMap strength="0" type="Quadratic"/>', filters = ''): Element {
   const xml = `<AnimationCore TimeScale="24000" Version="1" duration="30000">${timeMap}
     <metadata><Settings orientToPath="0" xformPtXOffsetPct="0.5" xformPtYOffsetPct="0.5" xformPtZOffsetPixels="0"/></metadata>
     <PropertyContainer id="headContainer">
       <PropertyContainer id="Basic_Motion">${basic}</PropertyContainer>
       <PropertyContainer id="Transformation">${transformation}</PropertyContainer>
       <PropertyContainer id="Colors">${colors}</PropertyContainer>
-      <PropertyContainer id="Filters"/>
+      <PropertyContainer id="Filters">${filters}</PropertyContainer>
     </PropertyContainer>
   </AnimationCore>`;
   return new DOMParser().parseFromString(xml, 'text/xml').documentElement;
 }
 
 const identity = { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 };
+
+// Filter containers copied from real saves. DROP_SHADOW_FILTER is from a file
+// whose instance has <DropShadowFilter alpha="0.898039215686275" blurX="60"
+// blurY="60" distance="15" quality="3" strength="0.6"/> (lsumedia/lsutv-graphics,
+// CountDown_FS); BLUR_FILTER is from a CS5 sample that animates <BlurFilter
+// blurX="10" blurY="10" quality="3"/> to 0 over 48 frames (Apress, Foundation
+// Flash CS5 for Designers, "Garden").
+const DROP_SHADOW_FILTER = `<PropertyContainer id="DropShadow_Filter"><Property enabled="1" id="DropShadow_BlurX" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,60" next="0,60" previous="0,60" roving="0" timevalue="0"/></Property><Property enabled="1" id="DropShadow_BlurY" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,60" next="0,60" previous="0,60" roving="0" timevalue="0"/></Property><Property enabled="1" id="DropShadow_Strength" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,60" next="0,60" previous="0,60" roving="0" timevalue="0"/></Property><Property enabled="1" id="DropShadow_Quality" readonly="0" value="3" visible="1"/><Property enabled="1" id="DropShadow_Angle" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,45" next="0,45" previous="0,45" roving="0" timevalue="0"/></Property><Property enabled="1" id="DropShadow_Distance" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,15" next="0,15" previous="0,15" roving="0" timevalue="0"/></Property><Property enabled="1" id="DropShadow_Knockout" readonly="0" value="0" visible="1"/><Property enabled="1" id="DropShadow_InnerShadow" readonly="0" value="0" visible="1"/><Property enabled="1" id="DropShadow_HideObject" readonly="0" value="0" visible="1"/><Property enabled="1" id="DropShadow_Color" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe roving="0" timevalue="0" value="0x000000e5"/></Property></PropertyContainer>`;
+const BLUR_FILTER = `<PropertyContainer id="Blur_Filter"><Property enabled="1" id="Blur_BlurX" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,10" next="0,10" previous="0,10" roving="0" timevalue="0"/><Keyframe anchor="0,0" next="0,0" previous="0,0" roving="0" timevalue="48000"/></Property><Property enabled="1" id="Blur_BlurY" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,10" next="0,10" previous="0,10" roving="0" timevalue="0"/><Keyframe anchor="0,0" next="0,0" previous="0,0" roving="0" timevalue="48000"/></Property><Property enabled="1" id="Blur_Quality" readonly="0" value="3" visible="1"/></PropertyContainer>`;
+// A glow as Animate saves it for an instance with <GlowFilter quality="3"/>
+// (FlashNightModReborn/CrazyFlashNight, 静止动作.xml), with a second color key added.
+const GLOW_FILTER = `<PropertyContainer id="Glow_Filter"><Property enabled="1" id="Glow_BlurX" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,5" next="0,5" previous="0,5" roving="0" timevalue="0"/></Property><Property enabled="1" id="Glow_BlurY" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,5" next="0,5" previous="0,5" roving="0" timevalue="0"/></Property><Property enabled="1" id="Glow_Strength" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,100" next="0,100" previous="0,100" roving="0" timevalue="0"/></Property><Property enabled="1" id="Glow_Quality" readonly="0" value="3" visible="1"/><Property enabled="1" id="Glow_Color" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe roving="0" timevalue="0" value="0xff0000ff"/><Keyframe roving="0" timevalue="10000" value="0x0000ff00"/></Property><Property enabled="1" id="Glow_Knockout" readonly="0" value="0" visible="1"/><Property enabled="1" id="Glow_InnerGlow" readonly="0" value="0" visible="1"/></PropertyContainer>`;
 
 describe('parseAnimationCore', () => {
   it('reads properties, keys, handles and the time map', () => {
@@ -70,6 +83,33 @@ describe('parseAnimationCore', () => {
     const tween = parseAnimationCore(core(prop('Motion_X', key(0, 0)).replace('enabled="1"', 'enabled="0"')));
     expect(tween.properties.Motion_X).toBeUndefined();
   });
+
+  it('picks each property\'s time map by TimeMapIndex', () => {
+    // As in Animate's ball-bounce motion preset: only Motion_Y bounces.
+    const tween = parseAnimationCore(core(
+      prop('Motion_X', key(0, 0) + key(74000, 500)) + prop('Motion_Y', key(0, 0) + key(74000, 367.3), ' TimeMapIndex="1"'),
+      '', '', '<TimeMap strength="0" type="Quadratic"/><TimeMap strength="4" type="BounceIn"/>'
+    ));
+    expect(tween.properties.Motion_X.timeMap).toEqual({ type: 'Quadratic', strength: 0 });
+    expect(tween.properties.Motion_Y.timeMap).toEqual({ type: 'BounceIn', strength: 4 });
+  });
+
+  it('reads the Filters container as one curve set per filter, in order', () => {
+    const tween = parseAnimationCore(core('', '', '', undefined, DROP_SHADOW_FILTER + BLUR_FILTER));
+    expect(tween.filters?.map((f) => f.kind)).toEqual(['DropShadow', 'Blur']);
+    const shadow = tween.filters![0].properties;
+    expect(Object.keys(shadow).sort()).toEqual([
+      'Angle', 'BlurX', 'BlurY', 'Color.a', 'Color.b', 'Color.g', 'Color.r', 'Distance',
+      'HideObject', 'InnerShadow', 'Knockout', 'Quality', 'Strength',
+    ]);
+    // Keyless properties with their own value are constants.
+    expect(shadow.Quality.keyframes).toEqual([{ time: 0, value: 3 }]);
+    expect(shadow['Color.a'].keyframes).toEqual([{ time: 0, value: 0xe5 }]);
+    expect(tween.filters![1].properties.BlurX.keyframes.map((k) => [k.time, k.value])).toEqual([[0, 10], [48000, 0]]);
+    // Filter curves stay out of the flat property map.
+    expect(Object.keys(tween.properties).some((id) => id.startsWith('DropShadow') || id.startsWith('Blur'))).toBe(false);
+    expect(parseAnimationCore(core(prop('Motion_X', key(0, 0)))).filters).toBeUndefined();
+  });
 });
 
 describe('evaluateMotionProperty', () => {
@@ -108,6 +148,33 @@ describe('evaluateMotionProperty', () => {
     expect(evaluateMotionProperty({ keyframes, timeMap: { type: 'Quadratic', strength: 100 } }, 5000)).toBeCloseTo(75, 3);
     expect(evaluateMotionProperty({ keyframes, timeMap: { type: 'Quadratic', strength: -100 } }, 5000)).toBeCloseTo(25, 3);
   });
+
+  it('holds the eased value from the last key on when the ease does not end on 1', () => {
+    // Sony's PSM sample spins Rotation_Z to 513 degrees with Spring 5 over 60
+    // frames; the spring settles at 70% of the change, so it comes to rest at 360.
+    const p = { keyframes: [{ time: 0, value: 0 }, { time: 59000, value: 513 }], timeMap: { type: 'Spring', strength: 5 } };
+    expect(evaluateMotionProperty(p, 59000)).toBeCloseTo(360.137, 2);
+    expect(evaluateMotionProperty(p, 70000)).toBeCloseTo(360.137, 2);
+    expect(evaluateMotionProperty(p, 0.08 * 59000)).toBeCloseTo(513, 6); // top of the first swing
+  });
+
+  it('bounces on the end value with BounceIn', () => {
+    // Animate's ball-bounce preset: Motion_Y 0 -> 367.3 over 74 frames, 4 bounces.
+    // The first arc (48% of the time) is the fall; the next peaks e^-1 back up.
+    const p = { keyframes: [{ time: 0, value: 0 }, { time: 74000, value: 367.3 }], timeMap: { type: 'BounceIn', strength: 4 } };
+    expect(evaluateMotionProperty(p, 0.24 * 74000)).toBeCloseTo(367.3 / 4, 3);
+    expect(evaluateMotionProperty(p, 0.48 * 74000)).toBeCloseTo(367.3, 3);
+    expect(evaluateMotionProperty(p, 0.6 * 74000)).toBeCloseTo(367.3 * (1 - Math.exp(-1)), 3);
+    expect(evaluateMotionProperty(p, 74000)).toBeCloseTo(367.3, 6);
+  });
+
+  it('holds the end keys where an ease leaves 0..1', () => {
+    // DampedWave starts at -0.5 and swings around the start value.
+    const p = { keyframes: [{ time: 0, value: 10 }, { time: 10000, value: 110 }], timeMap: { type: 'DampedWave', strength: 2 } };
+    expect(evaluateMotionProperty(p, 1000)).toBe(10);
+    expect(evaluateMotionProperty(p, 2500)).toBeCloseTo(10 + 100 * Math.exp(-0.5) / 2, 6);
+    expect(evaluateMotionProperty(p, 5000)).toBe(10);
+  });
 });
 
 describe('applyTimeMap', () => {
@@ -123,18 +190,58 @@ describe('applyTimeMap', () => {
     ['DualQuadratic', -100, 0.75, 0.875],
     ['DualQuadratic', 100, 0.25, 0.375], // slow in the middle
     ['DualQuadratic', 100, 0.5, 0.5],
-    ['Spring', 5, 0.3, 0.3], // not implemented: linear
   ])('%s strength %d at %d is %d', (type, strength, r, expected) => {
     expect(applyTimeMap({ type, strength }, r)).toBeCloseTo(expected, 6);
   });
 
   it('keeps the end points fixed', () => {
-    for (const type of ['Quadratic', 'Cubic', 'DualQuartic']) {
+    for (const type of ['Quadratic', 'Cubic', 'DualQuartic', 'BounceIn']) {
       for (const strength of [-100, 40, 100]) {
         expect(applyTimeMap({ type, strength }, 0)).toBeCloseTo(0, 9);
         expect(applyTimeMap({ type, strength }, 1)).toBeCloseTo(1, 9);
       }
     }
+  });
+
+  // Motion Editor presets, per Sony PSM's AnimationUtility. With 4 bounces the
+  // arcs take 12/25 of the time, then half, a third and a quarter of that.
+  it.each([
+    ['BounceIn', 4, 0.24, 0.25], // falling: (r / 0.48)^2
+    ['BounceIn', 4, 0.48, 1], // lands
+    ['BounceIn', 4, 0.6, 1 - Math.exp(-1)], // top of the first bounce
+    ['BounceIn', 4, 0.8, 1 - Math.exp(-2)],
+    ['BounceIn', -4, 0.76, 0.75], // mirrored in time: bounces at the start
+    ['Bounce', 4, 0.24, 1], // arcs out and back to the start
+    ['Bounce', 4, 0.48, 0],
+    ['Bounce', 4, 0.6, Math.exp(-1)],
+    ['Bounce', 4, 1, 0],
+    ['Bounce', -4, 0.76, 1],
+    ['Spring', 5, 0.04, Math.SQRT1_2], // quarter sine up to 1 at 0.4 / 5
+    ['Spring', 5, 0.08, 1],
+    ['Spring', 5, 0.172, 0.7 - 0.3 * Math.exp(-0.5)], // half a swing later
+    ['Spring', 5, 1, 0.7 + 0.3 * Math.exp(-5)],
+    ['Spring', -5, 0.3, 0.3], // linear
+    ['SineWave', 3, 1 / 3, 1],
+    ['SineWave', 3, 0.5, 0.5],
+    ['SineWave', 3, 2 / 3, 0],
+    ['SineWave', 3, 1, 1],
+    ['SawtoothWave', 2, 0.25, 0.5],
+    ['SawtoothWave', 2, 0.5, 1],
+    ['SawtoothWave', 2, 0.75, 0.5],
+    ['SawtoothWave', 2, 1, 0],
+    ['SquareWave', 4, 0.1, 0],
+    ['SquareWave', 4, 0.3, 1],
+    ['SquareWave', 4, 0.6, 0],
+    ['SquareWave', 4, 0.8, 1],
+    ['SquareWave', 0, 0.75, 1], // at least 2 levels
+    ['DampedWave', 2, 0, -0.5],
+    ['DampedWave', 2, 0.25, Math.exp(-0.5) / 2],
+    ['DampedWave', 2, 0.5, -Math.exp(-1) / 2],
+    ['DampedWave', 0, 0.3, 0.3],
+    ['RandomSquareWave', 3, 0.3, 0.3], // not reproducible: linear
+    ['Custom', 0, 0.3, 0.3], // curve storage unknown: linear
+  ])('%s strength %d at %d is %d', (type, strength, r, expected) => {
+    expect(applyTimeMap({ type, strength }, r)).toBeCloseTo(expected, 6);
   });
 });
 
@@ -217,5 +324,79 @@ describe('evaluateMotionObject', () => {
     const state = evaluateMotionObject(tweenOf({ Rotation_Y: linear(0, 60) }), 5, 24, identity);
     expect(state.rotationY).toBeCloseTo(30, 9);
     expect(state.rotationX).toBeUndefined();
+  });
+});
+
+describe('evaluateMotionObject filters', () => {
+  const filtersAt = (xml: string, frame: number, base: Filter[] = []) =>
+    evaluateMotionObject(parseAnimationCore(core('', '', '', undefined, xml)), frame, 24, identity, undefined, base).filters;
+
+  it('rebuilds the instance\'s own filter from the curves', () => {
+    // The real file's <DropShadowFilter alpha="0.898..." blurX="60" blurY="60"
+    // distance="15" quality="3" strength="0.6"/>, with the defaults it omits.
+    expect(filtersAt(DROP_SHADOW_FILTER, 0)).toEqual([{
+      type: 'dropShadow', blurX: 60, blurY: 60, strength: 0.6, quality: 3, angle: 45, distance: 15,
+      color: '#000000', alpha: 0xe5 / 255, knockout: false, inner: false, hideObject: false,
+    }]);
+    expect(filtersAt(GLOW_FILTER, 0)).toEqual([{
+      type: 'glow', blurX: 5, blurY: 5, strength: 1, quality: 3, color: '#FF0000', alpha: 1, knockout: false, inner: false,
+    }]);
+  });
+
+  it('animates filter values over the span', () => {
+    // Blur 10 -> 0 over 48 frames.
+    expect(filtersAt(BLUR_FILTER, 0)).toEqual([{ type: 'blur', blurX: 10, blurY: 10, quality: 3 }]);
+    expect(filtersAt(BLUR_FILTER, 24)).toEqual([{ type: 'blur', blurX: 5, blurY: 5, quality: 3 }]);
+    expect(filtersAt(BLUR_FILTER, 48)).toEqual([{ type: 'blur', blurX: 0, blurY: 0, quality: 3 }]);
+    // Glow color red -> transparent blue, per channel.
+    expect(filtersAt(GLOW_FILTER, 5)![0]).toMatchObject({ color: '#800080', alpha: 0.5 });
+  });
+
+  it('replaces the matching base filter and keeps the others', () => {
+    const adjust: Filter = { type: 'colorMatrix', matrix: Array(20).fill(0) };
+    const blur: Filter = { type: 'blur', blurX: 10, blurY: 10, quality: 3 };
+    const shadow: Filter = { type: 'dropShadow', blurX: 1, blurY: 1, color: '#00FF00', strength: 1, distance: 1, angle: 0 };
+    const out = filtersAt(DROP_SHADOW_FILTER + BLUR_FILTER, 24, [adjust, shadow, blur])!;
+    expect(out.map((f) => f.type)).toEqual(['colorMatrix', 'dropShadow', 'blur']);
+    expect(out[0]).toBe(adjust);
+    expect(out[1]).toMatchObject({ blurX: 60, color: '#000000', distance: 15 });
+    expect(out[2]).toMatchObject({ blurX: 5 });
+    // A curve set with no filter of its type in the base is appended.
+    expect(filtersAt(BLUR_FILTER, 0, [adjust])!.map((f) => f.type)).toEqual(['colorMatrix', 'blur']);
+  });
+
+  it('pairs curves with switched-off filters by position and keeps them off', () => {
+    const off: Filter = { type: 'blur', blurX: 2, blurY: 2, quality: 1, enabled: false };
+    const on: Filter = { type: 'blur', blurX: 7, blurY: 7, quality: 1 };
+    const second = `<PropertyContainer id="Blur_Filter">${prop('Blur_BlurX', key(0, 20))}</PropertyContainer>`;
+    const out = filtersAt(BLUR_FILTER + second, 24, [off, on])!;
+    expect(out[0]).toMatchObject({ blurX: 5, enabled: false });
+    expect(out[1]).toMatchObject({ blurX: 20 });
+    expect(out[1].enabled).toBeUndefined();
+  });
+
+  it('reads bevel colors and keeps what the curves do not cover', () => {
+    const bevel = `<PropertyContainer id="Bevel_Filter">
+      ${prop('Bevel_Distance', key(0, 4) + key(10000, 14))}
+      ${prop('Bevel_ShadowColor', '<Keyframe roving="0" timevalue="0" value="0x112233ff"/>')}
+      ${prop('Bevel_HilightColor', '<Keyframe roving="0" timevalue="0" value="0xffeeddcc"/>')}
+    </PropertyContainer>`;
+    const base: Filter = {
+      type: 'bevel', blurX: 3, blurY: 4, strength: 2, highlightColor: '#FFFFFF', shadowColor: '#000000',
+      distance: 4, angle: 30, bevelType: 'full',
+    };
+    expect(filtersAt(bevel, 5, [base])).toEqual([{
+      type: 'bevel', blurX: 3, blurY: 4, strength: 2, quality: 1, knockout: false, angle: 30, distance: 9,
+      shadowColor: '#112233', shadowAlpha: 1, highlightColor: '#FFEEDD', highlightAlpha: 0xcc / 255, bevelType: 'full',
+    }]);
+  });
+
+  it('falls back to Animate\'s defaults for values neither the curves nor the instance give', () => {
+    const angleOnly = `<PropertyContainer id="DropShadow_Filter">${prop('DropShadow_Angle', key(0, 90))}</PropertyContainer>`;
+    expect(filtersAt(angleOnly, 0)![0]).toMatchObject({ blurX: 5, blurY: 5, distance: 5, angle: 90, strength: 1, quality: 1 });
+  });
+
+  it('leaves the filters alone without filter curves', () => {
+    expect(evaluateMotionObject(parseAnimationCore(core('')), 5, 24, identity).filters).toBeUndefined();
   });
 });

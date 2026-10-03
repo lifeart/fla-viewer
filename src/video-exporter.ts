@@ -1,7 +1,13 @@
 import type { FLADocument, SoundItem, FrameSound } from './types';
-import { isLayerVisibleInFla, getMaskLayerIndex } from './layer-utils';
+import { isLayerVisibleInFla, getMaskLayerIndex, invertMatrix } from './layer-utils';
+import { layerZDepthAt, sortByStageDepth, stageLayerViews, type StageLayerViews } from './native-camera';
 import { FLARenderer } from './renderer';
-import { graphicSymbolFrame, movieClipPlayhead, movieClipRun, movieClipStopFrames, movieClipTicks, type EnclosingClip } from './symbol-loop';
+import {
+  graphicSymbolFrame, instanceClock, movieClipClock, movieClipPlayhead, movieClipRun, movieClipStopFrames,
+  movieClipTicks, rootClock, type TimelineClock
+} from './symbol-loop';
+import { applyIKPose } from './ik-pose';
+import { polygonsToSvgPathData, variableWidthStrokePolygons } from './variable-width-stroke';
 
 export interface ExportProgress {
   currentFrame: number;
@@ -1293,9 +1299,11 @@ export async function exportSVG(
   // real-file usage and the canvas renderer only crudely approximates them, so
   // we skip them gracefully (emit no primitive, never throw).
   const createFilterDef = (
-    filters: import('./types').Filter[] | undefined,
+    allFilters: import('./types').Filter[] | undefined,
     colorTransform?: import('./types').ColorTransform
   ): string => {
+    // Filters switched off in the Filters panel are not drawn.
+    const filters = allFilters?.filter((f) => f.enabled !== false);
     // Does the color transform have a non-identity RGB part (tint)? Mirrors the
     // canvas renderer's colorTransformAffectsRGB (renderer.ts:3775) EXACTLY,
     // including the 1e-6 threshold, so SVG and canvas agree on when a tint is
@@ -1402,9 +1410,9 @@ export async function exportSVG(
         case 'glow':
         case 'dropShadow': {
           // glow == distance-0 colored shadow; dropShadow offsets it by
-          // distance@angle. The renderer sets shadowBlur = max(blurX,blurY)*
-          // strength and the shadow color = color@alpha; we approximate that
-          // intent: blur radius from max axis (÷2 for stdDeviation), opacity =
+          // distance@angle. Like the renderer (shadowBlur = max(blurX,blurY),
+          // shadow color = color@alpha×strength clamped to 1): blur radius
+          // from the larger axis (÷2 for stdDeviation), opacity =
           // alpha×strength clamped.
           const stdDev = Math.max(filter.blurX, filter.blurY) / 2;
           const strength = filter.strength ?? 1;
@@ -1507,6 +1515,7 @@ export async function exportSVG(
       let strokeLinecap = '';
       let strokeLinejoin = '';
       let strokeDasharray = '';
+      let variableOutline = '';
 
       // Get fill style
       if (edge.fillStyle0 !== undefined || edge.fillStyle1 !== undefined) {
@@ -1520,7 +1529,11 @@ export async function exportSVG(
       // Get stroke style
       if (edge.strokeStyle !== undefined) {
         const strokeStyle = shape.strokes.find(s => s.index === edge.strokeStyle);
-        if (strokeStyle && strokeStyle.color) {
+        if (strokeStyle && strokeStyle.color && strokeStyle.widthMarkers) {
+          // Variable-width stroke: the same filled outline the canvas renderer draws.
+          const outline = polygonsToSvgPathData(variableWidthStrokePolygons(edge.commands, strokeStyle));
+          if (outline) variableOutline = `<path d="${outline}" fill="${strokeStyle.color}"/>`;
+        } else if (strokeStyle && strokeStyle.color) {
           stroke = strokeStyle.color;
           strokeWidth = strokeStyle.weight;
           if (strokeStyle.caps === 'round') strokeLinecap = ' stroke-linecap="round"';
@@ -1539,7 +1552,8 @@ export async function exportSVG(
       const fillAttr = fill.includes('fill-opacity') ? `fill="${fill.split('"')[0]}" fill-opacity="${fill.split('"')[1]}"` : `fill="${fill}"`;
       const strokeAttr = stroke !== 'none' ? ` stroke="${stroke}" stroke-width="${strokeWidth}"${strokeLinecap}${strokeLinejoin}${strokeDasharray}` : '';
 
-      paths.push(`<path d="${pathData}" ${fillAttr}${strokeAttr}/>`);
+      if (!variableOutline || fill !== 'none') paths.push(`<path d="${pathData}" ${fillAttr}${strokeAttr}/>`);
+      if (variableOutline) paths.push(variableOutline);
     }
 
     if (paths.length === 0) return '';
@@ -1666,13 +1680,13 @@ export async function exportSVG(
   };
 
   // Where an element sits: its timeline's current frame, layer, keyframe and
-  // element index, and how long the enclosing movie clip (if any) has played.
+  // element index, and the timeline's clock (the frames it showed before).
   type ElementPlace = {
     frame: number;
     layer: import('./types').Layer;
     keyframe: import('./types').Frame;
     elementIndex: number;
-    enclosing?: EnclosingClip;
+    clock: TimelineClock;
   };
 
   // Render element with keyframe start tracking for symbol frame calculation
@@ -1714,20 +1728,20 @@ export async function exportSVG(
     const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
 
     // Same frame choice as the renderer for an instance first drawn here: a movie
-    // clip has played since its run of keyframes began (holding at a stop()
-    // frame), a button shows its up state, a graphic follows its timeline.
+    // clip has played since its parent entered its run of keyframes (holding at
+    // a stop() frame), a button shows its up state, a graphic follows its timeline.
     let symbolFrame: number;
-    let enclosing: EnclosingClip | undefined;
+    let clock: TimelineClock;
     if (instance.symbolType === 'movieclip') {
       const run = movieClipRun(place.layer.frames, place.keyframe, place.elementIndex, instance.libraryItemName);
-      const ticks = movieClipTicks(place.frame, run, place.enclosing);
+      const ticks = movieClipTicks(run, place.clock);
       const stopFrames = movieClipStopFrames(symbol.timeline);
       symbolFrame = movieClipPlayhead(ticks, totalSymbolFrames, stopFrames).frame;
-      enclosing = { ticks, totalFrames: totalSymbolFrames, stopFrames };
-    } else if (instance.symbolType === 'button') {
-      symbolFrame = 0;
+      clock = movieClipClock(ticks, totalSymbolFrames, stopFrames);
     } else {
-      symbolFrame = graphicSymbolFrame(instance.loop, firstFrame, lastFrame, totalSymbolFrames, place.frame - place.keyframe.index);
+      symbolFrame = instance.symbolType === 'button' ? 0
+        : graphicSymbolFrame(instance.loop, firstFrame, lastFrame, totalSymbolFrames, place.frame - place.keyframe.index);
+      clock = instanceClock(place.clock, place.layer.frames, place.elementIndex, instance, totalSymbolFrames);
     }
 
     // Collect elements from all layers at the symbolFrame, mask-aware (mask
@@ -1741,7 +1755,7 @@ export async function exportSVG(
       depth + 1,
       new Set<number>(),
       elements,
-      enclosing
+      clock
     );
 
     if (elements.length === 0) return '';
@@ -1796,13 +1810,15 @@ export async function exportSVG(
     atFrameIndex: number,
     depth: number,
     out: string[],
-    enclosing?: EnclosingClip
+    clock: TimelineClock
   ): void => {
     const currentFrame = findActiveFrame(layer, atFrameIndex);
     if (!currentFrame) return;
     currentFrame.elements.forEach((element, elementIndex) => {
-      const rendered = renderElementWithKeyframe(element, depth,
-        { frame: atFrameIndex, layer, keyframe: currentFrame, elementIndex, enclosing });
+      // IK pose spans are baked per frame, so they pose here too (tweens don't).
+      const posed = applyIKPose(currentFrame, element, elementIndex, atFrameIndex);
+      const rendered = renderElementWithKeyframe(posed, depth,
+        { frame: atFrameIndex, layer, keyframe: currentFrame, elementIndex, clock });
       if (rendered) out.push(rendered);
     });
   };
@@ -1824,13 +1840,18 @@ export async function exportSVG(
   //    but the mask block returns first, so there is no double-hide.
   //  - Masked children are NOT rendered again when their index comes up in the
   //    normal loop (tracked via maskedLayers).
+  //
+  // `stageViews` (main timeline only) applies Animate's native camera and layer
+  // depth: each layer's output is wrapped in its view transform and layers are
+  // stacked by depth, as in the renderer (src/native-camera.ts).
   const renderLayerStack = (
     layers: import('./types').Layer[],
     atFrameIndex: number,
     depth: number,
     referenceLayers: Set<number>,
     out: string[],
-    enclosing?: EnclosingClip
+    clock: TimelineClock,
+    stageViews: StageLayerViews | null = null
   ): void => {
     // masked layer index -> mask layer index
     const maskedLayers = new Map<number, number>();
@@ -1841,8 +1862,22 @@ export async function exportSVG(
       }
     }
 
+    // A layer's output in its stage view (dropped when behind the camera).
+    const pushInView = (target: string[], layerOut: string[], layerIndex: number): void => {
+      if (layerOut.length === 0) return;
+      const view = stageViews ? stageViews.matrices[layerIndex] : undefined;
+      if (view === null) return;
+      const transform = view ? matrixToTransform(view) : '';
+      if (!transform) {
+        target.push(...layerOut);
+        return;
+      }
+      target.push(`<g transform="${transform}">\n    ${layerOut.join('\n    ')}\n  </g>`);
+    };
+
     const indices = [...Array(layers.length).keys()].reverse();
-    for (const layerIndex of indices) {
+    const paintOrder = stageViews ? sortByStageDepth(indices, stageViews) : indices;
+    for (const layerIndex of paintOrder) {
       const layer = layers[layerIndex];
 
       if (referenceLayers.has(layerIndex)) continue;
@@ -1859,13 +1894,16 @@ export async function exportSVG(
         }
         if (maskedByThis.length === 0) continue; // mask with no children: nothing to draw
 
-        // Render the masked children (bottom first, top last) honoring each
+        // Render the masked children in paint order (bottom first, or furthest
+        // first with layer depth, as the renderer stacks them) honoring each
         // child's own visibility. No double-hide: isLayerVisibleInFla here is
         // the child's check; the mask gate above is separate.
         const childOut: string[] = [];
-        for (const maskedIdx of [...maskedByThis].sort((a, b) => b - a)) {
+        for (const maskedIdx of paintOrder.filter((i) => maskedByThis.includes(i))) {
           if (!isLayerVisibleInFla(layers, maskedIdx)) continue;
-          renderLayerElements(layers[maskedIdx], atFrameIndex, depth, childOut, enclosing);
+          const layerOut: string[] = [];
+          renderLayerElements(layers[maskedIdx], atFrameIndex, depth, layerOut, clock);
+          pushInView(childOut, layerOut, maskedIdx);
         }
         if (childOut.length === 0) continue; // nothing visible to clip
 
@@ -1873,7 +1911,13 @@ export async function exportSVG(
         // no mask content; render children unclipped (renderer.ts:915-928).
         const maskFrame = findActiveFrame(layer, atFrameIndex);
         const clipId = maskFrame ? buildMaskClipDef(maskFrame) : null;
-        if (clipId) {
+        const maskView = stageViews ? stageViews.matrices[layerIndex] : undefined;
+        if (clipId && maskView === null) continue; // the mask is behind the camera: no mask area
+        const maskInverse = clipId && maskView && matrixToTransform(maskView) ? invertMatrix(maskView) : null;
+        if (clipId && maskView && maskInverse) {
+          // The clip is in the mask's view; the children are already in stage space.
+          out.push(`<g transform="${matrixToTransform(maskView)}" clip-path="url(#${clipId})">\n    <g transform="${matrixToTransform(maskInverse)}">\n    ${childOut.join('\n    ')}\n  </g>\n  </g>`);
+        } else if (clipId) {
           out.push(`<g clip-path="url(#${clipId})">\n    ${childOut.join('\n    ')}\n  </g>`);
         } else {
           out.push(...childOut);
@@ -1886,7 +1930,9 @@ export async function exportSVG(
 
       // Normal layer: honor visibility cascade.
       if (!isLayerVisibleInFla(layers, layerIndex)) continue;
-      renderLayerElements(layer, atFrameIndex, depth, out, enclosing);
+      const layerOut: string[] = [];
+      renderLayerElements(layer, atFrameIndex, depth, layerOut, clock);
+      pushInView(out, layerOut, layerIndex);
     }
   };
 
@@ -1896,6 +1942,16 @@ export async function exportSVG(
     return new Blob(['<svg xmlns="http://www.w3.org/2000/svg"></svg>'], { type: 'image/svg+xml' });
   }
 
+  // Animate's native camera, at its keyframe matrix (this exporter does not
+  // interpolate tweens), plus its layer depth.
+  const cameraLayer = timeline.nativeCameraLayerIndex !== undefined
+    ? timeline.layers[timeline.nativeCameraLayerIndex]
+    : undefined;
+  const cameraElement = cameraLayer ? findActiveFrame(cameraLayer, frameIndex)?.elements[0] : undefined;
+  const camera = cameraLayer && cameraElement?.type === 'symbol'
+    ? { matrix: cameraElement.matrix, zDepth: layerZDepthAt(cameraLayer, frameIndex) }
+    : null;
+
   const renderedElements: string[] = [];
   // Mask-aware reverse-order layer rendering (mask grouping + <clipPath>),
   // mirroring the canvas renderer. Reference layers are skipped (as before).
@@ -1904,7 +1960,9 @@ export async function exportSVG(
     frameIndex,
     0,
     timeline.referenceLayers,
-    renderedElements
+    renderedElements,
+    rootClock(frameIndex),
+    stageLayerViews(timeline.layers, frameIndex, camera, width, height)
   );
 
   // Build SVG
