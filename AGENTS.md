@@ -932,7 +932,9 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
     keeps the rest; `applyMotionObject` passes the result to the symbol/text filter path.
     Gradient colors and bevel/gradient `Type` come from the instance's own filter.
     A static filter's `strength` attribute is the same ratio (`0.6` = 60%, default 1), not
-    0..255, and a `<GlowFilter>` with no attributes is blur 5, red, 100% (`parseFilters`).
+    0..255. Omitted attributes are Animate's defaults (`parseFilters`, matching flacomdoc's
+    XFL reader): blur 5, distance 5, angle 45, quality 1, and a `<GlowFilter>` is red. A
+    filter saved with `isEnabled="false"` (switched off in the Filters panel) is dropped.
     The canvas renderer draws strength as shadow opacity (capped at 1), never as blur width,
     like the SVG exporter's flood opacity. Shadow offsets and blur are canvas pixels, not
     scaled with the stage.
@@ -969,7 +971,10 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   matched against Animate's own raster in a published CreateJS atlas (brotochola/willian).
   Still inferred: the curve between markers (Catmull-Rom, secant at `corner` markers). Also
   unverified: which side is `left`; it is drawn on the left of the path's direction, y down,
-  but every real profile seen is symmetric. Shape tweens keep a constant width.
+  but every real profile seen is symmetric; and how a stroke split over several `<Edge>`
+  elements (where it crosses a fill boundary) or saved with reversed records maps the profile:
+  each piece gets the whole profile here. Shape tweens keep a constant width. A zero-length
+  record (a click with the brush) draws as a dot shaped by the caps.
 - **Native camera (Animate CC 2017+).** `layerType="camera"` holding one `__Camera__` instance,
   plus `attachedToCamera` on layers; see "Native Camera" above. It is not a ramka layer, though
   it is usually named "Camera". Layer depth (Animate 2019+) is `frameZDepth` on keyframes.

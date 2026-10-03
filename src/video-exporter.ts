@@ -1408,9 +1408,9 @@ export async function exportSVG(
         case 'glow':
         case 'dropShadow': {
           // glow == distance-0 colored shadow; dropShadow offsets it by
-          // distance@angle. The renderer sets shadowBlur = max(blurX,blurY)*
-          // strength and the shadow color = color@alpha; we approximate that
-          // intent: blur radius from max axis (÷2 for stdDeviation), opacity =
+          // distance@angle. Like the renderer (shadowBlur = max(blurX,blurY),
+          // shadow color = color@alpha×strength clamped to 1): blur radius
+          // from the larger axis (÷2 for stdDeviation), opacity =
           // alpha×strength clamped.
           const stdDev = Math.max(filter.blurX, filter.blurY) / 2;
           const strength = filter.strength ?? 1;

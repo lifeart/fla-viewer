@@ -903,6 +903,24 @@ describe('movie clip instances (no symbolType attribute)', () => {
       expect(await playFrames(await nested(oneFrame, 'symbolType="graphic" cacheAsBitmap="true"'), frames))
         .toEqual([R, G, B, R, G, B, R, G, B, R]);
     });
+
+    it('finds a clip through a symbol cycle whichever symbol is asked first', async () => {
+      // A holds B and Inner, B holds A. Asking about A first reaches B while A
+      // is still being searched; B must not be remembered as clip-free.
+      const graphicOf = (name: string) => `<DOMSymbolInstance libraryItemName="${name}" symbolType="graphic"><matrix><Matrix/></matrix></DOMSymbolInstance>`;
+      const doc = await parseXfl({
+        'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0"><elements>${graphicOf('A')}</elements></DOMFrame></frames></DOMLayer>`,
+          ['A', 'B', 'Inner']),
+        'LIBRARY/A.xml': symbolItem('A', graphicOf('B') + inner),
+        'LIBRARY/B.xml': symbolItem('B', graphicOf('A')),
+        'LIBRARY/Inner.xml': innerItem,
+      });
+      const renderer = new FLARenderer(document.createElement('canvas'));
+      await renderer.setDocument(doc);
+      const has = (name: string) => (renderer as any).hasMovieClipInside(doc.symbols.get(name));
+      expect(has('A')).toBe(true);
+      expect(has('B')).toBe(true);
+    });
   });
 
   describe('movie clips inside graphic symbols and buttons', () => {

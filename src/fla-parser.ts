@@ -3305,20 +3305,24 @@ export class FLAParser {
 
     const filters: Filter[] = [];
 
+    // Animate omits attributes at their defaults: blur 5, distance 5, angle 45,
+    // strength 1 (100%), quality 1 (low). A filter switched off in the Filters
+    // panel is saved with isEnabled="false" and not drawn.
     for (const child of filtersEl.children) {
+      if (child.getAttribute('isEnabled') === 'false') continue;
       switch (child.tagName) {
         case 'BlurFilter':
           filters.push({
             type: 'blur',
-            blurX: parseFloat(child.getAttribute('blurX') || '0'),
-            blurY: parseFloat(child.getAttribute('blurY') || '0'),
+            blurX: parseFloat(child.getAttribute('blurX') || '5'),
+            blurY: parseFloat(child.getAttribute('blurY') || '5'),
             quality: parseInt(child.getAttribute('quality') || '1')
           });
           break;
 
         case 'GlowFilter':
-          // Animate omits defaults: a saved <GlowFilter quality="3"/> tweens from
-          // blur 5, strength 100% and opaque red (its object tween's Glow_* curves).
+          // A saved <GlowFilter quality="3"/> tweens from blur 5, strength 100%
+          // and opaque red (its object tween's Glow_* curves).
           filters.push({
             type: 'glow',
             blurX: parseFloat(child.getAttribute('blurX') || '5'),
@@ -3335,12 +3339,12 @@ export class FLAParser {
         case 'DropShadowFilter':
           filters.push({
             type: 'dropShadow',
-            blurX: parseFloat(child.getAttribute('blurX') || '0'),
-            blurY: parseFloat(child.getAttribute('blurY') || '0'),
+            blurX: parseFloat(child.getAttribute('blurX') || '5'),
+            blurY: parseFloat(child.getAttribute('blurY') || '5'),
             color: child.getAttribute('color') || '#000000',
             strength: parseFloat(child.getAttribute('strength') || '1'),
             alpha: parseFloat(child.getAttribute('alpha') || '1'),
-            distance: parseFloat(child.getAttribute('distance') || '4'),
+            distance: parseFloat(child.getAttribute('distance') || '5'),
             angle: parseFloat(child.getAttribute('angle') || '45'),
             inner: child.getAttribute('inner') === 'true',
             knockout: child.getAttribute('knockout') === 'true',
@@ -3352,14 +3356,14 @@ export class FLAParser {
         case 'BevelFilter':
           filters.push({
             type: 'bevel',
-            blurX: parseFloat(child.getAttribute('blurX') || '4'),
-            blurY: parseFloat(child.getAttribute('blurY') || '4'),
+            blurX: parseFloat(child.getAttribute('blurX') || '5'),
+            blurY: parseFloat(child.getAttribute('blurY') || '5'),
             strength: parseFloat(child.getAttribute('strength') || '1'),
             highlightColor: child.getAttribute('highlightColor') || '#FFFFFF',
             highlightAlpha: parseFloat(child.getAttribute('highlightAlpha') || '1'),
             shadowColor: child.getAttribute('shadowColor') || '#000000',
             shadowAlpha: parseFloat(child.getAttribute('shadowAlpha') || '1'),
-            distance: parseFloat(child.getAttribute('distance') || '4'),
+            distance: parseFloat(child.getAttribute('distance') || '5'),
             angle: parseFloat(child.getAttribute('angle') || '45'),
             inner: child.getAttribute('inner') === 'true',
             knockout: child.getAttribute('knockout') === 'true',
@@ -3425,10 +3429,10 @@ export class FLAParser {
         case 'GradientGlowFilter':
           filters.push({
             type: 'gradientGlow',
-            blurX: parseFloat(child.getAttribute('blurX') || '4'),
-            blurY: parseFloat(child.getAttribute('blurY') || '4'),
+            blurX: parseFloat(child.getAttribute('blurX') || '5'),
+            blurY: parseFloat(child.getAttribute('blurY') || '5'),
             strength: parseFloat(child.getAttribute('strength') || '1'),
-            distance: parseFloat(child.getAttribute('distance') || '4'),
+            distance: parseFloat(child.getAttribute('distance') || '5'),
             angle: parseFloat(child.getAttribute('angle') || '45'),
             colors: this.parseGradientFilterColors(child),
             inner: child.getAttribute('inner') === 'true',
@@ -3440,10 +3444,10 @@ export class FLAParser {
         case 'GradientBevelFilter':
           filters.push({
             type: 'gradientBevel',
-            blurX: parseFloat(child.getAttribute('blurX') || '4'),
-            blurY: parseFloat(child.getAttribute('blurY') || '4'),
+            blurX: parseFloat(child.getAttribute('blurX') || '5'),
+            blurY: parseFloat(child.getAttribute('blurY') || '5'),
             strength: parseFloat(child.getAttribute('strength') || '1'),
-            distance: parseFloat(child.getAttribute('distance') || '4'),
+            distance: parseFloat(child.getAttribute('distance') || '5'),
             angle: parseFloat(child.getAttribute('angle') || '45'),
             colors: this.parseGradientFilterColors(child),
             inner: child.getAttribute('inner') === 'true',

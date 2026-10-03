@@ -89,11 +89,13 @@ function flattenRuns(commands: readonly PathCommand[]): Run[] {
   let run: Run | null = null;
   let x = NaN;
   let y = NaN;
+  let moved = false; // a moveTo started a path that has drawn nothing yet
   const finish = () => {
-    if (run && run.points.length >= 4) runs.push(run);
+    if (run) runs.push(run); // one point: a stroke that went nowhere (a dot)
     run = null;
   };
   const push = (px: number, py: number) => {
+    moved = false;
     if (!run) run = { points: [x, y], closed: false };
     const p = run.points;
     if (Math.abs(p[p.length - 2] - px) > 1e-9 || Math.abs(p[p.length - 1] - py) > 1e-9) p.push(px, py);
@@ -111,6 +113,7 @@ function flattenRuns(commands: readonly PathCommand[]): Run[] {
           finish();
           x = cmd.x;
           y = cmd.y;
+          moved = true;
         }
         break;
       }
@@ -149,6 +152,8 @@ function flattenRuns(commands: readonly PathCommand[]): Run[] {
         break;
       }
       case 'Z': {
+        // The edge decoder writes a zero-length record as a moveTo and a close.
+        if (moved) push(x, y);
         const current = run as Run | null;
         if (current) {
           const p = current.points;
@@ -166,7 +171,12 @@ function flattenRuns(commands: readonly PathCommand[]): Run[] {
   for (const r of runs) {
     const p = r.points;
     const n = p.length;
-    if (!r.closed && Math.abs(p[0] - p[n - 2]) <= JOIN_EPSILON && Math.abs(p[1] - p[n - 1]) <= JOIN_EPSILON) {
+    // A path that ends where it started is a loop, unless it is a dab too short to
+    // tell its ends apart (that keeps its caps).
+    let length = 0;
+    for (let i = 2; i < n; i += 2) length += Math.hypot(p[i] - p[i - 2], p[i + 1] - p[i - 1]);
+    if (!r.closed && length > 4 * JOIN_EPSILON &&
+        Math.abs(p[0] - p[n - 2]) <= JOIN_EPSILON && Math.abs(p[1] - p[n - 1]) <= JOIN_EPSILON) {
       r.closed = true;
       p[n - 2] = p[0];
       p[n - 1] = p[1];
@@ -320,7 +330,18 @@ export function variableWidthStrokePolygons(
     const cum = [0];
     for (let i = 1; i < m; i++) cum.push(cum[i - 1] + Math.hypot(q[2 * i] - q[2 * i - 2], q[2 * i + 1] - q[2 * i - 1]));
     const total = cum[m - 1];
-    if (!(total > 1e-9)) continue;
+    if (!(total > 1e-9)) {
+      // A dot: both caps, back to back (nothing without caps).
+      const w = widthProfileAt(markers, 0);
+      const [x, y] = q;
+      if (caps === 'none') continue;
+      const dot = [x, y - w.left * stroke.weight];
+      capPoints(dot, x, y, 0, -1, 1, 0, w.left * stroke.weight, w.right * stroke.weight, caps);
+      dot.push(x, y + w.right * stroke.weight);
+      capPoints(dot, x, y, 0, 1, -1, 0, w.right * stroke.weight, w.left * stroke.weight, caps);
+      polygons.push(dot);
+      continue;
+    }
 
     // Resample so the width follows the profile between the path's own vertices: no
     // more than total / PROFILE_SAMPLES apart, plus a point exactly at each marker.

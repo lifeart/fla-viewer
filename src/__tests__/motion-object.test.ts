@@ -381,6 +381,11 @@ describe('evaluateMotionObject filters', () => {
     }]);
   });
 
+  it('falls back to Animate\'s defaults for values neither the curves nor the instance give', () => {
+    const angleOnly = `<PropertyContainer id="DropShadow_Filter">${prop('DropShadow_Angle', key(0, 90))}</PropertyContainer>`;
+    expect(filtersAt(angleOnly, 0)![0]).toMatchObject({ blurX: 5, blurY: 5, distance: 5, angle: 90, strength: 1, quality: 1 });
+  });
+
   it('leaves the filters alone without filter curves', () => {
     expect(evaluateMotionObject(parseAnimationCore(core('')), 5, 24, identity).filters).toBeUndefined();
   });

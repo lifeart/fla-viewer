@@ -161,8 +161,24 @@ describe('variable-width stroke outlines', () => {
     expect(variableWidthStrokePolygons(square, style)).toHaveLength(2);
   });
 
-  it('skips zero-length paths and keeps every coordinate finite', () => {
-    expect(variableWidthStrokePolygons(line(5, 5, 5, 5), style)).toEqual([]);
+  it('draws a zero-length path as a dot and a dab shorter than the join tolerance as an open path', () => {
+    const reach = (poly: number[], x: number, y: number) => {
+      let r = 0;
+      for (let i = 0; i < poly.length; i += 2) r = Math.max(r, Math.hypot(poly[i] - x, poly[i + 1] - y));
+      return r;
+    };
+    const [dot, ...more] = variableWidthStrokePolygons(line(5, 5, 5, 5), style);
+    expect(more).toEqual([]);
+    expect(reach(dot, 5, 5)).toBeCloseTo(20, 9);
+    expect(dot.length).toBeGreaterThan(16);
+    expect(variableWidthStrokePolygons(line(5, 5, 5, 5), { ...style, caps: 'none' })).toEqual([]);
+    // Ends 0.3px apart: one capped outline, not a loop with no length.
+    const dab = variableWidthStrokePolygons(line(5, 5, 5.3, 5), style);
+    expect(dab).toHaveLength(1);
+    expect(reach(dab[0], 5.15, 5)).toBeCloseTo(20.15, 6);
+  });
+
+  it('keeps every coordinate finite', () => {
     const curvy: PathCommand[] = [
       { type: 'M', x: 0, y: 0 }, { type: 'Q', cx: 50, cy: -80, x: 100, y: 0 },
       { type: 'C', c1x: 120, c1y: 40, c2x: 80, c2y: 60, x: 100, y: 0 }, { type: 'L', x: 0, y: 0 },
@@ -226,6 +242,16 @@ describe('rendering variable-width strokes', () => {
     const leftward = await render(strokedShape('!10000 4000|2000 4000', oneSided));
     expect(colorAt(leftward, 300, 188)).toBe(WHITE);
     expect(colorAt(leftward, 300, 212)).toBe(RED);
+  });
+
+  it('draws a click of the brush (a zero-length stroke) as a dot, like a constant-width stroke', async () => {
+    const flat = profile(marker(0, 0.5), marker(1, 0.5));
+    const canvas = await render(strokedShape('!6000 4000|6000 4000', flat));
+    expect(colorAt(canvas, 300, 200)).toBe(RED);
+    expect(colorAt(canvas, 314, 200)).toBe(RED);
+    expect(colorAt(canvas, 300, 186)).toBe(RED);
+    expect(colorAt(canvas, 326, 200)).toBe(WHITE);
+    expect(colorAt(canvas, 316, 216)).toBe(WHITE);
   });
 
   it('caps an open end at the end width', async () => {

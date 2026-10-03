@@ -4898,10 +4898,14 @@ export class FLARenderer {
 
   // Whether a movie clip instance appears anywhere in the symbol's timeline,
   // directly or inside nested graphics and buttons (memoized per symbol).
-  private hasMovieClipInside(symbol: Symbol, visiting = new Set<Symbol>()): boolean {
+  private hasMovieClipInside(symbol: Symbol, visiting = new Set<Symbol>(), cycle = { cut: false }): boolean {
     const known = this.movieClipInsideCache.get(symbol);
     if (known !== undefined) return known;
-    if (visiting.has(symbol) || !this.doc) return false;
+    if (!this.doc) return false;
+    if (visiting.has(symbol)) {
+      cycle.cut = true;
+      return false;
+    }
     visiting.add(symbol);
     let found = false;
     for (const layer of symbol.timeline.layers) {
@@ -4909,7 +4913,7 @@ export class FLARenderer {
         for (const element of frame.elements) {
           if (element.type !== 'symbol') continue;
           const inner = getWithNormalizedPath(this.doc.symbols, element.libraryItemName);
-          if (element.symbolType === 'movieclip' || (inner && this.hasMovieClipInside(inner, visiting))) {
+          if (element.symbolType === 'movieclip' || (inner && this.hasMovieClipInside(inner, visiting, cycle))) {
             found = true;
             break;
           }
@@ -4919,7 +4923,9 @@ export class FLARenderer {
       if (found) break;
     }
     visiting.delete(symbol);
-    this.movieClipInsideCache.set(symbol, found);
+    // A symbol on a cycle was skipped while still being searched, so a "no"
+    // below the outermost call isn't final yet.
+    if (found || !cycle.cut || visiting.size === 0) this.movieClipInsideCache.set(symbol, found);
     return found;
   }
 

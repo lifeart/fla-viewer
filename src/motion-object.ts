@@ -528,7 +528,7 @@ function evaluateFilter(
     strength: num('Strength', (b?.strength ?? 1) * 100) / 100,
     knockout: flag('Knockout', b?.knockout),
   };
-  const offset = { angle: num('Angle', b?.angle ?? 45), distance: num('Distance', b?.distance ?? 4) };
+  const offset = { angle: num('Angle', b?.angle ?? 45), distance: num('Distance', b?.distance ?? 5) };
 
   switch (type) {
     case 'dropShadow': {

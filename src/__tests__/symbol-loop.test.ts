@@ -92,6 +92,9 @@ describe('movie clip stop() frames', () => {
     ['var r = /"/; stop();', true],
     ['var r = /[/]/g; stop();', true],
     ['var half = total / 2; stop();', true],
+    ['var w = margin              / 2; stop();', true],
+    ['var w = obj.return / 2; stop();', true],
+    ['if (ok) return\n  /"/.test(s); stop();', true],
     ['function quote(s) { return /"/.test(s); }\nstop();', true],
     ['var x:XML = <a>b</a>; stop();', true],
   ])('callsStop(%j) is %s', (script, expected) => {
@@ -229,5 +232,29 @@ describe('instanceClock', () => {
     // Frame 3 lies outside the clip's run [0, 2); frame 1 inside it from parent frame 3.
     const layer = [key(0, 3, [at(3)]), key(3, 4, [at(1)])];
     expect(movieClipTicks({ start: 0, end: 2 }, instanceClock(rootClock(5), layer, 0, at(1), 5))).toBe(2);
+  });
+
+  it('walks a layer with a keyframe on every frame in linear time', () => {
+    const G = instance('G', 'graphic', { loop: 'loop' });
+    const count = 2000;
+    const keys = Array.from({ length: count }, (_, i) => key(i, 1, [G]));
+    let reads = 0;
+    const layer = new Proxy(keys, {
+      get(target, prop, receiver) {
+        if (typeof prop === 'string' && /^\d+$/.test(prop)) reads++;
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    expect(movieClipTicks({ start: 0, end: 1 }, instanceClock(rootClock(count - 1), layer, 0, G, 1))).toBe(count - 1);
+    // A scan from the first keyframe at every step read about count² / 2 = 2M.
+    expect(reads).toBeLessThan(count * 20);
+  });
+
+  it('finds keyframes listed out of order and stops at a gap in the layer', () => {
+    const G = instance('G', 'graphic', { loop: 'loop' });
+    const unsorted = [key(4, 2, [G]), key(0, 2, [G]), key(2, 2, [G])];
+    expect(frames(instanceClock(rootClock(5), unsorted, 0, G, 10), 7)).toEqual([1, 0, 1, 0, 1, 0, undefined]);
+    const gap = [key(0, 2, [G]), key(4, 2, [G])];
+    expect(frames(instanceClock(rootClock(5), gap, 0, G, 10), 3)).toEqual([1, 0, undefined]);
   });
 });

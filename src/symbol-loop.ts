@@ -48,14 +48,25 @@ export function graphicSymbolFrame(
   return mod(first + step * k);
 }
 
+// A `/` after one of these words starts a regex literal, not a division.
+const REGEX_AFTER_WORDS = new Set([
+  'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else',
+  'yield', 'await',
+]);
+
+/** The identifier that ends just before `end` (skipping whitespace), unless it is a property name. */
+function wordBefore(script: string, end: number): string {
+  while (end > 0 && /\s/.test(script[end - 1])) end--;
+  let start = end;
+  while (start > 0 && /[\w$]/.test(script[start - 1])) start--;
+  return start > 0 && script[start - 1] === '.' ? '' : script.slice(start, end);
+}
+
 /**
  * The part of a frame script that runs when the frame is entered: comments,
  * string and regex literals are dropped, and so are function bodies, block or
  * arrow-expression (event handlers and callbacks run later, if ever).
  */
-// A `/` after one of these words starts a regex literal, not a division.
-const REGEX_AFTER_WORD = /(?:^|[^\w$.])(?:return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)\s*$/;
-
 function frameEntryCode(script: string): string {
   let code = '';
   const braces: boolean[] = []; // per open brace: is it (inside) a function body?
@@ -74,7 +85,7 @@ function frameEntryCode(script: string): string {
     }
     // (Not after `<`: that's an E4X closing tag, `</a>`.)
     const regexStart = ch === '/' && (prev === '' || /[(,=:[!&|?{};+\-*%>~^]/.test(prev) ||
-      REGEX_AFTER_WORD.test(script.slice(Math.max(0, i - 16), i)));
+      REGEX_AFTER_WORDS.has(wordBefore(script, i)));
     if (ch === '"' || ch === "'" || ch === '`' || regexStart) {
       // String or regex literal: skip to its closing delimiter.
       let j = i + 1;
@@ -228,14 +239,30 @@ export function instanceClock(
   instance: SymbolInstance,
   totalFrames: number
 ): TimelineClock {
-  let last: Frame | undefined; // walks step back one frame at a time
+  // Walks step back one frame at a time, so the keyframe is usually the one
+  // found last or its neighbour; otherwise binary-search (frames are sorted by
+  // index), and scan only if that misses.
+  let last = -1;
   return (k) => {
     const p = parent(k);
     if (p === undefined) return undefined;
-    const inFrame = (f: Frame | undefined) => !!f && p >= f.index && p < f.index + f.duration;
-    const keyframe = inFrame(last) ? last : frames.find(inFrame);
-    if (!keyframe) return undefined;
-    last = keyframe;
+    const inFrame = (i: number) => i >= 0 && i < frames.length && p >= frames[i].index &&
+      p < frames[i].index + frames[i].duration;
+    let found = [last, last - 1, last + 1].find(inFrame) ?? -1;
+    if (found < 0) {
+      let lo = 0;
+      let hi = frames.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (p < frames[mid].index) hi = mid - 1;
+        else if (p >= frames[mid].index + frames[mid].duration) lo = mid + 1;
+        else { found = mid; break; }
+      }
+    }
+    if (found < 0) found = frames.findIndex((_, i) => inFrame(i));
+    if (found < 0) return undefined;
+    last = found;
+    const keyframe = frames[found];
     const element = keyframe.elements[elementIndex];
     if (!element || element.type !== 'symbol' || element.symbolType !== instance.symbolType ||
         element.libraryItemName !== instance.libraryItemName) return undefined;
