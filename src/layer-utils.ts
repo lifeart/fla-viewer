@@ -149,3 +149,49 @@ export function matricesNearlyEqual(m1: Matrix, m2: Matrix, eps = 1e-6): boolean
     Math.abs(m1.ty - m2.ty) < eps * 1000
   );
 }
+
+/**
+ * A classic tween's matrix at `t` (0..1) between two keyframes, interpolated
+ * the way Flash and the CreateJS runtime tween an instance: scale, skew angles
+ * and position each separately, so a turning instance keeps its size (lerping
+ * a..d shrinks it, to nothing halfway through a half turn). Each angle turns
+ * the short way round. A tween that mirrors the instance (the determinant
+ * changes sign) is interpolated entry by entry, through zero width.
+ */
+export function interpolateDecomposed(start: Matrix, end: Matrix, t: number): Matrix {
+  const lerp = (a: number, b: number) => a + (b - a) * t;
+  const detStart = start.a * start.d - start.b * start.c;
+  const detEnd = end.a * end.d - end.b * end.c;
+  if (!(detStart * detEnd > 0)) {
+    return {
+      a: lerp(start.a, end.a), b: lerp(start.b, end.b), c: lerp(start.c, end.c), d: lerp(start.d, end.d),
+      tx: lerp(start.tx, end.tx), ty: lerp(start.ty, end.ty),
+    };
+  }
+  // A mirrored matrix gets a negative x scale, so its skew angles stay close.
+  const sign = detStart < 0 ? -1 : 1;
+  const parts = (m: Matrix) => ({
+    scaleX: sign * Math.hypot(m.a, m.b),
+    scaleY: Math.hypot(m.c, m.d),
+    skewY: Math.atan2(sign * m.b, sign * m.a),
+    skewX: Math.atan2(-m.c, m.d),
+  });
+  const from = parts(start);
+  const to = parts(end);
+  const turn = (a: number, b: number) => {
+    const delta = b - a;
+    return a + (delta - 2 * Math.PI * Math.round(delta / (2 * Math.PI))) * t;
+  };
+  const scaleX = lerp(from.scaleX, to.scaleX);
+  const scaleY = lerp(from.scaleY, to.scaleY);
+  const skewY = turn(from.skewY, to.skewY);
+  const skewX = turn(from.skewX, to.skewX);
+  return {
+    a: scaleX * Math.cos(skewY),
+    b: scaleX * Math.sin(skewY),
+    c: -scaleY * Math.sin(skewX),
+    d: scaleY * Math.cos(skewX),
+    tx: lerp(start.tx, end.tx),
+    ty: lerp(start.ty, end.ty),
+  };
+}

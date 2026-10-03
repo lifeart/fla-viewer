@@ -1,4 +1,4 @@
-import type { Matrix, Point } from './types';
+import type { DisplayElement, Matrix, Point } from './types';
 import { invertMatrix, multiplyMatrices } from './layer-utils';
 
 // 3D symbol instances (Flash CS4+): `rotationX/Y/Z` and `centerPoint3DX/Y` on
@@ -101,4 +101,24 @@ export function projectedInstanceMatrix(
   const sy = perspective.center.y + vy * k;
   const stage: Matrix = { a, b, c, d, tx: sx - a * pivot.x - c * pivot.y, ty: sy - b * pivot.x - d * pivot.y };
   return multiplyMatrices(multiplyMatrices(fromStage, stage), matrix);
+}
+
+/**
+ * `element` with its matrix replaced (by a tween, a layer-parenting correction
+ * or an IK pose). A 3D instance's center point is in parent coordinates, so it
+ * moves with the transformation point.
+ */
+export function withInstanceMatrix<T extends DisplayElement>(element: T, matrix: Matrix): T {
+  if (element.type !== 'symbol' || !element.centerPoint3D) return { ...element, matrix };
+  const { x, y } = element.transformationPoint ?? { x: 0, y: 0 };
+  const from = element.matrix;
+  const center = element.centerPoint3D;
+  return {
+    ...element,
+    matrix,
+    centerPoint3D: {
+      x: center.x + (matrix.a * x + matrix.c * y + matrix.tx) - (from.a * x + from.c * y + from.tx),
+      y: center.y + (matrix.b * x + matrix.d * y + matrix.ty) - (from.b * x + from.d * y + from.ty),
+    },
+  };
 }

@@ -6,7 +6,8 @@ import { exportSingleFrame, exportSpriteSheet, exportSVG } from '../video-export
 import { FLAPlayer } from '../player';
 import { readDirectoryEntry, xflFolderToZip, isXFLStub, XFL_STUB_CONTENT, type XFLFolderEntry } from '../xfl-folder';
 import { ovalPrimitivePath } from '../primitive-shapes';
-import type { FLADocument, PathCommand, Shape, SymbolInstance, TextInstance } from '../types';
+import type { FLADocument, Matrix, PathCommand, Shape, SymbolInstance, TextInstance } from '../types';
+import { interpolateDecomposed } from '../layer-utils';
 
 // Version-specific XFL cases that real Flash CS4..Animate files contain. The XML
 // below mirrors what Flash CS5/CS6 writes (attribute names and value spellings
@@ -108,6 +109,62 @@ describe('classic tween rotation direction', () => {
       await renderHalfway('counter-clockwise');
       expect(colorAt(canvas, 200, 140)).toBe('#FF0000');
       expect(colorAt(canvas, 200, 260)).toBe('#FFFFFF');
+    });
+
+    it('keeps a turning instance its size without a forced direction', async () => {
+      // 0deg to 90deg: halfway the bar points down-right at 45deg, still 100px
+      // long. Lerping a..d would shrink it to about 71px.
+      const doc = await parseXfl({
+        'DOMDocument.xml': domDocument(`<DOMLayer name="Bar"><frames>
+          <DOMFrame index="0" duration="10" tweenType="motion" keyMode="22017">
+            <elements><DOMSymbolInstance libraryItemName="Bar" symbolType="graphic"><matrix><Matrix tx="200" ty="200"/></matrix></DOMSymbolInstance></elements>
+          </DOMFrame>
+          <DOMFrame index="10" duration="1" keyMode="9728">
+            <elements><DOMSymbolInstance libraryItemName="Bar" symbolType="graphic"><matrix><Matrix a="0" b="1" c="-1" d="0" tx="200" ty="200"/></matrix></DOMSymbolInstance></elements>
+          </DOMFrame>
+        </frames></DOMLayer>`, ['Bar']),
+        'LIBRARY/Bar.xml': symbolItem('Bar', rectShape(0, -5, 100, 10, '#FF0000')),
+      });
+      await renderer.setDocument(doc);
+      renderer.renderFrame(5);
+      expect(colorAt(canvas, 265, 265)).toBe('#FF0000');
+      expect(colorAt(canvas, 275, 275)).toBe('#FFFFFF');
+    });
+  });
+
+  describe('interpolating a classic tween\'s matrix', () => {
+    const turn = (deg: number, scale = 1) => {
+      const r = (deg * Math.PI) / 180;
+      return { a: scale * Math.cos(r), b: scale * Math.sin(r), c: -scale * Math.sin(r), d: scale * Math.cos(r), tx: 0, ty: 0 };
+    };
+    const close = (actual: Matrix, expected: Matrix) => {
+      for (const k of ['a', 'b', 'c', 'd', 'tx', 'ty'] as const) expect(actual[k]).toBeCloseTo(expected[k], 9);
+    };
+
+    it('turns and scales separately', () => {
+      close(interpolateDecomposed(turn(0), turn(90, 2), 0.5), turn(45, 1.5));
+      close(interpolateDecomposed(turn(0), turn(90, 2), 0), turn(0));
+      close(interpolateDecomposed(turn(0), turn(90, 2), 1), turn(90, 2));
+    });
+
+    it('turns the short way round', () => {
+      close(interpolateDecomposed(turn(170), turn(-170), 0.5), turn(180));
+    });
+
+    it('keeps a mirrored instance mirrored while it turns', () => {
+      const mirror = (m: Matrix) => ({ ...m, a: -m.a, b: -m.b });
+      close(interpolateDecomposed(mirror(turn(0)), mirror(turn(90)), 0.5), mirror(turn(45)));
+    });
+
+    it('interpolates entry by entry when the tween mirrors the instance', () => {
+      const flipped = { a: -1, b: 0, c: 0, d: 1, tx: 10, ty: 0 };
+      close(interpolateDecomposed(turn(0), flipped, 0.5), { a: 0, b: 0, c: 0, d: 1, tx: 5, ty: 0 });
+    });
+
+    it('matches plain interpolation for scale and position alone', () => {
+      const from = { a: 1, b: 0, c: 0, d: 2, tx: 0, ty: 0 };
+      const to = { a: 3, b: 0, c: 0, d: 0.5, tx: 40, ty: -20 };
+      close(interpolateDecomposed(from, to, 0.25), { a: 1.5, b: 0, c: 0, d: 1.625, tx: 10, ty: -5 });
     });
   });
 });

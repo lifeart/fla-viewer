@@ -248,6 +248,21 @@ describe('native camera rendering', () => {
     expect(colorAt(canvas, 275, 200)).toBe(WHITE);
   });
 
+  it('keeps the zoom while a camera tween turns', async () => {
+    // 0deg to 90deg: halfway the view has turned -45deg about the center and a
+    // square 100px right of it is still 100px away, at (345.7, 129.3). Lerping
+    // the camera matrix would zoom to 141% and show it at (375, 100).
+    await render(
+      cameraLayer([
+        { index: 0, duration: 10, matrix: CENTERED, attrs: 'tweenType="motion"' },
+        { index: 10, duration: 10, matrix: `a="0" b="1" c="-1" d="0" ${CENTERED}` },
+      ]) + contentLayer('Layer_1', rectShape(370, 195, 10, 10, RED)),
+      5
+    );
+    expect(colorAt(canvas, 346, 129)).toBe(RED);
+    expect(colorAt(canvas, 375, 100)).toBe(WHITE);
+  });
+
   it('leaves layers attached to the camera in place', async () => {
     await render(cameraLayer([{ index: 0, duration: 20, matrix: `tx="${W / 2 + 100}" ty="${H / 2}"` }]) +
       contentLayer('camera_overlay', rectShape(20, 20, 20, 20, BLUE), 'attachedToCamera="true"') +
@@ -287,6 +302,24 @@ describe('layer depth rendering', () => {
 
   const f = LAYER_DEPTH_FOCAL_LENGTH;
   const centerSquare = rectShape(265, 190, 20, 20, RED);
+
+  it('keeps layer depth in follow camera mode', async () => {
+    // A ramka framing the whole stage, followed: the near layer is still twice
+    // its size and still drawn over the layer above it.
+    const ramka = `<DOMLayer name="ramka" layerType="guide"><frames><DOMFrame index="0" duration="20"><elements>
+      <DOMSymbolInstance libraryItemName="Ramka" symbolType="graphic"><matrix><Matrix/></matrix>
+        <transformationPoint><Point x="${W / 2}" y="${H / 2}"/></transformationPoint></DOMSymbolInstance>
+    </elements></DOMFrame></frames></DOMLayer>`;
+    await renderer.setDocument(await parseXfl({ 'DOMDocument.xml': domDocument(ramka +
+      contentLayer('Top', rectShape(240, 195, 70, 10, BLUE)) +
+      contentLayer('Near', centerSquare, '', `frameZDepth="${-f / 2}"`)) }));
+    renderer.setFollowCamera(true);
+    expect(renderer.getCameraLayers().map((l) => l.name)).toContain('ramka');
+    renderer.renderFrame(0);
+    expect(colorAt(canvas, 258, 200)).toBe(RED);
+    expect(colorAt(canvas, 250, 200)).toBe(BLUE);
+    expect(colorAt(canvas, 250, 210)).toBe(WHITE);
+  });
 
   it('scales a near layer up about the stage center', async () => {
     // Depth -f/2 doubles the size: the 20px square becomes 40px (255..295).
@@ -371,5 +404,65 @@ describe('native camera in SVG export', () => {
     expect(svg.indexOf('fill="#FF0000"')).toBeLessThan(svg.indexOf('fill="#0000FF"'));
     // The attached overlay is untransformed: the far layer's is the only view group.
     expect(svg.match(/<g transform="/g)).toHaveLength(1);
+  });
+
+  it('stacks masked layers by depth like the canvas does', async () => {
+    // Under one mask: the upper masked layer (blue) is further away, so it is
+    // drawn first and the lower one (red) covers it in the middle.
+    const xml = domDocument(
+      contentLayer('Mask', rectShape(0, 0, W, H, '#00FF00'), 'layerType="mask"') +
+      contentLayer('Far', rectShape(225, 150, 100, 100, BLUE), 'layerType="masked" parentLayerIndex="0"', 'frameZDepth="100"') +
+      contentLayer('Near', rectShape(255, 180, 40, 40, RED), 'layerType="masked" parentLayerIndex="0"')
+    );
+    const doc = await parseXfl({ 'DOMDocument.xml': xml });
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(doc);
+    renderer.renderFrame(0);
+    expect(colorAt(canvas, 275, 200)).toBe(RED);
+    expect(colorAt(canvas, 240, 200)).toBe(BLUE);
+    const svg = await (await exportSVG(doc, 0)).text();
+    expect(svg.indexOf('fill="#0000FF"')).toBeGreaterThan(-1);
+    expect(svg.indexOf('fill="#0000FF"')).toBeLessThan(svg.indexOf('fill="#FF0000"'));
+  });
+
+  it('writes no empty transform for a mask seen through the default camera', async () => {
+    const doc = await parseXfl({
+      'DOMDocument.xml': domDocument(
+        cameraLayer([{ index: 0, duration: 20, matrix: CENTERED }]) +
+        contentLayer('Mask', rectShape(0, 0, 100, 100, BLUE), 'layerType="mask"') +
+        contentLayer('Masked', rectShape(0, 0, 10, 10, RED), 'layerType="masked" parentLayerIndex="1"')
+      ),
+    });
+    const svg = await (await exportSVG(doc, 0)).text();
+    expect(svg).toContain('clip-path="url(#');
+    expect(svg).not.toContain('transform=""');
+  });
+});
+
+describe('ramka camera tweens', () => {
+  // A guide layer named "ramka" whose one instance turns from 0deg to 180deg
+  // clockwise over 10 frames.
+  const ramka = (matrix: string) => `<elements><DOMSymbolInstance libraryItemName="Ramka" symbolType="graphic">
+    <matrix><Matrix ${matrix}/></matrix><transformationPoint><Point x="275" y="200"/></transformationPoint>
+  </DOMSymbolInstance></elements>`;
+
+  it('tweens the camera the same way with and without follow camera mode', async () => {
+    const doc = await parseXfl({
+      'DOMDocument.xml': domDocument(`<DOMLayer name="ramka" layerType="guide"><frames>
+        <DOMFrame index="0" duration="10" tweenType="motion" motionTweenRotate="clockwise" keyMode="22017">${ramka('')}</DOMFrame>
+        <DOMFrame index="10" keyMode="22017">${ramka('a="-1" d="-1" tx="550" ty="400"')}</DOMFrame>
+      </frames></DOMLayer>`, ''),
+    });
+    const renderer = new FLARenderer(document.createElement('canvas'));
+    await renderer.setDocument(doc);
+    const layer = doc.timelines[0].layers[0];
+    const followed: Matrix = (renderer as any).getCameraElement(layer, 5).matrix;
+    const transform: Matrix = (renderer as any).getCameraTransform(layer, 5);
+    expect(followed).toEqual(transform);
+    // A quarter turn clockwise at full size, not the zero matrix a lerp gives.
+    expect(followed.b).toBeCloseTo(1, 9);
+    expect(followed.c).toBeCloseTo(-1, 9);
+    expect(followed.a).toBeCloseTo(0, 9);
   });
 });

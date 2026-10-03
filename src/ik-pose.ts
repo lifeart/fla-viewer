@@ -1,5 +1,6 @@
 import type { DisplayElement, Frame } from './types';
 import { multiplyMatrices } from './layer-utils';
+import { withInstanceMatrix } from './transform-3d';
 
 /**
  * An element of an IK pose span (`tweenType="IK pose"`, a Bone tool armature)
@@ -21,5 +22,5 @@ export function applyIKPose<T extends DisplayElement>(
 ): T {
   const pose = frame.ikPoseMatrices?.[elementIndex]?.[frameIndex - frame.index];
   if (!pose) return element;
-  return { ...element, matrix: multiplyMatrices(pose, element.matrix) };
+  return withInstanceMatrix(element, multiplyMatrices(pose, element.matrix));
 }

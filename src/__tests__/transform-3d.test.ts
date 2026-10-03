@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import JSZip from 'jszip';
 import { FLAParser } from '../fla-parser';
 import { FLARenderer } from '../renderer';
-import { documentPerspective, projectedInstanceMatrix, rotation3D } from '../transform-3d';
-import type { FLADocument, Matrix, SymbolInstance } from '../types';
+import { documentPerspective, projectedInstanceMatrix, rotation3D, withInstanceMatrix } from '../transform-3d';
+import { applyIKPose } from '../ik-pose';
+import type { FLADocument, Frame, Matrix, SymbolInstance } from '../types';
 
 // 3D symbol instances (Flash CS4+). The instance XML mirrors real saves: a
 // panel turned -25 degrees about Y whose 2D matrix is only a translation, with
@@ -112,6 +113,17 @@ describe('3D instance parsing', () => {
     expect(turned.centerPoint3D).toEqual({ x: 275, y: 200 });
     expect(turned.z).toBeUndefined();
     expect(near.z).toBe(-100);
+  });
+
+  it('ignores malformed rotations and 3D centers', async () => {
+    const doc = await parseXfl({
+      'DOMDocument.xml': domDocument(layer(panelInstance(275, 200)
+        .replace('rotationY="-25"', 'rotationY="abc" rotationX="" rotationZ="NaN"')
+        .replace('centerPoint3DX="275"', 'centerPoint3DX="x"'))),
+      'LIBRARY/Panel.xml': panelSymbol,
+    });
+    const [panel] = doc.timelines[0].layers[0].frames[0].elements as SymbolInstance[];
+    expect([panel.rotationX, panel.rotationY, panel.rotationZ, panel.centerPoint3D]).toEqual([undefined, undefined, undefined, undefined]);
   });
 });
 
@@ -238,6 +250,114 @@ describe('3D instance rendering', () => {
     expect(colorAt(canvas, 209, 200)).toBe(WHITE);
     expect(colorAt(canvas, 341, 200)).toBe(WHITE);
     expect(colorAt(canvas, 275, 159)).toBe(WHITE);
+  });
+
+  it('draws an instance whose 3D values are not numbers at its 2D matrix', async () => {
+    const doc = await parseXfl({ 'DOMDocument.xml': domDocument(layer(panelInstance(375, 200))), 'LIBRARY/Panel.xml': panelSymbol });
+    (doc.timelines[0].layers[0].frames[0].elements[0] as SymbolInstance).rotationY = NaN;
+    await renderer.setDocument(doc);
+    renderer.renderFrame(0);
+    expect(colorAt(canvas, 375, 200)).toBe(RED);
+    expect(colorAt(canvas, 30, 20)).toBe(WHITE); // not at the parent's origin
+  });
+
+  it('keeps the 3D center with the instance through a classic tween', async () => {
+    // From (175, 200) to (375, 200); halfway it must match a panel placed at (275, 200).
+    const tweened = `<DOMLayer name="Layer 1"><frames>
+      <DOMFrame index="0" duration="10" tweenType="motion" keyMode="22017"><elements>${panelInstance(175, 200)}</elements></DOMFrame>
+      <DOMFrame index="10" keyMode="22017"><elements>${panelInstance(375, 200)}</elements></DOMFrame>
+    </frames></DOMLayer>`;
+    await render(tweened, '', 5);
+    const pixels = (c: HTMLCanvasElement) => c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+    const halfway = pixels(canvas);
+    await render(layer(panelInstance(275, 200)));
+    const placed = pixels(canvas);
+    let differing = 0;
+    for (let i = 0; i < placed.length; i += 4) if (Math.abs(placed[i + 1] - halfway[i + 1]) > 8) differing++;
+    expect(differing).toBe(0);
+    expect(colorAt(canvas, 316, 200)).toBe(RED);
+  });
+
+  it('keeps the 3D center with the instance through a classic tween under a layer parent', async () => {
+    // The parent (off stage) moves 200px right with the child, so the child
+    // tweens in the parent's space.
+    const parentAt = (tx: number) => `<elements><DOMSymbolInstance libraryItemName="Panel">
+      <matrix><Matrix tx="${tx}" ty="-1000"/></matrix><transformationPoint><Point x="50" y="30"/></transformationPoint>
+    </DOMSymbolInstance></elements>`;
+    const parent = `<DOMLayer name="Parent"><frames>
+      <DOMFrame index="0" duration="10" tweenType="motion" keyMode="22017">${parentAt(100)}</DOMFrame>
+      <DOMFrame index="10" keyMode="22017">${parentAt(300)}</DOMFrame>
+    </frames></DOMLayer>`;
+    const child = (frames: string) => `<DOMLayer name="Child" parentLayerIndex="0"><frames>${frames}</frames></DOMLayer>`;
+    await render(parent + child(`
+      <DOMFrame index="0" duration="10" tweenType="motion" keyMode="22017"><elements>${panelInstance(175, 200)}</elements></DOMFrame>
+      <DOMFrame index="10" keyMode="22017"><elements>${panelInstance(375, 200)}</elements></DOMFrame>`), '', 5);
+    const pixels = (c: HTMLCanvasElement) => c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+    const halfway = pixels(canvas);
+    await render(parent + child(`<DOMFrame index="0" duration="11"><elements>${panelInstance(275, 200)}</elements></DOMFrame>`));
+    const placed = pixels(canvas);
+    let differing = 0;
+    for (let i = 0; i < placed.length; i += 4) if (Math.abs(placed[i + 1] - halfway[i + 1]) > 8) differing++;
+    expect(differing).toBe(0);
+    expect(colorAt(canvas, 316, 200)).toBe(RED);
+  });
+
+  it('projects in stage space under a ramka camera, which only frames the view', async () => {
+    // A ramka zooming 200% on the top-left quarter of the stage must show what
+    // the viewer's own 200% zoom shows there.
+    const ramka = `<DOMLayer name="ramka" layerType="guide"><frames><DOMFrame index="0" duration="11"><elements>
+      <DOMSymbolInstance libraryItemName="Ramka" symbolType="graphic"><matrix><Matrix a="0.5" d="0.5"/></matrix>
+        <transformationPoint><Point x="275" y="200"/></transformationPoint></DOMSymbolInstance>
+    </elements></DOMFrame></frames></DOMLayer>`;
+    const pixels = () => canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
+    await render(ramka + layer(panelInstance(137.5, 100)));
+    const framed = pixels();
+    await renderer.setDocument(await parseXfl({ 'DOMDocument.xml': domDocument(layer(panelInstance(137.5, 100))), 'LIBRARY/Panel.xml': panelSymbol }));
+    (renderer as unknown as { zoomLevel: number }).zoomLevel = 2;
+    renderer.renderFrame(0);
+    const zoomed = pixels();
+    // Pixels drawn in both (the background may cover different areas) whose
+    // green differs, red against white.
+    const differing = (a: Uint8ClampedArray, b: Uint8ClampedArray) => {
+      let count = a.length === b.length ? 0 : Infinity;
+      for (let i = 0; i < a.length; i += 4) if (a[i + 3] === 255 && b[i + 3] === 255 && Math.abs(a[i + 1] - b[i + 1]) > 8) count++;
+      return count;
+    };
+    expect(differing(zoomed, framed)).toBe(0);
+    expect(colorAt(canvas, 275, 200)).toBe(RED); // the panel's center, zoomed
+    // Follow camera mode frames the same ramka differently (centered, in a
+    // 1100x800 viewport), but the panel must still project in stage space: it
+    // matches the stage drawn at the same scale and offset.
+    await renderer.setDocument(await parseXfl({ 'DOMDocument.xml': domDocument(ramka + layer(panelInstance(137.5, 100))), 'LIBRARY/Panel.xml': panelSymbol }));
+    renderer.setFollowCamera(true);
+    renderer.renderFrame(0);
+    const followed = pixels();
+    const followScale = (renderer as unknown as { scale: number }).scale;
+    renderer.setFollowCamera(false);
+    // Follow mode draws stage x at followScale * (550 + 2 * (x - 137.5)).
+    await renderer.setDocument(await parseXfl({ 'DOMDocument.xml': domDocument(layer(panelInstance(137.5, 100))), 'LIBRARY/Panel.xml': panelSymbol }));
+    const view = renderer as unknown as { scale: number; panX: number; panY: number };
+    expect(view.scale).toBeCloseTo(2 * followScale, 9);
+    view.panX = 275 * followScale;
+    view.panY = 200 * followScale;
+    renderer.renderFrame(0);
+    expect(differing(pixels(), followed)).toBe(0);
+    expect(colorAt(canvas, 275, 200)).toBe(RED); // drawn at stage (275, 200) in both
+  });
+
+  it('moves the 3D center with an IK pose and a matrix replaced for a rig', () => {
+    const panel = {
+      type: 'symbol', libraryItemName: 'Panel', symbolType: 'graphic', rotationY: -25,
+      matrix: { a: 1, b: 0, c: 0, d: 1, tx: 225, ty: 170 }, transformationPoint: { x: 50, y: 30 },
+      centerPoint3D: { x: 275, y: 200 },
+    } as SymbolInstance;
+    const moved = withInstanceMatrix(panel, { a: 1, b: 0, c: 0, d: 1, tx: 245, ty: 160 });
+    expect(moved.centerPoint3D).toEqual({ x: 295, y: 190 });
+    expect(moved.matrix.tx).toBe(245);
+    const pose = { a: 0, b: 1, c: -1, d: 0, tx: 0, ty: 0 }; // a quarter turn about the parent's origin
+    const frame = { index: 0, duration: 1, elements: [panel], ikPoseMatrices: [[pose]] } as unknown as Frame;
+    expect(applyIKPose(frame, panel, 0, 0).centerPoint3D).toEqual({ x: -200, y: 275 });
+    expect(withInstanceMatrix({ ...panel, centerPoint3D: undefined }, pose).centerPoint3D).toBeUndefined();
   });
 
   it('keeps the 3D center with the instance through an object motion tween', async () => {

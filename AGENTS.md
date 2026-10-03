@@ -109,6 +109,14 @@ Gotchas: `back` uses overshoot constant **1.7** (not Penner's 1.70158) and `back
 scales it by **×1.525**; `elasticInOut` period is **0.45**. CustomEase is a multi-segment
 piecewise cubic bezier (3n+1 points), not a single 4-point curve.
 
+**Classic tween matrices** are interpolated decomposed (`interpolateDecomposed` in
+`src/layer-utils.ts`): scale X/Y, skew angles the short way round, and position, as the
+CreateJS runtime tweens `scaleX`, `scaleY`, `rotation`, `skewX` and `skewY`. Lerping a..d instead shrinks a
+turning instance (to nothing halfway through a half turn) and zooms a turning camera. A
+tween that mirrors the instance (determinant changes sign) is lerped entry by entry.
+`motionTweenRotate="clockwise"`/`"counter-clockwise"` spins are separate
+(`interpolateMatrixWithRotation`).
+
 ### Matrix Transform
 
 2D affine transformation matrix: `[a c tx; b d ty; 0 0 1]`
@@ -209,7 +217,8 @@ Animate's own camera is a layer type, not a naming convention (`src/native-camer
   ramka auto-detection above is not applied. A timeline marked `cameraLayerEnabled="false"`
   ignores its camera layer (defensive: real files with a camera write `"true"`).
 - Main timeline only, as in the runtime. Masks clip in their own layer's view
-  (`renderMaskGroup`). The SVG exporter uses the camera keyframe's matrix without tweening.
+  (`renderMaskGroup`). Follow camera mode keeps every layer's view and depth stacking. The
+  SVG exporter uses the camera keyframe's matrix without tweening.
 
 **Layer depth (Animate 2019+).** `layer.setZDepthAtFrame` is saved as `frameZDepth` on the
 layer's keyframes (absent is 0; negative is nearer). The runtime (`_applyLayerZDepth`,
@@ -491,11 +500,14 @@ strokes and the Vitest suite. What is still open:
 - [ ] **Layer depth**: the camera's own depth is read from the camera layer's `frameZDepth`
   (inferred; no real file with a nonzero camera depth found); eased depth tweens are linear;
   depth inside symbols and the runtime's size-locked `layerDepth` (always 0 in the published
-  samples) are ignored
+  samples) are ignored; a mask group stacks at the mask layer's depth (unverified)
 - [ ] **3D instances**: drawn with an affine approximation of the perspective (no keystone:
   the far side is as tall as the near side); the SVG exporter, masks and layer-parenting rigs
   use the plain 2D matrix; `matrix3D` is not read (see "3D instances" below); a 3D instance
-  nested in a `cacheAsBitmap` or 9-slice symbol projects from the wrong stage position
+  nested in a `cacheAsBitmap` or 9-slice symbol projects from the wrong stage position; a 3D
+  instance inside another is projected twice, its depth not turned by the parent's rotation;
+  an object tween that animates `Rotation_Z` on a 3D instance turns its matrix and the 3D
+  rotation also applies the saved `rotationZ` (unverified against Flash)
 
 `TODO.md` has the detailed feature-by-feature status against JPEXS; `review.md` is an
 older code review checklist.
@@ -993,8 +1005,12 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   real documents checked carry the angle that keeps it at 528.27). Canvas 2D is affine, so the
   projection is linearized at the 3D center (`projectedInstanceMatrix`): exact there, first
   order elsewhere. The renderer keeps the frame's stage base transform (`stageBaseInverse`) to
-  map the parent to stage space. An object motion tween moves the 3D center with the
-  transformation point. `matrix3D` itself is not read: its translation (twips) fits no simple
+  map the parent to stage space; it is taken after a ramka or follow-camera transform, which
+  only frame the view, while Animate's native camera and layer depth are part of the stage.
+  Every matrix change (classic and object tweens, layer-parenting rigs, IK poses) moves the 3D
+  center with the transformation point (`withInstanceMatrix`). Malformed rotations and
+  centers are dropped at parse time, and a projection that is not finite falls back to the
+  2D matrix. `matrix3D` itself is not read: its translation (twips) fits no simple
   model (x/z equal `center - R * matrixTranslation` in the menus, y is off in some, and none of
   the unrotated CS5 instances fit), and in a CS4 multi-axis file its rotation matches no Euler
   order of the saved rotationX/Y/Z. Tests: `src/__tests__/transform-3d.test.ts`.

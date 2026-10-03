@@ -1131,8 +1131,9 @@ export class FLAParser {
     // Parse 3D center point if present
     const centerPoint3DX = el.getAttribute('centerPoint3DX');
     const centerPoint3DY = el.getAttribute('centerPoint3DY');
-    const centerPoint3D = (centerPoint3DX || centerPoint3DY)
-      ? { x: parseFloat(centerPoint3DX || '0'), y: parseFloat(centerPoint3DY || '0') }
+    const center3D = { x: parseFloat(centerPoint3DX || '0'), y: parseFloat(centerPoint3DY || '0') };
+    const centerPoint3D = (centerPoint3DX || centerPoint3DY) && Number.isFinite(center3D.x) && Number.isFinite(center3D.y)
+      ? center3D
       : undefined;
 
     // Parse 3D rotation properties
@@ -1143,9 +1144,13 @@ export class FLAParser {
     // value as the z translation of the instance's `matrix3D`).
     const zAttr = el.getAttribute('z') || el.getAttribute('centerPoint3DZ');
 
-    const rotationX = rotationXAttr ? parseFloat(rotationXAttr) : undefined;
-    const rotationY = rotationYAttr ? parseFloat(rotationYAttr) : undefined;
-    const rotationZ = rotationZAttr ? parseFloat(rotationZAttr) : undefined;
+    const angle = (attr: string | null) => {
+      const value = attr ? parseFloat(attr) : NaN;
+      return Number.isFinite(value) ? value : undefined;
+    };
+    const rotationX = angle(rotationXAttr);
+    const rotationY = angle(rotationYAttr);
+    const rotationZ = angle(rotationZAttr);
     const zValue = parseFloat(zAttr ?? '');
     const z = Number.isFinite(zValue) && zValue !== 0 ? zValue : undefined;
 

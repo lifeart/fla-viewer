@@ -1892,11 +1892,12 @@ export async function exportSVG(
         }
         if (maskedByThis.length === 0) continue; // mask with no children: nothing to draw
 
-        // Render the masked children (bottom first, top last) honoring each
+        // Render the masked children in paint order (bottom first, or furthest
+        // first with layer depth, as the renderer stacks them) honoring each
         // child's own visibility. No double-hide: isLayerVisibleInFla here is
         // the child's check; the mask gate above is separate.
         const childOut: string[] = [];
-        for (const maskedIdx of [...maskedByThis].sort((a, b) => b - a)) {
+        for (const maskedIdx of paintOrder.filter((i) => maskedByThis.includes(i))) {
           if (!isLayerVisibleInFla(layers, maskedIdx)) continue;
           const layerOut: string[] = [];
           renderLayerElements(layers[maskedIdx], atFrameIndex, depth, layerOut, clock);
@@ -1910,7 +1911,7 @@ export async function exportSVG(
         const clipId = maskFrame ? buildMaskClipDef(maskFrame) : null;
         const maskView = stageViews ? stageViews.matrices[layerIndex] : undefined;
         if (clipId && maskView === null) continue; // the mask is behind the camera: no mask area
-        const maskInverse = clipId && maskView ? invertMatrix(maskView) : null;
+        const maskInverse = clipId && maskView && matrixToTransform(maskView) ? invertMatrix(maskView) : null;
         if (clipId && maskView && maskInverse) {
           // The clip is in the mask's view; the children are already in stage space.
           out.push(`<g transform="${matrixToTransform(maskView)}" clip-path="url(#${clipId})">\n    <g transform="${matrixToTransform(maskInverse)}">\n    ${childOut.join('\n    ')}\n  </g>\n  </g>`);

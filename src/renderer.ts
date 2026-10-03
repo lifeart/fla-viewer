@@ -35,10 +35,10 @@ import {
   graphicSymbolFrame, instanceClock, movieClipClock, movieClipPlayhead, movieClipRun, movieClipStopFrames,
   movieClipTicks, rootClock, type TimelineClock
 } from './symbol-loop';
-import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
+import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, interpolateDecomposed, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 import { variableWidthStrokePolygons } from './variable-width-stroke';
 import { layerZDepthAt, sortByStageDepth, stageLayerViews, type StageCamera, type StageLayerViews } from './native-camera';
-import { documentPerspective, projectedInstanceMatrix, rotation3D } from './transform-3d';
+import { documentPerspective, projectedInstanceMatrix, rotation3D, withInstanceMatrix } from './transform-3d';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -988,10 +988,20 @@ export class FLARenderer {
           ctx.scale(1 / scaleX, 1 / scaleY);
           ctx.translate(-cameraCenterX, -cameraCenterY);
 
-          // Render all layers except camera
-          this.renderTimelineLayers(timeline, frameIndex, 0, this.manualCameraLayerIndex);
+          // Following the camera only frames the view: 3D instances still
+          // project in stage space.
+          const stageBaseInverse = this.stageBaseInverse;
+          this.stageBaseInverse = ctx.getTransform().inverse();
+
+          // Render all layers except camera, still through Animate's native
+          // camera and layer depth
+          const stageViews = this.doc
+            ? stageLayerViews(timeline.layers, frameIndex, this.getNativeCamera(timeline, frameIndex), this.doc.width, this.doc.height)
+            : null;
+          this.renderTimelineLayers(timeline, frameIndex, 0, this.manualCameraLayerIndex, stageViews);
 
           ctx.restore();
+          this.stageBaseInverse = stageBaseInverse;
           return;
         }
       }
@@ -1011,17 +1021,22 @@ export class FLARenderer {
     return isLayerVisibleInFla(layers, index);
   }
 
-  // Render timeline layers (extracted for reuse)
+  // Render a timeline's layers in paint order, skipping `skipLayerIndex` (the
+  // camera layer), each main-timeline layer in its native camera/layer depth
+  // view when `stageViews` is given.
   private renderTimelineLayers(
     timeline: Timeline,
     frameIndex: number,
     depth: number,
-    skipLayerIndex?: number
+    skipLayerIndex?: number,
+    stageViews: StageLayerViews | null = null
   ): void {
+    // Render layers based on layerOrder setting (main) or nestedLayerOrder (nested symbols)
     const order = depth === 0 ? this.layerOrder : this.nestedLayerOrder;
-    const indices = order === 'reverse'
-      ? [...Array(timeline.layers.length).keys()].reverse()
-      : [...Array(timeline.layers.length).keys()];
+    const timelineOrder = order === 'reverse'
+      ? [...Array(timeline.layers.length).keys()].reverse()  // [len-1, len-2, ..., 0]
+      : [...Array(timeline.layers.length).keys()];           // [0, 1, ..., len-1]
+    const indices = stageViews ? sortByStageDepth(timelineOrder, stageViews) : timelineOrder;
 
     // Track which layers are masked and their mask layer index
     const maskedLayers = new Map<number, number>(); // masked layer index -> mask layer index
@@ -1032,26 +1047,39 @@ export class FLARenderer {
       }
     }
 
-    // Track which masked layers have been rendered (so we don't render them twice)
+    // Track which masked layers have been rendered
     const renderedMasked = new Set<number>();
 
     for (const i of indices) {
-      // Skip specified layer (camera layer)
-      if (i === skipLayerIndex) continue;
+      const layer = timeline.layers[i];
+
+      // Skip camera layer (it's a reference, not rendered content)
+      if (i === skipLayerIndex) {
+        continue;
+      }
 
       // Skip hidden layers (only for main timeline, depth 0)
-      if (depth === 0 && this.hiddenLayers.has(i)) continue;
+      if (depth === 0 && this.hiddenLayers.has(i)) {
+        continue;
+      }
 
-      // Skip reference layers
-      if (timeline.referenceLayers.has(i)) continue;
+      // Skip reference layers (guides, camera frames, folders, etc.)
+      // These are detected during parsing based on layer type, position, and structure
+      if (timeline.referenceLayers.has(i)) {
+        continue;
+      }
 
       // Skip if already rendered as part of a mask group
-      if (renderedMasked.has(i)) continue;
+      if (renderedMasked.has(i)) {
+        continue;
+      }
 
-      const layer = timeline.layers[i];
+      // Also skip guide/folder layers that might not have been detected
       const layerTypeLower = (layer.layerType as string)?.toLowerCase() || '';
-      if (layer.layerType === 'guide' || layerTypeLower === 'guide' ||
-          layer.layerType === 'folder' || layerTypeLower === 'folder') {
+      const isGuideLayer = layer.layerType === 'guide' || layerTypeLower === 'guide';
+      const isFolderLayer = layer.layerType === 'folder' || layerTypeLower === 'folder';
+
+      if (isGuideLayer || isFolderLayer) {
         continue;
       }
 
@@ -1080,7 +1108,7 @@ export class FLARenderer {
 
         if (maskedByThis.length > 0) {
           // Render mask layer with clipping
-          this.renderMaskGroup(timeline, frameIndex, depth, i, maskedByThis);
+          this.renderMaskGroup(timeline, frameIndex, depth, i, maskedByThis, stageViews);
         }
         continue; // Don't render mask layer normally
       }
@@ -1090,7 +1118,7 @@ export class FLARenderer {
         continue;
       }
 
-      this.renderLayer(layer, frameIndex, depth, i, timeline.layers);
+      this.withStageView(stageViews, i, () => this.renderLayer(layer, frameIndex, depth, i, timeline.layers));
     }
   }
 
@@ -1219,10 +1247,7 @@ export class FLARenderer {
           element.type === 'symbol') {
         const next = this.findTweenPartner(element, elementIndex, nextKeyframe);
         if (next.type === 'symbol') {
-          maskElement = {
-            ...element,
-            matrix: this.interpolateTweenMatrix(element.matrix, next.matrix, progress, frame),
-          };
+          maskElement = withInstanceMatrix(element, this.interpolateTweenMatrix(element.matrix, next.matrix, progress, frame));
         }
       }
 
@@ -1327,6 +1352,7 @@ export class FLARenderer {
 
     // Apply camera transform at root level only
     let hasCameraTransform = false;
+    const stageBaseInverse = this.stageBaseInverse;
     if (depth === 0 && activeCameraIndex !== undefined) {
       const cameraLayer = timeline.layers[activeCameraIndex];
       if (cameraLayer) {
@@ -1335,135 +1361,23 @@ export class FLARenderer {
           ctx.save();
           // Apply inverse camera transform to simulate camera movement
           this.applyInverseCameraTransform(cameraTransform);
+          // A ramka only frames the view: 3D instances still project in stage space.
+          this.stageBaseInverse = ctx.getTransform().inverse();
           hasCameraTransform = true;
         }
       }
     }
 
-    // Render layers based on layerOrder setting (main) or nestedLayerOrder (nested symbols)
-    const order = depth === 0 ? this.layerOrder : this.nestedLayerOrder;
-    const timelineOrder = order === 'reverse'
-      ? [...Array(timeline.layers.length).keys()].reverse()  // [len-1, len-2, ..., 0]
-      : [...Array(timeline.layers.length).keys()];           // [0, 1, ..., len-1]
-    const indices = stageViews ? sortByStageDepth(timelineOrder, stageViews) : timelineOrder;
-
-    // Track which layers are masked and their mask layer index
-    const maskedLayers = new Map<number, number>(); // masked layer index -> mask layer index
-    for (let i = 0; i < timeline.layers.length; i++) {
-      const maskIndex = getMaskLayerIndex(timeline.layers, i);
-      if (maskIndex !== undefined) {
-        maskedLayers.set(i, maskIndex);
-      }
-    }
-
-    // Track which masked layers have been rendered
-    const renderedMasked = new Set<number>();
-
-    for (const i of indices) {
-      const layer = timeline.layers[i];
-
-      // Skip camera layer (it's a reference, not rendered content)
-      if (i === activeCameraIndex) {
-        continue;
-      }
-
-      // Skip hidden layers (only for main timeline, depth 0)
-      if (depth === 0 && this.hiddenLayers.has(i)) {
-        continue;
-      }
-
-      // Skip reference layers (guides, camera frames, folders, etc.)
-      // These are detected during parsing based on layer type, position, and structure
-      if (timeline.referenceLayers.has(i)) {
-        continue;
-      }
-
-      // Skip if already rendered as part of a mask group
-      if (renderedMasked.has(i)) {
-        continue;
-      }
-
-      // Also skip guide/folder layers that might not have been detected
-      const layerTypeLower = (layer.layerType as string)?.toLowerCase() || '';
-      const isGuideLayer = layer.layerType === 'guide' || layerTypeLower === 'guide';
-      const isFolderLayer = layer.layerType === 'folder' || layerTypeLower === 'folder';
-
-      if (isGuideLayer || isFolderLayer) {
-        continue;
-      }
-
-      // Honor FLA layer visibility (with folder/parent cascade). Mask layers
-      // are handled by their own block below.
-      if (layer.layerType !== 'mask' && layerTypeLower !== 'mask' &&
-          !this.isLayerVisibleInFla(timeline.layers, i)) {
-        continue;
-      }
-
-      // Check if this is a mask layer
-      if (layer.layerType === 'mask' || layerTypeLower === 'mask') {
-        // A hidden mask hides its whole group (the mask and everything masked
-        // by it). Honor the mask layer's own visibility before rendering.
-        if (layer.visible === false) continue;
-
-        // Find all layers masked by this layer, in the same paint order as the
-        // timeline (so masked layers keep their relative stacking).
-        const maskedByThis: number[] = [];
-        for (const maskedIdx of indices) {
-          if (maskedLayers.get(maskedIdx) === i) {
-            maskedByThis.push(maskedIdx);
-            renderedMasked.add(maskedIdx);
-          }
-        }
-
-        if (maskedByThis.length > 0) {
-          // Render mask layer with clipping
-          this.renderMaskGroup(timeline, frameIndex, depth, i, maskedByThis, stageViews);
-        }
-        continue; // Don't render mask layer normally
-      }
-
-      // Skip masked layers - they'll be rendered as part of their mask group
-      if (maskedLayers.has(i)) {
-        continue;
-      }
-
-      this.withStageView(stageViews, i, () => this.renderLayer(layer, frameIndex, depth, i, timeline.layers));
-    }
+    this.renderTimelineLayers(timeline, frameIndex, depth, activeCameraIndex, stageViews);
 
     if (hasCameraTransform) {
       ctx.restore();
+      this.stageBaseInverse = stageBaseInverse;
     }
   }
 
   private getCameraTransform(cameraLayer: Layer, frameIndex: number): Matrix | null {
-    const frame = this.findFrameAtIndex(cameraLayer.frames, frameIndex);
-    if (!frame || frame.elements.length === 0) return null;
-
-    // Get the first symbol instance (should be the Ramka/camera symbol)
-    const element = frame.elements[0];
-    if (element.type !== 'symbol') return null;
-
-    // Check for motion tween interpolation
-    if (frame.tweenType === 'motion') {
-      const nextKeyframe = this.findNextKeyframe(cameraLayer.frames, frame);
-      if (nextKeyframe && nextKeyframe.elements.length > 0) {
-        const nextElement = this.findTweenPartner(element, 0, nextKeyframe);
-        if (nextElement.type === 'symbol') {
-          const progress = this.calculateTweenProgress(
-            frameIndex,
-            frame,
-            nextKeyframe,
-            frame.acceleration,
-            frame.tweens
-          );
-
-          // Interpolate the camera matrix like any classic-tweened instance
-          return this.interpolateTweenMatrix(element.matrix, nextElement.matrix, progress, frame);
-        }
-      }
-    }
-
-    return this.applyMotionObject(frame, element, frameIndex).matrix;
+    return this.getCameraElement(cameraLayer, frameIndex)?.matrix ?? null;
   }
 
   // Animate's native camera at a frame: its `__Camera__` instance's matrix
@@ -1491,7 +1405,9 @@ export class FLARenderer {
     this.ctx.restore();
   }
 
-  // Get full camera element with transformation point (for follow camera mode)
+  // The camera (ramka or native) instance at a frame: its first symbol
+  // instance, tweened like any classic-tweened instance. Follow camera mode
+  // also reads its transformation point (the pivot doesn't change in a tween).
   private getCameraElement(cameraLayer: Layer, frameIndex: number): SymbolInstance | null {
     const frame = this.findFrameAtIndex(cameraLayer.frames, frameIndex);
     if (!frame || frame.elements.length === 0) return null;
@@ -1499,11 +1415,10 @@ export class FLARenderer {
     const element = frame.elements[0];
     if (element.type !== 'symbol') return null;
 
-    // Check for motion tween interpolation
     if (frame.tweenType === 'motion') {
       const nextKeyframe = this.findNextKeyframe(cameraLayer.frames, frame);
       if (nextKeyframe && nextKeyframe.elements.length > 0) {
-        const nextElement = nextKeyframe.elements[0];
+        const nextElement = this.findTweenPartner(element, 0, nextKeyframe);
         if (nextElement.type === 'symbol') {
           const progress = this.calculateTweenProgress(
             frameIndex,
@@ -1512,20 +1427,7 @@ export class FLARenderer {
             frame.acceleration,
             frame.tweens
           );
-
-          // Return interpolated element
-          return {
-            ...element,
-            matrix: {
-              a: this.lerp(element.matrix.a, nextElement.matrix.a, progress),
-              b: this.lerp(element.matrix.b, nextElement.matrix.b, progress),
-              c: this.lerp(element.matrix.c, nextElement.matrix.c, progress),
-              d: this.lerp(element.matrix.d, nextElement.matrix.d, progress),
-              tx: this.lerp(element.matrix.tx, nextElement.matrix.tx, progress),
-              ty: this.lerp(element.matrix.ty, nextElement.matrix.ty, progress)
-            }
-            // Keep original transformationPoint (pivot doesn't change during tween)
-          };
+          return { ...element, matrix: this.interpolateTweenMatrix(element.matrix, nextElement.matrix, progress, frame) };
         }
       }
     }
@@ -1546,16 +1448,8 @@ export class FLARenderer {
     const state = evaluateMotionObject(frame.motionObject, frameIndex - frame.index, this.doc.frameRate, element.matrix, tp, filters);
     if (element.type === 'text') return { ...element, matrix: state.matrix, ...(state.filters && { filters: state.filters }) };
     if (element.type !== 'symbol') return { ...element, matrix: state.matrix };
-    // The 3D center point (parent coordinates) moves with the transformation point.
-    const center = element.centerPoint3D;
-    const moved = center && tp && {
-      x: center.x + state.matrix.a * tp.x + state.matrix.c * tp.y + state.matrix.tx - (element.matrix.a * tp.x + element.matrix.c * tp.y + element.matrix.tx),
-      y: center.y + state.matrix.b * tp.x + state.matrix.d * tp.y + state.matrix.ty - (element.matrix.b * tp.x + element.matrix.d * tp.y + element.matrix.ty),
-    };
     return {
-      ...element,
-      matrix: state.matrix,
-      ...(moved && { centerPoint3D: moved }),
+      ...withInstanceMatrix(element, state.matrix),
       ...(state.colorTransform && { colorTransform: state.colorTransform }),
       ...(state.rotationX !== undefined && { rotationX: state.rotationX }),
       ...(state.rotationY !== undefined && { rotationY: state.rotationY }),
@@ -1658,8 +1552,8 @@ export class FLARenderer {
           //   world(t) = P(t) * lerp(inv(P(k0)) * C0, inv(P(k1)) * C1)
           this.applyMatrix(rig.parentNow);
           this.renderDisplayElementWithTween(
-            { ...element, matrix: multiplyMatrices(rig.startInverse, element.matrix) },
-            { ...nextDisplayElement, matrix: multiplyMatrices(rig.endInverse, nextDisplayElement.matrix) },
+            withInstanceMatrix(element, multiplyMatrices(rig.startInverse, element.matrix)),
+            withInstanceMatrix(nextDisplayElement, multiplyMatrices(rig.endInverse, nextDisplayElement.matrix)),
             progress, depth, frameIndex, frame, elementIndex
           );
         } else {
@@ -2115,8 +2009,7 @@ export class FLARenderer {
       // and frameOffset in renderSymbolInstance already handles animation progress.
       // Interpolating firstFrame would cause double-counting and "lagging" animation.
       const tweenedDisplayElement: SymbolInstance = {
-        ...element,
-        matrix: interpolatedMatrix,
+        ...withInstanceMatrix(element, interpolatedMatrix),
         // firstFrame stays as element.firstFrame (the keyframe's starting offset)
         ...(interpolatedColorTransform && { colorTransform: interpolatedColorTransform })
       };
@@ -2142,14 +2035,7 @@ export class FLARenderer {
         frame.motionTweenRotateTimes || 0
       );
     } else {
-      interpolatedMatrix = {
-        a: this.lerp(startMatrix.a, endMatrix.a, progress),
-        b: this.lerp(startMatrix.b, endMatrix.b, progress),
-        c: this.lerp(startMatrix.c, endMatrix.c, progress),
-        d: this.lerp(startMatrix.d, endMatrix.d, progress),
-        tx: this.lerp(startMatrix.tx, endMatrix.tx, progress),
-        ty: this.lerp(startMatrix.ty, endMatrix.ty, progress)
-      };
+      interpolatedMatrix = interpolateDecomposed(startMatrix, endMatrix, progress);
     }
 
     // Apply orient-to-path rotation if enabled
@@ -4441,6 +4327,10 @@ export class FLARenderer {
         documentPerspective(this.doc)
       )
       : null;
+    if (projected && ![projected.a, projected.b, projected.c, projected.d, projected.tx, projected.ty].every(Number.isFinite)) {
+      this.applyMatrix(m); // malformed 3D values: draw it flat rather than at the origin
+      return;
+    }
     this.applyMatrix(projected ?? { a: 0, b: 0, c: 0, d: 0, tx: 0, ty: 0 });
   }
 
