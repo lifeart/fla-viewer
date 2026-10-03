@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import JSZip from 'jszip';
 import { FLAParser, parseMotionTweenRotate } from '../fla-parser';
 import { FLARenderer } from '../renderer';
-import type { FLADocument, Shape } from '../types';
+import { readDirectoryEntry, xflFolderToZip, isXFLStub, XFL_STUB_CONTENT, type XFLFolderEntry } from '../xfl-folder';
+import type { FLADocument, Shape, SymbolInstance } from '../types';
 
 // Version-specific XFL cases that real Flash CS4..Animate files contain. The XML
 // below mirrors what Flash CS5/CS6 writes (attribute names and value spellings
@@ -158,5 +159,79 @@ describe('patterned stroke styles', () => {
     expect(colorAt(canvas, 100, 100)).toBe('#FF0000');
     expect(colorAt(canvas, 120, 100)).toBe('#FF0000');
     expect(colorAt(canvas, 110, 100)).toBe('#FFFFFF');
+  });
+});
+
+describe('uncompressed XFL folders (CS5+ "Save as XFL")', () => {
+  const enc = (text: string) => new TextEncoder().encode(text);
+  const folderDoc = domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0"><elements>
+    <DOMSymbolInstance libraryItemName="Box" symbolType="graphic"><matrix><Matrix tx="10" ty="20"/></matrix></DOMSymbolInstance>
+  </elements></DOMFrame></frames></DOMLayer>`, ['Box']);
+
+  const folder = (prefix: string): XFLFolderEntry[] => [
+    { path: `${prefix}Anim.xfl`, data: enc(XFL_STUB_CONTENT) },
+    { path: `${prefix}DOMDocument.xml`, data: enc(folderDoc) },
+    { path: `${prefix}LIBRARY/Box.xml`, data: new Blob([symbolItem('Box', rectShape(0, 0, 10, 10, '#00FF00'))]) },
+    { path: `${prefix}PublishSettings.xml`, data: enc('<PublishSettings/>') },
+  ];
+
+  it.each([
+    ['at the root', ''],
+    ['inside the dropped folder', 'Anim/'],
+    ['nested two folders deep with Windows separators', 'Projects\\Anim\\'],
+  ])('parses a folder %s', async (_label, prefix) => {
+    const doc = await new FLAParser().parse(folder(prefix));
+    expect(doc.width).toBe(550);
+    expect(doc.symbols.has('Box')).toBe(true);
+    const instance = doc.timelines[0].layers[0].frames[0].elements[0] as SymbolInstance;
+    expect(instance).toMatchObject({ type: 'symbol', libraryItemName: 'Box' });
+    expect(instance.matrix).toMatchObject({ tx: 10, ty: 20 });
+  });
+
+  it('uses the shallowest DOMDocument.xml and ignores files outside it', () => {
+    const zip = xflFolderToZip([
+      ...folder('Anim/'),
+      { path: 'Anim/backup/DOMDocument.xml', data: enc('<DOMDocument/>') },
+      { path: 'readme.txt', data: enc('outside') },
+    ]);
+    expect(Object.keys(zip.files).sort()).toEqual(
+      ['Anim.xfl', 'DOMDocument.xml', 'LIBRARY/', 'LIBRARY/Box.xml', 'PublishSettings.xml', 'backup/', 'backup/DOMDocument.xml'].sort()
+    );
+  });
+
+  it('rejects a folder without DOMDocument.xml', async () => {
+    await expect(new FLAParser().parse([{ path: 'x/LIBRARY/a.xml', data: enc('<a/>') }]))
+      .rejects.toThrow('DOMDocument.xml not found');
+  });
+
+  it('explains that the .xfl stub alone cannot be opened', async () => {
+    expect(isXFLStub(enc('PROXY-CS5'))).toBe(true);
+    expect(isXFLStub(enc('PROXY-CS5\r\n'))).toBe(true);
+    expect(isXFLStub(enc('PK\u0003\u0004'))).toBe(false);
+    await expect(new FLAParser().parse(new File([enc('PROXY-CS5')], 'Anim.xfl')))
+      .rejects.toThrow('Open the whole folder');
+  });
+
+  it('reads every file of a dropped directory, across readEntries batches', async () => {
+    // Minimal stand-ins for the File and Directory Entries API.
+    const fileEntry = (name: string, text: string) => ({
+      isFile: true, isDirectory: false, name,
+      file: (ok: (f: File) => void) => ok(new File([text], name)),
+    });
+    const dirEntry = (name: string, children: unknown[][]): unknown => ({
+      isFile: false, isDirectory: true, name,
+      createReader: () => {
+        const batches = [...children, []];
+        return { readEntries: (ok: (e: unknown[]) => void) => ok(batches.shift() ?? []) };
+      },
+    });
+    const root = dirEntry('Anim', [
+      [fileEntry('DOMDocument.xml', folderDoc)],
+      [dirEntry('LIBRARY', [[fileEntry('Box.xml', symbolItem('Box', rectShape(0, 0, 10, 10, '#00FF00')))]])],
+    ]);
+    const entries = await readDirectoryEntry(root as FileSystemDirectoryEntry);
+    expect(entries.map((e) => e.path).sort()).toEqual(['Anim/DOMDocument.xml', 'Anim/LIBRARY/Box.xml']);
+    const doc = await new FLAParser().parse(entries);
+    expect(doc.symbols.has('Box')).toBe(true);
   });
 });

@@ -48,6 +48,9 @@ import {
 import { isOLE2, OLE2File } from './ole2-reader';
 import { parseBinaryFLA } from './binary-fla-parser';
 import { getMaskLayerIndex } from './layer-utils';
+import { isXFLStub, xflFolderToZip, type XFLFolderEntry } from './xfl-folder';
+
+export type { XFLFolderEntry } from './xfl-folder';
 
 // Debug flag - enabled via ?debug=true URL parameter or setParserDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -153,10 +156,31 @@ export class FLAParser {
     }
   }
 
-  async parse(input: FLAInput, onProgress?: ProgressCallback, isSkipImagesFix?: SkipCheckCallback, options: ParseOptions = {}): Promise<FLADocument> {
+  /**
+   * Parse a .fla (zipped XFL, or a pre-CS5 binary FLA) or, given the files of an
+   * uncompressed XFL folder (CS5+ "Save as XFL"), that folder.
+   */
+  async parse(input: FLAInput | XFLFolderEntry[], onProgress?: ProgressCallback, isSkipImagesFix?: SkipCheckCallback, options: ParseOptions = {}): Promise<FLADocument> {
     const progress = onProgress || (() => {});
     const shouldSkipImagesFix = isSkipImagesFix || (() => false);
 
+    if (Array.isArray(input)) {
+      progress('Reading XFL folder...');
+      this.zip = xflFolderToZip(input);
+    } else {
+      // A pre-CS5 binary FLA is parsed completely while opening.
+      const binaryDoc = await this.openArchive(input, progress, options);
+      if (binaryDoc) return binaryDoc;
+    }
+    this.symbolCache.clear();
+    return this.parseXfl(progress, shouldSkipImagesFix, options);
+  }
+
+  /**
+   * Load a .fla into `this.zip`. Returns the finished document instead when the
+   * input is a pre-CS5 binary FLA, which has no XFL inside.
+   */
+  private async openArchive(input: FLAInput, progress: ProgressCallback, options: ParseOptions): Promise<FLADocument | null> {
     const bytes = await toBytes(input);
 
     // Detect format by leading bytes. CS5+ FLAs are ZIP archives ("PK"…);
@@ -178,6 +202,13 @@ export class FLAParser {
       return binaryDoc;
     }
 
+    if (isXFLStub(bytes)) {
+      throw new Error(
+        'This is the .xfl file of an uncompressed XFL document (Flash CS5+ "Save as XFL"). ' +
+        'Open the whole folder that contains it instead.'
+      );
+    }
+
     // Try to load ZIP, handling potentially corrupted files
     progress('Extracting archive...');
     try {
@@ -192,8 +223,10 @@ export class FLAParser {
         throw e;
       }
     }
-    this.symbolCache.clear();
+    return null;
+  }
 
+  private async parseXfl(progress: ProgressCallback, shouldSkipImagesFix: SkipCheckCallback, options: ParseOptions): Promise<FLADocument> {
     // Parse main document
     progress('Parsing document...');
     const domDocXml = await this.getFileContent('DOMDocument.xml');
