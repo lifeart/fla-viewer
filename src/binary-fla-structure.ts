@@ -39,6 +39,8 @@
  * recorded reason rather than crashing the whole parse (project rule).
  */
 
+import { readFlashStringAt } from './binary-flash-string';
+
 export type BinaryLayerType =
   | 'normal'
   | 'guide'
@@ -76,11 +78,6 @@ export interface BinaryTimelineInfo {
 const LAYER_SIG = new Uint8Array([
   0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x80,
 ]);
-
-// Flash length-prefixed UTF-16LE string BOM: FF FE FF <u8 len>.
-const FLASH_STR_BOM = new Uint8Array([0xff, 0xfe, 0xff]);
-
-const utf16le = new TextDecoder('utf-16le');
 
 // Layer type comes from Flash's own naming: "Guide: <layer>" for guides and
 // "Folder N" for folders. Only the default folder name counts, so a normal
@@ -121,23 +118,13 @@ export function extractLayers(streamData: Uint8Array): BinaryLayerInfo[] {
     // A plausible layer schema is small; bail this candidate otherwise. (The
     // sentinel can also precede CPicShape bodies, which are NOT layers — those
     // are not followed by a layer-schema byte + name Flash string.)
-    if (
-      schema < 1 ||
-      schema > 30 ||
-      !matchesAt(data, FLASH_STR_BOM, bomPos)
-    ) {
+    const nameStr = schema >= 1 && schema <= 30 ? readFlashStringAt(data, bomPos) : null;
+    if (!nameStr) {
       pos += 1;
       continue;
     }
-    const lenPos = bomPos + FLASH_STR_BOM.length;
-    const charLen = data[lenPos];
-    const nameStart = lenPos + 1;
-    const nameEnd = nameStart + charLen * 2;
-    if (charLen === 0 || nameEnd > data.length) {
-      pos += 1;
-      continue;
-    }
-    const name = utf16le.decode(data.subarray(nameStart, nameEnd));
+    const name = nameStr.value;
+    const nameEnd = nameStr.end;
 
     // Post-name triple (layer_schema >= 4): u8 current, u8 locked, u8 hidden.
     // fla-decoder labels byte 0 "type", but in real Flash files exactly one

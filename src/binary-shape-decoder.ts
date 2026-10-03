@@ -55,6 +55,10 @@ import type {
   Shape,
   StrokeStyle,
 } from './types';
+import { ArchiveReader, ByteReader, EndOfStreamError } from './binary-carchive';
+
+// Re-exported for existing importers; they live in ./binary-carchive.
+export { ArchiveReader, ByteReader, EndOfStreamError };
 
 /** Flash internal coordinate unit: 1 px = 2560 ultra-twips (= 20 twips × 128). */
 export const ULTRA_TWIPS_PER_PX = 2560;
@@ -74,72 +78,6 @@ export function edgeUnitsPerPx(shapeSchema: number): number {
 const TWIPS_PER_PX = 20;
 /** 16.16 fixed-point divisor (1.0 == 0x00010000). */
 const FIXED_16_16 = 65536;
-
-const ascii = new TextDecoder('ascii');
-
-/** Thrown when a read runs past the end of the stream buffer. */
-export class EndOfStreamError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'EndOfStreamError';
-  }
-}
-
-/** Little-endian cursor over a stream's bytes (mirrors decoder.py `Reader`). */
-export class ByteReader {
-  pos = 0;
-  private view: DataView;
-  constructor(public buf: Uint8Array) {
-    this.view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  }
-  private need(n: number): void {
-    if (this.pos + n > this.buf.length) {
-      throw new EndOfStreamError(
-        `need ${n} bytes at pos 0x${this.pos.toString(16)}, only ${this.remaining()} left`
-      );
-    }
-  }
-  u8(): number {
-    this.need(1);
-    return this.buf[this.pos++];
-  }
-  u16(): number {
-    this.need(2);
-    const v = this.view.getUint16(this.pos, true);
-    this.pos += 2;
-    return v;
-  }
-  s16(): number {
-    this.need(2);
-    const v = this.view.getInt16(this.pos, true);
-    this.pos += 2;
-    return v;
-  }
-  u32(): number {
-    this.need(4);
-    const v = this.view.getUint32(this.pos, true);
-    this.pos += 4;
-    return v;
-  }
-  s32(): number {
-    this.need(4);
-    const v = this.view.getInt32(this.pos, true);
-    this.pos += 4;
-    return v;
-  }
-  bytes(n: number): Uint8Array {
-    this.need(n);
-    const v = this.buf.subarray(this.pos, this.pos + n);
-    this.pos += n;
-    return v;
-  }
-  eof(): boolean {
-    return this.pos >= this.buf.length;
-  }
-  remaining(): number {
-    return this.buf.length - this.pos;
-  }
-}
 
 /** Interpret an s32 as 16.16 fixed-point. */
 function fixed16_16(raw: number): number {
@@ -177,80 +115,6 @@ export function colorFromU32(u32: number): { color: string; alpha: number } {
   const a = (u32 >>> 24) & 0xff;
   const hex = (n: number) => n.toString(16).padStart(2, '0');
   return { color: `#${hex(r)}${hex(g)}${hex(b)}`, alpha: a / 255 };
-}
-
-// ── MFC class-tag reader ────────────────────────────────────────────────────
-
-const NULL_TAG = 0x0000;
-const NEWCLASS_TAG = 0xffff;
-const LONG_BACKREF_TAG = 0x7fff;
-
-interface ClassTag {
-  kind: 'null' | 'new_class' | 'backref';
-  name?: string;
-  schema?: number;
-}
-
-/**
- * Reads the MFC `CArchive` class-tag protocol, registering new classes so
- * back-references resolve to a class name (FORMAT.md §2). Mirrors decoder.py
- * `ArchiveReader`: each NEWCLASS allocates two combined-table slots (class +
- * object), so a 1-based backref index maps to `combined[idx-1]`.
- */
-export class ArchiveReader {
-  /** Combined class+object table; entries carry the resolved class name. */
-  private combined: string[] = [];
-  constructor(public r: ByteReader) {}
-
-  registerClass(name: string): void {
-    this.combined.push(name); // odd slot: the CRuntimeClass
-    this.combined.push(name); // even slot: the created CObject
-  }
-
-  /** Read one object-header class tag. */
-  readClassTag(): ClassTag {
-    const tag = this.r.u16();
-    if (tag === NULL_TAG) return { kind: 'null' };
-    if (tag === NEWCLASS_TAG) {
-      const schema = this.r.u16();
-      const nameLen = this.r.u16();
-      const name = ascii.decode(this.r.bytes(nameLen));
-      this.registerClass(name);
-      return { kind: 'new_class', name, schema };
-    }
-    if (tag === LONG_BACKREF_TAG) {
-      const idx = this.r.u32();
-      const name = this.combined[idx - 1];
-      return { kind: 'backref', name };
-    }
-    if (tag & 0x8000) {
-      const idx = tag & 0x7fff;
-      const name = this.combined[idx - 1];
-      return { kind: 'backref', name };
-    }
-    throw new Error(
-      `bad class tag 0x${tag.toString(16).padStart(4, '0')} @ 0x${(this.r.pos - 2).toString(16)}`
-    );
-  }
-
-  /**
-   * Class name of the back-reference tag at the reader's position, WITHOUT
-   * consuming it; undefined if the next tag is not a resolvable backref.
-   */
-  peekBackrefName(): string | undefined {
-    const { buf, pos } = this.r;
-    if (pos + 2 > buf.length) return undefined;
-    const tag = buf[pos] | (buf[pos + 1] << 8);
-    if (!(tag & 0x8000) || tag === NEWCLASS_TAG || tag === LONG_BACKREF_TAG) {
-      return undefined;
-    }
-    return this.combined[(tag & 0x7fff) - 1];
-  }
-
-  /** Seed the table with classes already declared earlier in the stream. */
-  seedClasses(names: string[]): void {
-    for (const n of names) this.registerClass(n);
-  }
 }
 
 // ── shape data: fills, strokes, edge stream ─────────────────────────────────

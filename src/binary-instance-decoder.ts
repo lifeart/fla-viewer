@@ -73,7 +73,8 @@
  * is skipped, never crashing the parse; nothing is fabricated.
  */
 
-import { ByteReader, EndOfStreamError } from './binary-shape-decoder';
+import { ByteReader, EndOfStreamError, scanDeclaredClasses } from './binary-carchive';
+import { readFlashStringAt } from './binary-flash-string';
 import type { Matrix } from './types';
 
 /** 16.16 fixed-point divisor (1.0 == 0x00010000). */
@@ -225,19 +226,12 @@ export function tryParseInstanceAt(
     //   u32 1, u8×3 0, s32 -1, FF FE FF <u8 len> <UTF-16LE>, u32 media_ref
     // Reading the placeholder made every placement point at Symbol 1.
     const p = r.pos;
-    if (
-      p + 15 <= data.length &&
-      data[p + 11] === 0xff &&
-      data[p + 12] === 0xfe &&
-      data[p + 13] === 0xff
-    ) {
-      const nameEnd = p + 15 + data[p + 14] * 2;
-      if (nameEnd + 4 <= data.length) {
-        r.pos = nameEnd;
-        const ref = r.u32();
-        if (ref >= 1 && ref <= MAX_MEDIA_REF) mediaRef = ref;
-        else r.pos = p;
-      }
+    const flashName = readFlashStringAt(data, p + 11, { allowEmpty: true });
+    if (flashName && flashName.end + 4 <= data.length) {
+      r.pos = flashName.end;
+      const ref = r.u32();
+      if (ref >= 1 && ref <= MAX_MEDIA_REF) mediaRef = ref;
+      else r.pos = p;
     }
 
     return {
@@ -263,41 +257,8 @@ export function tryParseInstanceAt(
  * not a structured walk, so it never desyncs on CPicFrame's tail.
  */
 export function buildCombinedClassTable(data: Uint8Array): string[] {
-  const combined: string[] = [];
-  let i = 0;
-  while (i < data.length - 6) {
-    if (data[i] === 0xff && data[i + 1] === 0xff) {
-      const nameLen = data[i + 4] | (data[i + 5] << 8);
-      if (nameLen > 0 && nameLen < 40 && i + 6 + nameLen <= data.length) {
-        let printable = true;
-        for (let j = 0; j < nameLen; j++) {
-          const c = data[i + 6 + j];
-          // ASCII letters / digits / underscore — every CPic*/MFI* class name.
-          const ok =
-            (c >= 0x41 && c <= 0x5a) ||
-            (c >= 0x61 && c <= 0x7a) ||
-            (c >= 0x30 && c <= 0x39) ||
-            c === 0x5f;
-          if (!ok) {
-            printable = false;
-            break;
-          }
-        }
-        if (printable) {
-          let name = '';
-          for (let j = 0; j < nameLen; j++) {
-            name += String.fromCharCode(data[i + 6 + j]);
-          }
-          combined.push(name); // odd slot: the CRuntimeClass
-          combined.push(name); // even slot: the created CObject
-          i += 6 + nameLen;
-          continue;
-        }
-      }
-    }
-    i += 1;
-  }
-  return combined;
+  // odd slot: the CRuntimeClass; even slot: the created CObject.
+  return scanDeclaredClasses(data).flatMap((name) => [name, name]);
 }
 
 function matchAt(hay: Uint8Array, needle: Uint8Array, at: number): boolean {
