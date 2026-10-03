@@ -7,6 +7,8 @@ export interface FLADocument {
   height: number;
   frameRate: number;
   backgroundColor: string;
+  viewAngle3D?: number; // 3D perspective angle in degrees (CS4+); Flash's default is 55
+  vanishingPoint3D?: Point; // 3D vanishing point; default is the stage center
   timelines: Timeline[];
   symbols: Map<string, Symbol>;
   bitmaps: Map<string, BitmapItem>;

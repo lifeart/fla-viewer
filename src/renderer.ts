@@ -38,6 +38,7 @@ import {
 import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 import { variableWidthStrokePolygons } from './variable-width-stroke';
 import { layerZDepthAt, sortByStageDepth, stageLayerViews, type StageCamera, type StageLayerViews } from './native-camera';
+import { documentPerspective, projectedInstanceMatrix, rotation3D } from './transform-3d';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -112,6 +113,9 @@ export class FLARenderer {
   private instanceStack: { slot: string; clock: TimelineClock }[] = [];
   // Clock of the symbol instance getSymbolFrame resolved last.
   private resolvedClock: TimelineClock = rootClock(0);
+  // Inverse of the canvas transform that maps stage (document) coordinates to
+  // the canvas this frame; 3D instances project in stage coordinates.
+  private stageBaseInverse: DOMMatrix | null = null;
   private clipRunCache = new WeakMap<Frame, Map<string, { start: number; end: number }>>();
   // Movie clip states reached by the current renderFrame; the rest have left
   // the stage and are dropped when it ends (a clip placed again starts over).
@@ -923,6 +927,7 @@ export class FLARenderer {
     // Apply DPR, auto-fit scale, and manual zoom together; pan offsets are in CSS pixels
     const combinedScale = this.scale * this.zoomLevel * this.dpr;
     ctx.setTransform(combinedScale, 0, 0, combinedScale, this.panX * this.dpr, this.panY * this.dpr);
+    this.stageBaseInverse = ctx.getTransform().inverse();
 
     // Fill with background color (fill the viewport area)
     ctx.fillStyle = doc.backgroundColor;
@@ -1541,9 +1546,16 @@ export class FLARenderer {
     const state = evaluateMotionObject(frame.motionObject, frameIndex - frame.index, this.doc.frameRate, element.matrix, tp, filters);
     if (element.type === 'text') return { ...element, matrix: state.matrix, ...(state.filters && { filters: state.filters }) };
     if (element.type !== 'symbol') return { ...element, matrix: state.matrix };
+    // The 3D center point (parent coordinates) moves with the transformation point.
+    const center = element.centerPoint3D;
+    const moved = center && tp && {
+      x: center.x + state.matrix.a * tp.x + state.matrix.c * tp.y + state.matrix.tx - (element.matrix.a * tp.x + element.matrix.c * tp.y + element.matrix.tx),
+      y: center.y + state.matrix.b * tp.x + state.matrix.d * tp.y + state.matrix.ty - (element.matrix.b * tp.x + element.matrix.d * tp.y + element.matrix.ty),
+    };
     return {
       ...element,
       matrix: state.matrix,
+      ...(moved && { centerPoint3D: moved }),
       ...(state.colorTransform && { colorTransform: state.colorTransform }),
       ...(state.rotationX !== undefined && { rotationX: state.rotationX }),
       ...(state.rotationY !== undefined && { rotationY: state.rotationY }),
@@ -4408,82 +4420,28 @@ export class FLARenderer {
   }
 
   /**
-   * Apply 3D transform using perspective projection to 2D canvas.
-   * This simulates 3D rotations by applying appropriate 2D transforms.
+   * Apply a 3D instance's transform (rotationX/Y/Z about its 3D center, and
+   * z) in the document's perspective, linearized at the 3D center
+   * (src/transform-3d.ts). An instance behind the viewer draws nothing.
    */
   private apply3DTransform(instance: SymbolInstance): void {
-    const ctx = this.ctx;
-    const matrix = instance.matrix;
-
-    // Get 3D rotation angles in radians
-    const rotX = (instance.rotationX || 0) * Math.PI / 180;
-    const rotY = (instance.rotationY || 0) * Math.PI / 180;
-    const rotZ = (instance.rotationZ || 0) * Math.PI / 180;
-    const zPos = instance.z || 0;
-
-    // Get the center point for 3D rotation
-    const centerX = instance.centerPoint3D?.x || instance.transformationPoint.x;
-    const centerY = instance.centerPoint3D?.y || instance.transformationPoint.y;
-
-    // First apply the 2D matrix translation
-    ctx.translate(matrix.tx, matrix.ty);
-
-    // Apply perspective projection for 3D effect
-    // Using a simple perspective distance
-    const perspectiveDistance = 1000;
-
-    // Calculate 3D rotation matrices and project to 2D
-    // Rotation around X-axis affects Y scale and skew
-    const cosX = Math.cos(rotX);
-    const sinX = Math.sin(rotX);
-
-    // Rotation around Y-axis affects X scale and skew
-    const cosY = Math.cos(rotY);
-    const sinY = Math.sin(rotY);
-
-    // Apply Z-position scaling (objects further away appear smaller)
-    const zScale = perspectiveDistance / (perspectiveDistance + zPos);
-
-    // Extract scale from original matrix
-    const origScaleX = Math.sqrt(matrix.a * matrix.a + matrix.b * matrix.b);
-    const origScaleY = Math.sqrt(matrix.c * matrix.c + matrix.d * matrix.d);
-
-    // Combine all transformations:
-    // 1. Translate to center point
-    // 2. Apply 3D rotations (projected to 2D)
-    // 3. Apply perspective scale
-    // 4. Translate back
-
-    // Move to transformation center
-    ctx.translate(centerX, centerY);
-
-    // Apply Z rotation (in 2D plane)
-    ctx.rotate(rotZ);
-
-    // Apply Y rotation effect (horizontal compression/skew)
-    // When rotating around Y-axis, the X dimension compresses
-    const scaleXFromRotY = cosY * zScale;
-
-    // Apply X rotation effect (vertical compression/skew)
-    // When rotating around X-axis, the Y dimension compresses
-    const scaleYFromRotX = cosX * zScale;
-
-    // Apply the combined scale
-    ctx.scale(origScaleX * scaleXFromRotY, origScaleY * scaleYFromRotX);
-
-    // Apply skew from 3D rotations
-    // Y rotation creates horizontal skew
-    if (Math.abs(sinY) > 0.001) {
-      ctx.transform(1, 0, sinY * 0.5, 1, 0, 0);
-    }
-
-    // X rotation creates vertical skew
-    if (Math.abs(sinX) > 0.001) {
-      ctx.transform(1, sinX * 0.5, 0, 1, 0, 0);
-    }
-
-    // Translate back from center
-    ctx.translate(-centerX, -centerY);
+    const m = instance.matrix;
+    const tp = instance.transformationPoint;
+    const pivot = instance.centerPoint3D ?? { x: m.a * tp.x + m.c * tp.y + m.tx, y: m.b * tp.x + m.d * tp.y + m.ty };
+    // The parent's space -> stage, without the view's scale and pan.
+    const ctm = this.ctx.getTransform();
+    const toStage = this.stageBaseInverse ? this.stageBaseInverse.multiply(ctm) : ctm;
+    const projected = this.doc
+      ? projectedInstanceMatrix(
+        m,
+        pivot,
+        rotation3D(instance.rotationX, instance.rotationY, instance.rotationZ),
+        instance.z ?? 0,
+        { a: toStage.a, b: toStage.b, c: toStage.c, d: toStage.d, tx: toStage.e, ty: toStage.f },
+        documentPerspective(this.doc)
+      )
+      : null;
+    this.applyMatrix(projected ?? { a: 0, b: 0, c: 0, d: 0, tx: 0, ty: 0 });
   }
 
   // Apply filters using Canvas 2D shadow and filter API. A filter's strength

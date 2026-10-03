@@ -132,8 +132,10 @@ piecewise cubic bezier (3n+1 points), not a single 4-point curve.
     symbolType="graphic"           <!-- graphic | button; omitted for a movie clip -->
     loop="loop"                    <!-- loop | play once | single frame -->
     firstFrame="0"                 <!-- Starting frame for nested timeline -->
-    centerPoint3DX="100"           <!-- 3D center point for transforms -->
-    centerPoint3DY="200">
+    rotationY="-25"                <!-- CS4+ 3D: rotationX/Y/Z in degrees -->
+    centerPoint3DX="100"           <!-- 3D center point, parent coordinates -->
+    centerPoint3DY="200"
+    centerPoint3DZ="-100">         <!-- 3D depth (negative is nearer) -->
 
     <matrix><Matrix .../></matrix>
     <transformationPoint><Point x="0" y="0"/></transformationPoint>
@@ -405,10 +407,9 @@ Decodes to:
   - Stores in `timeline.referenceLayers` (Set) for efficient lookup
   - Skipped during rendering to avoid visual artifacts
 
-- [x] **3D Center Point**: centerPoint3DX/Y on symbol instances
-  - Parses 3D transformation center points
-  - Applies transforms around center point
-  - Interpolates center point during tweens
+- [x] **3D Instances** (CS4+): `rotationX/Y/Z` about `centerPoint3DX/Y`, depth from
+  `centerPoint3DZ`, in the document's perspective (`viewAngle3D`, `vanishingPoint3DX/Y`),
+  linearized at the 3D center (see "3D instances" under Version-specific XFL cases)
 
 - [x] **Bitmap Items**: DOMBitmapItem parsing from media section
   - Parses bitmap dimensions and references
@@ -491,6 +492,10 @@ strokes and the Vitest suite. What is still open:
   (inferred; no real file with a nonzero camera depth found); eased depth tweens are linear;
   depth inside symbols and the runtime's size-locked `layerDepth` (always 0 in the published
   samples) are ignored
+- [ ] **3D instances**: drawn with an affine approximation of the perspective (no keystone:
+  the far side is as tall as the near side); the SVG exporter, masks and layer-parenting rigs
+  use the plain 2D matrix; `matrix3D` is not read (see "3D instances" below); a 3D instance
+  nested in a `cacheAsBitmap` or 9-slice symbol projects from the wrong stage position
 
 `TODO.md` has the detailed feature-by-feature status against JPEXS; `review.md` is an
 older code review checklist.
@@ -506,6 +511,7 @@ older code review checklist.
 | DOMDocument | `width`, `height` | Canvas dimensions |
 | DOMDocument | `frameRate` | Playback speed |
 | DOMDocument | `backgroundColor` | Canvas background |
+| DOMDocument | `viewAngle3D`, `vanishingPoint3DX`, `vanishingPoint3DY` | 3D perspective (`src/transform-3d.ts`) |
 | DOMLayer | `name`, `color`, `visible`, `locked` | Layer metadata |
 | DOMLayer | `layerType` | normal/guide/folder detection, reference layer filtering |
 | DOMLayer | `outline` | Camera layer detection |
@@ -518,6 +524,7 @@ older code review checklist.
 | DOMSymbolInstance | `libraryItemName`, `symbolType` | Symbol reference |
 | DOMSymbolInstance | `loop`, `firstFrame` | Playback mode |
 | DOMSymbolInstance | `centerPoint3DX`, `centerPoint3DY` | 3D transform center |
+| DOMSymbolInstance | `rotationX`, `rotationY`, `rotationZ`, `centerPoint3DZ` | 3D rotation and depth |
 | Matrix | `a`, `b`, `c`, `d`, `tx`, `ty` | 2D transforms |
 | Point | `x`, `y` | Coordinates |
 | Edge | `fillStyle0`, `fillStyle1`, `strokeStyle` | Style indices |
@@ -614,6 +621,7 @@ Edge contributions are collected per fill style, then sorted into connected chai
 | `src/path-utils.ts` | Library path normalization |
 | `src/layer-utils.ts` | Layer visibility cascade, mask membership, rig parent lookup (shared by renderer and exporter) |
 | `src/native-camera.ts` | Animate's native camera and layer depth: per-layer stage views and stacking (shared by renderer and SVG exporter) |
+| `src/transform-3d.ts` | CS4+ 3D instances: rotation, document perspective, linearized projection |
 | `src/renderer.ts` | Canvas 2D rendering engine, edge sorting, path building, masks, rig transforms |
 | `src/player.ts` | Timeline playback, scenes, audio sync, zoom/pan |
 | `src/video-exporter.ts` | MP4/WebM (WebCodecs), GIF, PNG sequence, PNG/SVG frame, sprite sheet export |
@@ -966,6 +974,25 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   plus `attachedToCamera` on layers; see "Native Camera" above. It is not a ramka layer, though
   it is usually named "Camera". Layer depth (Animate 2019+) is `frameZDepth` on keyframes.
   Tests: `src/__tests__/native-camera.test.ts`.
+- **3D instances (CS4+).** The saved 2D `matrix` of a 3D instance is NOT what Flash shows: in
+  real files (Animate CC 2017 UI menus, rotationY -25/27/-332) it is a bare translation, and
+  Flash publishes the instance as a projected Matrix3D (`fl.motion.AnimatorFactory3D`,
+  `is3D = true`, seen in decompiled SWFs). `src/transform-3d.ts` rotates it by
+  R = Rz * Ry * Rx (`fl.motion.Animator3D` order, `MatrixTransformer3D` axis matrices; a
+  single-axis R equals the 3x3 part of the saved `matrix3D`) about `centerPoint3DX/Y` (parent
+  coordinates; matrix * transformationPoint unless the center was moved), at depth
+  `centerPoint3DZ` (equal to the `matrix3D` z translation / 20 in a real CS5 file; a `z`
+  attribute is also read, though no real file has one), then projects toward
+  `vanishingPoint3DX/Y` (default: stage center) with focal length
+  `(width / 2) / tan(viewAngle3D / 2)` (AS3 PerspectiveProjection; default 55 degrees; 4 of 5
+  real documents checked carry the angle that keeps it at 528.27). Canvas 2D is affine, so the
+  projection is linearized at the 3D center (`projectedInstanceMatrix`): exact there, first
+  order elsewhere. The renderer keeps the frame's stage base transform (`stageBaseInverse`) to
+  map the parent to stage space. An object motion tween moves the 3D center with the
+  transformation point. `matrix3D` itself is not read: its translation (twips) fits no simple
+  model (x/z equal `center - R * matrixTranslation` in the menus, y is off in some, and none of
+  the unrotated CS5 instances fit), and in a CS4 multi-axis file its rotation matches no Euler
+  order of the saved rotationX/Y/Z. Tests: `src/__tests__/transform-3d.test.ts`.
 - **Movie clips have no `symbolType`.** Animate writes it only for `graphic`/`button`
   (instances and library items); a missing value is a movie clip (`parseSymbolType`). Movie
   clips run their own playheads (`advanceMovieClipPlayheads`, called by the player on every

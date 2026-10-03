@@ -20,9 +20,9 @@ import { invertMatrix, multiplyMatrices } from './layer-utils';
 //   keep their timeline order.
 
 /**
- * The runtime's fixed focal length. It is also the focal length of Flash's
- * default 55 degree field of view on a 550px-wide stage; Animate documents of
- * other sizes usually carry the `viewAngle3D` that keeps it.
+ * The runtime's fixed focal length. It is close to the 3D focal length of
+ * Flash's default 55 degree field of view on a 550px-wide stage (528.27; see
+ * src/transform-3d.ts), which Animate documents of other sizes usually keep.
  */
 export const LAYER_DEPTH_FOCAL_LENGTH = 528.25;
 

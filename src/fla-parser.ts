@@ -287,6 +287,13 @@ export class FLAParser {
     const height = parseFloat(root.getAttribute('height') || '400') || 400;
     const frameRate = parseFloat(root.getAttribute('frameRate') || '24') || 24;
     const backgroundColor = root.getAttribute('backgroundColor') || '#FFFFFF';
+    // 3D perspective (CS4+): perspective angle and vanishing point.
+    const viewAngle3D = parseFloat(root.getAttribute('viewAngle3D') ?? '');
+    const vanishingX = parseFloat(root.getAttribute('vanishingPoint3DX') ?? '');
+    const vanishingY = parseFloat(root.getAttribute('vanishingPoint3DY') ?? '');
+    const vanishingPoint3D = Number.isFinite(vanishingX) || Number.isFinite(vanishingY)
+      ? { x: Number.isFinite(vanishingX) ? vanishingX : width / 2, y: Number.isFinite(vanishingY) ? vanishingY : height / 2 }
+      : undefined;
 
     // Parse symbol references and load them
     await this.loadSymbols(root, progress);
@@ -312,6 +319,8 @@ export class FLAParser {
       height,
       frameRate,
       backgroundColor,
+      ...(Number.isFinite(viewAngle3D) && { viewAngle3D }),
+      ...(vanishingPoint3D && { vanishingPoint3D }),
       timelines,
       symbols: this.symbolCache,
       bitmaps,
@@ -1130,12 +1139,15 @@ export class FLAParser {
     const rotationXAttr = el.getAttribute('rotationX');
     const rotationYAttr = el.getAttribute('rotationY');
     const rotationZAttr = el.getAttribute('rotationZ');
-    const zAttr = el.getAttribute('z');
+    // Depth: Flash saves it as the 3D center's z (`centerPoint3DZ`, the same
+    // value as the z translation of the instance's `matrix3D`).
+    const zAttr = el.getAttribute('z') || el.getAttribute('centerPoint3DZ');
 
     const rotationX = rotationXAttr ? parseFloat(rotationXAttr) : undefined;
     const rotationY = rotationYAttr ? parseFloat(rotationYAttr) : undefined;
     const rotationZ = rotationZAttr ? parseFloat(rotationZAttr) : undefined;
-    const z = zAttr ? parseFloat(zAttr) : undefined;
+    const zValue = parseFloat(zAttr ?? '');
+    const z = Number.isFinite(zValue) && zValue !== 0 ? zValue : undefined;
 
     // Parse cache as bitmap
     const cacheAsBitmapAttr = el.getAttribute('cacheAsBitmap');
