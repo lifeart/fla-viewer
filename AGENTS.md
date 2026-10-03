@@ -433,6 +433,10 @@ suite. What is still open:
   (they fall back to linear)
 - [ ] **Variable-width strokes** (`<VariablePointWidth><WidthMarker>`) and art/pattern
   brushes draw at constant width
+- [ ] **Movie clips inside graphic symbols**: seeded from the graphic's current frame only,
+  so a seek or single-frame export of a one-frame or looping graphic can show a different
+  clip frame than continuous playback (whether Flash restarts such clips when the graphic
+  loops is unverified)
 
 `TODO.md` has the detailed feature-by-feature status against JPEXS; `review.md` is an
 older code review checklist.
@@ -861,7 +865,8 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   since the run began, measured on the parent's frames, or inside another movie clip on that
   clip's own elapsed ticks (it loops from frame 0 or holds at its first stop()). So a seek, a
   single-frame/SVG/mid-range export, or a frame after a `cacheAsBitmap` frame agrees with
-  playback. A `cacheAsBitmap` frame itself still shows the cached subtree.
+  playback. A `cacheAsBitmap` frame itself still shows the cached subtree. A clip inside a
+  graphic symbol is seeded from the graphic's current frame only (see Remaining TODOs).
 
 ### Pre-CS5 binary FLA (issue #8)
 - Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not
