@@ -375,6 +375,23 @@ export interface StrokeStyle {
   bitmapPath?: string;
   bitmapIsClipped?: boolean;
   bitmapIsSmoothed?: boolean;
+  // Variable-width profile (<SolidStroke><VariablePointWidth><WidthMarker>), sorted by
+  // position. Absent for a constant-width stroke. Drawn as a filled outline
+  // (src/variable-width-stroke.ts).
+  widthMarkers?: WidthMarker[];
+}
+
+/**
+ * One point of a variable-width stroke profile (Animate CC Width tool / width profiles).
+ * `position` runs 0..1 along the length of each stroked path; `left`/`right` are the
+ * half-widths on either side as fractions of the stroke weight (0.5 + 0.5 = the full
+ * weight). `corner` is `type="corner"`: the width may change slope there.
+ */
+export interface WidthMarker {
+  position: number;
+  left: number;
+  right: number;
+  corner?: boolean;
 }
 
 export interface Edge {

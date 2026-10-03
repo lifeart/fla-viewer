@@ -31,7 +31,8 @@ import type {
   MorphSegment,
   ColorTransform,
   BlendMode,
-  Rectangle
+  Rectangle,
+  WidthMarker
 } from './types';
 import { decodeEdgesWithStyleChanges } from './edge-decoder';
 import {
@@ -112,6 +113,37 @@ const DEFAULT_DASH_LENGTH = 4;
 const DEFAULT_DASH_SPACE_LENGTH = 4;
 // Default gap between dots of a <DottedStroke> without `dotSpace` (flacomdoc's XFL reader).
 const DEFAULT_DOT_SPACE = 3;
+
+/**
+ * A variable-width stroke profile (Animate CC Width tool and width profiles), as saved:
+ *   <SolidStroke weight="3"><fill>…</fill>
+ *     <VariablePointWidth>
+ *       <WidthMarker position="0" left="0" right="0" type="corner"/>
+ *       <WidthMarker position="0.5" left="0.5" right="0.5"/>
+ *       <WidthMarker position="1" left="0" right="0" type="corner"/>
+ *     </VariablePointWidth></SolidStroke>
+ * Real files only carry it on <SolidStroke>. Returns {} for a constant-width stroke.
+ */
+function parseWidthProfile(solidStroke: globalThis.Element): { widthMarkers?: WidthMarker[] } {
+  const markers: WidthMarker[] = [];
+  for (const el of solidStroke.querySelectorAll(':scope > VariablePointWidth > WidthMarker')) {
+    const num = (name: string, fallback: number) => {
+      const v = parseFloat(el.getAttribute(name) ?? '');
+      return Number.isFinite(v) ? v : fallback;
+    };
+    const position = num('position', NaN);
+    if (Number.isNaN(position)) continue;
+    markers.push({
+      position: Math.min(1, Math.max(0, position)),
+      left: Math.max(0, num('left', 0.5)),
+      right: Math.max(0, num('right', 0.5)),
+      ...(el.getAttribute('type') === 'corner' && { corner: true }),
+    });
+  }
+  if (markers.length === 0) return {};
+  markers.sort((a, b) => a.position - b.position);
+  return { widthMarkers: markers };
+}
 
 /**
  * Normalize a classic tween's `motionTweenRotate`. Animate writes the long forms
@@ -1687,7 +1719,7 @@ export class FLAParser {
       // Check for SolidStroke
       const solidStroke = strokeEl.querySelector('SolidStroke');
       if (solidStroke) {
-        const commonProps = parseCommonStrokeProps(solidStroke);
+        const commonProps = { ...parseCommonStrokeProps(solidStroke), ...parseWidthProfile(solidStroke) };
         const fillEl = solidStroke.querySelector('fill');
 
         if (fillEl) {

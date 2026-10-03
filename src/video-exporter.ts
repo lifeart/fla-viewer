@@ -6,6 +6,7 @@ import {
   movieClipTicks, rootClock, type TimelineClock
 } from './symbol-loop';
 import { applyIKPose } from './ik-pose';
+import { polygonsToSvgPathData, variableWidthStrokePolygons } from './variable-width-stroke';
 
 export interface ExportProgress {
   currentFrame: number;
@@ -1511,6 +1512,7 @@ export async function exportSVG(
       let strokeLinecap = '';
       let strokeLinejoin = '';
       let strokeDasharray = '';
+      let variableOutline = '';
 
       // Get fill style
       if (edge.fillStyle0 !== undefined || edge.fillStyle1 !== undefined) {
@@ -1524,7 +1526,11 @@ export async function exportSVG(
       // Get stroke style
       if (edge.strokeStyle !== undefined) {
         const strokeStyle = shape.strokes.find(s => s.index === edge.strokeStyle);
-        if (strokeStyle && strokeStyle.color) {
+        if (strokeStyle && strokeStyle.color && strokeStyle.widthMarkers) {
+          // Variable-width stroke: the same filled outline the canvas renderer draws.
+          const outline = polygonsToSvgPathData(variableWidthStrokePolygons(edge.commands, strokeStyle));
+          if (outline) variableOutline = `<path d="${outline}" fill="${strokeStyle.color}"/>`;
+        } else if (strokeStyle && strokeStyle.color) {
           stroke = strokeStyle.color;
           strokeWidth = strokeStyle.weight;
           if (strokeStyle.caps === 'round') strokeLinecap = ' stroke-linecap="round"';
@@ -1543,7 +1549,8 @@ export async function exportSVG(
       const fillAttr = fill.includes('fill-opacity') ? `fill="${fill.split('"')[0]}" fill-opacity="${fill.split('"')[1]}"` : `fill="${fill}"`;
       const strokeAttr = stroke !== 'none' ? ` stroke="${stroke}" stroke-width="${strokeWidth}"${strokeLinecap}${strokeLinejoin}${strokeDasharray}` : '';
 
-      paths.push(`<path d="${pathData}" ${fillAttr}${strokeAttr}/>`);
+      if (!variableOutline || fill !== 'none') paths.push(`<path d="${pathData}" ${fillAttr}${strokeAttr}/>`);
+      if (variableOutline) paths.push(variableOutline);
     }
 
     if (paths.length === 0) return '';

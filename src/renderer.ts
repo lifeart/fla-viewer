@@ -36,6 +36,7 @@ import {
   movieClipTicks, rootClock, type TimelineClock
 } from './symbol-loop';
 import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
+import { variableWidthStrokePolygons } from './variable-width-stroke';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -73,6 +74,7 @@ interface CachedShapePaths {
   fillPaths: Map<number, Path2D>;
   fillAreas: Map<number, number>; // signed area of each fill path (winding direction)
   strokePaths: Map<number, Path2D>;
+  strokeOutlines: Map<number, Path2D>; // variable-width strokes, filled (nonzero) instead of stroked
   combinedPath: Path2D;
 }
 
@@ -3497,7 +3499,7 @@ export class FLARenderer {
 
     // Get cached paths or compute them
     const cached = this.getOrComputeShapePaths(shape);
-    const { fillPaths, strokePaths, combinedPath } = cached;
+    const { fillPaths, strokePaths, strokeOutlines, combinedPath } = cached;
 
     // Capture debug element before rendering
     if (this.debugMode) {
@@ -3526,12 +3528,15 @@ export class FLARenderer {
       }
     }
 
-    // Render stroked paths
-    const sortedStrokeStyles = Array.from(strokePaths.entries()).sort((a, b) => a[0] - b[0]);
+    // Render stroked paths, and variable-width strokes as filled outlines, in style order
+    const sortedStrokeStyles = [...strokePaths.entries(), ...strokeOutlines.entries()].sort((a, b) => a[0] - b[0]);
 
     for (const [styleIndex, path] of sortedStrokeStyles) {
       const stroke = strokeStyles.get(styleIndex);
-      if (stroke) {
+      if (stroke && strokeOutlines.has(styleIndex)) {
+        ctx.fillStyle = this.getStrokeStyle(stroke);
+        ctx.fill(path, 'nonzero');
+      } else if (stroke) {
         ctx.strokeStyle = this.getStrokeStyle(stroke);
         ctx.lineWidth = stroke.weight;
         ctx.lineCap = stroke.caps === 'none' ? 'butt' : stroke.caps || 'round';
@@ -3736,19 +3741,38 @@ export class FLARenderer {
       fillAreas.set(styleIndex, area / 2);
     }
 
-    // Handle strokes separately (they don't need sorting)
+    // Handle strokes separately (they don't need sorting). A variable-width stroke
+    // (<VariablePointWidth>) becomes a filled outline instead of a stroked path.
     const strokePaths = new Map<number, Path2D>();
+    const strokeOutlines = new Map<number, Path2D>();
+    const variableStrokes = new Map<number, StrokeStyle>();
+    for (const stroke of shape.strokes) {
+      if (stroke.widthMarkers) variableStrokes.set(stroke.index, stroke);
+    }
     for (const edge of shape.edges) {
-      if (edge.strokeStyle !== undefined) {
-        if (!strokePaths.has(edge.strokeStyle)) {
-          strokePaths.set(edge.strokeStyle, new Path2D());
+      if (edge.strokeStyle === undefined) continue;
+      const variableStroke = variableStrokes.get(edge.strokeStyle);
+      if (variableStroke) {
+        let outline = strokeOutlines.get(edge.strokeStyle);
+        if (!outline) {
+          outline = new Path2D();
+          strokeOutlines.set(edge.strokeStyle, outline);
         }
-        strokePaths.get(edge.strokeStyle)!.addPath(this.edgeToPath(edge));
+        for (const poly of variableWidthStrokePolygons(edge.commands, variableStroke)) {
+          outline.moveTo(poly[0], poly[1]);
+          for (let i = 2; i < poly.length; i += 2) outline.lineTo(poly[i], poly[i + 1]);
+          outline.closePath();
+        }
+        continue;
       }
+      if (!strokePaths.has(edge.strokeStyle)) {
+        strokePaths.set(edge.strokeStyle, new Path2D());
+      }
+      strokePaths.get(edge.strokeStyle)!.addPath(this.edgeToPath(edge));
     }
 
     // Cache the result
-    const result: CachedShapePaths = { fillPaths, fillAreas, strokePaths, combinedPath };
+    const result: CachedShapePaths = { fillPaths, fillAreas, strokePaths, strokeOutlines, combinedPath };
     this.shapePathCache.set(shape, result);
     return result;
   }

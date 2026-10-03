@@ -414,8 +414,8 @@ Decodes to:
 
 Done since this list was first written: gradient fills, 9-slice scaling, text, sound,
 frame labels and scenes, independent MovieClip playheads, zoom and pan, layer visibility
-toggles (debug panel), export (MP4, WebM, GIF, PNG, SVG, sprite sheet) and the Vitest
-suite. What is still open:
+toggles (debug panel), export (MP4, WebM, GIF, PNG, SVG, sprite sheet), variable-width
+strokes and the Vitest suite. What is still open:
 
 - [ ] **Buttons**: Up/Over/Down states and mouse handling (hit areas are only used by the
   debug panel's click-to-inspect)
@@ -434,8 +434,9 @@ suite. What is still open:
   (no saved Custom time map was found to show how its curve is stored; PSM's Random draws
   unseeded levels), and AdjColor filter curves and the gradient/type of gradient filters are
   not animated
-- [ ] **Variable-width strokes** (`<VariablePointWidth><WidthMarker>`) and art/pattern
-  brushes draw at constant width
+- [ ] **Art/pattern brushes** draw as plain strokes. The brushes themselves are saved in
+  `PaintBrushDefinitions.xml` (included from `<brushdefinitions>`), but no saved stroke that
+  uses one has been found, so how a stroke refers to its brush is unknown
 
 `TODO.md` has the detailed feature-by-feature status against JPEXS; `review.md` is an
 older code review checklist.
@@ -470,6 +471,7 @@ older code review checklist.
 | LinearGradient | GradientEntry children | Gradient colors |
 | StrokeStyle | `index` | Style reference |
 | SolidStroke | `weight`, `caps`, `joints` | Stroke properties |
+| WidthMarker | `position`, `left`, `right`, `type` | Variable-width stroke profile |
 | SolidStroke/fill | `SolidColor` | Stroke color |
 | DOMBitmapItem | `name`, `href`, `frameRight`, `frameBottom` | Bitmap metadata |
 | DOMVideoInstance | `libraryItemName`, `frameRight`, `frameBottom` | Video placeholder |
@@ -546,6 +548,7 @@ Edge contributions are collected per fill style, then sorted into connected chai
 | `src/edge-decoder.ts` | XFL edge path format decoder (quadratic and cubic) |
 | `src/shape-utils.ts` | Shape repair and path helpers |
 | `src/primitive-shapes.ts` | Outlines for rectangle/oval primitive shapes |
+| `src/variable-width-stroke.ts` | Outlines for variable-width strokes (width profiles) |
 | `src/motion-object.ts` | CS4+ object motion tweens (`<AnimationCore>`) |
 | `src/ik-pose.ts` | IK pose spans (Bone tool armatures): baked per-frame matrices |
 | `src/symbol-loop.ts` | Graphic symbol loop modes (frame an instance shows) |
@@ -890,6 +893,16 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   keyframe per frame into an `"ik container"` symbol placed as a play-once graphic, so they
   already played (flacomdoc 0023, a CS5 save). Animate 20.5 still saves pose layers, so not
   only CS4-CS6 files have them. Tests: `src/__tests__/ik-pose.test.ts`.
+- **Variable-width strokes (Animate CC).** A width profile is
+  `<SolidStroke><VariablePointWidth><WidthMarker position left right [type="corner"]/>`:
+  `position` runs 0..1, `left`/`right` are half-widths as fractions of `weight` (0.5 + 0.5 =
+  the full weight). Parsed by `parseWidthProfile`; `src/variable-width-stroke.ts` builds a
+  filled outline for the renderer and the SVG exporter. A path is a run of records in one
+  `<Edge>` that join end to start, and `position` is the fraction of its length. This was
+  matched against Animate's own raster in a published CreateJS atlas (brotochola/willian).
+  Still inferred: the curve between markers (Catmull-Rom, secant at `corner` markers). Also
+  unverified: which side is `left`; it is drawn on the left of the path's direction, y down,
+  but every real profile seen is symmetric. Shape tweens keep a constant width.
 - **Movie clips have no `symbolType`.** Animate writes it only for `graphic`/`button`
   (instances and library items); a missing value is a movie clip (`parseSymbolType`). Movie
   clips run their own playheads (`advanceMovieClipPlayheads`, called by the player on every
