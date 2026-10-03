@@ -136,6 +136,28 @@ describe('edge-decoder', () => {
         expect(commands.filter(c => c.type === 'Z')).toHaveLength(1);
         expect(commands.filter(c => c.type === 'M')).toHaveLength(2);
       });
+
+      // Flash CS3+ writes "general line" edges as `/x y` (a straight LineTo), e.g. the
+      // stroke `!7995 6095/8205 7505` in a real Flash CS5 save. Only a bare `/` closes.
+      it('treats `/x y` as a line to (x, y)', () => {
+        expect(decodeEdges('!7995 6095/8205 7505')).toEqual([
+          { type: 'M', x: 399.75, y: 304.75 },
+          { type: 'L', x: 410.25, y: 375.25 },
+        ]);
+      });
+
+      it('decodes consecutive `/` lines and hex coordinates', () => {
+        expect(decodeEdges('!9000 4905/9790 3495!9790 3495/#2710 #1329')).toEqual([
+          { type: 'M', x: 450, y: 245.25 },
+          { type: 'L', x: 489.5, y: 174.75 },
+          { type: 'L', x: 500, y: 245.25 },
+        ]);
+      });
+
+      it('mixes `/` lines with `|` lines and curves', () => {
+        const commands = decodeEdges('!0 0/200 0|200 200[0 200 0 0');
+        expect(commands.map(c => c.type)).toEqual(['M', 'L', 'L', 'Q', 'Z']);
+      });
     });
 
     describe('Style indicator (S)', () => {

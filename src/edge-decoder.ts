@@ -519,6 +519,16 @@ export function decodeEdgesWithStyleChanges(edgeStr: string, debug?: boolean): E
       }
 
       case '/': {
+        // `/x y` is a straight line, like `|x y`: Flash CS3+ writes it for "general
+        // line" edges (flacomdoc's FlaWriter/EdgeReader; xfl2svg's grammar has
+        // `lineto: ("|"|"/")`). Real CS5 files contain e.g. `!7995 6095/8205 7505`.
+        // Re-dispatch it as a LineTo; only a bare `/` closes the subpath.
+        if (i + 2 < tokens.length &&
+            Number.isFinite(decodeCoord(tokens[i + 1])) &&
+            Number.isFinite(decodeCoord(tokens[i + 2]))) {
+          tokens[i] = '|';
+          continue;
+        }
         // Close path - emit Z command
         commands.push({ type: 'Z' });
         // For implicit moveTo feature: save position and set flag
