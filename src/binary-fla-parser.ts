@@ -73,6 +73,7 @@ import {
   decodeStreamTimeline,
   type DecodedStreamTimeline,
 } from './binary-timeline-decoder';
+import { decodeNativeStreamTimeline } from './binary-native-timeline';
 import type {
   FLADocument,
   Frame,
@@ -513,7 +514,7 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
       // Attribution uses the UN-deduped placements (deduping would discard the
       // per-keyframe copies needed to tell frames apart); the dedupe above is
       // only for the single-frame fallback.
-      const tl = decodeStreamTimeline(streamData);
+      const tl = decodeTimeline(streamData);
       if (tl) sceneTimelines.set(pageNum, tl);
       if (tl && insts.length > 0) sceneInstances.set(pageNum, insts);
       continue;
@@ -530,7 +531,7 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
       const insts = scanForInstances(streamData);
       const deduped = dedupeInstances(insts);
       if (deduped.length > 0) symbolInstances.set(symNum, deduped);
-      const tl = decodeStreamTimeline(streamData);
+      const tl = decodeTimeline(streamData);
       if (tl) symbolTimelines.set(symNum, tl);
       if (tl && insts.length > 0) symbolInstances.set(symNum, insts);
     }
@@ -560,6 +561,15 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
     symbolTimelines,
     sounds: extractSoundsSafely(contents, ole),
   };
+}
+
+/**
+ * Structural timeline for one stream: the existing walker first, then the
+ * CPic object walker ported from PR #45 for streams the first one rejects
+ * (most CS3/CS4 files). Null when neither is confident.
+ */
+function decodeTimeline(streamData: Uint8Array): DecodedStreamTimeline | null {
+  return decodeStreamTimeline(streamData) ?? decodeNativeStreamTimeline(streamData);
 }
 
 /**

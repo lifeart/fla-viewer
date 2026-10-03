@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   collectFlashStrings,
+  decodeRawUtf16UntilNull,
   decodeUtf16Le,
   hasFlashStringMarker,
   readFlashStringAt,
+  readStrictFlashStringAt,
 } from '../binary-flash-string';
 
 function utf16le(s: string): number[] {
@@ -83,5 +85,42 @@ describe('helpers', () => {
     expect(hasFlashStringMarker(data, 1)).toBe(false);
     expect(hasFlashStringMarker(data, -1)).toBe(false);
     expect(decodeUtf16Le(data, 4, 2)).toBe('A');
+  });
+});
+
+describe('readStrictFlashStringAt', () => {
+  it('reads what readFlashStringAt reads when nothing is suspicious', () => {
+    const data = Uint8Array.from(flashString('Layer 1'));
+    expect(readStrictFlashStringAt(data, 0)).toEqual(readFlashStringAt(data, 0));
+  });
+
+  it('rejects a NUL code unit and strings over maxChars', () => {
+    expect(readStrictFlashStringAt(Uint8Array.from(flashString('a\u0000b')), 0)).toBeNull();
+    const data = Uint8Array.from(flashString('abcdef'));
+    expect(readStrictFlashStringAt(data, 0, { maxChars: 5 })).toBeNull();
+    expect(readStrictFlashStringAt(data, 0, { maxChars: 6 })?.value).toBe('abcdef');
+  });
+
+  it('rejects the extended marker unless allowed instead of reading 0xFF as a length', () => {
+    const long = 'y'.repeat(300);
+    const data = Uint8Array.from(extendedFlashString(long));
+    expect(readStrictFlashStringAt(data, 0)).toBeNull();
+    expect(readStrictFlashStringAt(data, 0, { allowExtended: true })?.value).toBe(long);
+    // A 255-char normal string after the extended marker byte would otherwise fit.
+    const ambiguous = Uint8Array.from([0xff, 0xfe, 0xff, 0xff, ...new Array(510).fill(0x41)]);
+    expect(readFlashStringAt(ambiguous, 0)?.charLength).toBe(255);
+    expect(readStrictFlashStringAt(ambiguous, 0)).toBeNull();
+  });
+});
+
+describe('decodeRawUtf16UntilNull', () => {
+  it('reads up to the NUL and points past it', () => {
+    const data = Uint8Array.from([...utf16le('Hi!'), 0, 0, 0x41, 0]);
+    expect(decodeRawUtf16UntilNull(data, 0)).toEqual({ value: 'Hi!', end: 8 });
+  });
+
+  it('returns null for an empty string or no data', () => {
+    expect(decodeRawUtf16UntilNull(Uint8Array.from([0, 0, 0x41, 0]), 0)).toBeNull();
+    expect(decodeRawUtf16UntilNull(Uint8Array.from([0x41]), 0)).toBeNull();
   });
 });
