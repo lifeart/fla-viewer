@@ -14,6 +14,10 @@ interface StreamSound {
 interface ActiveSound {
   stream: StreamSound;
   source: AudioBufferSourceNode;
+  // Stream sounds are locked to the frame (drift-corrected, stopped outside
+  // their keyframe span). Event/start sounds play through on their own clock
+  // once triggered, like Flash, until they end or playback stops.
+  frameLocked: boolean;
   startOffset: number;
   startContextTime: number;
 }
@@ -263,12 +267,20 @@ export class FLAPlayer {
     source.connect(this.gainNode!);
     source.start(0, audioOffset);
 
-    this.activeSounds.push({
+    const active: ActiveSound = {
       stream,
       source,
+      frameLocked: stream.sound.sync === 'stream',
       startOffset: audioOffset,
       startContextTime: this.audioContext.currentTime,
-    });
+    };
+    this.activeSounds.push(active);
+    if (!active.frameLocked) {
+      source.onended = () => {
+        const index = this.activeSounds.indexOf(active);
+        if (index >= 0) this.activeSounds.splice(index, 1);
+      };
+    }
   }
 
   /**
@@ -280,9 +292,12 @@ export class FLAPlayer {
    */
   private syncAudioToFrame(): void {
     if (!this.audioContext) return;
+    // A one-frame timeline never moves, so there is no frame to lock to.
+    if (this.state.totalFrames <= 1) return;
 
     const fps = Math.max(1, this.state.fps);
     for (const active of [...this.activeSounds]) {
+      if (!active.frameLocked) continue;
       const stream = active.stream;
 
       // Playhead moved outside this sound's range — stop it.
@@ -307,6 +322,12 @@ export class FLAPlayer {
       if (drift > threshold) {
         this.playStreamSound(stream, this.state.currentFrame);
       }
+    }
+  }
+
+  private stopFrameLockedSounds(): void {
+    for (const active of this.activeSounds.filter(a => a.frameLocked)) {
+      this.stopSound(active.stream);
     }
   }
 
@@ -424,7 +445,6 @@ export class FLAPlayer {
     this.state.currentFrame = 0;
     this.state.globalFrame = this.sceneFrameOffsets[sceneIndex];
     this.renderer.resetMovieClipPlayheads();
-    this.findStreamSounds();
     this.render();
     this.notifyStateChange();
 
@@ -470,6 +490,8 @@ export class FLAPlayer {
     this.state.totalFrames = timeline.totalFrames;
     this.state.sceneName = timeline.name;
     this.renderer.setCurrentScene(sceneIndex);
+    // Each scene has its own sounds; keep the list in step with the scene.
+    this.findStreamSounds();
   }
 
   private animate = (): void => {
@@ -488,6 +510,7 @@ export class FLAPlayer {
 
       // Check if we've reached the end of the current scene
       if (this.state.currentFrame >= this.state.totalFrames) {
+        const previousScene = this.state.currentScene;
         // Move to next scene or loop back to first scene
         if (this.state.currentScene < this.state.totalScenes - 1) {
           // Go to next scene
@@ -499,7 +522,14 @@ export class FLAPlayer {
           // Reset MovieClip playheads when looping
           this.renderer.resetMovieClipPlayheads();
         }
-        this.startAudio();
+        // Stream sounds belong to the frames they span, so they stop at the
+        // wrap; event sounds already playing carry on. Frame 0's sounds then
+        // trigger again, except in a one-frame timeline that just holds (Flash
+        // does not re-enter it, and re-triggering every tick would buzz).
+        if (this.state.currentScene !== previousScene || this.state.totalFrames > 1) {
+          this.stopFrameLockedSounds();
+          this.startSoundsAtFrame(0);
+        }
       } else {
         // Advance MovieClip playheads along with main timeline
         this.renderer.advanceMovieClipPlayheads();
