@@ -211,6 +211,13 @@ describe('instanceClock', () => {
     expect(frames(instanceClock(rootClock(3), moved, 0, at(0), 5), 3)).toEqual([0, 0, undefined]);
   });
 
+  it('reads overlapping keyframes the way the renderer does: the first one wins', () => {
+    const at = (firstFrame: number) => instance('G', 'graphic', { loop: 'single frame', firstFrame });
+    // Frames 2 and 3 lie in both keyframes; the renderer draws the first.
+    const layer = [key(0, 4, [at(1)]), key(2, 3, [at(3)])];
+    expect(frames(instanceClock(rootClock(4), layer, 0, at(1), 5), 5)).toEqual([3, 1, 1, 1, 1]);
+  });
+
   it('shows a button\'s first frame', () => {
     const B = instance('B', 'button');
     expect(frames(instanceClock(rootClock(2), [key(0, 5, [B])], 0, B, 4), 4)).toEqual([0, 0, 0, undefined]);

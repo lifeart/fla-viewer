@@ -1299,9 +1299,11 @@ export async function exportSVG(
   // real-file usage and the canvas renderer only crudely approximates them, so
   // we skip them gracefully (emit no primitive, never throw).
   const createFilterDef = (
-    filters: import('./types').Filter[] | undefined,
+    allFilters: import('./types').Filter[] | undefined,
     colorTransform?: import('./types').ColorTransform
   ): string => {
+    // Filters switched off in the Filters panel are not drawn.
+    const filters = allFilters?.filter((f) => f.enabled !== false);
     // Does the color transform have a non-identity RGB part (tint)? Mirrors the
     // canvas renderer's colorTransformAffectsRGB (renderer.ts:3775) EXACTLY,
     // including the 1e-6 threshold, so SVG and canvas agree on when a tint is

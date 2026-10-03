@@ -156,6 +156,42 @@ describe('classic tween rotation direction', () => {
       close(interpolateDecomposed(mirror(turn(0)), mirror(turn(90)), 0.5), mirror(turn(45)));
     });
 
+    it('keeps the shape through a half turn instead of shearing it flat', () => {
+      // A 150% x 100% instance turned 1 degree, tweened to 181 degrees: the
+      // determinant stays 1.5, so it never passes through zero width.
+      const from = { a: 1.499772, b: 0.026179, c: -0.017452, d: 0.999848, tx: 0, ty: 0 };
+      const to = { a: -1.499772, b: -0.026179, c: 0.017452, d: -0.999848, tx: 0, ty: 0 };
+      for (const t of [0.25, 0.5, 0.75]) {
+        const m = interpolateDecomposed(from, to, t);
+        expect(m.a * m.d - m.b * m.c).toBeCloseTo(1.5, 4);
+        expect(Math.hypot(m.a, m.b)).toBeCloseTo(1.5, 4);
+        expect(m.c).toBeCloseTo(-m.b / 1.5, 4);
+        expect(m.d).toBeCloseTo(m.a / 1.5, 4);
+      }
+      // A skewed half turn keeps its (small) skew rather than flipping.
+      const skewed = { a: -1, b: 0.02, c: 0.02, d: -1, tx: 0, ty: 0 };
+      for (const t of [0.25, 0.5, 0.75]) {
+        const m = interpolateDecomposed(turn(0), skewed, t);
+        expect(m.a * m.d - m.b * m.c).toBeGreaterThan(0.99);
+      }
+    });
+
+    it('spins the given way, with extra whole turns', () => {
+      close(interpolateDecomposed(turn(0), turn(90), 0.5, { direction: 'cw', turns: 1 }), turn(225));
+      close(interpolateDecomposed(turn(0), turn(90), 0.5, { direction: 'ccw', turns: 0 }), turn(-135));
+      close(interpolateDecomposed(turn(0), turn(0, 2), 0.25, { direction: 'cw', turns: 1 }), turn(90, 1.25));
+    });
+
+    it('keeps a mirrored instance mirrored while it spins', () => {
+      const mirror = (m: Matrix) => ({ ...m, a: -m.a, b: -m.b });
+      close(interpolateDecomposed(mirror(turn(0)), mirror(turn(90)), 0.5, { direction: 'cw', turns: 1 }), mirror(turn(225)));
+    });
+
+    it('turns a key scaled to nothing from angle 0', () => {
+      const zero = { a: 0, b: 0, c: 0, d: 0, tx: 0, ty: 0 };
+      close(interpolateDecomposed(zero, turn(90, 2), 0.5), turn(45, 1));
+    });
+
     it('interpolates entry by entry when the tween mirrors the instance', () => {
       const flipped = { a: -1, b: 0, c: 0, d: 1, tx: 10, ty: 0 };
       close(interpolateDecomposed(turn(0), flipped, 0.5), { a: 0, b: 0, c: 0, d: 1, tx: 5, ty: 0 });
@@ -587,6 +623,24 @@ describe('CS4+ object motion tweens (tweenType="motion object")', () => {
     expect(await shadowAt('angle="0"', 30, 0)).toBe('#000000');
     expect(await shadowAt('angle="0"', 22, 22)).toBe('#FFFFFF');
   });
+
+  it('does not draw a filter switched off in the Filters panel', async () => {
+    expect(await shadowAt('angle="0" isEnabled="false"', 30, 0)).toBe('#FFFFFF');
+  });
+
+  it('pairs filter curves with a switched-off filter by position', async () => {
+    // Two shadows, the second switched off. Its curves (blue, to the right)
+    // stay on the switched-off shadow; the first set (black, down) is drawn.
+    const shadowCurves = (angle: number, color: string) => `<PropertyContainer id="DropShadow_Filter">${curve('DropShadow_BlurX', keyAt(0, 0))}${curve('DropShadow_BlurY', keyAt(0, 0))}${curve('DropShadow_Angle', keyAt(0, angle))}${curve('DropShadow_Distance', keyAt(0, 30))}${curve('DropShadow_Color', `<Keyframe roving="0" timevalue="0" value="${color}"/>`)}</PropertyContainer>`;
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(await parseXfl(files(motionLayer('', '', shadowCurves(90, '0x000000ff') + shadowCurves(0, '0x0000ffff'),
+      '<filters><DropShadowFilter angle="90" blurX="0" blurY="0" distance="30"/><DropShadowFilter isEnabled="false" blurX="0" blurY="0" distance="30" angle="0" color="#0000FF"/></filters>'))));
+    renderer.renderFrame(0);
+    const s = canvas.width / 550;
+    expect(colorAt(canvas, 60, 110 + 30 / s)).toBe('#000000');
+    expect(colorAt(canvas, 60 + 30 / s, 110)).toBe('#FFFFFF');
+  });
 });
 
 describe('reverse graphic loop modes (Animate 2021)', () => {
@@ -977,6 +1031,25 @@ describe('movie clip instances (no symbolType attribute)', () => {
       const has = (name: string) => (renderer as any).hasMovieClipInside(doc.symbols.get(name));
       expect(has('A')).toBe(true);
       expect(has('B')).toBe(true);
+    });
+
+    it('searches each symbol once when a cycle keeps results from being remembered', async () => {
+      // S0..S23 each hold S(i+1) twice and S24 holds S0: without a memo for the
+      // search, every path is walked, 2^24 of them.
+      const graphicOf = (name: string) => `<DOMSymbolInstance libraryItemName="${name}" symbolType="graphic"><matrix><Matrix/></matrix></DOMSymbolInstance>`;
+      const names = Array.from({ length: 25 }, (_, i) => `S${i}`);
+      const files: Record<string, string> = {
+        'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0"><elements></elements></DOMFrame></frames></DOMLayer>`, names),
+      };
+      names.forEach((name, i) => {
+        files[`LIBRARY/${name}.xml`] = symbolItem(name, i < 24 ? graphicOf(`S${i + 1}`) + graphicOf(`S${i + 1}`) : graphicOf('S0'));
+      });
+      const doc = await parseXfl(files);
+      const renderer = new FLARenderer(document.createElement('canvas'));
+      await renderer.setDocument(doc);
+      const t0 = performance.now();
+      expect((renderer as any).hasMovieClipInside(doc.symbols.get('S0'))).toBe(false);
+      expect(performance.now() - t0).toBeLessThan(500);
     });
   });
 

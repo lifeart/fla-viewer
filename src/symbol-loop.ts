@@ -241,15 +241,19 @@ export function instanceClock(
 ): TimelineClock {
   // Walks step back one frame at a time, so the keyframe is usually the one
   // found last or its neighbour; otherwise binary-search (frames are sorted by
-  // index), and scan only if that misses.
+  // index), and scan only if that misses. Keyframes that overlap (a duration
+  // running past the next index) are always scanned, so the first one wins, as
+  // in the renderer.
   let last = -1;
+  let overlapping: boolean | undefined;
   return (k) => {
     const p = parent(k);
     if (p === undefined) return undefined;
+    overlapping ??= frames.some((f, i) => i > 0 && frames[i - 1].index + frames[i - 1].duration > f.index);
     const inFrame = (i: number) => i >= 0 && i < frames.length && p >= frames[i].index &&
       p < frames[i].index + frames[i].duration;
-    let found = [last, last - 1, last + 1].find(inFrame) ?? -1;
-    if (found < 0) {
+    let found = overlapping ? -1 : [last, last - 1, last + 1].find(inFrame) ?? -1;
+    if (found < 0 && !overlapping) {
       let lo = 0;
       let hi = frames.length - 1;
       while (lo <= hi) {

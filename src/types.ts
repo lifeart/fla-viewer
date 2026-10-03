@@ -576,7 +576,9 @@ export interface GradientFilterEntry {
   ratio: number; // 0-255 position in gradient
 }
 
-export type Filter = BlurFilter | GlowFilter | DropShadowFilter | BevelFilter | ColorMatrixFilter | ConvolutionFilter | GradientGlowFilter | GradientBevelFilter;
+// `enabled: false` is a filter switched off in the Filters panel: kept in the
+// list (object tween filter curves pair by position) but not drawn.
+export type Filter = (BlurFilter | GlowFilter | DropShadowFilter | BevelFilter | ColorMatrixFilter | ConvolutionFilter | GradientGlowFilter | GradientBevelFilter) & { enabled?: false };
 
 // Shape Tweens (MorphShape)
 export interface MorphCurve {

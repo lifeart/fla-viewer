@@ -106,13 +106,25 @@ export function projectedInstanceMatrix(
 /**
  * `element` with its matrix replaced (by a tween, a layer-parenting correction
  * or an IK pose). A 3D instance's center point is in parent coordinates, so it
- * moves with the transformation point.
+ * goes where the new matrix takes the point of the instance it was on (it turns
+ * with the instance when it is off the transformation point). An old matrix
+ * scaled to nothing has no such point: the center then moves with the
+ * transformation point.
  */
 export function withInstanceMatrix<T extends DisplayElement>(element: T, matrix: Matrix): T {
   if (element.type !== 'symbol' || !element.centerPoint3D) return { ...element, matrix };
+  const center = element.centerPoint3D;
+  const inverse = invertMatrix(element.matrix);
+  if (inverse) {
+    const m = multiplyMatrices(matrix, inverse);
+    return {
+      ...element,
+      matrix,
+      centerPoint3D: { x: m.a * center.x + m.c * center.y + m.tx, y: m.b * center.x + m.d * center.y + m.ty },
+    };
+  }
   const { x, y } = element.transformationPoint ?? { x: 0, y: 0 };
   const from = element.matrix;
-  const center = element.centerPoint3D;
   return {
     ...element,
     matrix,

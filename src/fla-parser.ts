@@ -3312,9 +3312,11 @@ export class FLAParser {
 
     // Animate omits attributes at their defaults: blur 5, distance 5, angle 45,
     // strength 1 (100%), quality 1 (low). A filter switched off in the Filters
-    // panel is saved with isEnabled="false" and not drawn.
+    // panel is saved with isEnabled="false": it is kept, marked enabled: false,
+    // so an object tween's filter curves still line up with the list, and is
+    // not drawn.
     for (const child of filtersEl.children) {
-      if (child.getAttribute('isEnabled') === 'false') continue;
+      const count = filters.length;
       switch (child.tagName) {
         case 'BlurFilter':
           filters.push({
@@ -3460,6 +3462,9 @@ export class FLAParser {
             quality: parseInt(child.getAttribute('quality') || '1')
           });
           break;
+      }
+      if (filters.length > count && child.getAttribute('isEnabled') === 'false') {
+        filters[count] = { ...filters[count], enabled: false };
       }
     }
 

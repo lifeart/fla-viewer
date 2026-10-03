@@ -321,6 +321,22 @@ describe('layer depth rendering', () => {
     expect(colorAt(canvas, 250, 210)).toBe(WHITE);
   });
 
+  it('follows a ramka where the native camera shows it', async () => {
+    // The native camera zooms 200%, so the ramka framing the stage covers twice
+    // the stage on screen. Following it shows the stage at its own size.
+    const ramka = `<DOMLayer name="ramka" layerType="guide"><frames><DOMFrame index="0" duration="20"><elements>
+      <DOMSymbolInstance libraryItemName="Ramka" symbolType="graphic"><matrix><Matrix/></matrix>
+        <transformationPoint><Point x="${W / 2}" y="${H / 2}"/></transformationPoint></DOMSymbolInstance>
+    </elements></DOMFrame></frames></DOMLayer>`;
+    await renderer.setDocument(await parseXfl({ 'DOMDocument.xml': domDocument(
+      cameraLayer([{ index: 0, duration: 20, matrix: `a="0.5" d="0.5" ${CENTERED}` }]) + ramka + contentLayer('Layer_1', centerSquare)) }));
+    renderer.setFollowCamera(true);
+    renderer.renderFrame(0);
+    expect(colorAt(canvas, 275, 200)).toBe(RED);
+    expect(colorAt(canvas, 282, 207)).toBe(RED);
+    expect(colorAt(canvas, 290, 200)).toBe(WHITE);
+  });
+
   it('scales a near layer up about the stage center', async () => {
     // Depth -f/2 doubles the size: the 20px square becomes 40px (255..295).
     await render(contentLayer('Near', centerSquare, '', `frameZDepth="${-f / 2}"`));

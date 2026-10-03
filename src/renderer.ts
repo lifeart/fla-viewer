@@ -35,7 +35,7 @@ import {
   graphicSymbolFrame, instanceClock, movieClipClock, movieClipPlayhead, movieClipRun, movieClipStopFrames,
   movieClipTicks, rootClock, type TimelineClock
 } from './symbol-loop';
-import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, interpolateDecomposed, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
+import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, interpolateDecomposed, invertMatrix, isSimilarity, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 import { variableWidthStrokePolygons } from './variable-width-stroke';
 import { layerZDepthAt, sortByStageDepth, stageLayerViews, type StageCamera, type StageLayerViews } from './native-camera';
 import { documentPerspective, projectedInstanceMatrix, rotation3D, withInstanceMatrix } from './transform-3d';
@@ -965,7 +965,14 @@ export class FLARenderer {
           // The matrix tx/ty positions the symbol's origin on the document
           // The actual camera center on the document is: tx + transformationPoint.x, ty + transformationPoint.y
 
-          const matrix = cameraElement.matrix;
+          // Animate's native camera and layer depth draw every layer through
+          // its stage view, the ramka layer included: follow the ramka where
+          // that view puts it.
+          const stageViews = this.doc
+            ? stageLayerViews(timeline.layers, frameIndex, this.getNativeCamera(timeline, frameIndex), this.doc.width, this.doc.height)
+            : null;
+          const ramkaView = stageViews?.matrices[this.manualCameraLayerIndex];
+          const matrix = ramkaView ? multiplyMatrices(ramkaView, cameraElement.matrix) : cameraElement.matrix;
           const tp = cameraElement.transformationPoint || { x: 0, y: 0 };
 
           const scaleX = Math.sqrt(matrix.a * matrix.a + matrix.b * matrix.b);
@@ -995,9 +1002,6 @@ export class FLARenderer {
 
           // Render all layers except camera, still through Animate's native
           // camera and layer depth
-          const stageViews = this.doc
-            ? stageLayerViews(timeline.layers, frameIndex, this.getNativeCamera(timeline, frameIndex), this.doc.width, this.doc.height)
-            : null;
           this.renderTimelineLayers(timeline, frameIndex, 0, this.manualCameraLayerIndex, stageViews);
 
           ctx.restore();
@@ -1500,8 +1504,9 @@ export class FLARenderer {
       : [...Array(frame.elements.length).keys()];
 
     // Layer parenting (Animate "rig"): compose the parent's motion since this
-    // child keyframe was authored. Null when not parented / parent static /
-    // undeterminable — then the stored (world-space) matrices are used as-is.
+    // child keyframe was authored. Null when not parented / parent static (and
+    // the result would be the stored matrices) / undeterminable — then the
+    // stored (world-space) matrices are used as-is.
     const rig = layers && layerIndex !== undefined
       ? this.getRigCorrection(layers, layerIndex, frameIndex, frame, nextKeyframe)
       : null;
@@ -1596,14 +1601,18 @@ export class FLARenderer {
    * keyframe span [k0, k1):
    *   - holding child:  world(t) = P(t) * inv(P(k0)) * C0
    *   - tweening child: world(t) = P(t) * lerp(inv(P(k0)) * C0, inv(P(k1)) * C1)
-   * At t = k0 (and k1) this reproduces the stored matrix exactly, and when the
-   * parent is static across the span it is the identity, so world-space keys
-   * are never double-transformed.
+   * At t = k0 (and k1) this reproduces the stored matrix exactly, and a
+   * holding child under a static parent is drawn as stored, so world-space keys
+   * are never double-transformed. A tweening child is interpolated in the
+   * parent's space even when the parent is static: under a parent that
+   * stretches (say 200% x 100%) a turning child stays a turned copy of its
+   * local self, which interpolating the world matrices would not give.
    *
    * Returns null (no composition) when the layer is not rig-parented, when the
    * parent's transform cannot be determined (parent frame is not exactly one
    * symbol instance), for shape tweens, or when the parent does not move across
-   * the span.
+   * the span and the result would be the stored matrices anyway (a holding
+   * child, or a parent that only turns, scales evenly and moves).
    */
   private getRigCorrection(
     layers: Layer[],
@@ -1627,7 +1636,7 @@ export class FLARenderer {
     }
 
     if (matricesNearlyEqual(parentNow, parentAtStart) &&
-        (!parentAtEnd || matricesNearlyEqual(parentAtEnd, parentAtStart))) {
+        (!parentAtEnd || (matricesNearlyEqual(parentAtEnd, parentAtStart) && isSimilarity(parentAtStart)))) {
       return null; // parent static across the span: stored matrices are exact
     }
 
@@ -2025,18 +2034,12 @@ export class FLARenderer {
   private interpolateTweenMatrix(startMatrix: Matrix, endMatrix: Matrix, progress: number, frame?: Frame): Matrix {
     let interpolatedMatrix: Matrix;
 
-    // Check for rotation tween (CW/CCW with additional rotations)
-    if (frame?.motionTweenRotate && frame.motionTweenRotate !== 'none') {
-      interpolatedMatrix = this.interpolateMatrixWithRotation(
-        startMatrix,
-        endMatrix,
-        progress,
-        frame.motionTweenRotate,
-        frame.motionTweenRotateTimes || 0
-      );
-    } else {
-      interpolatedMatrix = interpolateDecomposed(startMatrix, endMatrix, progress);
-    }
+    // A rotation tween (CW/CCW) turns that way, plus its extra whole turns.
+    const rotate = frame?.motionTweenRotate;
+    const spin = rotate === 'cw' || rotate === 'ccw'
+      ? { direction: rotate, turns: frame?.motionTweenRotateTimes || 0 }
+      : undefined;
+    interpolatedMatrix = interpolateDecomposed(startMatrix, endMatrix, progress, spin);
 
     // Apply orient-to-path rotation if enabled
     if (frame?.motionTweenOrientToPath) {
@@ -2048,61 +2051,6 @@ export class FLARenderer {
     }
 
     return interpolatedMatrix;
-  }
-
-  private interpolateMatrixWithRotation(
-    startMatrix: Matrix,
-    endMatrix: Matrix,
-    progress: number,
-    direction: 'cw' | 'ccw',
-    additionalRotations: number
-  ): Matrix {
-    // Decompose matrices into scale, rotation, and translation
-    const startScale = Math.sqrt(startMatrix.a * startMatrix.a + startMatrix.b * startMatrix.b);
-    const endScale = Math.sqrt(endMatrix.a * endMatrix.a + endMatrix.b * endMatrix.b);
-
-    const startScaleY = Math.sqrt(startMatrix.c * startMatrix.c + startMatrix.d * startMatrix.d);
-    const endScaleY = Math.sqrt(endMatrix.c * endMatrix.c + endMatrix.d * endMatrix.d);
-
-    // Extract rotation angle
-    let startAngle = Math.atan2(startMatrix.b, startMatrix.a);
-    let endAngle = Math.atan2(endMatrix.b, endMatrix.a);
-
-    // Calculate angle difference with direction
-    let angleDiff = endAngle - startAngle;
-
-    // Add additional full rotations
-    const fullRotation = Math.PI * 2 * additionalRotations;
-
-    if (direction === 'cw') {
-      // Clockwise: ensure positive rotation
-      if (angleDiff < 0) angleDiff += Math.PI * 2;
-      angleDiff += fullRotation;
-    } else {
-      // Counter-clockwise: ensure negative rotation
-      if (angleDiff > 0) angleDiff -= Math.PI * 2;
-      angleDiff -= fullRotation;
-    }
-
-    // Interpolate
-    const angle = startAngle + angleDiff * progress;
-    const scaleX = this.lerp(startScale, endScale, progress);
-    const scaleY = this.lerp(startScaleY, endScaleY, progress);
-    const tx = this.lerp(startMatrix.tx, endMatrix.tx, progress);
-    const ty = this.lerp(startMatrix.ty, endMatrix.ty, progress);
-
-    // Reconstruct matrix
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-
-    return {
-      a: cos * scaleX,
-      b: sin * scaleX,
-      c: -sin * scaleY,
-      d: cos * scaleY,
-      tx,
-      ty
-    };
   }
 
   /**
@@ -2415,7 +2363,7 @@ export class FLARenderer {
         //    and ColorMatrix/AdjustColor filters adjust the resulting bitmap.
         if (needsColorMatrix && instance.filters) {
           for (const filter of instance.filters) {
-            if (filter.type === 'colorMatrix' && Array.isArray(filter.matrix) && filter.matrix.length === 20) {
+            if (filter.enabled !== false && filter.type === 'colorMatrix' && Array.isArray(filter.matrix) && filter.matrix.length === 20) {
               this.applyColorMatrixToImage(offCtx, filter.matrix, 0, 0, ow, oh);
             }
           }
@@ -4346,6 +4294,7 @@ export class FLARenderer {
     const cssFilters: string[] = [];
 
     for (const filter of filters) {
+      if (filter.enabled === false) continue;
       switch (filter.type) {
         case 'blur':
           totalBlurX += filter.blurX;
@@ -4577,7 +4526,7 @@ export class FLARenderer {
   // instance needs the offscreen per-pixel pass — ctx.filter does not honor
   // data-URL SVG feColorMatrix in Chromium, see applyColorMatrixToImage).
   private filtersHaveColorMatrix(filters: Filter[] | undefined): boolean {
-    return !!filters && filters.some(f => f.type === 'colorMatrix' && Array.isArray(f.matrix) && f.matrix.length === 20);
+    return !!filters && filters.some(f => f.enabled !== false && f.type === 'colorMatrix' && Array.isArray(f.matrix) && f.matrix.length === 20);
   }
 
   // Apply a 4x5 colorMatrix per pixel in place over the given region of a
@@ -4787,9 +4736,15 @@ export class FLARenderer {
    */
 
   // Whether a movie clip instance appears anywhere in the symbol's timeline,
-  // directly or inside nested graphics and buttons (memoized per symbol).
-  private hasMovieClipInside(symbol: Symbol, visiting = new Set<Symbol>(), cycle = { cut: false }): boolean {
-    const known = this.movieClipInsideCache.get(symbol);
+  // directly or inside nested graphics and buttons (memoized per symbol, and
+  // per search for answers a cycle keeps from being final).
+  private hasMovieClipInside(
+    symbol: Symbol,
+    visiting = new Set<Symbol>(),
+    cycle = { cut: false },
+    searched = new Map<Symbol, boolean>()
+  ): boolean {
+    const known = this.movieClipInsideCache.get(symbol) ?? searched.get(symbol);
     if (known !== undefined) return known;
     if (!this.doc) return false;
     if (visiting.has(symbol)) {
@@ -4803,7 +4758,7 @@ export class FLARenderer {
         for (const element of frame.elements) {
           if (element.type !== 'symbol') continue;
           const inner = getWithNormalizedPath(this.doc.symbols, element.libraryItemName);
-          if (element.symbolType === 'movieclip' || (inner && this.hasMovieClipInside(inner, visiting, cycle))) {
+          if (element.symbolType === 'movieclip' || (inner && this.hasMovieClipInside(inner, visiting, cycle, searched))) {
             found = true;
             break;
           }
@@ -4814,8 +4769,10 @@ export class FLARenderer {
     }
     visiting.delete(symbol);
     // A symbol on a cycle was skipped while still being searched, so a "no"
-    // below the outermost call isn't final yet.
+    // below the outermost call isn't final yet. Within this search it is: the
+    // symbol being searched answers for whatever the cycle cut off.
     if (found || !cycle.cut || visiting.size === 0) this.movieClipInsideCache.set(symbol, found);
+    searched.set(symbol, found);
     return found;
   }
 

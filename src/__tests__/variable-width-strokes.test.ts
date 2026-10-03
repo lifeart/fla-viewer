@@ -176,6 +176,11 @@ describe('variable-width stroke outlines', () => {
     const dab = variableWidthStrokePolygons(line(5, 5, 5.3, 5), style);
     expect(dab).toHaveLength(1);
     expect(reach(dab[0], 5.15, 5)).toBeCloseTo(20.15, 6);
+    // The same when the dab is closed explicitly.
+    const closedDab: PathCommand[] = [
+      { type: 'M', x: 5, y: 5 }, { type: 'L', x: 5.6, y: 5 }, { type: 'L', x: 5.05, y: 5.3 }, { type: 'Z' },
+    ];
+    expect(variableWidthStrokePolygons(closedDab, style)).toHaveLength(1);
   });
 
   it('keeps every coordinate finite', () => {
@@ -252,6 +257,16 @@ describe('rendering variable-width strokes', () => {
     expect(colorAt(canvas, 300, 186)).toBe(RED);
     expect(colorAt(canvas, 326, 200)).toBe(WHITE);
     expect(colorAt(canvas, 316, 216)).toBe(WHITE);
+  });
+
+  it('caps a short dab the edge decoder closes instead of joining it as a loop', async () => {
+    // Ends 0.05px from its start, so the edge decoder closes it.
+    const flat = profile(marker(0, 0.5), marker(1, 0.5));
+    const doc = await parseXfl(strokedShape('!6000 4000|6012 4000|6001 4006', flat));
+    const shape = doc.timelines[0].layers[0].frames[0].elements[0] as Shape;
+    const commands = shape.edges[0].commands;
+    expect(commands[commands.length - 1].type).toBe('Z');
+    expect(variableWidthStrokePolygons(commands, shape.strokes[0])).toHaveLength(1);
   });
 
   it('caps an open end at the end width', async () => {

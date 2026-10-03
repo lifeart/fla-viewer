@@ -5479,7 +5479,7 @@ describe('FLAParser', () => {
       expect(filters?.[1]).toMatchObject({ type: 'glow', blurX: 5, blurY: 5, color: '#FF0000', alpha: 1, strength: 1, quality: 3 });
     });
 
-    it('reads omitted blur and distance as 5 and skips disabled filters', async () => {
+    it('reads omitted blur and distance as 5 and keeps disabled filters marked off', async () => {
       // The <filters> of a real Flash CS5 save (flacomdoc 0011_filters).
       const timelines = `
         <timelines>
@@ -5510,11 +5510,12 @@ describe('FLAParser', () => {
       const doc = await parser.parse(await createFlaZip(createDOMDocument({ timelines })));
       const element = doc.timelines[0].layers[0].frames[0].elements[0];
       const filters = element.type === 'symbol' ? element.filters : undefined;
-      expect(filters?.map((f) => f.type)).toEqual(['dropShadow', 'bevel', 'blur', 'gradientGlow']);
-      expect(filters?.[0]).toMatchObject({ blurX: 5, blurY: 5, distance: 5, angle: 45, strength: 1, hideObject: true });
-      expect(filters?.[1]).toMatchObject({ blurX: 5, blurY: 5, distance: 5, bevelType: 'outer' });
-      expect(filters?.[2]).toMatchObject({ blurX: 5, blurY: 5, quality: 3 });
-      expect(filters?.[3]).toMatchObject({ blurX: 5, blurY: 5, distance: 5 });
+      expect(filters?.map((f) => f.type)).toEqual(['blur', 'dropShadow', 'bevel', 'blur', 'gradientGlow']);
+      expect(filters?.map((f) => f.enabled)).toEqual([false, undefined, undefined, undefined, undefined]);
+      expect(filters?.[1]).toMatchObject({ blurX: 5, blurY: 5, distance: 5, angle: 45, strength: 1, hideObject: true });
+      expect(filters?.[2]).toMatchObject({ blurX: 5, blurY: 5, distance: 5, bevelType: 'outer' });
+      expect(filters?.[3]).toMatchObject({ blurX: 5, blurY: 5, quality: 3 });
+      expect(filters?.[4]).toMatchObject({ blurX: 5, blurY: 5, distance: 5 });
     });
 
     it('should parse BevelFilter with all attributes', async () => {

@@ -472,8 +472,9 @@ const FILTER_TYPES: Record<string, CurveFilter['type']> = {
 /**
  * The element's filters with each filter curve applied at `t` ticks. A curve
  * set replaces the element's next unused filter of its type (the containers
- * follow the instance's filter order) and is appended when there is none.
- * Filters without curves, and kinds not read here (AdjColor), stay as they are.
+ * follow the instance's filter order, switched-off filters included) and is
+ * appended when there is none; a switched-off filter stays off. Filters
+ * without curves, and kinds not read here (AdjColor), stay as they are.
  */
 function evaluateFilters(curves: MotionFilterCurves[], t: number, base: Filter[]): Filter[] {
   const filters = base.slice();
@@ -484,7 +485,7 @@ function evaluateFilters(curves: MotionFilterCurves[], t: number, base: Filter[]
     const index = filters.findIndex((f, i) => f.type === type && !used.has(i));
     const filter = evaluateFilter(type, properties, t, index >= 0 ? filters[index] as CurveFilter : undefined);
     if (index >= 0) {
-      filters[index] = filter;
+      filters[index] = filters[index].enabled === false ? { ...filter, enabled: false } : filter;
       used.add(index);
     } else {
       used.add(filters.push(filter) - 1);

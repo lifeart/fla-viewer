@@ -365,6 +365,16 @@ describe('evaluateMotionObject filters', () => {
     expect(filtersAt(BLUR_FILTER, 0, [adjust])!.map((f) => f.type)).toEqual(['colorMatrix', 'blur']);
   });
 
+  it('pairs curves with switched-off filters by position and keeps them off', () => {
+    const off: Filter = { type: 'blur', blurX: 2, blurY: 2, quality: 1, enabled: false };
+    const on: Filter = { type: 'blur', blurX: 7, blurY: 7, quality: 1 };
+    const second = `<PropertyContainer id="Blur_Filter">${prop('Blur_BlurX', key(0, 20))}</PropertyContainer>`;
+    const out = filtersAt(BLUR_FILTER + second, 24, [off, on])!;
+    expect(out[0]).toMatchObject({ blurX: 5, enabled: false });
+    expect(out[1]).toMatchObject({ blurX: 20 });
+    expect(out[1].enabled).toBeUndefined();
+  });
+
   it('reads bevel colors and keeps what the curves do not cover', () => {
     const bevel = `<PropertyContainer id="Bevel_Filter">
       ${prop('Bevel_Distance', key(0, 4) + key(10000, 14))}

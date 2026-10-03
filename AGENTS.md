@@ -110,12 +110,17 @@ scales it by **×1.525**; `elasticInOut` period is **0.45**. CustomEase is a mul
 piecewise cubic bezier (3n+1 points), not a single 4-point curve.
 
 **Classic tween matrices** are interpolated decomposed (`interpolateDecomposed` in
-`src/layer-utils.ts`): scale X/Y, skew angles the short way round, and position, as the
-CreateJS runtime tweens `scaleX`, `scaleY`, `rotation`, `skewX` and `skewY`. Lerping a..d instead shrinks a
-turning instance (to nothing halfway through a half turn) and zooms a turning camera. A
-tween that mirrors the instance (determinant changes sign) is lerped entry by entry.
-`motionTweenRotate="clockwise"`/`"counter-clockwise"` spins are separate
-(`interpolateMatrixWithRotation`).
+`src/layer-utils.ts`): scale X/Y, skew angles and position, as the CreateJS runtime tweens
+`scaleX`, `scaleY`, `rotation`, `skewX` and `skewY`. Lerping a..d instead shrinks a turning
+instance (to nothing halfway through a half turn) and zooms a turning camera. The rotation
+(skewY) turns the short way round, or the `motionTweenRotate="clockwise"`/`"counter-clockwise"`
+way plus `motionTweenRotateTimes` whole turns; skewX turns by the same amount plus the
+short-way change in the skew between them, so a half turn can't shear the instance flat.
+An exact 180 degree turn with no direction set goes counter-clockwise. A mirrored instance
+(negative determinant at both keys) gets a negative x scale and stays mirrored, spins
+included. A tween that mirrors the instance (determinant changes sign) is lerped entry by
+entry, through zero width; a key scaled to nothing (determinant 0) is decomposed with angle
+0. These cases are inferred from the CreateJS runtime, not checked against Animate.
 
 ### Matrix Transform
 
@@ -217,8 +222,10 @@ Animate's own camera is a layer type, not a naming convention (`src/native-camer
   ramka auto-detection above is not applied. A timeline marked `cameraLayerEnabled="false"`
   ignores its camera layer (defensive: real files with a camera write `"true"`).
 - Main timeline only, as in the runtime. Masks clip in their own layer's view
-  (`renderMaskGroup`). Follow camera mode keeps every layer's view and depth stacking. The
-  SVG exporter uses the camera keyframe's matrix without tweening.
+  (`renderMaskGroup`). Follow camera mode keeps every layer's view and depth stacking, and
+  follows the ramka where its own layer view puts it (so under a 200% native zoom a ramka
+  framing the stage shows the stage at its own size). The SVG exporter uses the camera
+  keyframe's matrix without tweening.
 
 **Layer depth (Animate 2019+).** `layer.setZDepthAtFrame` is saved as `frameZDepth` on the
 layer's keyframes (absent is 0; negative is nearer). The runtime (`_applyLayerZDepth`,
@@ -871,8 +878,11 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   shows "offset issues" and people bake every frame before archiving). The renderer
   (`getRigCorrection` in `src/renderer.ts`) composes, per child keyframe span [k0,k1):
   holding child `world(t) = P(t)·inv(P(k0))·C0`; tweening child
-  `world(t) = P(t)·lerp(inv(P(k0))·C0, inv(P(k1))·C1)`. This is exact at child keys and the
-  identity when the parent is static over the span, so it never double-transforms.
+  `world(t) = P(t)·lerp(inv(P(k0))·C0, inv(P(k1))·C1)`. This is exact at child keys, and a
+  holding child under a static parent is drawn as stored, so it never double-transforms.
+  A tweening child is interpolated in the parent's space even under a static parent, unless
+  the parent only turns, scales evenly and moves (`isSimilarity`), where it makes no
+  difference: under a stretched parent a turning child stays a turned copy of itself.
   Only normal→normal links count (`getRigParentIndex` in `src/layer-utils.ts`; folder/mask/
   guide links are ignored), and only when the parent frame holds exactly ONE symbol instance;
   otherwise it falls back to stored matrices. Shape-tween child spans are not composed.
@@ -946,7 +956,9 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
     A static filter's `strength` attribute is the same ratio (`0.6` = 60%, default 1), not
     0..255. Omitted attributes are Animate's defaults (`parseFilters`, matching flacomdoc's
     XFL reader): blur 5, distance 5, angle 45, quality 1, and a `<GlowFilter>` is red. A
-    filter saved with `isEnabled="false"` (switched off in the Filters panel) is dropped.
+    filter saved with `isEnabled="false"` (switched off in the Filters panel) is kept with
+    `enabled: false`, so the object tween's filter containers still pair with the list by
+    position, and is not drawn (`applyFilters`, SVG `createFilterDef`).
     The canvas renderer draws strength as shadow opacity (capped at 1), never as blur width,
     like the SVG exporter's flood opacity. Shadow offsets and blur are canvas pixels, not
     scaled with the stage.
@@ -986,7 +998,8 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   but every real profile seen is symmetric; and how a stroke split over several `<Edge>`
   elements (where it crosses a fill boundary) or saved with reversed records maps the profile:
   each piece gets the whole profile here. Shape tweens keep a constant width. A zero-length
-  record (a click with the brush) draws as a dot shaped by the caps.
+  record (a click with the brush) draws as a dot shaped by the caps, and a path shorter than
+  2px keeps its caps even when it ends at its start (the edge decoder closes such a path).
 - **Native camera (Animate CC 2017+).** `layerType="camera"` holding one `__Camera__` instance,
   plus `attachedToCamera` on layers; see "Native Camera" above. It is not a ramka layer, though
   it is usually named "Camera". Layer depth (Animate 2019+) is `frameZDepth` on keyframes.
@@ -1007,8 +1020,10 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   order elsewhere. The renderer keeps the frame's stage base transform (`stageBaseInverse`) to
   map the parent to stage space; it is taken after a ramka or follow-camera transform, which
   only frame the view, while Animate's native camera and layer depth are part of the stage.
-  Every matrix change (classic and object tweens, layer-parenting rigs, IK poses) moves the 3D
-  center with the transformation point (`withInstanceMatrix`). Malformed rotations and
+  Every matrix change (classic and object tweens, layer-parenting rigs, IK poses) takes the 3D
+  center along with the point of the instance it is on (`withInstanceMatrix`: new matrix
+  times the inverse of the old), so a moved center turns with the instance; from a matrix
+  scaled to nothing it moves with the transformation point. Malformed rotations and
   centers are dropped at parse time, and a projection that is not finite falls back to the
   2D matrix. `matrix3D` itself is not read: its translation (twips) fits no simple
   model (x/z equal `center - R * matrixTranslation` in the menus, y is off in some, and none of

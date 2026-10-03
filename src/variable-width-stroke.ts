@@ -172,10 +172,13 @@ function flattenRuns(commands: readonly PathCommand[]): Run[] {
     const p = r.points;
     const n = p.length;
     // A path that ends where it started is a loop, unless it is a dab too short to
-    // tell its ends apart (that keeps its caps).
+    // tell its ends apart: that keeps its caps, even when it was closed (the edge
+    // decoder closes a path that ends within 0.5px of its start).
     let length = 0;
     for (let i = 2; i < n; i += 2) length += Math.hypot(p[i] - p[i - 2], p[i + 1] - p[i - 1]);
-    if (!r.closed && length > 4 * JOIN_EPSILON &&
+    if (length <= 4 * JOIN_EPSILON) {
+      r.closed = false;
+    } else if (!r.closed &&
         Math.abs(p[0] - p[n - 2]) <= JOIN_EPSILON && Math.abs(p[1] - p[n - 1]) <= JOIN_EPSILON) {
       r.closed = true;
       p[n - 2] = p[0];

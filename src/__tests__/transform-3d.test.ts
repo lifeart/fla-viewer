@@ -358,6 +358,14 @@ describe('3D instance rendering', () => {
     const frame = { index: 0, duration: 1, elements: [panel], ikPoseMatrices: [[pose]] } as unknown as Frame;
     expect(applyIKPose(frame, panel, 0, 0).centerPoint3D).toEqual({ x: -200, y: 275 });
     expect(withInstanceMatrix({ ...panel, centerPoint3D: undefined }, pose).centerPoint3D).toBeUndefined();
+    // A center 25px right of the transformation point turns with the instance.
+    const offCenter = { ...panel, centerPoint3D: { x: 300, y: 200 } };
+    const turned = applyIKPose({ ...frame, elements: [offCenter] } as Frame, offCenter, 0, 0).centerPoint3D!;
+    expect(turned.x).toBeCloseTo(-200, 9);
+    expect(turned.y).toBeCloseTo(300, 9);
+    // From a matrix scaled to nothing, it moves with the transformation point.
+    const flat = { ...panel, matrix: { a: 0, b: 0, c: 0, d: 0, tx: 275, ty: 200 } };
+    expect(withInstanceMatrix(flat, { a: 1, b: 0, c: 0, d: 1, tx: 245, ty: 160 }).centerPoint3D).toEqual({ x: 295, y: 190 });
   });
 
   it('keeps the 3D center with the instance through an object motion tween', async () => {
