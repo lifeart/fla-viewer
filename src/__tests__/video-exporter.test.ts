@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF, exportWebM, exportSVG, selectMp4AudioCodec, mixAudio } from '../video-exporter';
+import { exportVideo, downloadBlob, isWebCodecsSupported, exportPNGSequence, exportSingleFrame, exportSpriteSheet, exportGIF, exportWebM, exportSVG, selectMp4AudioCodec, mixAudio, findStreamSounds } from '../video-exporter';
 import type { SoundItem } from '../types';
 import JSZip from 'jszip';
 import {
@@ -858,6 +858,38 @@ describe('video-exporter', () => {
       expect(warnings).toEqual([]);
       // No codec probing at all when there is nothing to encode.
       expect(support).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('findStreamSounds', () => {
+    it('exports event and start sounds to their end, stream sounds for their keyframe, and skips stop', async () => {
+      const audioContext = new AudioContext();
+      try {
+        // 1 second of audio = 10 frames at 10fps; every keyframe spans 2 frames.
+        const audioData = audioContext.createBuffer(2, audioContext.sampleRate, audioContext.sampleRate);
+        const syncs = ['event', 'start', 'stream', 'stop'] as const;
+        const sounds = new Map<string, SoundItem>(
+          syncs.map(s => [`${s}.mp3`, { name: `${s}.mp3`, href: `${s}.mp3`, audioData }]),
+        );
+        const doc = createMinimalDoc({
+          frameRate: 10,
+          sounds,
+          timelines: [createTimeline({
+            totalFrames: 20,
+            layers: syncs.map(s => createLayer({
+              frames: [createFrame({ index: 3, duration: 2, sound: { name: `${s}.mp3`, sync: s, inPoint44: 0 } })],
+            })),
+          })],
+        });
+
+        const found = new Map(findStreamSounds(doc).map(s => [s.sound.sync, s]));
+        expect([...found.keys()].sort()).toEqual(['event', 'start', 'stream']);
+        expect(found.get('event')).toMatchObject({ startFrame: 3, duration: 10 });
+        expect(found.get('start')).toMatchObject({ startFrame: 3, duration: 10 });
+        expect(found.get('stream')).toMatchObject({ startFrame: 3, duration: 2 });
+      } finally {
+        await audioContext.close();
+      }
     });
   });
 

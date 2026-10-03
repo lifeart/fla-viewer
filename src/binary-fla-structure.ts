@@ -80,17 +80,12 @@ const LAYER_SIG = new Uint8Array([
 // Flash length-prefixed UTF-16LE string BOM: FF FE FF <u8 len>.
 const FLASH_STR_BOM = new Uint8Array([0xff, 0xfe, 0xff]);
 
-// CPicLayer.type byte → semantic kind (FORMAT.md §4). 0=normal, 1=guide,
-// 3=mask, 4=masked, 5=folder. Values we have not observed map to 'normal'.
-const LAYER_TYPE_BY_BYTE: Record<number, BinaryLayerType> = {
-  0: 'normal',
-  1: 'guide',
-  3: 'mask',
-  4: 'masked',
-  5: 'folder',
-};
-
 const utf16le = new TextDecoder('utf-16le');
+
+// Layer type comes from Flash's own naming: "Guide: <layer>" for guides and
+// "Folder N" for folders. Only the default folder name counts, so a normal
+// layer the user called e.g. "Folder art" is still drawn.
+export const FOLDER_NAME = /^Folder \d+$/;
 
 function matchesAt(hay: Uint8Array, needle: Uint8Array, at: number): boolean {
   if (at < 0 || at + needle.length > hay.length) return false;
@@ -144,21 +139,24 @@ export function extractLayers(streamData: Uint8Array): BinaryLayerInfo[] {
     }
     const name = utf16le.decode(data.subarray(nameStart, nameEnd));
 
-    // Post-name triple (layer_schema >= 4): u8 type, u8 locked, u8 visible.
-    let typeByte = 0;
+    // Post-name triple (layer_schema >= 4): u8 current, u8 locked, u8 hidden.
+    // fla-decoder labels byte 0 "type", but in real Flash files exactly one
+    // layer per timeline has it set (every single-layer symbol does) — it is
+    // the editor's CURRENT-layer flag. Reading it as type turned every
+    // symbol's only layer into a guide (not rendered). Byte 2 is set when the
+    // layer is hidden (fla-decoder: 0=visible, 1=hidden).
     let locked = false;
     let visible = true;
     if (schema >= 4 && nameEnd + 2 < data.length) {
-      typeByte = data[nameEnd];
       locked = data[nameEnd + 1] !== 0;
-      visible = data[nameEnd + 2] !== 0;
+      visible = data[nameEnd + 2] === 0;
     }
-    let layerType = LAYER_TYPE_BY_BYTE[typeByte] ?? 'normal';
+    let layerType: BinaryLayerType = 'normal';
     // The name prefix carries the same semantics Flash shows in the UI and is
     // a useful disambiguator for guide/folder layers whose type byte the
     // reference does not always populate consistently.
     if (name.startsWith('Guide: ')) layerType = 'guide';
-    else if (name.startsWith('Folder ')) layerType = 'folder';
+    else if (FOLDER_NAME.test(name)) layerType = 'folder';
 
     layers.push({ name, schema, layerType, locked, visible });
     // Advance past this layer's name so the same record isn't re-matched.

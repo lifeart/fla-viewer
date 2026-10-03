@@ -49,6 +49,7 @@
 import { OLE2File } from './ole2-reader';
 import {
   extractLayers,
+  FOLDER_NAME,
   type BinaryLayerInfo,
   type BinaryLayerType,
 } from './binary-fla-structure';
@@ -72,6 +73,7 @@ import type {
   Frame,
   Layer,
   Shape,
+  SoundItem,
   Symbol,
   SymbolInstance,
   Timeline,
@@ -141,6 +143,22 @@ export interface BinaryFLAInfo {
   sceneInstances: Map<number, DecodedInstance[]>;
   /** Symbol-instance placements recovered from each `Symbol N` stream. */
   symbolInstances: Map<number, DecodedInstance[]>;
+  /** Sounds from the `CMediaSound` records, keyed by media number (N of `Media N`). */
+  sounds: Map<number, BinarySound>;
+}
+
+/** A sound library item whose audio lives in the OLE2 stream `Media N`. */
+export interface BinarySound {
+  mediaNumber: number;
+  /** Display name (the imported file's name, e.g. "song.wav"). */
+  name: string;
+  /** OLE2 stream holding the audio bytes. */
+  stream: string;
+  codec: 'pcm' | 'mp3';
+  sampleRate: number;
+  bitDepth: number;
+  channels: number;
+  sampleCount: number;
 }
 
 const SYMBOL_TYPE_NAMES: Record<number, BinarySymbolType> = {
@@ -278,14 +296,157 @@ function extractLibrary(contents: Uint8Array): BinaryLibraryEntry[] {
   );
 }
 
+/** SWF-style sound rates, indexed by bits 2-3 of the CMediaSound format byte. */
+const SOUND_RATES = [5512, 11025, 22050, 44100];
+
+/**
+ * Decode the `CMediaSound` records in `Contents`. Each record starts with its
+ * stream name as a u8-length UTF-16 string (`07 "Media 1"`), then the display
+ * name (`FF FE FF <len> <UTF-16>`), and ends with a footer
+ * `00 0A <format> 00 <u32 sampleCount>`. The format byte is laid out like the
+ * SWF sound header: bit 0 stereo, bit 1 16-bit, bits 2-3 rate index (a real
+ * Flash 8 file's 0x0E = 44.1 kHz 16-bit mono; its Media stream is exactly
+ * sampleCount × 2 bytes). A record is only accepted when its stream holds MP3
+ * (sniffed) or exactly the PCM byte count the footer declares — other codecs
+ * (ADPCM, Nellymoser) are reported and skipped, never guessed at.
+ */
+function extractSounds(
+  contents: Uint8Array,
+  ole: OLE2File
+): Map<number, BinarySound> {
+  const sounds = new Map<number, BinarySound>();
+  // Sounds are keyed by name downstream (doc.sounds, frame.sound.name), so two
+  // records sharing a display name would collide; disambiguate with the stream.
+  const usedNames = new Set<string>();
+  for (let p = 0; p + 20 < contents.length; p++) {
+    const len = contents[p];
+    if (len < 7 || len > 12) continue;
+    // Cheap pre-check for UTF-16 "M" before decoding.
+    if (contents[p + 1] !== 0x4d || contents[p + 2] !== 0x00) continue;
+    const nameEnd = p + 1 + len * 2;
+    if (nameEnd + 4 > contents.length) continue;
+    const stream = decodeUtf16(contents, p + 1, len * 2);
+    const m = /^Media (\d+)$/.exec(stream);
+    if (!m || !ole.hasStream(stream)) continue;
+    if (
+      contents[nameEnd] !== 0xff ||
+      contents[nameEnd + 1] !== 0xfe ||
+      contents[nameEnd + 2] !== 0xff
+    ) {
+      continue;
+    }
+    const displayLen = contents[nameEnd + 3];
+    const displayEnd = nameEnd + 4 + displayLen * 2;
+    const name = decodeUtf16(contents, nameEnd + 4, displayLen * 2);
+
+    let footer = -1;
+    for (let j = displayEnd; j + 8 <= contents.length && j < displayEnd + 600; j++) {
+      if (contents[j] === 0x00 && contents[j + 1] === 0x0a && contents[j + 3] === 0x00) {
+        footer = j;
+        break;
+      }
+    }
+    if (footer < 0) continue;
+    const format = contents[footer + 2];
+    const sampleCount =
+      (contents[footer + 4] |
+      (contents[footer + 5] << 8) |
+      (contents[footer + 6] << 16) |
+      (contents[footer + 7] << 24)) >>> 0;
+    const channels = format & 1 ? 2 : 1;
+    const bitDepth = format & 2 ? 16 : 8;
+    const sampleRate = SOUND_RATES[(format >> 2) & 3];
+
+    let data: Uint8Array;
+    try {
+      data = ole.readStream(stream);
+    } catch (err) {
+      console.warn(`binary-fla: sound "${name}" (${stream}) unreadable, skipped:`, err);
+      continue;
+    }
+    const isMp3 =
+      (data[0] === 0xff && (data[1] & 0xe0) === 0xe0) ||
+      (data[0] === 0x49 && data[1] === 0x44 && data[2] === 0x33);
+    const pcmBytes = sampleCount * channels * (bitDepth / 8);
+    if (!isMp3 && data.length !== pcmBytes) {
+      console.warn(
+        `binary-fla: sound "${name}" (${stream}) is neither MP3 nor ` +
+          `${pcmBytes}-byte PCM (${data.length} bytes); codec not supported, skipped`
+      );
+      continue;
+    }
+    const mediaNumber = parseInt(m[1], 10);
+    let uniqueName = name || stream;
+    if (usedNames.has(uniqueName)) uniqueName = `${uniqueName} (${stream})`;
+    usedNames.add(uniqueName);
+    sounds.set(mediaNumber, {
+      mediaNumber,
+      name: uniqueName,
+      stream,
+      codec: isMp3 ? 'mp3' : 'pcm',
+      sampleRate,
+      bitDepth,
+      channels,
+      sampleCount,
+    });
+    p = footer;
+  }
+  return sounds;
+}
+
+/**
+ * Sound recovery is best-effort: a corrupt sound stream (e.g. a looping FAT
+ * chain) must not fail an otherwise readable file, so drop sounds instead.
+ */
+function extractSoundsSafely(
+  contents: Uint8Array,
+  ole: OLE2File
+): Map<number, BinarySound> {
+  try {
+    return extractSounds(contents, ole);
+  } catch (err) {
+    console.warn('binary-fla: could not read sounds; continuing without them:', err);
+    return new Map();
+  }
+}
+
+/**
+ * The stage rectangle (4×s32 twips: left, right, top, bottom) sits this many
+ * bytes before the background-color record. Observed identically in a real
+ * MX 2004 file (600×300) and a real Flash 8 file (720×480); in both the HTML
+ * publish-setting Width/Height strings were stale (550×400), so this rect is
+ * the authoritative stage size.
+ */
+const STAGE_RECT_BEFORE_COLOR = 53;
+
+function extractStageRect(
+  dv: DataView,
+  at: number
+): { width?: number; height?: number } {
+  if (at < 0 || at + 16 > dv.byteLength) return {};
+  const left = dv.getInt32(at, true);
+  const right = dv.getInt32(at + 4, true);
+  const top = dv.getInt32(at + 8, true);
+  const bottom = dv.getInt32(at + 12, true);
+  const width = (right - left) / 20;
+  const height = (bottom - top) / 20;
+  // Flash stage limits: 1..8192 px (whole pixels).
+  const ok = (v: number) => Number.isInteger(v) && v >= 1 && v <= 8192;
+  if (left !== 0 || top !== 0 || !ok(width) || !ok(height)) return {};
+  return { width, height };
+}
+
 /**
  * Extract background color + frame rate from the binary RGBA/RGBA/u16/u16
  * pattern in `Contents` (fla-decoder extract_all.py): two RGBA quads (both
  * with alpha 0xFF), a u16 zero pad, then the frame rate as a u16 in 10..60.
  */
-function extractColorAndFrameRate(
-  contents: Uint8Array
-): { backgroundColor?: string; frameRate?: number } {
+function extractColorAndFrameRate(contents: Uint8Array): {
+  backgroundColor?: string;
+  frameRate?: number;
+  width?: number;
+  height?: number;
+} {
   const dv = new DataView(
     contents.buffer,
     contents.byteOffset,
@@ -305,6 +466,7 @@ function extractColorAndFrameRate(
       return {
         backgroundColor: `#${hex(r)}${hex(g)}${hex(b)}`,
         frameRate: fps,
+        ...extractStageRect(dv, ci - STAGE_RECT_BEFORE_COLOR),
       };
     }
   }
@@ -351,7 +513,12 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
   const contents = ole.readStream('Contents');
   const strings = collectFlashStrings(contents);
 
-  const { backgroundColor, frameRate } = extractColorAndFrameRate(contents);
+  const {
+    backgroundColor,
+    frameRate,
+    width: stageWidth,
+    height: stageHeight,
+  } = extractColorAndFrameRate(contents);
   const dims = extractDimensions(strings);
   const library = extractLibrary(contents);
 
@@ -414,8 +581,8 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
   return {
     // Flash's default stage is 550×400 @ 24fps on a white stage — apply these
     // as fallbacks when a value could not be recovered.
-    width: dims.width ?? 550,
-    height: dims.height ?? 400,
+    width: stageWidth ?? dims.width ?? 550,
+    height: stageHeight ?? dims.height ?? 400,
     frameRate: frameRate ?? 24,
     backgroundColor: backgroundColor ?? '#FFFFFF',
     streams,
@@ -432,6 +599,7 @@ export function extractBinaryFLAInfo(bytes: Uint8Array): BinaryFLAInfo {
     symbolInstances,
     sceneTimelines,
     symbolTimelines,
+    sounds: extractSoundsSafely(contents, ole),
   };
 }
 
@@ -536,16 +704,13 @@ function buildLayers(
   const referenceLayers = new Set<number>();
   const content: (Shape | SymbolInstance)[] = [...shapes, ...instances];
 
-  // Prefer a host layer the renderer will actually draw: visible AND not a
-  // guide/folder reference layer. Fall back to the first non-guide/folder
-  // layer even if hidden, then to none (handled by the synthetic layer below).
+  // Host the content on the first layer the renderer will draw (not a
+  // guide/folder reference layer), else on the synthetic layer below.
   const renderable = (bl: BinaryLayerInfo) => {
     const t = toViewerLayerType(bl.layerType);
     return t !== 'guide' && t !== 'folder';
   };
-  let hostLayerIndex = binaryLayers.findIndex(
-    (bl) => renderable(bl) && bl.visible
-  );
+  const hostLayerIndex = binaryLayers.findIndex(renderable);
 
   const layers: Layer[] = binaryLayers.map((bl, index) => {
     const layerType = toViewerLayerType(bl.layerType);
@@ -557,7 +722,8 @@ function buildLayers(
     return {
       name: bl.name,
       color: '#4FFF4F',
-      visible: bl.visible,
+      // Pre-CS5.5 Flash publishes hidden layers, so hidden-in-editor is not hidden-on-stage.
+      visible: true,
       locked: bl.locked,
       outline: false,
       layerType,
@@ -586,7 +752,7 @@ function buildLayers(
       frames: [{ index: 0, duration: 1, keyMode: 0, elements: [...content] }],
     });
   }
-  return { layers, referenceLayers };
+  return toTopFirst(layers, referenceLayers);
 }
 
 /**
@@ -611,18 +777,26 @@ function buildAttributedLayers(
   timeline: DecodedStreamTimeline,
   decodedShapes: DecodedShape[],
   decodedInstances: DecodedInstance[],
-  libraryByNumber: Map<number, BinaryLibraryEntry>
+  libraryByNumber: Map<number, BinaryLibraryEntry>,
+  sounds: Map<number, BinarySound>
 ): { layers: Layer[]; referenceLayers: Set<number>; totalFrames: number } | null {
   const referenceLayers = new Set<number>();
   let attributedAny = false;
+  const allKeyframes = timeline.layers.flatMap((l) => l.keyframes);
+  const inAnyKeyframe = (offset: number) =>
+    allKeyframes.some((kf) => offset >= kf.bodyStart && offset < kf.bodyEnd);
+  // The binary layer record carries no reliable type byte (see
+  // binary-fla-structure), so use the UI name prefix like extractLayers.
+  const typeOf = (name: string): 'guide' | 'folder' | 'normal' =>
+    name.startsWith('Guide: ') ? 'guide' : FOLDER_NAME.test(name) ? 'folder' : 'normal';
+  // Orphan content goes on the first layer that is drawn: a guide or folder
+  // is a reference layer, so content hosted there would never render. With
+  // no drawn layer at all, a synthetic one is added below.
+  const orphanHost = timeline.layers.findIndex((dl) => typeOf(dl.name) === 'normal');
+  const isOrphan = (d: { bodyStart: number }) => !inAnyKeyframe(d.bodyStart);
 
   const layers: Layer[] = timeline.layers.map((dl, index) => {
-    const layerType =
-      dl.typeByte === LAYER_TYPE_GUIDE_BYTE
-        ? 'guide'
-        : dl.typeByte === LAYER_TYPE_FOLDER_BYTE
-          ? 'folder'
-          : 'normal';
+    const layerType = typeOf(dl.name);
     if (layerType === 'guide' || layerType === 'folder') {
       referenceLayers.add(index);
     }
@@ -637,22 +811,44 @@ function buildAttributedLayers(
         libraryByNumber
       );
       if (shapes.length > 0 || instances.length > 0) attributedAny = true;
-      return {
+      const frame: Frame = {
         index: kf.startIndex,
         duration: kf.duration,
         keyMode: 0,
         elements: [...shapes, ...instances] as Frame['elements'],
       };
+      if (kf.motionTween) {
+        frame.tweenType = 'motion';
+        frame.acceleration = kf.acceleration ?? 0;
+      }
+      const sound = kf.soundRef ? sounds.get(kf.soundRef) : undefined;
+      if (sound) {
+        // The sync mode is not decoded from the binary frame record; 'event'
+        // is Flash's default (and what the XFL parser assumes when absent).
+        frame.sound = { name: sound.name, sync: 'event' };
+      }
+      return frame;
     });
 
-    // Any content that fell outside every keyframe range goes on the first
-    // keyframe (never drop recovered artwork). For a layer with no keyframes at
-    // all, synthesise a single frame to carry it.
-    const orphanShapes = shapeBuckets.unattributed.map((d) => d.shape);
-    const orphanInstances = buildSymbolInstances(
-      instBuckets.unattributed,
-      libraryByNumber
-    );
+    // Content that fell outside EVERY layer's keyframe ranges goes on the
+    // first drawn layer's first keyframe (never drop recovered artwork). Content
+    // owned by another layer is not an orphan here — hosting it on every layer
+    // duplicated it across the whole timeline.
+    const orphanShapes =
+      index === orphanHost
+        ? shapeBuckets.unattributed
+            .filter((d) => !inAnyKeyframe(d.bodyStart))
+            .map((d) => d.shape)
+        : [];
+    const orphanInstances =
+      index === orphanHost
+        ? buildSymbolInstances(
+            instBuckets.unattributed.filter(
+              (d) => !inAnyKeyframe(d.bodyStart)
+            ),
+            libraryByNumber
+          )
+        : [];
     if (orphanShapes.length > 0 || orphanInstances.length > 0) {
       if (frames.length === 0) {
         frames.push({ index: 0, duration: 1, keyMode: 0, elements: [] });
@@ -669,7 +865,8 @@ function buildAttributedLayers(
     return {
       name: dl.name,
       color: '#4FFF4F',
-      visible: dl.visible,
+      // Pre-CS5.5 Flash publishes hidden layers, so hidden-in-editor is not hidden-on-stage.
+      visible: true,
       locked: dl.locked,
       outline: false,
       layerType,
@@ -677,13 +874,49 @@ function buildAttributedLayers(
     };
   });
 
+  if (orphanHost < 0) {
+    const orphanElements = [
+      ...decodedShapes.filter(isOrphan).map((d) => d.shape),
+      ...buildSymbolInstances(decodedInstances.filter(isOrphan), libraryByNumber),
+    ] as Frame['elements'];
+    if (orphanElements.length > 0) {
+      // Stored-first = bottom; put it at the bottom of the stack.
+      layers.unshift({
+        name: 'Recovered Content',
+        color: '#4FFF4F',
+        visible: true,
+        locked: false,
+        outline: false,
+        layerType: 'normal',
+        frames: [{ index: 0, duration: 1, keyMode: 0, elements: orphanElements }],
+      });
+      const shifted = [...referenceLayers].map((i) => i + 1);
+      referenceLayers.clear();
+      shifted.forEach((i) => referenceLayers.add(i));
+    }
+  }
+
   if (!attributedAny) return null;
-  return { layers, referenceLayers, totalFrames: timeline.totalFrames };
+  return { ...toTopFirst(layers, referenceLayers), totalFrames: timeline.totalFrames };
 }
 
-// CPicLayer.type byte values used by the structural walk (FORMAT.md §4).
-const LAYER_TYPE_GUIDE_BYTE = 1;
-const LAYER_TYPE_FOLDER_BYTE = 5;
+/**
+ * Binary FLAs store a timeline's layers BOTTOM-first; the viewer (like XFL)
+ * expects TOP-first (layers[0] drawn last). Verified on a real Flash 8 file: its
+ * first-stored layer holds a table that the exported movie draws BEHIND the
+ * food on the second layer.
+ */
+function toTopFirst(
+  layers: Layer[],
+  referenceLayers: Set<number>
+): { layers: Layer[]; referenceLayers: Set<number> } {
+  const last = layers.length - 1;
+  return {
+    layers: [...layers].reverse(),
+    referenceLayers: new Set([...referenceLayers].map((i) => last - i)),
+  };
+}
+
 
 /**
  * Parse a binary FLA into a {@link FLADocument} the existing viewer/renderer
@@ -750,7 +983,8 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
         streamTimeline,
         decodedShapes,
         decodedInstances,
-        libraryByNumber
+        libraryByNumber,
+        info.sounds
       );
       if (attributed) {
         return {
@@ -823,7 +1057,20 @@ export function parseBinaryFLA(bytes: Uint8Array): FLADocument {
     timelines,
     symbols,
     bitmaps: new Map(),
-    sounds: new Map(),
+    sounds: new Map(
+      [...info.sounds.values()].map((s): [string, SoundItem] => [
+        s.name,
+        {
+          name: s.name,
+          href: s.stream,
+          format: s.codec === 'mp3' ? 'mp3' : undefined,
+          sampleCount: s.sampleCount,
+          sampleRate: s.sampleRate,
+          bitDepth: s.bitDepth,
+          channels: s.channels,
+        },
+      ])
+    ),
     videos: new Map(),
   };
 }

@@ -8,6 +8,20 @@ interface StreamSound {
   duration: number; // in frames
 }
 
+// A sound that is currently playing. Where the source started (offset into
+// the buffer + audio-context time at start) lets us detect drift between the
+// realtime audio clock and the rendered frame and re-seek.
+interface ActiveSound {
+  stream: StreamSound;
+  source: AudioBufferSourceNode;
+  // Stream sounds are locked to the frame (drift-corrected, stopped outside
+  // their keyframe span). Event/start sounds play through on their own clock
+  // once triggered, like Flash, until they end or playback stops.
+  frameLocked: boolean;
+  startOffset: number;
+  startContextTime: number;
+}
+
 export class FLAPlayer {
   private renderer: FLARenderer;
   private doc: FLADocument | null = null;
@@ -31,17 +45,11 @@ export class FLAPlayer {
   // Audio playback
   private audioContext: AudioContext | null = null;
   private gainNode: GainNode | null = null;
-  private activeAudioSource: AudioBufferSourceNode | null = null;
   private streamSounds: StreamSound[] = [];
   private volume: number = 1;
-  // Reference point for keeping audio locked to the rendered frame. Audio
-  // plays on the realtime audio clock, but the video advances one frame per
-  // render tick, so it falls behind under heavy rendering load. We track where
-  // the active source started (offset into the buffer + audio-context time at
-  // start) so we can detect drift and re-seek the audio back to the frame.
-  private activeStream: StreamSound | null = null;
-  private audioStartOffset: number = 0;
-  private audioStartContextTime: number = 0;
+  // Sounds playing right now. Several can overlap (event sounds keep playing
+  // past their keyframe, and different layers can each carry a sound).
+  private activeSounds: ActiveSound[] = [];
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new FLARenderer(canvas);
@@ -105,14 +113,20 @@ export class FLAPlayer {
     if (!timeline) return;
     for (const layer of timeline.layers) {
       for (const frame of layer.frames) {
-        if (frame.sound && frame.sound.sync === 'stream') {
+        // 'event' (Flash's default) and 'start' sounds were previously ignored,
+        // leaving most files silent. They are scheduled like stream sounds but
+        // keep playing to the end of the sound even past their keyframe.
+        if (frame.sound && frame.sound.sync !== 'stop') {
           const soundItem = this.doc.sounds.get(frame.sound.name);
           if (soundItem && soundItem.audioData) {
+            const soundFrames = Math.ceil(soundItem.audioData.duration * this.doc.frameRate);
             this.streamSounds.push({
               sound: frame.sound,
               soundItem,
               startFrame: frame.index,
-              duration: frame.duration
+              duration: frame.sound.sync === 'stream'
+                ? frame.duration
+                : Math.max(frame.duration, soundFrames)
             });
           }
         }
@@ -150,6 +164,20 @@ export class FLAPlayer {
     this.notifyStateChange();
   }
 
+  /**
+   * Stop playback for good and release audio. Call before replacing this
+   * player: an abandoned player kept its animation loop and sound running, so
+   * loading a second file played two soundtracks at once.
+   */
+  destroy(): void {
+    this.onStateChange = null;
+    this.pause();
+    this.gainNode?.disconnect();
+    void this.audioContext?.close();
+    this.audioContext = null;
+    this.gainNode = null;
+  }
+
   stop(): void {
     this.pause();
     this.state.currentFrame = 0;
@@ -164,9 +192,7 @@ export class FLAPlayer {
     this.notifyStateChange();
   }
 
-  private startAudio(): void {
-    if (this.streamSounds.length === 0) return;
-
+  private ensureAudioContext(): void {
     // Initialize AudioContext on first use (requires user interaction)
     if (!this.audioContext) {
       this.audioContext = new AudioContext();
@@ -179,26 +205,49 @@ export class FLAPlayer {
     if (this.audioContext.state === 'suspended') {
       this.audioContext.resume();
     }
+  }
 
-    // Find stream sound that covers current frame
+  private coversFrame(stream: StreamSound, frame: number): boolean {
+    return frame >= stream.startFrame && frame < stream.startFrame + stream.duration;
+  }
+
+  /** Start every sound that covers the current frame (on play, seek or scene change). */
+  private startAudio(): void {
+    this.stopAudio();
+    if (this.streamSounds.length === 0) return;
+    this.ensureAudioContext();
+
     const currentFrame = this.state.currentFrame;
     for (const stream of this.streamSounds) {
-      const endFrame = stream.startFrame + stream.duration;
-      if (currentFrame >= stream.startFrame && currentFrame < endFrame) {
+      if (this.coversFrame(stream, currentFrame)) {
         this.playStreamSound(stream, currentFrame);
-        break;
       }
+    }
+  }
+
+  /** Start sounds whose keyframe the playhead just reached during playback. */
+  private startSoundsAtFrame(frame: number): void {
+    for (const stream of this.streamSounds) {
+      if (stream.startFrame !== frame) continue;
+      // 'start' sync never stacks: skip it while the same sound is playing.
+      if (stream.sound.sync === 'start' &&
+          this.activeSounds.some(a => a.stream.soundItem === stream.soundItem)) {
+        continue;
+      }
+      if (!this.audioContext) this.ensureAudioContext();
+      this.playStreamSound(stream, frame);
     }
   }
 
   private playStreamSound(stream: StreamSound, fromFrame: number): void {
     if (!this.audioContext || !stream.soundItem.audioData) return;
 
-    // Stop any currently playing audio
-    this.stopAudio();
+    // Re-seeking a stream sound replaces it (drift correction). Event sounds
+    // stack like Flash: re-entering their keyframe starts another instance.
+    if (stream.sound.sync === 'stream') this.stopSound(stream);
 
     const audioBuffer = stream.soundItem.audioData;
-    const fps = this.state.fps;
+    const fps = Math.max(1, this.state.fps);
 
     // Calculate audio start position
     // inPoint44 is the start offset in the original audio (in samples at 44kHz)
@@ -217,14 +266,22 @@ export class FLAPlayer {
     const source = this.audioContext.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(this.gainNode!);
-    this.activeAudioSource = source;
-
     source.start(0, audioOffset);
 
-    // Remember where playback started so we can keep it aligned to the frame.
-    this.activeStream = stream;
-    this.audioStartOffset = audioOffset;
-    this.audioStartContextTime = this.audioContext.currentTime;
+    const active: ActiveSound = {
+      stream,
+      source,
+      frameLocked: stream.sound.sync === 'stream',
+      startOffset: audioOffset,
+      startContextTime: this.audioContext.currentTime,
+    };
+    this.activeSounds.push(active);
+    if (!active.frameLocked) {
+      source.onended = () => {
+        const index = this.activeSounds.indexOf(active);
+        if (index >= 0) this.activeSounds.splice(index, 1);
+      };
+    }
   }
 
   /**
@@ -235,45 +292,66 @@ export class FLAPlayer {
    * picture and sound lag together.
    */
   private syncAudioToFrame(): void {
-    if (!this.audioContext || !this.activeAudioSource || !this.activeStream) return;
+    if (!this.audioContext) return;
+    // A one-frame timeline never moves, so there is no frame to lock to.
+    if (this.state.totalFrames <= 1) return;
 
-    const stream = this.activeStream;
     const fps = Math.max(1, this.state.fps);
-    const framesIntoSound = this.state.currentFrame - stream.startFrame;
+    for (const active of [...this.activeSounds]) {
+      if (!active.frameLocked) continue;
+      const stream = active.stream;
 
-    // Playhead moved outside this stream's range — stop the sound.
-    if (framesIntoSound < 0 || this.state.currentFrame >= stream.startFrame + stream.duration) {
-      this.stopAudio();
-      return;
+      // Playhead moved outside this sound's range — stop it.
+      if (!this.coversFrame(stream, this.state.currentFrame)) {
+        this.stopSound(stream);
+        continue;
+      }
+
+      const framesIntoSound = this.state.currentFrame - stream.startFrame;
+      const inPointSeconds = (stream.sound.inPoint44 || 0) / 44100;
+      const expectedPos = inPointSeconds + framesIntoSound / fps;
+      const actualPos = active.startOffset + (this.audioContext.currentTime - active.startContextTime);
+
+      // Only correct when the audio has run *ahead* of the rendered frame (the
+      // render-lag case). Each correction restarts the buffer source, which is an
+      // audible discontinuity, so use a generous threshold (~quarter second) and
+      // re-seek occasionally rather than many times per second under heavy lag.
+      // We never pull the audio forward: the frame can't outrun realtime audio,
+      // so a negative drift is noise not worth a clicky restart.
+      const drift = actualPos - expectedPos;
+      const threshold = Math.max(0.25, 3 / fps);
+      if (drift > threshold) {
+        this.playStreamSound(stream, this.state.currentFrame);
+      }
     }
+  }
 
-    const inPointSeconds = (stream.sound.inPoint44 || 0) / 44100;
-    const expectedPos = inPointSeconds + framesIntoSound / fps;
-    const actualPos = this.audioStartOffset + (this.audioContext.currentTime - this.audioStartContextTime);
+  private stopFrameLockedSounds(): void {
+    for (const active of this.activeSounds.filter(a => a.frameLocked)) {
+      this.stopSound(active.stream);
+    }
+  }
 
-    // Only correct when the audio has run *ahead* of the rendered frame (the
-    // render-lag case). Each correction restarts the buffer source, which is an
-    // audible discontinuity, so use a generous threshold (~quarter second) and
-    // re-seek occasionally rather than many times per second under heavy lag.
-    // We never pull the audio forward: the frame can't outrun realtime audio,
-    // so a negative drift is noise not worth a clicky restart.
-    const drift = actualPos - expectedPos;
-    const threshold = Math.max(0.25, 3 / fps);
-    if (drift > threshold) {
-      this.playStreamSound(stream, this.state.currentFrame);
+  private stopSound(stream: StreamSound): void {
+    const index = this.activeSounds.findIndex(a => a.stream === stream);
+    if (index < 0) return;
+    const [active] = this.activeSounds.splice(index, 1);
+    try {
+      active.source.stop();
+    } catch {
+      // Ignore errors if already stopped
     }
   }
 
   private stopAudio(): void {
-    if (this.activeAudioSource) {
+    for (const active of this.activeSounds) {
       try {
-        this.activeAudioSource.stop();
+        active.source.stop();
       } catch {
         // Ignore errors if already stopped
       }
-      this.activeAudioSource = null;
     }
-    this.activeStream = null;
+    this.activeSounds = [];
   }
 
   nextFrame(): void {
@@ -368,7 +446,6 @@ export class FLAPlayer {
     this.state.currentFrame = 0;
     this.state.globalFrame = this.sceneFrameOffsets[sceneIndex];
     this.renderer.resetMovieClipPlayheads();
-    this.findStreamSounds();
     this.render();
     this.notifyStateChange();
 
@@ -409,11 +486,14 @@ export class FLAPlayer {
     const timeline = this.doc.timelines[sceneIndex];
     if (!timeline) return;
 
+    const sceneChanged = sceneIndex !== this.state.currentScene;
     this.state.currentScene = sceneIndex;
     this.state.currentFrame = 0;
     this.state.totalFrames = timeline.totalFrames;
     this.state.sceneName = timeline.name;
     this.renderer.setCurrentScene(sceneIndex);
+    // Each scene has its own sounds; keep the list in step with the scene.
+    if (sceneChanged) this.findStreamSounds();
   }
 
   private animate = (): void => {
@@ -432,6 +512,7 @@ export class FLAPlayer {
 
       // Check if we've reached the end of the current scene
       if (this.state.currentFrame >= this.state.totalFrames) {
+        const previousScene = this.state.currentScene;
         // Move to next scene or loop back to first scene
         if (this.state.currentScene < this.state.totalScenes - 1) {
           // Go to next scene
@@ -443,10 +524,19 @@ export class FLAPlayer {
           // Reset MovieClip playheads when looping
           this.renderer.resetMovieClipPlayheads();
         }
-        this.startAudio();
+        // Stream sounds belong to the frames they span, so they stop at the
+        // wrap; event sounds already playing carry on. Frame 0's sounds then
+        // trigger again, except in a one-frame timeline that just holds (Flash
+        // does not re-enter it, and re-triggering every tick would buzz).
+        if (this.state.currentScene !== previousScene || this.state.totalFrames > 1) {
+          this.stopFrameLockedSounds();
+          this.startSoundsAtFrame(0);
+        }
       } else {
         // Advance MovieClip playheads along with main timeline
         this.renderer.advanceMovieClipPlayheads();
+        // Sounds keyed later in the timeline start when the playhead gets there.
+        this.startSoundsAtFrame(this.state.currentFrame);
       }
 
       this.render();

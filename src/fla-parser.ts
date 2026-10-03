@@ -45,7 +45,7 @@ import {
   getAudioCodecName,
   getKeyframes
 } from './flv-parser';
-import { isOLE2 } from './ole2-reader';
+import { isOLE2, OLE2File } from './ole2-reader';
 import { parseBinaryFLA } from './binary-fla-parser';
 import { getMaskLayerIndex } from './layer-utils';
 
@@ -147,7 +147,13 @@ export class FLAParser {
       progress('Reading binary (pre-CS5) FLA...');
       // parseBinaryFLA throws with a specific message on unrecognized binary
       // FLAs; let it propagate so the UI shows real feedback (no silent catch).
-      return parseBinaryFLA(bytes);
+      const binaryDoc = parseBinaryFLA(bytes);
+      // Like the XFL path, structure-only parsing skips audio decoding.
+      if (binaryDoc.sounds.size > 0 && !options.structureOnly) {
+        progress('Loading sounds...');
+        await this.loadBinarySounds(binaryDoc.sounds, bytes);
+      }
+      return binaryDoc;
     }
 
     // Try to load ZIP, handling potentially corrupted files
@@ -1738,6 +1744,22 @@ export class FLAParser {
       // Per JPEXS: variant=1 means chunked compression
       // Chunks start at offset 26 with [UI16 length][data]... [UI16 0x0000]
       let compData: Uint8Array;
+      const expectedSize = headerWidth * headerHeight * 4;
+      const maxBitmapOutput = 512 * 1024 * 1024;
+      if (expectedSize > maxBitmapOutput) {
+        console.warn(`FLA bitmap dimensions exceed the safe decode limit: ${headerWidth}x${headerHeight}`);
+        return null;
+      }
+      const maxOutput = Math.min(
+        Math.max(expectedSize, headerRowSize * headerHeight) + 64 * 1024,
+        maxBitmapOutput,
+      );
+      const rawPayloadLength = bytes.length - 26;
+      const rawPaddingLength = rawPayloadLength - expectedSize;
+      const hasValidRawPadding = rawPaddingLength >= 0
+        && rawPaddingLength <= 3
+        && bytes.subarray(26 + expectedSize).every((value) => value === 0);
+      const isRawPixelPlane = variant === 0 && hasValidRawPadding;
 
       if (variant === 1) {
         // Chunked format: read and concatenate all chunks
@@ -1772,6 +1794,11 @@ export class FLAParser {
         if (DEBUG) {
           console.log(`Chunked format: ${chunks.length} chunks, ${totalLen} bytes total`);
         }
+      } else if (isRawPixelPlane) {
+        // Animate can store variant-0 32-bit bitmaps as a verbatim A,R,G,B
+        // pixel plane. Do not interpret exact-size data as deflate: arbitrary
+        // pixels may look like a valid stream and expand without bound.
+        compData = bytes.slice(26, 26 + expectedSize);
       } else {
         // Non-chunked: raw data starts at offset 26
         // Skip zlib header if present
@@ -1782,7 +1809,9 @@ export class FLAParser {
         compData = bytes.slice(offset);
       }
 
-      // Validate we have enough compressed data to work with
+      // Validate we have enough compressed data to work with. A raw pixel
+      // plane may legitimately be all zero (fully transparent), so compressed
+      // stream heuristics apply only to data that will be inflated.
       // Empty or very small data (< 4 bytes) cannot be valid deflate stream
       if (compData.length < 4) {
         if (DEBUG) {
@@ -1793,21 +1822,103 @@ export class FLAParser {
 
       // Check if data looks like valid deflate (not all zeros)
       // First byte of deflate has block type bits that are rarely all zero
-      let hasNonZero = false;
-      for (let i = 0; i < Math.min(compData.length, 16); i++) {
-        if (compData[i] !== 0) {
-          hasNonZero = true;
-          break;
+      if (!isRawPixelPlane) {
+        let hasNonZero = false;
+        for (let i = 0; i < Math.min(compData.length, 16); i++) {
+          if (compData[i] !== 0) {
+            hasNonZero = true;
+            break;
+          }
         }
-      }
-      if (!hasNonZero) {
-        if (DEBUG) {
-          console.warn('Compressed data appears to be all zeros (invalid)');
+        if (!hasNonZero) {
+          if (DEBUG) {
+            console.warn('Compressed data appears to be all zeros (invalid)');
+          }
+          return null;
         }
-        return null;
       }
 
-      const expectedSize = headerWidth * headerHeight * 4;
+      type NativeInflateResult =
+        | { status: 'unavailable' }
+        | { status: 'decoded'; data: Uint8Array }
+        | { status: 'decode_error' };
+
+      // Chromium's native inflater is dramatically faster and more memory
+      // efficient for large Animate bitmap streams than pako's one-shot path.
+      // Consume it incrementally and stop once output reaches the dimensions
+      // declared by the bitmap header plus a small padding allowance. Bytes
+      // past that are trailing padding, so they are dropped rather than
+      // failing the whole bitmap.
+      const tryNativeInflateRaw = async (): Promise<NativeInflateResult> => {
+        if (typeof DecompressionStream === 'undefined') return { status: 'unavailable' };
+
+        try {
+          const input = new Uint8Array(compData);
+          const stream = new Blob([input]).stream().pipeThrough(
+            new DecompressionStream('deflate-raw' as CompressionFormat)
+          );
+          const reader = stream.getReader();
+          const chunks: Uint8Array[] = [];
+          let totalSize = 0;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+
+            const kept = Math.min(value.length, maxOutput - totalSize);
+            chunks.push(kept === value.length ? value : value.subarray(0, kept));
+            totalSize += kept;
+            if (totalSize >= maxOutput) {
+              await reader.cancel('FLA bitmap output reached declared dimensions');
+              break;
+            }
+          }
+
+          const result = new Uint8Array(totalSize);
+          let offset = 0;
+          for (const chunk of chunks) {
+            result.set(chunk, offset);
+            offset += chunk.length;
+          }
+          return { status: 'decoded', data: result };
+        } catch {
+          return { status: 'decode_error' };
+        }
+      };
+
+      const inflateRawWithLimit = (useDict: boolean = false): Uint8Array => {
+        const chunks: Uint8Array[] = [];
+        const options: pako.InflateOptions = { raw: true, chunkSize: 16384 };
+        if (useDict) options.dictionary = zeroDict;
+        const inflater = new pako.Inflate(options);
+        let totalSize = 0;
+        let outputLimitReached = false;
+
+        // Keep output up to maxOutput; anything past it is trailing padding.
+        inflater.onData = (chunk: Uint8Array) => {
+          const kept = Math.min(chunk.length, maxOutput - totalSize);
+          if (kept > 0) chunks.push(new Uint8Array(chunk.subarray(0, kept)));
+          totalSize += kept;
+          if (totalSize >= maxOutput) outputLimitReached = true;
+        };
+
+        const inputChunkSize = 4096;
+        for (let offset = 0; offset < compData.length; offset += inputChunkSize) {
+          const end = Math.min(offset + inputChunkSize, compData.length);
+          inflater.push(compData.subarray(offset, end), end === compData.length);
+          if (outputLimitReached) break;
+          if (inflater.err) throw new Error(inflater.msg || 'Raw deflate failed');
+        }
+
+        const result = new Uint8Array(totalSize);
+        let offset = 0;
+        for (const chunk of chunks) {
+          result.set(chunk, offset);
+          offset += chunk.length;
+        }
+        return result;
+      };
 
       // Helper function for streaming partial recovery
       // Uses onData callback to capture chunks as they're produced,
@@ -1815,6 +1926,8 @@ export class FLAParser {
       const tryStreamingRecovery = (useDict: boolean = false): Uint8Array | null => {
         try {
           const chunks: Uint8Array[] = [];
+          let totalSize = 0;
+          let outputLimitReached = false;
           const options: pako.InflateOptions = { raw: true, chunkSize: 16384 };
           if (useDict) {
             options.dictionary = zeroDict;
@@ -1823,7 +1936,10 @@ export class FLAParser {
 
           // Capture chunks via onData callback - this is key for partial recovery
           inflater.onData = (chunk: Uint8Array) => {
-            chunks.push(new Uint8Array(chunk));
+            const kept = Math.min(chunk.length, maxOutput - totalSize);
+            if (kept > 0) chunks.push(new Uint8Array(chunk.subarray(0, kept)));
+            totalSize += kept;
+            if (totalSize >= maxOutput) outputLimitReached = true;
           };
 
           const chunkSize = 4096;
@@ -1838,6 +1954,7 @@ export class FLAParser {
               break;
             }
 
+            if (outputLimitReached) break;
             if (inflater.err) {
               break;
             }
@@ -1845,9 +1962,6 @@ export class FLAParser {
 
           // Combine collected chunks
           if (chunks.length === 0) return null;
-
-          let totalSize = 0;
-          for (const chunk of chunks) totalSize += chunk.length;
 
           const result = new Uint8Array(totalSize);
           let offset = 0;
@@ -1958,18 +2072,29 @@ export class FLAParser {
         return result;
       };
 
-      // Try raw deflate first (most common)
-      algoProgress('deflate');
-      try {
-        pixelData = pako.inflateRaw(compData);
-      } catch (rawError) {
-        // Raw deflate failed - try dictionary first (gives complete results for some files)
-        algoProgress('dictionary');
-        if (DEBUG) console.log(`Raw deflate failed for ${headerWidth}x${headerHeight}, trying dictionary...`);
+      // Exact-size variant-0 data is already the pixel plane. Otherwise prefer
+      // native raw deflate and retain pako only for browsers without the API.
+      if (isRawPixelPlane) {
+        algoProgress('raw');
+        pixelData = compData;
+      } else {
+        const nativeInflate = await tryNativeInflateRaw();
         try {
-          pixelData = pako.inflateRaw(compData, { dictionary: zeroDict } as pako.InflateOptions);
-          if (DEBUG) console.log(`Dictionary decompress: ${pixelData.length} bytes for ${headerWidth}x${headerHeight}`);
-        } catch (dictError) {
+          if (nativeInflate.status === 'decoded') {
+            algoProgress('native-deflate');
+            pixelData = nativeInflate.data;
+          } else {
+            algoProgress('deflate');
+            pixelData = inflateRawWithLimit();
+          }
+        } catch {
+          // Raw deflate failed - try dictionary first (gives complete results for some files)
+          algoProgress('dictionary');
+          if (DEBUG) console.log(`Raw deflate failed for ${headerWidth}x${headerHeight}, trying dictionary...`);
+          try {
+            pixelData = inflateRawWithLimit(true);
+            if (DEBUG) console.log(`Dictionary decompress: ${pixelData.length} bytes for ${headerWidth}x${headerHeight}`);
+          } catch (dictError) {
           // Dictionary failed - try streaming recovery (gets partial data)
           algoProgress('streaming');
           if (DEBUG) console.log(`Dictionary failed, trying streaming for ${headerWidth}x${headerHeight}...`);
@@ -2027,6 +2152,7 @@ export class FLAParser {
               }
             }
           }
+        }
         }
       }
 
@@ -2471,6 +2597,43 @@ export class FLAParser {
     } catch (e) {
       if (DEBUG) {
         console.warn(`Failed to decode audio: ${sourceRef}`, e);
+      }
+    }
+  }
+
+  /**
+   * Decode binary-FLA sounds: each SoundItem's `href` names the OLE2 stream
+   * (`Media N`) holding raw PCM or MP3 (see binary-fla-parser extractSounds).
+   */
+  private async loadBinarySounds(
+    sounds: Map<string, SoundItem>,
+    bytes: Uint8Array
+  ): Promise<void> {
+    if (typeof AudioContext === 'undefined') {
+      console.warn('Web Audio unavailable; binary FLA sounds not loaded');
+      return;
+    }
+    if (!this.audioContext) {
+      this.audioContext = new AudioContext();
+    }
+    const ole = new OLE2File(bytes);
+    for (const sound of sounds.values()) {
+      try {
+        const data = ole.readStream(sound.href);
+        // Copy into a standalone ArrayBuffer (decodeAudioData detaches it).
+        const buffer = data.slice().buffer;
+        if (sound.format === 'mp3') {
+          sound.audioData = await this.audioContext.decodeAudioData(buffer);
+        } else {
+          sound.audioData = this.convertPCMToAudioBuffer(
+            buffer,
+            sound.sampleRate!,
+            sound.bitDepth!,
+            sound.channels!
+          );
+        }
+      } catch (err) {
+        console.warn(`Failed to decode binary FLA sound "${sound.name}":`, err);
       }
     }
   }

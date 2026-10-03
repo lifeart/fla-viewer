@@ -3539,7 +3539,9 @@ export class FLARenderer {
     // Build fill paths by sorting edges into connected chains
     const fillPaths = new Map<number, Path2D>();
     const fillAreas = new Map<number, number>();
-    const EPSILON = 8.0;
+    // Binary-FLA edges have exact integer endpoints: match vertices exactly
+    // (see Shape.exactEdges). XFL keeps the 8px gap tolerance.
+    const EPSILON = shape.exactEdges ? 1e-6 : 8.0;
 
     for (const [styleIndex, contributions] of fillEdgeContributions) {
       const path = new Path2D();

@@ -305,19 +305,21 @@ describe('binary-instance-decoder: instanceSymbolType', () => {
   });
 });
 
-// ── REAL-FILE: btnstrob.fla scene places library Symbol 1 ───────────────────
-// The headline case: the scene (Page 1) PLACES Symbol 1 (a green square) via a
-// CPicSprite instance at (300,150) px. The geometry PR decoded the symbol into
-// the library but left the stage EMPTY; this decodes the placement.
+// ── REAL-FILE: btnstrob.fla scene places the "mvc BtnStrobe" movie clip ───────
+// The scene (Page 1) places library item 2, the "mvc BtnStrobe" movie clip
+// (a bevelled button), via a CPicSprite at (300,150) px — the centre of the
+// 600×300 stage. The record's first u32 after the instance name is a constant
+// 1; the real media_ref follows an empty UTF-16 name. (Reading the constant
+// pointed the sprite at Symbol 1, a *graphic*, which a CPicSprite cannot be.)
 describe('binary-instance-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () => {
-  it('recovers the scene CPicSprite placement (media_ref 1 @ 300,150)', async () => {
+  it('recovers the scene CPicSprite placement (media_ref 2 @ 300,150)', async () => {
     const bytes = await loadBtnstrob();
     expect([...bytes.slice(0, 4)]).toEqual([0xd0, 0xcf, 0x11, 0xe0]);
     const ole = new OLE2File(bytes);
     const found = scanForInstances(ole.readStream('Page 1'));
     expect(found).toHaveLength(1);
     expect(found[0].className).toBe('CPicSprite');
-    expect(found[0].mediaRef).toBe(1); // → library "Symbol 1"
+    expect(found[0].mediaRef).toBe(2); // → library "mvc BtnStrobe"
     expect(found[0].matrix).toEqual({
       a: 1,
       b: 0,
@@ -328,14 +330,15 @@ describe('binary-instance-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () =>
     });
   });
 
-  it('parseBinaryFLA composites Symbol 1 onto the scene (was empty)', async () => {
+  it('parseBinaryFLA composites the movie clip onto the scene (was empty)', async () => {
     const bytes = await loadBtnstrob();
     const doc = parseBinaryFLA(bytes);
 
     // The library still decodes its symbols (geometry PR).
     expect(doc.symbols.has('Symbol 1')).toBe(true);
+    expect(doc.symbols.has('mvc BtnStrobe')).toBe(true);
 
-    // The scene now carries a SymbolInstance referencing Symbol 1 — previously
+    // The scene now carries a SymbolInstance referencing the clip — previously
     // the scene's frames were entirely empty.
     const scene = doc.timelines[0];
     const allElements = scene.layers.flatMap((l) =>
@@ -346,10 +349,10 @@ describe('binary-instance-decoder: real Flash MX 2004 FLA (btnstrob.fla)', () =>
     const placed = symbolInstances[0];
     expect(placed.type).toBe('symbol');
     if (placed.type === 'symbol') {
-      expect(placed.libraryItemName).toBe('Symbol 1');
+      expect(placed.libraryItemName).toBe('mvc BtnStrobe');
       expect(placed.matrix.tx).toBe(300);
       expect(placed.matrix.ty).toBe(150);
-      // The referenced symbol exists and carries the green square geometry.
+      // The referenced symbol exists and carries the button geometry.
       const sym = doc.symbols.get(placed.libraryItemName)!;
       const shapes = sym.timeline.layers
         .flatMap((l) => l.frames.flatMap((f) => f.elements))

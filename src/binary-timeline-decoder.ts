@@ -78,6 +78,15 @@ export interface DecodedKeyframe {
   bodyStart: number;
   /** Byte offset just past the frame body (exclusive). */
   bodyEnd: number;
+  /**
+   * 1-based sound this keyframe starts (0 = none): N refers to the `Media N`
+   * stream's CMediaSound. Seen on a real Flash 8 file's sound-only layer.
+   */
+  soundRef?: number;
+  /** Classic motion tween from this keyframe to the next. */
+  motionTween?: boolean;
+  /** Tween ease, -100 (in) .. 100 (out); 0 = linear. */
+  acceleration?: number;
 }
 
 /** One decoded layer with its keyframe sequence. */
@@ -86,10 +95,9 @@ export interface DecodedTimelineLayer {
   name: string;
   /** CPicLayer.layer_schema. */
   schema: number;
-  /** Layer kind from the post-name type byte (0=normal,1=guide,3=mask,
-   *  4=masked,5=folder); undefined when the schema does not carry it. */
-  typeByte?: number;
   locked: boolean;
+  /** False when hidden in the authoring tool (editor state only: pre-CS5.5
+   *  Flash still publishes hidden layers). */
   visible: boolean;
   /** Keyframes in timeline order. */
   keyframes: DecodedKeyframe[];
@@ -106,6 +114,9 @@ export interface DecodedStreamTimeline {
 interface FrameParse {
   duration: number;
   bodyEnd: number;
+  soundRef: number;
+  motionTween: boolean;
+  acceleration: number;
 }
 
 const utf16le = new TextDecoder('utf-16le');
@@ -237,10 +248,14 @@ function consumeCPicFrame(r: ByteReader, ar: ArchiveReader): FrameParse {
 
   const fs = r.u8(); // frame_schema
   const field18c = r.u16(); // SPAN (Flash keyframe duration)
-  if (fs > 2) r.u16(); // field_188
-  else r.u8();
-  if (fs > 1) r.s16(); // field_190
-  if (fs > 4) r.u16(); // sound ref
+  // field_188: bit 0 = classic MOTION tween to the next keyframe. In a real Flash 8
+  // file exactly the keyframes that start a tween (the explosion's tiny →
+  // full-size scale-ups) have 0x1E01; static keyframes have 0x0600.
+  const field188 = fs > 2 ? r.u16() : r.u8();
+  // field_190: tween ease (Flash's -100..100 "acceleration"). Only zero was
+  // observed; out-of-range values are ignored rather than trusted.
+  const field190 = fs > 1 ? r.s16() : 0;
+  const soundRef = fs > 4 ? r.u16() : 0; // sound ref
   if (fs > 5) {
     const cnt = r.u16(); // entry table
     for (let i = 0; i < cnt; i++) {
@@ -296,7 +311,13 @@ function consumeCPicFrame(r: ByteReader, ar: ArchiveReader): FrameParse {
   if (field18c < 1 || field18c > MAX_FRAME_SPAN) {
     throw new Error(`implausible frame span ${field18c}`);
   }
-  return { duration: field18c, bodyEnd: r.pos };
+  return {
+    duration: field18c,
+    bodyEnd: r.pos,
+    soundRef,
+    motionTween: (field188 & 1) !== 0,
+    acceleration: Math.abs(field190) <= 100 ? field190 : 0,
+  };
 }
 
 /**
@@ -467,8 +488,17 @@ function consumeCPicLayer(
     }
     if (tag.name === 'CPicFrame') {
       const bodyStart = r.pos;
-      const { duration, bodyEnd } = consumeCPicFrame(r, ar);
-      keyframes.push({ startIndex, duration, bodyStart, bodyEnd });
+      const { duration, bodyEnd, soundRef, motionTween, acceleration } =
+        consumeCPicFrame(r, ar);
+      keyframes.push({
+        startIndex,
+        duration,
+        bodyStart,
+        bodyEnd,
+        soundRef,
+        motionTween,
+        acceleration,
+      });
       startIndex += duration;
     } else {
       consumeChildObject(tag.name, r, ar);
@@ -484,16 +514,17 @@ function consumeCPicLayer(
   // Layer tail (FORMAT.md §4 `CPicLayer::Serialize`).
   const layerSchema = r.u8();
   const name = readFlashCString(r);
-  let typeByte: number | undefined;
   let locked = false;
   let visible = true;
   if (layerSchema <= 3) {
     r.u8(); // field_type
   }
   if (layerSchema >= 4 && layerSchema <= 30) {
-    typeByte = r.u8();
+    // u8 current, u8 locked, u8 hidden. Byte 0 is the editor's current-layer
+    // flag, NOT the layer type (see binary-fla-structure extractLayers).
+    r.u8();
     locked = r.u8() !== 0;
-    visible = r.u8() !== 0;
+    visible = r.u8() === 0;
   }
   if (layerSchema >= 5 && layerSchema <= 30) r.u32(); // color
   if (layerSchema >= 6 && layerSchema <= 30) {
@@ -522,6 +553,12 @@ function consumeCPicLayer(
   // valid such sentinel (closest to stream end — the outermost page's), so the
   // page's children loop reads its NULL and stops. Without this the page loop
   // would mis-read nested sprite frames as extra top-level layers.
+  // Skipped when the tail parsed cleanly and the NEXT object is another
+  // CPicLayer: jumping to the last sentinel there dropped every layer after
+  // the first (a real Flash 8 scene lost 2 of its 3 layers).
+  if (ar.peekBackrefName() === 'CPicLayer') {
+    return { name, schema: layerSchema, locked, visible, keyframes };
+  }
   const buf = r.buf;
   let best = -1;
   let search = r.pos;
@@ -549,7 +586,6 @@ function consumeCPicLayer(
   return {
     name,
     schema: layerSchema,
-    typeByte,
     locked,
     visible,
     keyframes,

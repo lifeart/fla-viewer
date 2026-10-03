@@ -474,21 +474,26 @@ export async function exportWebM(
   return new Blob([buffer], { type: 'video/webm' });
 }
 
-function findStreamSounds(doc: FLADocument): StreamSound[] {
+export function findStreamSounds(doc: FLADocument): StreamSound[] {
   const streamSounds: StreamSound[] = [];
   if (!doc.timelines[0]) return streamSounds;
 
   const timeline = doc.timelines[0];
   for (const layer of timeline.layers) {
     for (const frame of layer.frames) {
-      if (frame.sound && frame.sound.sync === 'stream') {
+      // Match the player: 'event'/'start' sounds play to their end, not just
+      // for their keyframe span (they were previously dropped from exports).
+      if (frame.sound && frame.sound.sync !== 'stop') {
         const soundItem = doc.sounds.get(frame.sound.name);
         if (soundItem && soundItem.audioData) {
+          const soundFrames = Math.ceil(soundItem.audioData.duration * doc.frameRate);
           streamSounds.push({
             sound: frame.sound,
             soundItem,
             startFrame: frame.index,
-            duration: frame.duration,
+            duration: frame.sound.sync === 'stream'
+              ? frame.duration
+              : Math.max(frame.duration, soundFrames),
           });
         }
       }

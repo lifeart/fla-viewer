@@ -58,6 +58,18 @@ import type {
 
 /** Flash internal coordinate unit: 1 px = 2560 ultra-twips (= 20 twips × 128). */
 export const ULTRA_TWIPS_PER_PX = 2560;
+
+/**
+ * Edge-stream units per pixel for a CPicShape. Flash 8+ records
+ * (`shape_schema > 2`, the same gate as stroke caps) store edges at twice the
+ * precision: 5120 units/px. Verified on a real Flash 8 file whose shapes only
+ * match the exported movie's size and position at 5120 (at 2560 every shape
+ * rendered 2× too large, off-stage). Older records (`shape_schema` <= 2, e.g.
+ * the MX 2004 btnstrob fixture) keep 2560.
+ */
+export function edgeUnitsPerPx(shapeSchema: number): number {
+  return shapeSchema > 2 ? ULTRA_TWIPS_PER_PX * 2 : ULTRA_TWIPS_PER_PX;
+}
 /** Matrix translation unit: 1 px = 20 twips. */
 const TWIPS_PER_PX = 20;
 /** 16.16 fixed-point divisor (1.0 == 0x00010000). */
@@ -221,6 +233,20 @@ export class ArchiveReader {
     );
   }
 
+  /**
+   * Class name of the back-reference tag at the reader's position, WITHOUT
+   * consuming it; undefined if the next tag is not a resolvable backref.
+   */
+  peekBackrefName(): string | undefined {
+    const { buf, pos } = this.r;
+    if (pos + 2 > buf.length) return undefined;
+    const tag = buf[pos] | (buf[pos + 1] << 8);
+    if (!(tag & 0x8000) || tag === NEWCLASS_TAG || tag === LONG_BACKREF_TAG) {
+      return undefined;
+    }
+    return this.combined[(tag & 0x7fff) - 1];
+  }
+
   /** Seed the table with classes already declared earlier in the stream. */
   seedClasses(names: string[]): void {
     for (const n of names) this.registerClass(n);
@@ -247,7 +273,8 @@ interface DecodedFill {
 function readFillStyle(
   r: ByteReader,
   capsFlag: boolean,
-  index: number
+  index: number,
+  shapeDataSchema = 0
 ): DecodedFill {
   const colorU32 = r.u32();
   const subtype = r.u8();
@@ -263,6 +290,11 @@ function readFillStyle(
       r.u16(); // grad_hints
       gradType = r.u8();
     }
+    // shape_data_schema >= 5 (Flash 8+) adds 5 more bytes before the stops —
+    // presumably focal point / spread / interpolation, all zero in the one
+    // real sample (a Flash 8 red→yellow linear gradient). Not reading them
+    // misaligned the stops and lost the whole shape.
+    if (shapeDataSchema >= 5) r.bytes(5);
     const gradient = [];
     for (let i = 0; i < numStops; i++) {
       const position = r.u8();
@@ -331,7 +363,8 @@ function skipInlineFill(r: ByteReader): void {
 function readLineStyle(
   r: ByteReader,
   capsFlag: boolean,
-  index: number
+  index: number,
+  shapeDataSchema = 0
 ): StrokeStyle {
   const strokeColorU32 = r.u32();
   const flags16 = r.u16();
@@ -347,7 +380,7 @@ function readLineStyle(
     r.u8(); // reserved
     miterLimit = r.u16();
     // The caps tail also carries a full fill style (variable length).
-    readFillStyle(r, capsFlag, 0);
+    readFillStyle(r, capsFlag, 0, shapeDataSchema);
     caps = startCap === 1 ? 'round' : startCap === 2 ? 'square' : 'none';
     joints =
       joinsByte === 1 ? 'round' : joinsByte === 2 ? 'bevel' : 'miter';
@@ -433,15 +466,21 @@ export function readEdgeStream(r: ByteReader): RawEdge[] {
     const flags = r.u8();
     if (flags === 0) break; // terminator
     if (flags & 0x40) {
-      // style change: 3 indices, 1-based, u8 if 0x80 set else u16.
+      // style change: 3 indices, 1-based, u8 if 0x80 set else u16, in the
+      // order LINE, FILL1 (left), FILL0 (right). Reading them as
+      // fill0/fill1/line lost one fill of every two-fill shape and invented
+      // strokes on shapes that have none: the first index is 0 in every
+      // stroke-less shape and 1 in a real MX 2004 file's 1-fill/1-stroke
+      // shape. The fill sides were confirmed by matching a real Flash 8 file's
+      // render against its exported movie.
       if (flags & 0x80) {
-        fill0 = r.u8();
-        fill1 = r.u8();
         line = r.u8();
+        fill1 = r.u8();
+        fill0 = r.u8();
       } else {
-        fill0 = r.u16() & 0x7fff;
-        fill1 = r.u16() & 0x7fff;
         line = r.u16() & 0x7fff;
+        fill1 = r.u16() & 0x7fff;
+        fill0 = r.u16() & 0x7fff;
       }
     }
     const t1 = flags & 3;
@@ -703,13 +742,13 @@ export function readShapeData(
       r.u16();
       fills.push({ index: i + 1, type: 'solid', color, alpha });
     } else {
-      fills.push(readFillStyle(r, capsFlag, i + 1).style);
+      fills.push(readFillStyle(r, capsFlag, i + 1, shapeDataSchema).style);
     }
   }
   const lineCount = r.u16();
   const strokes: StrokeStyle[] = [];
   for (let i = 0; i < lineCount; i++) {
-    strokes.push(readLineStyle(r, capsFlag, i + 1));
+    strokes.push(readLineStyle(r, capsFlag, i + 1, shapeDataSchema));
   }
   let rawEdges: RawEdge[] = [];
   if (shapeDataSchema >= 2) {
@@ -754,8 +793,11 @@ export function readShapeData(
  * `fillStyle0/1`/`strokeStyle` are kept undefined when their index is 0 (the
  * "no style" sentinel), matching the previous contract.
  */
-export function rawEdgesToEdges(rawEdges: RawEdge[]): Edge[] {
-  const px = (v: number) => v / ULTRA_TWIPS_PER_PX;
+export function rawEdgesToEdges(
+  rawEdges: RawEdge[],
+  unitsPerPx: number = ULTRA_TWIPS_PER_PX
+): Edge[] {
+  const px = (v: number) => v / unitsPerPx;
   const out: Edge[] = [];
   for (const e of rawEdges) {
     const commands: PathCommand[] = [
@@ -829,13 +871,14 @@ export function readCPicShape(
   const shapeSchema = r.u8();
   const matrix = readMatrix(r);
   const data = readShapeData(r, shapeSchema > 2);
-  const edges = rawEdgesToEdges(data.rawEdges);
+  const edges = rawEdgesToEdges(data.rawEdges, edgeUnitsPerPx(shapeSchema));
   const shape: Shape = {
     type: 'shape',
     matrix,
     fills: data.fills,
     strokes: data.strokes,
     edges,
+    exactEdges: true,
   };
   return { shape, rawEdges: data.rawEdges };
 }

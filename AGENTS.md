@@ -600,8 +600,8 @@ Offset  Size  Type    Field           Description
 16-19   4     UI32 LE frameTop        Always 0
 20-23   4     UI32 LE frameBottom     Height in twips (÷20 = pixels)
 24      1     UI8     hasAlpha        0 = no alpha, 1 = has alpha channel
-25      1     UI8     variant         1 = chunked zlib compression
-26+     var           data            Chunked compressed pixel data
+25      1     UI8     variant         1 = chunked zlib; 0 may be raw pixels
+26+     var           data            Chunked compressed or raw pixel data
 ```
 
 ### Chunked Compression Format
@@ -722,6 +722,14 @@ b8 2e 00 00     frameBottom = 0x00002eb8 = 11960 twips (598 px)
 ### Implementation Notes
 
 - Extra bytes beyond `width × height × 4` are trailing padding (truncate)
+- A variant-0 payload with exactly `width × height × 4` pixel bytes, plus at
+  most three verified zero alignment bytes, is a raw A,R,G,B pixel plane;
+  never send those arbitrary pixel bytes to a deflate decoder
+- Prefer bounded native `DecompressionStream('deflate-raw')` for large valid
+  streams, with an equivalently bounded pako path retained for compatibility
+  and recovery fallbacks. Every inflate path stops at `max(w*h*4, rowSize*h) +
+  64 KB` and keeps what it has (the rest is trailing padding); never reject a
+  bitmap for running past it
 - Some files require preset zlib dictionary (32KB zeros) for decompression
 - Chunked format: concatenate all chunks before inflating, or inflate incrementally
 - JPEG files in bin/ are passed through directly (no conversion needed)

@@ -170,6 +170,13 @@
       padding: 0;
     }
 
+    /* Disable iOS double-tap-to-zoom (fast taps on Play/Pause zoomed the page)
+       while keeping pinch zoom. touch-action combines down the tree, so this
+       covers every element; the canvas keeps its own "none" for panning. */
+    html {
+      touch-action: manipulation;
+    }
+
     body {
       font-family: var(--font-ui);
       background: var(--bg-primary);
@@ -617,10 +624,27 @@
       border-radius: 2px;
       cursor: pointer;
       position: relative;
+      /* Without this, html's touch-action: manipulation lets a horizontal
+         drag pan the page and cancel the scrub after a few pixels. */
+      touch-action: none;
     }
 
     .timeline:hover {
       height: 6px;
+    }
+
+    /* Invisible 20px-tall hit area so the 4px bar is easy to grab and drag. */
+    .timeline::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: -8px;
+      bottom: -8px;
+    }
+
+    .timeline.scrubbing .timeline-progress::after {
+      opacity: 1;
     }
 
     .timeline-progress {
@@ -1319,6 +1343,25 @@
       align-items: center;
     }
 
+    /* Collapse toggle: folds the panel away so it doesn't cover the stage. */
+    .mobile-controls-toggle {
+      /* Last in the column: the panel is anchored by its bottom edge, so the
+         toggle stays in the same place when the groups above it collapse. */
+      order: 1;
+      align-self: flex-end;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+
+    .mobile-controls.collapsed .mobile-controls-group {
+      display: none;
+    }
+
+    .mobile-controls.collapsed .mobile-controls-toggle svg {
+      transform: rotate(180deg);
+    }
+
     .pan-controls .pan-center {
       display: flex;
       gap: 4px;
@@ -1845,6 +1888,9 @@
 
         <!-- Mobile zoom/pan controls -->
         <div class="mobile-controls" id="mobile-controls">
+          <button class="mobile-btn mobile-btn-small mobile-controls-toggle" id="mobile-controls-toggle" title="Hide zoom/pan controls" aria-label="Hide zoom and pan controls" aria-expanded="true" aria-controls="mobile-controls">
+            <svg viewBox="0 0 24 24"><path d="M10 17l5-5-5-5z"/></svg>
+          </button>
           <div class="mobile-controls-group">
             <button class="mobile-btn" id="zoom-in-btn" title="Zoom In (+)" aria-label="Zoom in">
               <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14zm.5-7H9v2H7v1h2v2h1v-2h2V9h-2z"/></svg>

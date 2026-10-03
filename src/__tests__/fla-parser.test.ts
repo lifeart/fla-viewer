@@ -1,9 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import JSZip from 'jszip';
 import pako from 'pako';
 import { FLAParser, setParserDebug } from '../fla-parser';
 import { FLARenderer } from '../renderer';
 import { createConsoleSpy, expectLogContaining, type ConsoleSpy } from './test-utils';
+import {
+  createHumptyCompatibleChunkedBitmapFixture,
+  createHumptyCompatibleRawBitmapFixture,
+} from './fixtures/humpty-bitmap-fixtures';
 // A small real MP3 stream (frame-aligned slice of a real Animate sound .dat),
 // used to prove MP3 carried under a PCM-style format string decodes correctly.
 import mp3SoundUrl from './fixtures/mp3-sound.mp3?url';
@@ -19,6 +23,19 @@ async function createFlaZip(domDocumentXml: string, additionalFiles: Record<stri
 
   const blob = await zip.generateAsync({ type: 'blob' });
   return new File([blob], 'test.fla', { type: 'application/octet-stream' });
+}
+
+// Draw a decoded bitmap and return its RGBA bytes (row-major, width x height).
+async function readPixels(image: HTMLImageElement, width: number, height: number): Promise<number[]> {
+  if (!image.complete) {
+    await new Promise<void>((resolve) => { image.onload = () => resolve(); });
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d')!;
+  context.drawImage(image, 0, 0);
+  return Array.from(context.getImageData(0, 0, width, height).data);
 }
 
 // Minimal valid DOMDocument.xml structure
@@ -2003,6 +2020,244 @@ describe('FLAParser', () => {
       expect(bitmap?.height).toBe(height);
       // imageData should be loaded (not null/undefined) for valid decompression
       expect(bitmap?.imageData).toBeDefined();
+    });
+
+    it('decodes a synthetic Humpty-compatible multi-chunk bitmap with native deflate', async () => {
+      const fixture = createHumptyCompatibleChunkedBitmapFixture();
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-chunked.png" href="humpty-compatible-chunked.png"
+            bitmapDataHRef="M synthetic chunked.dat"
+            frameRight="${fixture.width * 20}" frameBottom="${fixture.height * 20}"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic chunked.dat': fixture.dat },
+      );
+      const progressMessages: string[] = [];
+
+      const doc = await parser.parse(fla, (message) => progressMessages.push(message));
+      const image = doc.bitmaps.get('humpty-compatible-chunked.png')?.imageData as HTMLImageElement;
+
+      expect(image).toBeDefined();
+      expect(progressMessages).toContain('Fixing images 1/1 [native-deflate]');
+      expect(progressMessages).not.toContain('Fixing images 1/1 [deflate]');
+      if (!image.complete) {
+        await new Promise<void>((resolve) => { image.onload = () => resolve(); });
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = fixture.width;
+      canvas.height = fixture.height;
+      const context = canvas.getContext('2d')!;
+      context.drawImage(image, 0, 0);
+      expect(Array.from(context.getImageData(0, 0, 2, 1).data)).toEqual([
+        fixture.pixelData[1],
+        fixture.pixelData[2],
+        fixture.pixelData[3],
+        fixture.pixelData[0],
+        64,
+        96,
+        128,
+        128,
+      ]);
+    });
+
+    it('falls back to bounded pako when deflate-raw is unsupported', async () => {
+      const fixture = createHumptyCompatibleChunkedBitmapFixture();
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-fallback.png" href="humpty-compatible-fallback.png"
+            bitmapDataHRef="M synthetic fallback.dat"
+            frameRight="${fixture.width * 20}" frameBottom="${fixture.height * 20}"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic fallback.dat': fixture.dat },
+      );
+      const progressMessages: string[] = [];
+      vi.stubGlobal('DecompressionStream', class UnsupportedDecompressionStream {
+        constructor() {
+          throw new TypeError('deflate-raw is unsupported');
+        }
+      });
+
+      try {
+        const doc = await parser.parse(fla, (message) => progressMessages.push(message));
+        expect(doc.bitmaps.get('humpty-compatible-fallback.png')?.imageData).toBeDefined();
+        expect(progressMessages).toContain('Fixing images 1/1 [deflate]');
+        expect(progressMessages).not.toContain('Fixing images 1/1 [dictionary]');
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('keeps only the declared bitmap size when inflated output runs past the limit', async () => {
+      // Header says 1x1, but the stream inflates to 200x100 pixels: far past
+      // the w*h*4 + 64 KB cap. Output is cut at the cap (bounded memory) and
+      // the extra bytes are treated as trailing padding, so the declared
+      // 1x1 bitmap still decodes from the first pixel.
+      const oversized = createHumptyCompatibleChunkedBitmapFixture(200, 100);
+      const dat = oversized.dat.slice();
+      dat[2] = 4;
+      dat[3] = 0;
+      dat[4] = 1;
+      dat[5] = 0;
+      dat[6] = 1;
+      dat[7] = 0;
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-oversized.png" href="humpty-compatible-oversized.png"
+            bitmapDataHRef="M synthetic oversized.dat"
+            frameRight="20" frameBottom="20"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic oversized.dat': dat },
+      );
+      const firstPixel = [
+        oversized.pixelData[1],
+        oversized.pixelData[2],
+        oversized.pixelData[3],
+        oversized.pixelData[0],
+      ];
+
+      const progress: string[] = [];
+      const doc = await parser.parse(fla, (message) => progress.push(message));
+      const image = doc.bitmaps.get('humpty-compatible-oversized.png')?.imageData as HTMLImageElement;
+      expect(image).toBeDefined();
+      expect(progress).toContain('Fixing images 1/1 [native-deflate]');
+      expect(await readPixels(image, 1, 1)).toEqual(firstPixel);
+
+      vi.stubGlobal('DecompressionStream', class UnsupportedDecompressionStream {
+        constructor() {
+          throw new TypeError('deflate-raw is unsupported');
+        }
+      });
+      try {
+        const fallbackProgress: string[] = [];
+        const fallbackDoc = await parser.parse(fla, (message) => fallbackProgress.push(message));
+        const fallbackImage = fallbackDoc.bitmaps.get('humpty-compatible-oversized.png')?.imageData as HTMLImageElement;
+        expect(fallbackImage).toBeDefined();
+        expect(fallbackProgress).toContain('Fixing images 1/1 [deflate]');
+        expect(fallbackProgress).not.toContain('Fixing images 1/1 [dictionary]');
+        expect(await readPixels(fallbackImage, 1, 1)).toEqual(firstPixel);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('decodes a bitmap whose stream carries more than 64 KB of trailing padding', async () => {
+      const fixture = createHumptyCompatibleChunkedBitmapFixture(11, 9, 2048, 100 * 1024);
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-padded.png" href="humpty-compatible-padded.png"
+            bitmapDataHRef="M synthetic padded.dat"
+            frameRight="${fixture.width * 20}" frameBottom="${fixture.height * 20}"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic padded.dat': fixture.dat },
+      );
+      const expectedFirstTwo = [
+        fixture.pixelData[1], fixture.pixelData[2], fixture.pixelData[3], fixture.pixelData[0],
+        64, 96, 128, 128,
+      ];
+
+      const doc = await parser.parse(fla);
+      const image = doc.bitmaps.get('humpty-compatible-padded.png')?.imageData as HTMLImageElement;
+      expect(image).toBeDefined();
+      expect((await readPixels(image, fixture.width, fixture.height)).slice(0, 8)).toEqual(expectedFirstTwo);
+
+      vi.stubGlobal('DecompressionStream', class UnsupportedDecompressionStream {
+        constructor() {
+          throw new TypeError('deflate-raw is unsupported');
+        }
+      });
+      try {
+        const fallbackDoc = await parser.parse(fla);
+        const fallbackImage = fallbackDoc.bitmaps.get('humpty-compatible-padded.png')?.imageData as HTMLImageElement;
+        expect(fallbackImage).toBeDefined();
+        expect((await readPixels(fallbackImage, fixture.width, fixture.height)).slice(0, 8)).toEqual(expectedFirstTwo);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('treats a synthetic Humpty-compatible exact-size variant-0 bitmap as raw pixels', async () => {
+      const fixture = createHumptyCompatibleRawBitmapFixture();
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-raw.png" href="humpty-compatible-raw.png"
+            bitmapDataHRef="M synthetic raw.dat"
+            frameRight="${fixture.width * 20}" frameBottom="${fixture.height * 20}"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic raw.dat': fixture.dat },
+      );
+      const progressMessages: string[] = [];
+
+      const doc = await parser.parse(fla, (message) => progressMessages.push(message));
+      const image = doc.bitmaps.get('humpty-compatible-raw.png')?.imageData as HTMLImageElement;
+
+      expect(image).toBeDefined();
+      expect(progressMessages).toContain('Fixing images 1/1 [raw]');
+      if (!image.complete) {
+        await new Promise<void>((resolve) => { image.onload = () => resolve(); });
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = fixture.width;
+      canvas.height = fixture.height;
+      const context = canvas.getContext('2d')!;
+      context.drawImage(image, 0, 0);
+      const [red, green, blue, alpha] = context.getImageData(0, 0, 1, 1).data;
+      expect([red, green, blue, alpha]).toEqual([
+        fixture.pixelData[1],
+        fixture.pixelData[2],
+        fixture.pixelData[3],
+        fixture.pixelData[0],
+      ]);
+      const semiTransparent = context.getImageData(1, 0, 1, 1).data;
+      expect(Array.from(semiTransparent)).toEqual([64, 96, 128, 128]);
+    });
+
+    it('accepts an all-zero exact-size variant-0 transparent pixel plane', async () => {
+      const fixture = createHumptyCompatibleRawBitmapFixture(2, 2);
+      fixture.dat.fill(0, 26);
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-transparent.png" href="humpty-compatible-transparent.png"
+            bitmapDataHRef="M synthetic transparent.dat"
+            frameRight="40" frameBottom="40"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic transparent.dat': fixture.dat },
+      );
+
+      const doc = await parser.parse(fla);
+
+      expect(doc.bitmaps.get('humpty-compatible-transparent.png')?.imageData).toBeDefined();
+    });
+
+    it('accepts zero alignment padding after a variant-0 raw pixel plane', async () => {
+      const fixture = createHumptyCompatibleRawBitmapFixture(2, 2);
+      const padded = new Uint8Array(fixture.dat.length + 3);
+      padded.set(fixture.dat);
+      const media = `
+        <media>
+          <DOMBitmapItem name="humpty-compatible-padded.png" href="humpty-compatible-padded.png"
+            bitmapDataHRef="M synthetic padded.dat"
+            frameRight="40" frameBottom="40"/>
+        </media>`;
+      const fla = await createFlaZip(
+        createDOMDocument({ media }),
+        { 'bin/M synthetic padded.dat': padded },
+      );
+
+      const doc = await parser.parse(fla);
+
+      expect(doc.bitmaps.get('humpty-compatible-padded.png')?.imageData).toBeDefined();
     });
 
     it('should decompress valid FLA bitmap with different dimensions', async () => {

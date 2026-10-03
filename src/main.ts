@@ -224,6 +224,10 @@ export class FLAViewerApp {
       this.canvasDragStartY = e.clientY;
     });
 
+    // Double-click resets pan/zoom (same as the "0" key); the Reset View
+    // button only exists in the mobile controls.
+    this.canvas.addEventListener('dblclick', () => this.player?.resetView());
+
     this.canvas.addEventListener('touchstart', (e) => {
       if (!this.player || e.touches.length > 1) return;
       this.isDraggingCanvas = true;
@@ -312,10 +316,40 @@ export class FLAViewerApp {
     this.panLeftBtn?.addEventListener('click', () => this.player?.pan(PAN_STEP, 0));
     this.panRightBtn?.addEventListener('click', () => this.player?.pan(-PAN_STEP, 0));
 
-    // Timeline scrubbing (uses global frames to seek across scenes)
-    this.timeline.addEventListener('click', (e) => {
+    // Collapsible mobile zoom/pan panel (it covers the stage on phones).
+    // The choice is remembered per device; storage may be unavailable
+    // (private mode), in which case the panel just starts expanded.
+    const mobileControls = document.getElementById('mobile-controls');
+    const mobileToggle = document.getElementById('mobile-controls-toggle');
+    const setControlsCollapsed = (collapsed: boolean) => {
+      mobileControls?.classList.toggle('collapsed', collapsed);
+      mobileToggle?.setAttribute('aria-expanded', String(!collapsed));
+      const label = collapsed ? 'Show zoom and pan controls' : 'Hide zoom and pan controls';
+      mobileToggle?.setAttribute('aria-label', label);
+      mobileToggle?.setAttribute('title', label);
+    };
+    try {
+      setControlsCollapsed(localStorage.getItem('mobileControlsCollapsed') === '1');
+    } catch {
+      // Storage blocked: keep the default (expanded).
+    }
+    mobileToggle?.addEventListener('click', () => {
+      const collapsed = !mobileControls?.classList.contains('collapsed');
+      setControlsCollapsed(collapsed);
+      try {
+        localStorage.setItem('mobileControlsCollapsed', collapsed ? '1' : '0');
+      } catch {
+        // Storage blocked: the choice lasts until reload.
+      }
+    });
+
+    // Timeline scrubbing (uses global frames to seek across scenes). Pointer
+    // events so the playhead follows a drag, not just a click; playback pauses
+    // while dragging (seeking a playing timeline restarts the audio on every
+    // move) and resumes on release.
+    const seekTo = (clientX: number) => {
       const rect = this.timeline.getBoundingClientRect();
-      const progress = (e.clientX - rect.left) / rect.width;
+      const progress = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
       const state = this.player?.getState();
       if (state && state.totalScenes > 1) {
         // Seek across all scenes using global frame
@@ -324,7 +358,28 @@ export class FLAViewerApp {
       } else {
         this.player?.seekToProgress(progress);
       }
+    };
+    let resumeAfterScrub = false;
+    this.timeline.addEventListener('pointerdown', (e) => {
+      if (!this.player || e.button !== 0) return;
+      resumeAfterScrub = this.player.getState().playing;
+      if (resumeAfterScrub) this.player.pause();
+      this.timeline.setPointerCapture(e.pointerId);
+      this.timeline.classList.add('scrubbing');
+      seekTo(e.clientX);
     });
+    this.timeline.addEventListener('pointermove', (e) => {
+      if (this.timeline.hasPointerCapture(e.pointerId)) seekTo(e.clientX);
+    });
+    const endScrub = (e: PointerEvent) => {
+      if (!this.timeline.hasPointerCapture(e.pointerId)) return;
+      this.timeline.releasePointerCapture(e.pointerId);
+      this.timeline.classList.remove('scrubbing');
+      if (resumeAfterScrub) this.player?.play();
+      resumeAfterScrub = false;
+    };
+    this.timeline.addEventListener('pointerup', endScrub);
+    this.timeline.addEventListener('pointercancel', endScrub);
 
     // Layer order change
     this.layerOrderSelect.addEventListener('change', () => {
@@ -1025,6 +1080,9 @@ export class FLAViewerApp {
       // Create player and wait for fonts to load
       this.loadingText.textContent = 'Loading fonts...';
       this.updateLoadingStage('Loading fonts...');
+      // Stop the previous file's player; otherwise its loop and sound keep
+      // running under the new one (two soundtracks at once).
+      this.player?.destroy();
       this.player = new FLAPlayer(this.canvas);
       await this.player.setDocument(doc);
       this.player.onStateUpdate((state) => this.updateUI(state));
@@ -1125,8 +1183,14 @@ export class FLAViewerApp {
   private pauseIcon = '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
 
   private updateUI(state: PlayerState): void {
-    // Update play button icon
-    this.playBtn.innerHTML = state.playing ? this.pauseIcon : this.playIcon;
+    // Update play button icon — only when it changes. updateUI runs every
+    // frame; rewriting the SVG under the cursor between mousedown and mouseup
+    // swallowed clicks on the icon (only the button's edges responded).
+    const icon = state.playing ? this.pauseIcon : this.playIcon;
+    if (this.playBtn.dataset.icon !== icon) {
+      this.playBtn.innerHTML = icon;
+      this.playBtn.dataset.icon = icon;
+    }
 
     // Update frame info (timecode style)
     if (state.totalScenes > 1) {

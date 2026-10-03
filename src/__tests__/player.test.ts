@@ -6,6 +6,26 @@ import {
   createLayer,
   createFrame,
 } from './test-utils';
+import type { FrameSound } from '../types';
+
+// Private audio state of FLAPlayer, reached into for deterministic tests
+// (driving the rAF loop would make them timing-dependent).
+interface AudioInternals {
+  startAudio: () => void;
+  startSoundsAtFrame: (frame: number) => void;
+  syncAudioToFrame: () => void;
+  streamSounds: { startFrame: number; duration: number; sound: FrameSound }[];
+  activeSounds: {
+    stream: { startFrame: number; sound: FrameSound };
+    source: AudioBufferSourceNode;
+    startContextTime: number;
+  }[];
+  audioContext: AudioContext | null;
+  state: { currentFrame: number; playing: boolean };
+  lastFrameTime: number;
+  animationId: number | null;
+  animate: () => void;
+}
 
 describe('FLAPlayer', () => {
   let canvas: HTMLCanvasElement;
@@ -551,33 +571,306 @@ describe('FLAPlayer', () => {
       await player.setDocument(doc);
 
       // Start audio directly (without the rAF loop) so the test is deterministic.
-      const p = player as unknown as {
-        startAudio: () => void;
-        syncAudioToFrame: () => void;
-        activeAudioSource: AudioBufferSourceNode | null;
-        activeStream: unknown;
-        audioStartContextTime: number;
-        audioContext: AudioContext;
-      };
+      const p = player as unknown as AudioInternals;
       p.startAudio();
-      const firstSource = p.activeAudioSource;
-      expect(firstSource).toBeTruthy();
-      expect(p.activeStream).toBeTruthy();
+      expect(p.activeSounds).toHaveLength(1);
+      const firstSource = p.activeSounds[0].source;
 
       // Aligned (no drift): the source must be left alone, no audible restart.
-      p.audioStartContextTime = p.audioContext.currentTime;
+      p.activeSounds[0].startContextTime = p.audioContext!.currentTime;
       p.syncAudioToFrame();
-      expect(p.activeAudioSource).toBe(firstSource);
+      expect(p.activeSounds[0].source).toBe(firstSource);
 
       // Simulate heavy render lag: audio has played ~1s while still on frame 0.
-      p.audioStartContextTime = p.audioContext.currentTime - 1;
+      p.activeSounds[0].startContextTime = p.audioContext!.currentTime - 1;
       p.syncAudioToFrame();
       // Audio should be re-seeked back to the frame (a fresh source).
-      expect(p.activeAudioSource).toBeTruthy();
-      expect(p.activeAudioSource).not.toBe(firstSource);
+      expect(p.activeSounds).toHaveLength(1);
+      expect(p.activeSounds[0].source).not.toBe(firstSource);
 
       player.pause();
       await audioContext.close();
+    });
+
+    describe('sync modes and overlapping sounds', () => {
+      let audioContext: AudioContext;
+
+      beforeEach(() => {
+        audioContext = new AudioContext();
+      });
+
+      afterEach(async () => {
+        await audioContext.close();
+      });
+
+      // A silent buffer of the given length in seconds.
+      const buffer = (seconds: number) =>
+        audioContext.createBuffer(2, Math.ceil(audioContext.sampleRate * seconds), audioContext.sampleRate);
+
+      // One layer per sound, each a single keyframe at `index` with `duration` frames.
+      async function loadSounds(
+        totalFrames: number,
+        entries: { name: string; seconds: number; index: number; duration: number; sync: FrameSound['sync'] }[],
+      ): Promise<AudioInternals> {
+        const sounds = new Map();
+        for (const e of entries) {
+          sounds.set(e.name, { name: e.name, audioData: buffer(e.seconds) });
+        }
+        const doc = createMinimalDoc({
+          frameRate: 10,
+          sounds,
+          timelines: [createTimeline({
+            totalFrames,
+            layers: entries.map(e => createLayer({
+              frames: [createFrame({
+                index: e.index,
+                duration: e.duration,
+                sound: { name: e.name, sync: e.sync, inPoint44: 0 },
+              })],
+            })),
+          })],
+        });
+        await player.setDocument(doc);
+        return player as unknown as AudioInternals;
+      }
+
+      it('schedules event and start sounds, not only stream; ignores stop', async () => {
+        const p = await loadSounds(40, [
+          { name: 'event.mp3', seconds: 1, index: 0, duration: 2, sync: 'event' },
+          { name: 'start.mp3', seconds: 1, index: 0, duration: 2, sync: 'start' },
+          { name: 'stream.mp3', seconds: 1, index: 0, duration: 2, sync: 'stream' },
+          { name: 'stop.mp3', seconds: 1, index: 0, duration: 2, sync: 'stop' },
+        ]);
+        const byName = new Map(p.streamSounds.map(s => [s.sound.name, s]));
+        expect([...byName.keys()].sort()).toEqual(['event.mp3', 'start.mp3', 'stream.mp3']);
+        // Event/start sounds play to their end (1s = 10 frames at 10fps), past
+        // their 2-frame keyframe; stream sounds stop with the keyframe.
+        expect(byName.get('event.mp3')!.duration).toBe(10);
+        expect(byName.get('start.mp3')!.duration).toBe(10);
+        expect(byName.get('stream.mp3')!.duration).toBe(2);
+      });
+
+      it('plays overlapping sounds at the same time', async () => {
+        const p = await loadSounds(40, [
+          { name: 'a.mp3', seconds: 1, index: 0, duration: 1, sync: 'event' },
+          { name: 'b.mp3', seconds: 1, index: 0, duration: 20, sync: 'stream' },
+        ]);
+        p.startAudio();
+        expect(p.activeSounds.map(a => a.stream.sound.name).sort()).toEqual(['a.mp3', 'b.mp3']);
+        player.pause();
+        expect(p.activeSounds).toHaveLength(0);
+      });
+
+      it('starts a sound when the playhead reaches its keyframe during playback', async () => {
+        const p = await loadSounds(40, [
+          { name: 'late.mp3', seconds: 1, index: 5, duration: 1, sync: 'event' },
+        ]);
+        p.startAudio();
+        expect(p.activeSounds).toHaveLength(0);
+
+        p.state.currentFrame = 5;
+        p.startSoundsAtFrame(5);
+        expect(p.activeSounds.map(a => a.stream.sound.name)).toEqual(['late.mp3']);
+
+        // An event sound plays through on its own clock: moving past its
+        // 1-frame keyframe neither stops nor re-seeks it.
+        const source = p.activeSounds[0].source;
+        p.state.currentFrame = 30;
+        p.syncAudioToFrame();
+        expect(p.activeSounds).toHaveLength(1);
+        expect(p.activeSounds[0].source).toBe(source);
+      });
+
+      it('stops a stream sound when the playhead leaves its keyframe span', async () => {
+        const p = await loadSounds(40, [
+          { name: 'st.mp3', seconds: 2, index: 0, duration: 5, sync: 'stream' },
+        ]);
+        p.startAudio();
+        p.state.currentFrame = 4;
+        p.syncAudioToFrame();
+        expect(p.activeSounds).toHaveLength(1);
+        p.state.currentFrame = 5;
+        p.syncAudioToFrame();
+        expect(p.activeSounds).toHaveLength(0);
+      });
+
+      // Advance one tick of the playback loop deterministically.
+      function tick(p: AudioInternals): void {
+        p.lastFrameTime = performance.now() - 10_000;
+        p.animate();
+        if (p.animationId !== null) cancelAnimationFrame(p.animationId);
+        p.animationId = null;
+      }
+
+      it('on loop, restarts stream sounds but lets a playing event sound carry on', async () => {
+        const p = await loadSounds(4, [
+          { name: 'loop-stream.mp3', seconds: 2, index: 0, duration: 4, sync: 'stream' },
+          { name: 'long-event.mp3', seconds: 5, index: 1, duration: 1, sync: 'event' },
+        ]);
+        p.state.playing = true;
+        p.startAudio();
+        tick(p); // frame 1: event sound triggers
+        const event = p.activeSounds.find(a => a.stream.sound.name === 'long-event.mp3')!;
+        expect(event).toBeDefined();
+        const stream = p.activeSounds.find(a => a.stream.sound.name === 'loop-stream.mp3')!;
+        tick(p);
+        tick(p);
+        tick(p); // wraps to frame 0
+        expect(p.state.currentFrame).toBe(0);
+        expect(p.activeSounds.find(a => a.stream.sound.name === 'long-event.mp3')?.source).toBe(event.source);
+        const restarted = p.activeSounds.find(a => a.stream.sound.name === 'loop-stream.mp3')!;
+        expect(restarted.source).not.toBe(stream.source);
+        player.pause();
+      });
+
+      it('stacks an event sound when the loop comes back to its keyframe', async () => {
+        const p = await loadSounds(4, [
+          { name: 'long.mp3', seconds: 5, index: 0, duration: 1, sync: 'event' },
+        ]);
+        p.state.playing = true;
+        p.startAudio();
+        const first = p.activeSounds[0].source;
+        // Re-entering the keyframe directly...
+        p.startSoundsAtFrame(0);
+        expect(p.activeSounds).toHaveLength(2);
+        expect(p.activeSounds[0].source).toBe(first);
+        p.activeSounds[1].source.stop();
+        p.activeSounds.pop();
+        // ...and through a loop wrap.
+        for (let i = 0; i < 4; i++) tick(p); // wraps back to frame 0
+        expect(p.state.currentFrame).toBe(0);
+        // The first instance keeps playing; a second one starts on top.
+        expect(p.activeSounds).toHaveLength(2);
+        expect(p.activeSounds[0].source).toBe(first);
+        expect(p.activeSounds[1].source).not.toBe(first);
+        player.pause();
+      });
+
+      it('uses the new scene\'s sounds after playback advances to it', async () => {
+        const sounds = new Map([
+          ['a.mp3', { name: 'a.mp3', href: 'a.mp3', audioData: buffer(5) }],
+          ['b.mp3', { name: 'b.mp3', href: 'b.mp3', audioData: buffer(5) }],
+        ]);
+        const scene = (name: string, totalFrames: number, sound: string) => createTimeline({
+          name,
+          totalFrames,
+          layers: [createLayer({
+            frames: [createFrame({ index: 1, duration: 1, sound: { name: sound, sync: 'event', inPoint44: 0 } })],
+          })],
+        });
+        await player.setDocument(createMinimalDoc({
+          frameRate: 10,
+          sounds,
+          timelines: [scene('Scene 1', 2, 'a.mp3'), scene('Scene 2', 3, 'b.mp3')],
+        }));
+        const p = player as unknown as AudioInternals;
+        p.state.playing = true;
+        p.startAudio();
+        tick(p); // scene 1, frame 1: a
+        tick(p); // scene 2, frame 0
+        tick(p); // scene 2, frame 1: b (not a again)
+        expect(p.activeSounds.map(a => a.stream.sound.name)).toEqual(['a.mp3', 'b.mp3']);
+        player.pause();
+      });
+
+      it('does not re-trigger sounds every tick in a one-frame timeline', async () => {
+        const p = await loadSounds(1, [
+          { name: 'one.mp3', seconds: 2, index: 0, duration: 1, sync: 'event' },
+          { name: 'one-stream.mp3', seconds: 2, index: 0, duration: 1, sync: 'stream' },
+        ]);
+        p.state.playing = true;
+        p.startAudio();
+        const sources = p.activeSounds.map(a => a.source);
+        expect(sources).toHaveLength(2);
+        tick(p);
+        tick(p);
+        // Same node objects (toEqual would match any two source nodes).
+        expect(p.activeSounds).toHaveLength(2);
+        expect(p.activeSounds.every((a, i) => a.source === sources[i])).toBe(true);
+        player.pause();
+      });
+
+      it('does not stack a start-sync sound that is already playing', async () => {
+        const doc = createMinimalDoc({
+          frameRate: 10,
+          sounds: new Map([['s.mp3', { name: 's.mp3', href: 's.mp3', audioData: buffer(2) }]]),
+          timelines: [createTimeline({
+            totalFrames: 40,
+            layers: [createLayer({
+              frames: [
+                createFrame({ index: 0, duration: 5, sound: { name: 's.mp3', sync: 'start', inPoint44: 0 } }),
+                createFrame({ index: 5, duration: 5, sound: { name: 's.mp3', sync: 'start', inPoint44: 0 } }),
+              ],
+            })],
+          })],
+        });
+        await player.setDocument(doc);
+        const p = player as unknown as AudioInternals;
+        p.startAudio();
+        expect(p.activeSounds).toHaveLength(1);
+        p.state.currentFrame = 5;
+        p.startSoundsAtFrame(5);
+        expect(p.activeSounds).toHaveLength(1);
+        expect(p.activeSounds[0].stream.startFrame).toBe(0);
+      });
+
+      it('stacks a repeated event sound', async () => {
+        const doc = createMinimalDoc({
+          frameRate: 10,
+          sounds: new Map([['e.mp3', { name: 'e.mp3', href: 'e.mp3', audioData: buffer(2) }]]),
+          timelines: [createTimeline({
+            totalFrames: 40,
+            layers: [createLayer({
+              frames: [
+                createFrame({ index: 0, duration: 5, sound: { name: 'e.mp3', sync: 'event', inPoint44: 0 } }),
+                createFrame({ index: 5, duration: 5, sound: { name: 'e.mp3', sync: 'event', inPoint44: 0 } }),
+              ],
+            })],
+          })],
+        });
+        await player.setDocument(doc);
+        const p = player as unknown as AudioInternals;
+        p.startAudio();
+        p.state.currentFrame = 5;
+        p.startSoundsAtFrame(5);
+        expect(p.activeSounds.map(a => a.stream.startFrame)).toEqual([0, 5]);
+      });
+    });
+
+    describe('destroy', () => {
+      it('stops playback and audio and closes the audio context', async () => {
+        const audioContext = new AudioContext();
+        const audioData = audioContext.createBuffer(2, audioContext.sampleRate, audioContext.sampleRate);
+        const doc = createMinimalDoc({
+          frameRate: 10,
+          sounds: new Map([['d.mp3', { name: 'd.mp3', href: 'd.mp3', audioData }]]),
+          timelines: [createTimeline({
+            totalFrames: 20,
+            layers: [createLayer({
+              frames: [createFrame({ index: 0, duration: 20, sound: { name: 'd.mp3', sync: 'stream', inPoint44: 0 } })],
+            })],
+          })],
+        });
+        await player.setDocument(doc);
+        let updates = 0;
+        player.onStateUpdate(() => updates++);
+        player.play();
+        const p = player as unknown as AudioInternals;
+        const ctx = p.audioContext!;
+        expect(p.activeSounds).toHaveLength(1);
+
+        player.destroy();
+        updates = 0;
+        expect(player.getState().playing).toBe(false);
+        expect(p.activeSounds).toHaveLength(0);
+        expect(p.audioContext).toBeNull();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(ctx.state).toBe('closed');
+        // The detached state callback no longer fires.
+        player.goToFrame(3);
+        expect(updates).toBe(0);
+        await audioContext.close();
+      });
     });
 
     it('should set volume on gainNode when playing', async () => {

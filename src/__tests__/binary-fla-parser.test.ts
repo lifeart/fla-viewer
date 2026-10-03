@@ -345,17 +345,18 @@ describe('binary FLA timeline / layer-structure extraction (issue #8)', () => {
     expect(doc.timelines).toHaveLength(1);
     const scene = doc.timelines[0];
     expect(scene.name).toBe('Scene 1');
+    // Stored bottom-first in the stream; the viewer wants top-first.
     expect(scene.layers.map((l) => l.name)).toEqual([
-      'Background',
-      'Guide: helper',
       'Actions',
+      'Guide: helper',
+      'Background',
     ]);
     // The guide layer is flagged so the viewer does not try to render it.
     expect(scene.layers[1].layerType).toBe('guide');
     expect([...scene.referenceLayers]).toEqual([1]);
     // Locked/visible flags are carried through.
-    expect(scene.layers[2].name).toBe('Actions');
-    expect(scene.layers[2].locked).toBe(true);
+    expect(scene.layers[0].name).toBe('Actions');
+    expect(scene.layers[0].locked).toBe(true);
     // We do NOT fabricate frame content: each layer has exactly one empty frame.
     expect(scene.layers[0].frames).toHaveLength(1);
     expect(scene.layers[0].frames[0].elements).toEqual([]);
@@ -364,10 +365,12 @@ describe('binary FLA timeline / layer-structure extraction (issue #8)', () => {
     const box = doc.symbols.get('Box');
     expect(box?.symbolType).toBe('graphic');
     expect(box?.timeline.layers.map((l) => l.name)).toEqual([
-      'Layer 1',
       'Layer 2',
+      'Layer 1',
     ]);
-    expect(box?.timeline.layers[1].visible).toBe(false);
+    // Layer 2 is hidden in the editor, but pre-CS5.5 Flash still publishes
+    // hidden layers, so the viewer renders it.
+    expect(box?.timeline.layers[0].visible).toBe(true);
   });
 
   it('routes through FLAParser.parse and yields the layered document', async () => {
@@ -377,9 +380,9 @@ describe('binary FLA timeline / layer-structure extraction (issue #8)', () => {
     });
     const doc = await new FLAParser().parse(file);
     expect(doc.timelines[0].layers.map((l) => l.name)).toEqual([
-      'Background',
-      'Guide: helper',
       'Actions',
+      'Guide: helper',
+      'Background',
     ]);
   });
 });
