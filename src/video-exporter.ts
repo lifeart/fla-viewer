@@ -1,5 +1,6 @@
 import type { FLADocument, SoundItem, FrameSound } from './types';
-import { isLayerVisibleInFla, getMaskLayerIndex } from './layer-utils';
+import { isLayerVisibleInFla, getMaskLayerIndex, invertMatrix } from './layer-utils';
+import { stageLayerViews, type StageLayerViews } from './native-camera';
 import { FLARenderer } from './renderer';
 import {
   graphicSymbolFrame, instanceClock, movieClipClock, movieClipPlayhead, movieClipRun, movieClipStopFrames,
@@ -1837,13 +1838,18 @@ export async function exportSVG(
   //    but the mask block returns first, so there is no double-hide.
   //  - Masked children are NOT rendered again when their index comes up in the
   //    normal loop (tracked via maskedLayers).
+  //
+  // `stageViews` (main timeline only) applies Animate's native camera: each
+  // layer's output is wrapped in its view transform, as in the renderer
+  // (src/native-camera.ts).
   const renderLayerStack = (
     layers: import('./types').Layer[],
     atFrameIndex: number,
     depth: number,
     referenceLayers: Set<number>,
     out: string[],
-    clock: TimelineClock
+    clock: TimelineClock,
+    stageViews: StageLayerViews | null = null
   ): void => {
     // masked layer index -> mask layer index
     const maskedLayers = new Map<number, number>();
@@ -1853,6 +1859,19 @@ export async function exportSVG(
         maskedLayers.set(i, maskIndex);
       }
     }
+
+    // A layer's output in its stage view (dropped when it is not drawn).
+    const pushInView = (target: string[], layerOut: string[], layerIndex: number): void => {
+      if (layerOut.length === 0) return;
+      const view = stageViews ? stageViews.matrices[layerIndex] : undefined;
+      if (view === null) return;
+      const transform = view ? matrixToTransform(view) : '';
+      if (!transform) {
+        target.push(...layerOut);
+        return;
+      }
+      target.push(`<g transform="${transform}">\n    ${layerOut.join('\n    ')}\n  </g>`);
+    };
 
     const indices = [...Array(layers.length).keys()].reverse();
     for (const layerIndex of indices) {
@@ -1878,7 +1897,9 @@ export async function exportSVG(
         const childOut: string[] = [];
         for (const maskedIdx of [...maskedByThis].sort((a, b) => b - a)) {
           if (!isLayerVisibleInFla(layers, maskedIdx)) continue;
-          renderLayerElements(layers[maskedIdx], atFrameIndex, depth, childOut, clock);
+          const layerOut: string[] = [];
+          renderLayerElements(layers[maskedIdx], atFrameIndex, depth, layerOut, clock);
+          pushInView(childOut, layerOut, maskedIdx);
         }
         if (childOut.length === 0) continue; // nothing visible to clip
 
@@ -1886,7 +1907,13 @@ export async function exportSVG(
         // no mask content; render children unclipped (renderer.ts:915-928).
         const maskFrame = findActiveFrame(layer, atFrameIndex);
         const clipId = maskFrame ? buildMaskClipDef(maskFrame) : null;
-        if (clipId) {
+        const maskView = stageViews ? stageViews.matrices[layerIndex] : undefined;
+        if (clipId && maskView === null) continue; // the mask is not drawn: no mask area
+        const maskInverse = clipId && maskView ? invertMatrix(maskView) : null;
+        if (clipId && maskView && maskInverse) {
+          // The clip is in the mask's view; the children are already in stage space.
+          out.push(`<g transform="${matrixToTransform(maskView)}" clip-path="url(#${clipId})">\n    <g transform="${matrixToTransform(maskInverse)}">\n    ${childOut.join('\n    ')}\n  </g>\n  </g>`);
+        } else if (clipId) {
           out.push(`<g clip-path="url(#${clipId})">\n    ${childOut.join('\n    ')}\n  </g>`);
         } else {
           out.push(...childOut);
@@ -1899,7 +1926,9 @@ export async function exportSVG(
 
       // Normal layer: honor visibility cascade.
       if (!isLayerVisibleInFla(layers, layerIndex)) continue;
-      renderLayerElements(layer, atFrameIndex, depth, out, clock);
+      const layerOut: string[] = [];
+      renderLayerElements(layer, atFrameIndex, depth, layerOut, clock);
+      pushInView(out, layerOut, layerIndex);
     }
   };
 
@@ -1908,6 +1937,16 @@ export async function exportSVG(
   if (!timeline) {
     return new Blob(['<svg xmlns="http://www.w3.org/2000/svg"></svg>'], { type: 'image/svg+xml' });
   }
+
+  // Animate's native camera, at its keyframe matrix (this exporter does not
+  // interpolate tweens).
+  const cameraLayer = timeline.nativeCameraLayerIndex !== undefined
+    ? timeline.layers[timeline.nativeCameraLayerIndex]
+    : undefined;
+  const cameraElement = cameraLayer ? findActiveFrame(cameraLayer, frameIndex)?.elements[0] : undefined;
+  const camera = cameraLayer && cameraElement?.type === 'symbol'
+    ? { matrix: cameraElement.matrix }
+    : null;
 
   const renderedElements: string[] = [];
   // Mask-aware reverse-order layer rendering (mask grouping + <clipPath>),
@@ -1918,7 +1957,8 @@ export async function exportSVG(
     0,
     timeline.referenceLayers,
     renderedElements,
-    rootClock(frameIndex)
+    rootClock(frameIndex),
+    stageLayerViews(timeline.layers, camera, width, height)
   );
 
   // Build SVG

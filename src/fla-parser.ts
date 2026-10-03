@@ -645,6 +645,13 @@ export class FLAParser {
       // Find camera layer using generic detection
       const cameraLayerIndex = this.detectCameraLayer(layers, docWidth, docHeight);
 
+      // Animate's native camera layer, unless the timeline marks the camera
+      // disabled (files with a camera write cameraLayerEnabled="true").
+      const nativeCameraIndex = layers.findIndex((layer) => layer.layerType === 'camera');
+      const nativeCameraLayerIndex = nativeCameraIndex >= 0 && tl.getAttribute('cameraLayerEnabled') !== 'false'
+        ? nativeCameraIndex
+        : undefined;
+
       // Detect all reference layers that should not be rendered
       const referenceLayers = this.detectReferenceLayers(layers, docWidth, docHeight);
 
@@ -653,7 +660,10 @@ export class FLAParser {
         referenceLayers.add(cameraLayerIndex);
       }
 
-      timelines.push({ name, layers, totalFrames, cameraLayerIndex, referenceLayers });
+      timelines.push({
+        name, layers, totalFrames, cameraLayerIndex, referenceLayers,
+        ...(nativeCameraLayerIndex !== undefined && { nativeCameraLayerIndex })
+      });
     }
 
     return timelines;
@@ -682,7 +692,8 @@ export class FLAParser {
                            layerNameLower.includes('camera') ||
                            layerNameLower.includes('viewport');
 
-      if (!isCameraName) continue;
+      // Animate's native camera layer is applied on its own (nativeCameraLayerIndex).
+      if (!isCameraName || layer.layerType === 'camera') continue;
 
       // Check if layer has frames with elements
       if (layer.frames.length === 0) continue;
@@ -787,6 +798,7 @@ export class FLAParser {
       const alphaPercent = alphaPercentAttr ? parseInt(alphaPercentAttr) : undefined;
       const layerType = layerEl.getAttribute('layerType') as Layer['layerType'];
       const parentLayerIndex = layerEl.getAttribute('parentLayerIndex');
+      const attachedToCamera = layerEl.getAttribute('attachedToCamera') === 'true';
 
       const frames = await this.parseFrames(layerEl);
 
@@ -800,6 +812,7 @@ export class FLAParser {
         alphaPercent,
         layerType: layerType || 'normal',
         parentLayerIndex: parentLayerIndex ? parseInt(parentLayerIndex) : undefined,
+        ...(attachedToCamera && { attachedToCamera }),
         frames
       });
     }

@@ -72,6 +72,12 @@ export interface Timeline {
   layers: Layer[];
   totalFrames: number;
   cameraLayerIndex?: number; // Index of the camera layer for camera transforms
+  /**
+   * Index of Animate's native camera layer (`layerType="camera"`, CC 2017+) when
+   * the timeline's camera is enabled. Its `__Camera__` instance drives the view
+   * of every layer not attached to the camera (src/native-camera.ts).
+   */
+  nativeCameraLayerIndex?: number;
   referenceLayers: Set<number>; // Indices of layers that should not be rendered (guides, camera frames, etc.)
 }
 
@@ -86,6 +92,7 @@ export interface Layer {
   layerType?: 'normal' | 'guide' | 'folder' | 'camera' | 'mask' | 'masked';
   parentLayerIndex?: number;
   maskLayerIndex?: number; // For masked layers, index of the mask layer
+  attachedToCamera?: boolean; // Pinned to the native camera: drawn without the camera's view
   frames: Frame[];
 }
 

@@ -37,6 +37,7 @@ import {
 } from './symbol-loop';
 import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 import { variableWidthStrokePolygons } from './variable-width-stroke';
+import { stageLayerViews, type StageCamera, type StageLayerViews } from './native-camera';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -534,6 +535,8 @@ export class FLARenderer {
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i];
       const nameLower = layer.name.toLowerCase();
+      // Animate's native camera is always applied; it is not a follow target.
+      if (layer.layerType === 'camera') continue;
 
       // Match camera-related layer names
       if (nameLower === 'ramka' ||
@@ -565,6 +568,7 @@ export class FLARenderer {
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i];
       const nameLower = layer.name.toLowerCase();
+      if (layer.layerType === 'camera') continue;
 
       if (nameLower === 'ramka' ||
           nameLower === 'camera' ||
@@ -1091,10 +1095,13 @@ export class FLARenderer {
     frameIndex: number,
     depth: number,
     maskLayerIndex: number,
-    maskedLayerIndices: number[]
+    maskedLayerIndices: number[],
+    stageViews: StageLayerViews | null = null
   ): void {
     const ctx = this.ctx;
     const maskLayer = timeline.layers[maskLayerIndex];
+    // The mask's own camera view (null: not drawn, so no mask area).
+    const maskView = stageViews ? stageViews.matrices[maskLayerIndex] : undefined;
 
     // Find the frame at the current index for the mask layer. With no mask
     // content (empty keyframe, or past the mask layer's last frame) the masked
@@ -1110,7 +1117,9 @@ export class FLARenderer {
       // into ONE path so overlapping/separate mask shapes union. (Calling
       // ctx.clip() once per shape intersects them instead.)
       const clip: MaskClipPaths = { positive: new Path2D(), negative: new Path2D(), positiveCount: 0, negativeCount: 0 };
-      this.addLayerToMaskPath(maskLayer, frameIndex, new DOMMatrix(), clip, depth);
+      if (maskView !== null) {
+        this.addLayerToMaskPath(maskLayer, frameIndex, maskView ? this.toDOMMatrix(maskView) : new DOMMatrix(), clip, depth);
+      }
       ctx.clip(this.buildMaskClipPath(clip), 'nonzero');
     }
 
@@ -1123,7 +1132,7 @@ export class FLARenderer {
       if (timeline.referenceLayers.has(maskedIdx)) continue;
       const maskedLayer = timeline.layers[maskedIdx];
       if (maskedLayer) {
-        this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx, timeline.layers);
+        this.withStageView(stageViews, maskedIdx, () => this.renderLayer(maskedLayer, frameIndex, depth, maskedIdx, timeline.layers));
       }
     }
 
@@ -1292,13 +1301,20 @@ export class FLARenderer {
 
     const ctx = this.ctx;
 
+    // Animate's native camera (main timeline only): each layer gets its own
+    // stage transform. Null without a camera.
+    const nativeCamera = depth === 0 ? this.getNativeCamera(timeline, frameIndex) : null;
+    const stageViews = depth === 0 && this.doc
+      ? stageLayerViews(timeline.layers, nativeCamera, this.doc.width, this.doc.height)
+      : null;
+
     // Determine which camera layer to use (if any)
     // Manual follow camera takes precedence over auto-detected camera
     let activeCameraIndex: number | undefined;
     if (depth === 0) {
       if (this.followCamera && this.manualCameraLayerIndex !== undefined) {
         activeCameraIndex = this.manualCameraLayerIndex;
-      } else {
+      } else if (!nativeCamera) {
         activeCameraIndex = timeline.cameraLayerIndex;
       }
     }
@@ -1394,7 +1410,7 @@ export class FLARenderer {
 
         if (maskedByThis.length > 0) {
           // Render mask layer with clipping
-          this.renderMaskGroup(timeline, frameIndex, depth, i, maskedByThis);
+          this.renderMaskGroup(timeline, frameIndex, depth, i, maskedByThis, stageViews);
         }
         continue; // Don't render mask layer normally
       }
@@ -1404,7 +1420,7 @@ export class FLARenderer {
         continue;
       }
 
-      this.renderLayer(layer, frameIndex, depth, i, timeline.layers);
+      this.withStageView(stageViews, i, () => this.renderLayer(layer, frameIndex, depth, i, timeline.layers));
     }
 
     if (hasCameraTransform) {
@@ -1424,7 +1440,7 @@ export class FLARenderer {
     if (frame.tweenType === 'motion') {
       const nextKeyframe = this.findNextKeyframe(cameraLayer.frames, frame);
       if (nextKeyframe && nextKeyframe.elements.length > 0) {
-        const nextElement = nextKeyframe.elements[0];
+        const nextElement = this.findTweenPartner(element, 0, nextKeyframe);
         if (nextElement.type === 'symbol') {
           const progress = this.calculateTweenProgress(
             frameIndex,
@@ -1434,20 +1450,37 @@ export class FLARenderer {
             frame.tweens
           );
 
-          // Interpolate camera matrix
-          return {
-            a: this.lerp(element.matrix.a, nextElement.matrix.a, progress),
-            b: this.lerp(element.matrix.b, nextElement.matrix.b, progress),
-            c: this.lerp(element.matrix.c, nextElement.matrix.c, progress),
-            d: this.lerp(element.matrix.d, nextElement.matrix.d, progress),
-            tx: this.lerp(element.matrix.tx, nextElement.matrix.tx, progress),
-            ty: this.lerp(element.matrix.ty, nextElement.matrix.ty, progress)
-          };
+          // Interpolate the camera matrix like any classic-tweened instance
+          return this.interpolateTweenMatrix(element.matrix, nextElement.matrix, progress, frame);
         }
       }
     }
 
     return this.applyMotionObject(frame, element, frameIndex).matrix;
+  }
+
+  // Animate's native camera at a frame: its `__Camera__` instance's matrix,
+  // tweened like any instance.
+  private getNativeCamera(timeline: Timeline, frameIndex: number): StageCamera | null {
+    const index = timeline.nativeCameraLayerIndex;
+    const cameraLayer = index !== undefined ? timeline.layers[index] : undefined;
+    if (!cameraLayer) return null;
+    const matrix = this.getCameraTransform(cameraLayer, frameIndex);
+    return matrix ? { matrix } : null;
+  }
+
+  // Draw a main-timeline layer through its native camera view.
+  private withStageView(stageViews: StageLayerViews | null, layerIndex: number, draw: () => void): void {
+    if (!stageViews) {
+      draw();
+      return;
+    }
+    const view = stageViews.matrices[layerIndex];
+    if (!view) return;
+    this.ctx.save();
+    this.applyMatrix(view);
+    draw();
+    this.ctx.restore();
   }
 
   // Get full camera element with transformation point (for follow camera mode)

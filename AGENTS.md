@@ -51,7 +51,7 @@ FLA files (Adobe Animate/Flash Professional) are ZIP archives containing XML fil
     color="#FF4F4F"           <!-- Layer color in timeline UI -->
     visible="true"            <!-- Layer visibility -->
     locked="false"            <!-- Layer lock state -->
-    layerType="normal"        <!-- normal | guide | folder | mask | masked -->
+    layerType="normal"        <!-- normal | guide | folder | mask | masked | camera -->
     parentLayerIndex="2">     <!-- Parent folder index (if in folder) -->
 
     <frames>
@@ -177,6 +177,37 @@ To render content from the camera's perspective:
 1. Detect camera layer using the criteria above
 2. Get the symbol's transform matrix at current frame (with tween interpolation)
 3. Apply the **inverse** transform to all other content
+
+### Native Camera (Animate CC 2017+)
+
+Animate's own camera is a layer type, not a naming convention (`src/native-camera.ts`):
+
+```xml
+<DOMTimeline name="Scene 1" cameraLayerEnabled="true" layerDepthEnabled="true">
+  <layers>
+    <DOMLayer name="Camera" color="#0099FF" autoNamed="false" layerType="camera">
+      <frames><DOMFrame index="0" duration="20" keyMode="9728"><elements>
+        <DOMSymbolInstance libraryItemName="__Camera__" name="___camera___instance" isVisible="false">
+          <matrix><Matrix a="0.5" d="0.5" tx="275" ty="200"/></matrix>
+          <transformationPoint><Point/></transformationPoint>
+        </DOMSymbolInstance>
+      </elements></DOMFrame></frames>
+    </DOMLayer>
+    <DOMLayer name="hud" attachedToCamera="true">...</DOMLayer>
+```
+
+- `__Camera__` is a stage-sized rectangle centered on its origin, so the default camera is a
+  translation to the stage center. Every layer not `attachedToCamera` is drawn through
+  `translate(stageCenter) * inverse(cameraMatrix)`: camera scale 0.5 is 200% zoom, and the
+  view turns opposite to the instance's rotation. This is the HTML5 runtime's
+  `_applyLayerZDepth` / `AdobeAn.VirtualCamera`, checked against the published `.js` of real
+  files (eliasku/animate-tests `camera_layer`, dailybruin `lessons-in-laughter`).
+- Camera keyframes tween like any classic tween (`getCameraTransform`). The camera layer is a
+  reference layer (never drawn) and is not offered as a follow camera; while it is active the
+  ramka auto-detection above is not applied. A timeline marked `cameraLayerEnabled="false"`
+  ignores its camera layer (defensive: real files with a camera write `"true"`).
+- Main timeline only, as in the runtime. Masks clip in their own layer's view
+  (`renderMaskGroup`). The SVG exporter uses the camera keyframe's matrix without tweening.
 
 ### Video Instance
 
@@ -322,6 +353,9 @@ Decodes to:
   - Applies inverse transform for camera pan/zoom
   - Supports motion tween interpolation for smooth camera movements
 
+- [x] **Native Camera** (Animate CC 2017+): `layerType="camera"` pan, zoom and rotation;
+  `attachedToCamera` layers stay fixed (see "Native Camera" above)
+
 - [x] **Video Instance Support**: Placeholder rendering for DOMVideoInstance
   - Parses video dimensions and position
   - Renders placeholder rectangle with play button icon
@@ -437,6 +471,8 @@ strokes and the Vitest suite. What is still open:
 - [ ] **Art/pattern brushes** draw as plain strokes. The brushes themselves are saved in
   `PaintBrushDefinitions.xml` (included from `<brushdefinitions>`), but no saved stroke that
   uses one has been found, so how a stroke refers to its brush is unknown
+- [ ] **Native camera**: color effects (tint, color filter) are not applied (how they are
+  saved is unverified); the SVG exporter does not tween the camera
 
 `TODO.md` has the detailed feature-by-feature status against JPEXS; `review.md` is an
 older code review checklist.
@@ -456,6 +492,8 @@ older code review checklist.
 | DOMLayer | `layerType` | normal/guide/folder detection, reference layer filtering |
 | DOMLayer | `outline` | Camera layer detection |
 | DOMLayer | `parentLayerIndex` | Folder hierarchy |
+| DOMLayer | `layerType="camera"`, `attachedToCamera` | Native camera (`src/native-camera.ts`) |
+| DOMTimeline | `cameraLayerEnabled` | Native camera on/off |
 | DOMFrame | `index`, `duration`, `keyMode` | Frame timing |
 | DOMFrame | `tweenType`, `acceleration` | Motion tween |
 | DOMSymbolInstance | `libraryItemName`, `symbolType` | Symbol reference |
@@ -517,6 +555,7 @@ interface Timeline {
   layers: Layer[];
   totalFrames: number;
   cameraLayerIndex?: number;      // Index of detected camera layer
+  nativeCameraLayerIndex?: number; // Animate's own camera layer (layerType="camera")
   referenceLayers: Set<number>;   // Indices of non-renderable layers (guide/folder/camera)
 }
 ```
@@ -555,6 +594,7 @@ Edge contributions are collected per fill style, then sorted into connected chai
 | `src/xfl-folder.ts` | Uncompressed XFL folders |
 | `src/path-utils.ts` | Library path normalization |
 | `src/layer-utils.ts` | Layer visibility cascade, mask membership, rig parent lookup (shared by renderer and exporter) |
+| `src/native-camera.ts` | Animate's native camera: per-layer stage views (shared by renderer and SVG exporter) |
 | `src/renderer.ts` | Canvas 2D rendering engine, edge sorting, path building, masks, rig transforms |
 | `src/player.ts` | Timeline playback, scenes, audio sync, zoom/pan |
 | `src/video-exporter.ts` | MP4/WebM (WebCodecs), GIF, PNG sequence, PNG/SVG frame, sprite sheet export |
@@ -903,6 +943,9 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   Still inferred: the curve between markers (Catmull-Rom, secant at `corner` markers). Also
   unverified: which side is `left`; it is drawn on the left of the path's direction, y down,
   but every real profile seen is symmetric. Shape tweens keep a constant width.
+- **Native camera (Animate CC 2017+).** `layerType="camera"` holding one `__Camera__` instance,
+  plus `attachedToCamera` on layers; see "Native Camera" above. It is not a ramka layer, though
+  it is usually named "Camera". Tests: `src/__tests__/native-camera.test.ts`.
 - **Movie clips have no `symbolType`.** Animate writes it only for `graphic`/`button`
   (instances and library items); a missing value is a movie clip (`parseSymbolType`). Movie
   clips run their own playheads (`advanceMovieClipPlayheads`, called by the player on every
