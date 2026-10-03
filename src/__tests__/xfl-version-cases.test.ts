@@ -341,3 +341,87 @@ describe('primitive rectangles and ovals (DOMRectangleObject / DOMOvalObject)', 
     expect(shape.edges[0].strokeStyle).toBe(1);
   });
 });
+
+describe('CS4+ object motion tweens (tweenType="motion object")', () => {
+  // A 20x20 red box symbol moved 200px right over a 11-frame span, as Flash CS5
+  // saves it: one DOMFrame for the whole span, keys inside <AnimationCore>.
+  const motionLayer = (extraBasic = '', colors = '') => `<DOMLayer name="Tween" animationType="motion object"><frames>
+    <DOMFrame index="0" duration="11" tweenType="motion object" motionTweenRotate="none" motionTweenScale="false" isMotionObject="true" visibleAnimationKeyframes="2097151" keyMode="8195">
+      <motionObjectXML><AnimationCore TimeScale="24000" Version="1" duration="11000"><TimeMap strength="0" type="Quadratic"/><metadata><Settings orientToPath="0" xformPtXOffsetPct="0.5" xformPtYOffsetPct="0.5" xformPtZOffsetPixels="0"/></metadata>
+        <PropertyContainer id="headContainer">
+          <PropertyContainer id="Basic_Motion">
+            <Property enabled="1" id="Motion_X" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,0" next="0,0" previous="0,0" roving="0" timevalue="0"/><Keyframe anchor="0,200" next="0,200" previous="0,200" roving="0" timevalue="10000"/></Property>
+            <Property enabled="1" id="Motion_Y" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,0" next="0,0" previous="0,0" roving="0" timevalue="0"/></Property>
+            <Property enabled="1" id="Rotation_Z" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,0" next="0,0" previous="0,0" roving="0" timevalue="0"/></Property>
+            ${extraBasic}
+          </PropertyContainer>
+          <PropertyContainer id="Transformation">
+            <Property enabled="1" id="Skew_X" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,0" next="0,0" previous="0,0" roving="0" timevalue="0"/></Property>
+            <Property enabled="1" id="Skew_Y" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,0" next="0,0" previous="0,0" roving="0" timevalue="0"/></Property>
+            <Property enabled="1" id="Scale_X" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,100" next="0,100" previous="0,100" roving="0" timevalue="0"/></Property>
+            <Property enabled="1" id="Scale_Y" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,100" next="0,100" previous="0,100" roving="0" timevalue="0"/></Property>
+          </PropertyContainer>
+          <PropertyContainer id="Colors">${colors}</PropertyContainer><PropertyContainer id="Filters"/>
+        </PropertyContainer></AnimationCore></motionObjectXML>
+      <elements><DOMSymbolInstance libraryItemName="Box" name="" centerPoint3DX="60" centerPoint3DY="110">
+        <matrix><Matrix tx="50" ty="100"/></matrix><transformationPoint><Point x="10" y="10"/></transformationPoint>
+      </DOMSymbolInstance></elements>
+    </DOMFrame>
+  </frames></DOMLayer>`;
+
+  const files = (layer: string) => ({
+    'DOMDocument.xml': domDocument(layer, ['Box']),
+    'LIBRARY/Box.xml': symbolItem('Box', rectShape(0, 0, 20, 20, '#FF0000')),
+  });
+
+  it('parses the AnimationCore onto the frame', async () => {
+    const doc = await parseXfl(files(motionLayer()));
+    const frame = doc.timelines[0].layers[0].frames[0];
+    expect(frame.tweenType).toBe('motion object');
+    expect(frame.motionObject?.timeScale).toBe(24000);
+    expect(frame.motionObject?.properties.Motion_X.keyframes.map((k) => k.value)).toEqual([0, 200]);
+  });
+
+  it.each([
+    [0, 60],
+    [5, 160],
+    [10, 260],
+  ])('draws the box at its tweened position on frame %d', async (frameIndex, centerX) => {
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(await parseXfl(files(motionLayer())));
+    renderer.renderFrame(frameIndex);
+    expect(colorAt(canvas, centerX, 110)).toBe('#FF0000');
+    expect(colorAt(canvas, centerX - 15, 110)).toBe('#FFFFFF');
+    expect(colorAt(canvas, centerX + 15, 110)).toBe('#FFFFFF');
+  });
+
+  it('moves a mask driven by an object tween', async () => {
+    const mask = motionLayer().replace('<DOMLayer name="Tween" animationType="motion object">', '<DOMLayer name="Mask" layerType="mask" animationType="motion object">');
+    const masked = `<DOMLayer name="Content" layerType="masked" parentLayerIndex="0"><frames><DOMFrame index="0" duration="11"><elements>
+      ${rectShape(0, 0, 550, 400, '#0000FF')}
+    </elements></DOMFrame></frames></DOMLayer>`;
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(await parseXfl({ ...files(''), 'DOMDocument.xml': domDocument(mask + masked, ['Box']) }));
+    renderer.renderFrame(5);
+    expect(colorAt(canvas, 160, 110)).toBe('#0000FF');
+    expect(colorAt(canvas, 60, 110)).toBe('#FFFFFF'); // where the mask started
+  });
+
+  it('fades the instance with an Alpha_Amount curve', async () => {
+    const alpha = `<PropertyContainer id="Alpha_ColorXform"><Property enabled="1" id="Alpha_Amount" ignoreTimeMap="0" readonly="0" visible="1">
+      <Keyframe anchor="0,100" next="0,100" previous="0,100" roving="0" timevalue="0"/><Keyframe anchor="0,0" next="0,0" previous="0,0" roving="0" timevalue="10000"/>
+    </Property></PropertyContainer>`;
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(await parseXfl(files(motionLayer('', alpha))));
+    renderer.renderFrame(5);
+    // Half transparent red over white.
+    const [r, g, b] = Array.from(canvas.getContext('2d')!.getImageData(Math.floor(160 * canvas.width / 550), Math.floor(110 * canvas.width / 550), 1, 1).data);
+    expect(r).toBeGreaterThan(245);
+    expect(g).toBeGreaterThan(110);
+    expect(g).toBeLessThan(145);
+    expect(b).toBe(g);
+  });
+});

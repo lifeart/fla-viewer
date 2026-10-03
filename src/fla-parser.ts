@@ -51,6 +51,7 @@ import { parseBinaryFLA } from './binary-fla-parser';
 import { getMaskLayerIndex } from './layer-utils';
 import { isXFLStub, xflFolderToZip, type XFLFolderEntry } from './xfl-folder';
 import { rectanglePrimitivePath, ovalPrimitivePath } from './primitive-shapes';
+import { parseAnimationCore } from './motion-object';
 
 export type { XFLFolderEntry } from './xfl-folder';
 
@@ -788,7 +789,7 @@ export class FLAParser {
       // Duration must be at least 1 to avoid division by zero in tween calculations
       const duration = Math.max(1, parseInt(frameEl.getAttribute('duration') || '1') || 1);
       const keyMode = parseInt(frameEl.getAttribute('keyMode') || '0');
-      const tweenType = frameEl.getAttribute('tweenType') as 'motion' | 'shape' | undefined;
+      const tweenType = frameEl.getAttribute('tweenType') as Frame['tweenType'] | null;
       const acceleration = frameEl.getAttribute('acceleration');
 
       // Motion tween properties
@@ -805,6 +806,12 @@ export class FLAParser {
 
       // Parse morph shape for shape tweens
       const morphShape = tweenType === 'shape' ? this.parseMorphShape(frameEl) : undefined;
+
+      // CS4+ object motion tween: the property curves live in <motionObjectXML>.
+      const animationCore = tweenType === 'motion object'
+        ? frameEl.querySelector(':scope > motionObjectXML > AnimationCore')
+        : null;
+      const motionObject = animationCore ? parseAnimationCore(animationCore) : undefined;
 
       // Parse frame label (name attribute is the label text, labelType is the label kind)
       const label = frameEl.getAttribute('name') || undefined;
@@ -824,6 +831,7 @@ export class FLAParser {
         tweens,
         sound,
         ...(morphShape && { morphShape }),
+        ...(motionObject && { motionObject }),
         ...(label && { label }),
         ...(labelType && { labelType }),
         ...(actionScript && { actionScript }),

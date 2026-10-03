@@ -29,6 +29,7 @@ import type {
   MovieClipInstanceState
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
+import { evaluateMotionObject } from './motion-object';
 import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
@@ -1124,6 +1125,10 @@ export class FLARenderer {
         }
       }
 
+      if (frame.motionObject) {
+        maskElement = this.applyMotionObject(frame, element, frameIndex);
+      }
+
       this.addElementToMaskPath(maskElement, transform, clip, depth, frameIndex, elementIndex);
     });
   }
@@ -1357,7 +1362,7 @@ export class FLARenderer {
       }
     }
 
-    return element.matrix;
+    return this.applyMotionObject(frame, element, frameIndex).matrix;
   }
 
   // Get full camera element with transformation point (for follow camera mode)
@@ -1399,7 +1404,26 @@ export class FLARenderer {
       }
     }
 
-    return element;
+    return this.applyMotionObject(frame, element, frameIndex);
+  }
+
+  /**
+   * An element of a CS4+ object motion tween span (`frame.motionObject`) as it
+   * stands `frameIndex - frame.index` frames into the span: matrix, and color
+   * and 3D rotation when the tween animates them. Other elements pass through.
+   */
+  private applyMotionObject<T extends DisplayElement>(frame: Frame, element: T, frameIndex: number): T {
+    if (!frame.motionObject || !this.doc) return element;
+    const tp = element.type === 'symbol' ? element.transformationPoint : undefined;
+    const state = evaluateMotionObject(frame.motionObject, frameIndex - frame.index, this.doc.frameRate, element.matrix, tp);
+    if (element.type !== 'symbol') return { ...element, matrix: state.matrix };
+    return {
+      ...element,
+      matrix: state.matrix,
+      ...(state.colorTransform && { colorTransform: state.colorTransform }),
+      ...(state.rotationX !== undefined && { rotationX: state.rotationX }),
+      ...(state.rotationY !== undefined && { rotationY: state.rotationY }),
+    };
   }
 
   private applyInverseCameraTransform(matrix: Matrix): void {
@@ -1508,7 +1532,7 @@ export class FLARenderer {
         }
       } else {
         if (rig) this.applyMatrix(multiplyMatrices(rig.parentNow, rig.startInverse));
-        this.renderDisplayElement(element, depth, frameIndex, elementIndex);
+        this.renderDisplayElement(this.applyMotionObject(frame, element, frameIndex), depth, frameIndex, elementIndex);
       }
 
       if (rig) {
@@ -1628,9 +1652,10 @@ export class FLARenderer {
           if (rig) result = multiplyMatrices(multiplyMatrices(rig.parentNow, rig.startInverse), result);
         }
       } else {
+        const matrix = this.applyMotionObject(frame, element, frameIndex).matrix;
         result = rig
-          ? multiplyMatrices(multiplyMatrices(rig.parentNow, rig.startInverse), element.matrix)
-          : element.matrix;
+          ? multiplyMatrices(multiplyMatrices(rig.parentNow, rig.startInverse), matrix)
+          : matrix;
       }
     }
     cache.set(key, result);

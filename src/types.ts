@@ -1,5 +1,7 @@
 // Core FLA document types
 
+import type { MotionObjectTween } from './motion-object';
+
 export interface FLADocument {
   width: number;
   height: number;
@@ -91,8 +93,14 @@ export interface Frame {
   index: number;
   duration: number;
   keyMode: number;
-  tweenType?: 'motion' | 'shape' | 'none';
+  tweenType?: 'motion' | 'shape' | 'none' | 'motion object';
   acceleration?: number;
+  /**
+   * CS4+ object-based motion tween (`tweenType="motion object"`): the span's
+   * property curves from `<motionObjectXML><AnimationCore>`, applied to the
+   * frame's elements by the renderer.
+   */
+  motionObject?: MotionObjectTween;
   elements: DisplayElement[];
   tweens?: Tween[];
   sound?: FrameSound;
