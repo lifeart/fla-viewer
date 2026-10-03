@@ -816,6 +816,19 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   frame with all recovered content. Not decoded yet: tweens, frame labels, sounds, and per-frame
   placement matrices for instances inside movie clips (reference: eddiemoore/fla-decoder).
 
+### Headless / tooling parse (issue #42)
+- `new FLAParser({ DOMParser })` takes any WHATWG-compatible `DOMParser` (e.g. linkedom in
+  Node); it defaults to the global and throws a clear error when neither exists.
+- `parse()` accepts `File | Blob | ArrayBuffer | Uint8Array`. Pass
+  `{ structureOnly: true }` as the 4th argument to skip bitmap/audio/video decoding (item
+  metadata is still parsed); the viewer never sets it.
+- Tooling-only fields the renderer ignores: instance `name` on symbol instances and
+  dynamic/input text, `TextInstance.textType`, `Frame.actionScript`, `Symbol.linkage*`, and
+  `SymbolInstance.componentParameters` (from `<persistentData><PD n t v>`).
+- `<DOMComponentInstance>` parses as a movieclip symbol instance (it was dropped before),
+  and `<DOMCompiledClipItem>` library items load into `doc.symbols` as movieclips.
+- Binary (pre-CS5) files get none of these fields yet.
+
 ### Embedded video `.dat` (issue #10)
 - A `<DOMVideoItem videoDataHRef="…">` points at a `bin/…dat` that, in modern XFL, is **not**
   an FLV — it's a native **MP4/MOV** wrapped behind a tiny Adobe media header (`03 08` + 8
