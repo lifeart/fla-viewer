@@ -433,10 +433,6 @@ suite. What is still open:
   (they fall back to linear)
 - [ ] **Variable-width strokes** (`<VariablePointWidth><WidthMarker>`) and art/pattern
   brushes draw at constant width
-- [ ] **Movie clips inside graphic symbols**: seeded from the graphic's current frame only,
-  so a seek or single-frame export of a one-frame or looping graphic can show a different
-  clip frame than continuous playback (whether Flash restarts such clips when the graphic
-  loops is unverified)
 
 `TODO.md` has the detailed feature-by-feature status against JPEXS; `review.md` is an
 older code review checklist.
@@ -862,12 +858,15 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   level). A state is dropped at the end of a `renderFrame` that didn't reach it, and replaced
   when the instance's run of back-to-back keyframes (`movieClipRun`) changes, e.g. when the
   timeline loops back over a gap; either way a clip placed again starts over. A new state is
-  seeded to where continuous playback would be (`movieClipTicks` + `movieClipPlayhead`): ticks
-  since the run began, measured on the parent's frames, or inside another movie clip on that
-  clip's own elapsed ticks (it loops from frame 0 or holds at its first stop()). So a seek, a
-  single-frame/SVG/mid-range export, or a frame after a `cacheAsBitmap` frame agrees with
-  playback. A `cacheAsBitmap` frame itself still shows the cached subtree. A clip inside a
-  graphic symbol is seeded from the graphic's current frame only (see Remaining TODOs).
+  seeded to where continuous playback would be (`movieClipTicks` + `movieClipPlayhead`): the
+  ticks its parent has stayed inside the clip's run, read back on the parent's
+  `TimelineClock` (`rootClock` for the main timeline, `movieClipClock` for a clip that loops
+  from frame 0 or holds at its first stop(), `instanceClock` for a graphic or button while its
+  layer holds it). So a seek, a single-frame/SVG/mid-range export, or a frame after a
+  `cacheAsBitmap` frame agrees with playback, at any nesting depth. A `cacheAsBitmap` frame
+  itself still shows the cached subtree. A clip inside a looping graphic keeps playing across
+  the graphic's wrap when its run covers the whole graphic timeline (unverified against Flash,
+  which may place it anew), and starts over when the graphic jumps into its run.
 
 ### Pre-CS5 binary FLA (issue #8)
 - Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not

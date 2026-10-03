@@ -1,7 +1,10 @@
 import type { FLADocument, SoundItem, FrameSound } from './types';
 import { isLayerVisibleInFla, getMaskLayerIndex } from './layer-utils';
 import { FLARenderer } from './renderer';
-import { graphicSymbolFrame, movieClipPlayhead, movieClipRun, movieClipStopFrames, movieClipTicks, type EnclosingClip } from './symbol-loop';
+import {
+  graphicSymbolFrame, instanceClock, movieClipClock, movieClipPlayhead, movieClipRun, movieClipStopFrames,
+  movieClipTicks, rootClock, type TimelineClock
+} from './symbol-loop';
 
 export interface ExportProgress {
   currentFrame: number;
@@ -1666,13 +1669,13 @@ export async function exportSVG(
   };
 
   // Where an element sits: its timeline's current frame, layer, keyframe and
-  // element index, and how long the enclosing movie clip (if any) has played.
+  // element index, and the timeline's clock (the frames it showed before).
   type ElementPlace = {
     frame: number;
     layer: import('./types').Layer;
     keyframe: import('./types').Frame;
     elementIndex: number;
-    enclosing?: EnclosingClip;
+    clock: TimelineClock;
   };
 
   // Render element with keyframe start tracking for symbol frame calculation
@@ -1714,20 +1717,20 @@ export async function exportSVG(
     const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
 
     // Same frame choice as the renderer for an instance first drawn here: a movie
-    // clip has played since its run of keyframes began (holding at a stop()
-    // frame), a button shows its up state, a graphic follows its timeline.
+    // clip has played since its parent entered its run of keyframes (holding at
+    // a stop() frame), a button shows its up state, a graphic follows its timeline.
     let symbolFrame: number;
-    let enclosing: EnclosingClip | undefined;
+    let clock: TimelineClock;
     if (instance.symbolType === 'movieclip') {
       const run = movieClipRun(place.layer.frames, place.keyframe, place.elementIndex, instance.libraryItemName);
-      const ticks = movieClipTicks(place.frame, run, place.enclosing);
+      const ticks = movieClipTicks(run, place.clock);
       const stopFrames = movieClipStopFrames(symbol.timeline);
       symbolFrame = movieClipPlayhead(ticks, totalSymbolFrames, stopFrames).frame;
-      enclosing = { ticks, totalFrames: totalSymbolFrames, stopFrames };
-    } else if (instance.symbolType === 'button') {
-      symbolFrame = 0;
+      clock = movieClipClock(ticks, totalSymbolFrames, stopFrames);
     } else {
-      symbolFrame = graphicSymbolFrame(instance.loop, firstFrame, lastFrame, totalSymbolFrames, place.frame - place.keyframe.index);
+      symbolFrame = instance.symbolType === 'button' ? 0
+        : graphicSymbolFrame(instance.loop, firstFrame, lastFrame, totalSymbolFrames, place.frame - place.keyframe.index);
+      clock = instanceClock(place.clock, place.layer.frames, place.elementIndex, instance, totalSymbolFrames);
     }
 
     // Collect elements from all layers at the symbolFrame, mask-aware (mask
@@ -1741,7 +1744,7 @@ export async function exportSVG(
       depth + 1,
       new Set<number>(),
       elements,
-      enclosing
+      clock
     );
 
     if (elements.length === 0) return '';
@@ -1796,13 +1799,13 @@ export async function exportSVG(
     atFrameIndex: number,
     depth: number,
     out: string[],
-    enclosing?: EnclosingClip
+    clock: TimelineClock
   ): void => {
     const currentFrame = findActiveFrame(layer, atFrameIndex);
     if (!currentFrame) return;
     currentFrame.elements.forEach((element, elementIndex) => {
       const rendered = renderElementWithKeyframe(element, depth,
-        { frame: atFrameIndex, layer, keyframe: currentFrame, elementIndex, enclosing });
+        { frame: atFrameIndex, layer, keyframe: currentFrame, elementIndex, clock });
       if (rendered) out.push(rendered);
     });
   };
@@ -1830,7 +1833,7 @@ export async function exportSVG(
     depth: number,
     referenceLayers: Set<number>,
     out: string[],
-    enclosing?: EnclosingClip
+    clock: TimelineClock
   ): void => {
     // masked layer index -> mask layer index
     const maskedLayers = new Map<number, number>();
@@ -1865,7 +1868,7 @@ export async function exportSVG(
         const childOut: string[] = [];
         for (const maskedIdx of [...maskedByThis].sort((a, b) => b - a)) {
           if (!isLayerVisibleInFla(layers, maskedIdx)) continue;
-          renderLayerElements(layers[maskedIdx], atFrameIndex, depth, childOut, enclosing);
+          renderLayerElements(layers[maskedIdx], atFrameIndex, depth, childOut, clock);
         }
         if (childOut.length === 0) continue; // nothing visible to clip
 
@@ -1886,7 +1889,7 @@ export async function exportSVG(
 
       // Normal layer: honor visibility cascade.
       if (!isLayerVisibleInFla(layers, layerIndex)) continue;
-      renderLayerElements(layer, atFrameIndex, depth, out, enclosing);
+      renderLayerElements(layer, atFrameIndex, depth, out, clock);
     }
   };
 
@@ -1904,7 +1907,8 @@ export async function exportSVG(
     frameIndex,
     0,
     timeline.referenceLayers,
-    renderedElements
+    renderedElements,
+    rootClock(frameIndex)
   );
 
   // Build SVG

@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { graphicSymbolFrame, callsStop, movieClipPlayhead, movieClipRun, movieClipStopFrames, movieClipTicks } from '../symbol-loop';
+import {
+  graphicSymbolFrame, callsStop, instanceClock, movieClipClock, movieClipPlayhead, movieClipRun, movieClipStopFrames,
+  movieClipTicks, rootClock
+} from '../symbol-loop';
 import type { Frame, Layer, SymbolInstance, Timeline } from '../types';
 
 // Frames shown on parent frames 0..count-1 of a keyframe, for a 10-frame symbol.
@@ -157,23 +160,72 @@ describe('movieClipRun', () => {
 });
 
 describe('movieClipTicks', () => {
-  const clip = (ticks: number, totalFrames: number, stops: number[] = []) => ({ ticks, totalFrames, stopFrames: new Set(stops) });
+  const clip = (ticks: number, totalFrames: number, stops: number[] = []) => movieClipClock(ticks, totalFrames, new Set(stops));
 
-  it('counts from the run start on the main timeline or in a graphic', () => {
-    expect(movieClipTicks(7, { start: 5, end: 10 })).toBe(2);
+  it('counts from the run start on the main timeline', () => {
+    expect(movieClipTicks({ start: 5, end: 10 }, rootClock(7))).toBe(2);
+    expect(movieClipTicks({ start: 0, end: 10 }, rootClock(0))).toBe(0);
   });
 
   it('counts the enclosing clip\'s whole life when its run covers its timeline', () => {
-    expect(movieClipTicks(1, { start: 0, end: 4 }, clip(9, 4))).toBe(9);
+    expect(movieClipTicks({ start: 0, end: 4 }, clip(9, 4))).toBe(9);
   });
 
   it('restarts with every pass of a looping enclosing clip otherwise', () => {
     // Enclosing 4-frame clip, 9 ticks old: on its frame 1; the run [0, 2) began at tick 8.
-    expect(movieClipTicks(1, { start: 0, end: 2 }, clip(9, 4))).toBe(1);
+    expect(movieClipTicks({ start: 0, end: 2 }, clip(9, 4))).toBe(1);
   });
 
   it('counts from the run start in an enclosing clip that held at a stop()', () => {
-    expect(movieClipTicks(0, { start: 0, end: 1 }, clip(9, 4, [0]))).toBe(9);
-    expect(movieClipTicks(2, { start: 1, end: 3 }, clip(9, 4, [2]))).toBe(8);
+    expect(movieClipTicks({ start: 0, end: 1 }, clip(9, 4, [0]))).toBe(9);
+    expect(movieClipTicks({ start: 1, end: 3 }, clip(9, 4, [2]))).toBe(8);
+  });
+});
+
+describe('instanceClock', () => {
+  const instance = (name: string, symbolType: SymbolInstance['symbolType'], extra: Partial<SymbolInstance> = {}) =>
+    ({ type: 'symbol', libraryItemName: name, symbolType, ...extra }) as SymbolInstance;
+  const key = (index: number, duration: number, elements: SymbolInstance[]) =>
+    ({ index, duration, elements }) as unknown as Frame;
+  const frames = (clock: (k: number) => number | undefined, count: number) =>
+    Array.from({ length: count }, (_, k) => clock(k));
+
+  it('reads back a looping graphic\'s frames while its layer holds it', () => {
+    const G = instance('G', 'graphic', { loop: 'loop' });
+    const layer = [key(0, 2, []), key(2, 8, [G])];
+    // Parent frame 6: the 3-frame graphic shows (6 - 2) % 3 = 1, placed 4 ticks ago.
+    const clock = instanceClock(rootClock(6), layer, 0, G, 3);
+    expect(frames(clock, 6)).toEqual([1, 0, 2, 1, 0, undefined]);
+  });
+
+  it('follows each keyframe\'s own loop settings and stops at another symbol or slot', () => {
+    const at = (firstFrame: number) => instance('G', 'graphic', { loop: 'single frame', firstFrame });
+    const layer = [key(0, 1, [instance('H', 'graphic')]), key(1, 2, [at(3)]), key(3, 2, [at(1)])];
+    expect(frames(instanceClock(rootClock(4), layer, 0, at(1), 5), 5)).toEqual([1, 1, 3, 3, undefined]);
+    const moved = [key(0, 2, [instance('H', 'graphic'), at(0)]), key(2, 2, [at(0)])];
+    expect(frames(instanceClock(rootClock(3), moved, 0, at(0), 5), 3)).toEqual([0, 0, undefined]);
+  });
+
+  it('shows a button\'s first frame', () => {
+    const B = instance('B', 'button');
+    expect(frames(instanceClock(rootClock(2), [key(0, 5, [B])], 0, B, 4), 4)).toEqual([0, 0, 0, undefined]);
+  });
+
+  it('seeds a clip inside a graphic from how long the graphic stayed in its run', () => {
+    const G = instance('G', 'graphic', { loop: 'loop' });
+    const layer = [key(0, 20, [G])];
+    // A one-frame graphic holds the clip for all 12 parent frames.
+    expect(movieClipTicks({ start: 0, end: 1 }, instanceClock(rootClock(12), layer, 0, G, 1))).toBe(12);
+    // A 4-frame looping graphic re-enters a clip run of [0, 2) on every pass;
+    // one covering its whole timeline keeps the clip.
+    expect(movieClipTicks({ start: 0, end: 2 }, instanceClock(rootClock(9), layer, 0, G, 4))).toBe(1);
+    expect(movieClipTicks({ start: 0, end: 4 }, instanceClock(rootClock(9), layer, 0, G, 4))).toBe(9);
+  });
+
+  it('starts a clip over when its graphic jumps into the run', () => {
+    const at = (firstFrame: number) => instance('G', 'graphic', { loop: 'single frame', firstFrame });
+    // Frame 3 lies outside the clip's run [0, 2); frame 1 inside it from parent frame 3.
+    const layer = [key(0, 3, [at(3)]), key(3, 4, [at(1)])];
+    expect(movieClipTicks({ start: 0, end: 2 }, instanceClock(rootClock(5), layer, 0, at(1), 5))).toBe(2);
   });
 });

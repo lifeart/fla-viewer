@@ -771,27 +771,40 @@ describe('movie clip instances (no symbolType attribute)', () => {
     expect(colors).toEqual([R, G, B, R, R]);
   });
 
-  describe('movie clips inside movie clips', () => {
-    // Main timeline: 10 frames holding Outer at (100,100). Outer: 4 frames whose
-    // keyframes are `outerFrames`, holding Inner (3 frames: red, green, blue).
-    const innerItem = clipItem().replace(/name="Clip"/g, 'name="Inner"');
-    const nested = (outerFrames: string, outerAttrs = '') => parseXfl({
-      'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0" duration="10"><elements>
-        <DOMSymbolInstance libraryItemName="Outer" ${outerAttrs}><matrix><Matrix tx="100" ty="100"/></matrix></DOMSymbolInstance>
-      </elements></DOMFrame></frames></DOMLayer>`, ['Outer', 'Inner']),
-      'LIBRARY/Inner.xml': innerItem,
-      'LIBRARY/Outer.xml': `<DOMSymbolItem xmlns="http://ns.adobe.com/xfl/2008/" name="Outer">
-        <timeline><DOMTimeline name="Outer"><layers><DOMLayer name="Layer 1"><frames>${outerFrames}</frames></DOMLayer></layers></DOMTimeline></timeline>
-      </DOMSymbolItem>`,
-    });
-    const inner = '<DOMSymbolInstance libraryItemName="Inner"><matrix><Matrix/></matrix></DOMSymbolInstance>';
-    const frames = [...Array(10).keys()];
-    const coldColors = async (doc: FLADocument) => {
-      const colors: string[] = [];
-      for (const f of frames) colors.push(...await playFrames(doc, [f]));
-      return colors;
-    };
+  // Main timeline: 10 frames holding Outer at (100,100). Outer's keyframes are
+  // `outerFrames`, holding Inner (a 3-frame clip: red, green, blue). Outer is a
+  // movie clip unless `outerAttrs` sets a symbolType.
+  const innerItem = clipItem().replace(/name="Clip"/g, 'name="Inner"');
+  const nested = (outerFrames: string, outerAttrs = '') => parseXfl({
+    'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0" duration="10"><elements>
+      <DOMSymbolInstance libraryItemName="Outer" ${outerAttrs}><matrix><Matrix tx="100" ty="100"/></matrix></DOMSymbolInstance>
+    </elements></DOMFrame></frames></DOMLayer>`, ['Outer', 'Inner']),
+    'LIBRARY/Inner.xml': innerItem,
+    'LIBRARY/Outer.xml': `<DOMSymbolItem xmlns="http://ns.adobe.com/xfl/2008/" name="Outer">
+      <timeline><DOMTimeline name="Outer"><layers><DOMLayer name="Layer 1"><frames>${outerFrames}</frames></DOMLayer></layers></DOMTimeline></timeline>
+    </DOMSymbolItem>`,
+  });
+  const inner = '<DOMSymbolInstance libraryItemName="Inner"><matrix><Matrix/></matrix></DOMSymbolInstance>';
+  const frames = [...Array(10).keys()];
+  /** Each frame rendered by a fresh renderer, as after a seek. */
+  const coldColors = async (doc: FLADocument) => {
+    const colors: string[] = [];
+    for (const f of frames) colors.push(...await playFrames(doc, [f]));
+    return colors;
+  };
+  /** The color in single-frame PNG and SVG exports of `frame` (or which of R/G/B the SVG holds). */
+  const exportedColors = async (doc: FLADocument, frame: number) => {
+    const bitmap = await createImageBitmap(await exportSingleFrame(doc, frame));
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(bitmap, 0, 0);
+    const [r, g, b] = ctx.getImageData(110, 110, 1, 1).data;
+    const hex = (v: number) => v.toString(16).padStart(2, '0').toUpperCase();
+    const svg = await (await exportSVG(doc, frame)).text();
+    return { png: `#${hex(r)}${hex(g)}${hex(b)}`, svg: [R, G, B].filter((c) => svg.includes(c)) };
+  };
 
+  describe('movie clips inside movie clips', () => {
     it('agrees between playback and seeking when the outer clip loops', async () => {
       const doc = await nested(`<DOMFrame index="0" duration="4"><elements>${inner}</elements></DOMFrame>`);
       const played = await playFrames(doc, frames);
@@ -830,6 +843,43 @@ describe('movie clip instances (no symbolType attribute)', () => {
       const cached = await playFrames(await nested(outer, 'cacheAsBitmap="true"'), frames);
       const live = (colors: string[]) => colors.filter((_, tick) => tick % 4 !== 0);
       expect(live(cached)).toEqual(live(plain));
+    });
+  });
+
+  describe('movie clips inside graphic symbols and buttons', () => {
+    const graphic = 'symbolType="graphic" loop="loop"';
+
+    it('keeps a clip playing in a one-frame graphic when seeking and exporting', async () => {
+      const doc = await nested(`<DOMFrame index="0"><elements>${inner}</elements></DOMFrame>`, graphic);
+      const played = await playFrames(doc, frames);
+      expect(played).toEqual([R, G, B, R, G, B, R, G, B, R]);
+      expect(await coldColors(doc)).toEqual(played);
+      expect(await exportedColors(doc, 7)).toEqual({ png: G, svg: [G] });
+    });
+
+    it('keeps the clip across a looping graphic\'s wrap when it covers the whole graphic', async () => {
+      const doc = await nested(`<DOMFrame index="0" duration="4"><elements>${inner}</elements></DOMFrame>`, graphic);
+      const played = await playFrames(doc, frames);
+      expect(played).toEqual([R, G, B, R, G, B, R, G, B, R]);
+      expect(await coldColors(doc)).toEqual(played);
+      expect(await exportedColors(doc, 8)).toEqual({ png: B, svg: [B] });
+    });
+
+    it('restarts the clip on each pass when it covers only part of a looping graphic', async () => {
+      const doc = await nested(`<DOMFrame index="0" duration="2"><elements>${inner}</elements></DOMFrame>
+        <DOMFrame index="2" duration="2"><elements></elements></DOMFrame>`, graphic);
+      const played = await playFrames(doc, frames);
+      expect(played).toEqual([R, G, WHITE, WHITE, R, G, WHITE, WHITE, R, G]);
+      expect(await coldColors(doc)).toEqual(played);
+      expect(await exportedColors(doc, 5)).toEqual({ png: G, svg: [G] });
+    });
+
+    it('keeps a clip playing inside a button\'s up state', async () => {
+      const doc = await nested(`<DOMFrame index="0"><elements>${inner}</elements></DOMFrame>`, 'symbolType="button"');
+      const played = await playFrames(doc, frames);
+      expect(played).toEqual([R, G, B, R, G, B, R, G, B, R]);
+      expect(await coldColors(doc)).toEqual(played);
+      expect(await exportedColors(doc, 4)).toEqual({ png: G, svg: [G] });
     });
   });
 

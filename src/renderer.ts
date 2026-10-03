@@ -30,7 +30,10 @@ import type {
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
 import { evaluateMotionObject } from './motion-object';
-import { graphicSymbolFrame, movieClipPlayhead, movieClipRun, movieClipStopFrames, movieClipTicks } from './symbol-loop';
+import {
+  graphicSymbolFrame, instanceClock, movieClipClock, movieClipPlayhead, movieClipRun, movieClipStopFrames,
+  movieClipTicks, rootClock, type TimelineClock
+} from './symbol-loop';
 import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
@@ -100,10 +103,10 @@ export class FLARenderer {
   private movieClipStates = new Map<string, MovieClipInstanceState>();
   private stopFramesCache = new WeakMap<Timeline, ReadonlySet<number>>();
   // Symbol instances being drawn, outermost first: each one's slot (see
-  // instanceSlot) and, for a movie clip, its playhead state.
-  private instanceStack: { slot: string; clip: MovieClipInstanceState | null }[] = [];
-  // Movie clip state getSymbolFrame resolved last (null for other symbols).
-  private resolvedClip: MovieClipInstanceState | null = null;
+  // instanceSlot) and a clock reading back the frames its timeline showed.
+  private instanceStack: { slot: string; clock: TimelineClock }[] = [];
+  // Clock of the symbol instance getSymbolFrame resolved last.
+  private resolvedClock: TimelineClock = rootClock(0);
   private clipRunCache = new WeakMap<Frame, Map<string, { start: number; end: number }>>();
   // Movie clip states reached by the current renderFrame; the rest have left
   // the stage and are dropped when it ends (a clip placed again starts over).
@@ -418,14 +421,16 @@ export class FLARenderer {
   }
 
   // Get or create the state of the movie clip instance at `key`. A clip seen for
-  // the first time has been playing since its run of keyframes began, so after a
-  // seek (or in a one-frame export) it shows the frame continuous playback would.
+  // the first time has been playing since its parent (read back on parentClock)
+  // entered its run of keyframes, so after a seek (or in a one-frame export) it
+  // shows the frame continuous playback would.
   private getOrCreateMovieClipState(
     key: string,
     instance: SymbolInstance,
     elementIndex: number,
     totalFrames: number,
     parentFrame: number,
+    parentClock: TimelineClock,
     timeline: Timeline
   ): MovieClipInstanceState {
     const run = this.clipRun(elementIndex, instance.libraryItemName, parentFrame);
@@ -438,12 +443,7 @@ export class FLARenderer {
         stopFrames = movieClipStopFrames(timeline);
         this.stopFramesCache.set(timeline, stopFrames);
       }
-      const parent = this.instanceStack[this.instanceStack.length - 1]?.clip;
-      const ticks = movieClipTicks(parentFrame, run, parent ? {
-        ticks: parent.elapsed,
-        totalFrames: parent.totalFrames,
-        stopFrames: parent.stopFrames ?? new Set<number>(),
-      } : undefined);
+      const ticks = movieClipTicks(run, parentClock);
       const { frame, stopped } = movieClipPlayhead(ticks, totalFrames, stopFrames);
       state = {
         playhead: frame,
@@ -1241,7 +1241,7 @@ export class FLARenderer {
 
       const slot = this.instanceSlot(element.libraryItemName, elementIndex);
       const symbolFrame = this.getSymbolFrame(element, symbol, parentFrameIndex, elementIndex);
-      this.instanceStack.push({ slot, clip: this.resolvedClip });
+      this.instanceStack.push({ slot, clock: this.resolvedClock });
       const layers = symbol.timeline.layers;
       for (let i = 0; i < layers.length; i++) {
         const type = (layers[i].layerType as string | undefined)?.toLowerCase();
@@ -2273,7 +2273,7 @@ export class FLARenderer {
     const firstFrame = instance.firstFrame || 0;
     const lastFrame = instance.lastFrame;
     const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
-    this.resolvedClip = null;
+    const parentClock = this.instanceStack[this.instanceStack.length - 1]?.clock ?? rootClock(parentFrameIndex);
 
     // MovieClips play independently from parent timeline with their own playhead
     if (instance.symbolType === 'movieclip') {
@@ -2284,13 +2284,19 @@ export class FLARenderer {
         elementIndex,
         totalSymbolFrames,
         parentFrameIndex,
+        parentClock,
         symbol.timeline
       );
 
-      this.resolvedClip = state;
+      this.resolvedClock = movieClipClock(state.elapsed, totalSymbolFrames, state.stopFrames ?? new Set<number>());
       // Use the instance's independent playhead
       return state.playhead % totalSymbolFrames;
     }
+
+    // Graphics and buttons follow their parent's clock while their layer holds them.
+    this.resolvedClock = this.currentLayer
+      ? instanceClock(parentClock, this.currentLayer.frames, elementIndex, instance, totalSymbolFrames)
+      : (k) => (k === 0 ? (instance.symbolType === 'button' ? 0 : parentFrameIndex) : undefined);
 
     // Buttons show first frame (up state) without ActionScript
     if (instance.symbolType === 'button') {
@@ -2409,7 +2415,7 @@ export class FLARenderer {
     const slot = this.instanceSlot(instance.libraryItemName, elementIndex);
     const symbolFrame = this.getSymbolFrame(instance, symbol, parentFrameIndex, elementIndex);
     // Movie clips nested in this instance are keyed by the instances above them.
-    this.instanceStack.push({ slot, clip: this.resolvedClip });
+    this.instanceStack.push({ slot, clock: this.resolvedClock });
 
     if (instance.symbolType === 'button') {
       // Track button hit area for debug click detection
