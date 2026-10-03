@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import JSZip from 'jszip';
 import { FLAViewerApp } from '../main';
+import { FLAPlayer } from '../player';
 
 // Helper to create a minimal FLA zip file
 async function createMinimalFlaZip(): Promise<File> {
@@ -1011,6 +1012,130 @@ describe('main.ts', () => {
       // Prev frame
       const prevBtn = document.getElementById('prev-btn')!;
       prevBtn.click();
+    });
+  });
+
+  describe('player controls (play icon, reload, scrubbing, view reset, mobile panel)', () => {
+    let container: HTMLElement;
+
+    async function dropFile(): Promise<void> {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(await createMinimalFlaZip());
+      document.getElementById('drop-zone')!.dispatchEvent(
+        new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer }),
+      );
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    beforeEach(() => {
+      container = createAppDOM();
+      container.insertAdjacentHTML('beforeend', `
+        <div id="mobile-controls" class="mobile-controls">
+          <button id="mobile-controls-toggle" aria-expanded="true"></button>
+          <div class="mobile-controls-group"></div>
+        </div>`);
+      try {
+        localStorage.removeItem('mobileControlsCollapsed');
+      } catch {
+        // Storage unavailable: the toggle still works for the session.
+      }
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      container.remove();
+    });
+
+    it('keeps the same play-button icon node while the play state is unchanged', async () => {
+      const app = new FLAViewerApp();
+      await dropFile();
+      const playBtn = document.getElementById('play-btn')!;
+      const player = (app as unknown as { player: FLAPlayer }).player;
+
+      player.play();
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const icon = playBtn.firstElementChild;
+      expect(icon).not.toBeNull();
+      // Several frames render meanwhile; rewriting the icon each frame
+      // swallowed clicks that landed on it.
+      await new Promise(resolve => setTimeout(resolve, 150));
+      expect(playBtn.firstElementChild).toBe(icon);
+
+      player.pause();
+      expect(playBtn.firstElementChild).not.toBe(icon);
+    });
+
+    it('destroys the previous player when another file loads', async () => {
+      const destroy = vi.spyOn(FLAPlayer.prototype, 'destroy');
+      new FLAViewerApp();
+      await dropFile();
+      expect(destroy).not.toHaveBeenCalled();
+      await dropFile();
+      expect(destroy).toHaveBeenCalledTimes(1);
+    });
+
+    it('resets zoom/pan on canvas double-click', async () => {
+      const resetView = vi.spyOn(FLAPlayer.prototype, 'resetView');
+      new FLAViewerApp();
+      await dropFile();
+      document.getElementById('stage')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      expect(resetView).toHaveBeenCalledTimes(1);
+    });
+
+    it('scrubs the timeline by dragging and resumes playback on release', async () => {
+      const app = new FLAViewerApp();
+      await dropFile();
+      const player = (app as unknown as { player: FLAPlayer }).player;
+      const timeline = document.getElementById('timeline')!;
+      timeline.style.width = '400px';
+      timeline.style.height = '4px';
+      // Synthetic pointers have no capture target in Chromium; emulate capture.
+      let captured = false;
+      timeline.setPointerCapture = () => { captured = true; };
+      timeline.releasePointerCapture = () => { captured = false; };
+      timeline.hasPointerCapture = () => captured;
+      const rect = timeline.getBoundingClientRect();
+      const at = (fraction: number) => rect.left + rect.width * fraction;
+      const pointer = (type: string, fraction: number) =>
+        timeline.dispatchEvent(new PointerEvent(type, { bubbles: true, button: 0, pointerId: 1, clientX: at(fraction) }));
+
+      player.play();
+      pointer('pointerdown', 0);
+      expect(player.getState().playing).toBe(false); // paused while dragging
+      pointer('pointermove', 1);
+      expect(player.getState().currentFrame).toBe(4); // last of 5 frames
+      pointer('pointermove', 0.5);
+      expect(player.getState().currentFrame).toBe(2);
+      pointer('pointerup', 0.5);
+      expect(player.getState().playing).toBe(true);
+      player.pause();
+
+      // A move without a press does not seek.
+      pointer('pointermove', 1);
+      expect(player.getState().currentFrame).toBe(2);
+    });
+
+    it('collapses the mobile zoom/pan panel and remembers it', () => {
+      new FLAViewerApp();
+      const panel = document.getElementById('mobile-controls')!;
+      const toggle = document.getElementById('mobile-controls-toggle')!;
+      expect(panel.classList.contains('collapsed')).toBe(false);
+
+      toggle.click();
+      expect(panel.classList.contains('collapsed')).toBe(true);
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      expect(localStorage.getItem('mobileControlsCollapsed')).toBe('1');
+
+      // A fresh app starts collapsed.
+      container.remove();
+      container = createAppDOM();
+      container.insertAdjacentHTML('beforeend', `
+        <div id="mobile-controls" class="mobile-controls">
+          <button id="mobile-controls-toggle" aria-expanded="true"></button>
+        </div>`);
+      new FLAViewerApp();
+      expect(document.getElementById('mobile-controls')!.classList.contains('collapsed')).toBe(true);
+      localStorage.removeItem('mobileControlsCollapsed');
     });
   });
 

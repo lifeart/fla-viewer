@@ -474,7 +474,7 @@ export async function exportWebM(
   return new Blob([buffer], { type: 'video/webm' });
 }
 
-function findStreamSounds(doc: FLADocument): StreamSound[] {
+export function findStreamSounds(doc: FLADocument): StreamSound[] {
   const streamSounds: StreamSound[] = [];
   if (!doc.timelines[0]) return streamSounds;
 
