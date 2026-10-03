@@ -963,7 +963,7 @@ export class FLARenderer {
 
           // The camera symbol's transformation point is the pivot/center of the viewport frame
           // The matrix tx/ty positions the symbol's origin on the document
-          // The actual camera center on the document is: tx + transformationPoint.x, ty + transformationPoint.y
+          // The actual camera center on the document is the matrix applied to the transformation point
 
           // Animate's native camera and layer depth draw every layer through
           // its stage view, the ramka layer included: follow the ramka where
@@ -978,9 +978,10 @@ export class FLARenderer {
           const scaleX = Math.sqrt(matrix.a * matrix.a + matrix.b * matrix.b);
           const scaleY = Math.sqrt(matrix.c * matrix.c + matrix.d * matrix.d);
 
-          // Camera center in document coordinates
-          const cameraCenterX = matrix.tx + tp.x * scaleX;
-          const cameraCenterY = matrix.ty + tp.y * scaleY;
+          // Camera center in document coordinates (turned with the ramka, and
+          // with the native camera's view)
+          const cameraCenterX = matrix.a * tp.x + matrix.c * tp.y + matrix.tx;
+          const cameraCenterY = matrix.b * tp.x + matrix.d * tp.y + matrix.ty;
 
           // Viewport center
           const viewportCenterX = viewport.width / 2;

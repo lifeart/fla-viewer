@@ -166,8 +166,9 @@ export function isSimilarity(m: Matrix, eps = 1e-6): boolean {
  * Y skew angle) turns the short way round, or `spin` whole extra turns in the
  * given direction (`motionTweenRotate`); the X skew angle keeps its offset from
  * it, so a half turn can't shear the instance flat. A tween that mirrors the
- * instance (the determinant changes sign) is interpolated entry by entry,
- * through zero width.
+ * instance, or runs between a mirrored key and one scaled flat (the
+ * determinant changes sign or goes from negative to 0), is interpolated entry
+ * by entry, through zero width.
  */
 export function interpolateDecomposed(
   start: Matrix,
@@ -178,7 +179,7 @@ export function interpolateDecomposed(
   const lerp = (a: number, b: number) => a + (b - a) * t;
   const detStart = start.a * start.d - start.b * start.c;
   const detEnd = end.a * end.d - end.b * end.c;
-  if (detStart * detEnd < 0 || !Number.isFinite(detStart * detEnd)) {
+  if ((detStart < 0) !== (detEnd < 0) || !Number.isFinite(detStart * detEnd)) {
     return {
       a: lerp(start.a, end.a), b: lerp(start.b, end.b), c: lerp(start.c, end.c), d: lerp(start.d, end.d),
       tx: lerp(start.tx, end.tx), ty: lerp(start.ty, end.ty),
@@ -186,7 +187,7 @@ export function interpolateDecomposed(
   }
   // A mirrored matrix gets a negative x scale, so its skew angles stay close.
   // (A key scaled to nothing has angle 0, as in CreateJS.)
-  const sign = detStart < 0 || (detStart === 0 && detEnd < 0) ? -1 : 1;
+  const sign = detStart < 0 ? -1 : 1;
   const parts = (m: Matrix) => ({
     scaleX: sign * Math.hypot(m.a, m.b),
     scaleY: Math.hypot(m.c, m.d),
@@ -197,7 +198,9 @@ export function interpolateDecomposed(
   const to = parts(end);
   const TURN = 2 * Math.PI;
   const wrap = (d: number) => d - TURN * Math.round(d / TURN);
+  // Keys at the same angle (up to rounding) don't spin a whole extra turn.
   let turnY = wrap(to.skewY - from.skewY);
+  if (Math.abs(turnY) < 1e-6) turnY = 0;
   if (spin?.direction === 'cw') {
     if (turnY < 0) turnY += TURN;
     turnY += TURN * spin.turns;

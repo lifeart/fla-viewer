@@ -366,6 +366,12 @@ describe('3D instance rendering', () => {
     // From a matrix scaled to nothing, it moves with the transformation point.
     const flat = { ...panel, matrix: { a: 0, b: 0, c: 0, d: 0, tx: 275, ty: 200 } };
     expect(withInstanceMatrix(flat, { a: 1, b: 0, c: 0, d: 1, tx: 245, ty: 160 }).centerPoint3D).toEqual({ x: 295, y: 190 });
+    // So does a center a rounding step off the point of a key scaled to 0.1%:
+    // mapping it back through that scale would put it 10px away.
+    const tiny = { ...panel, matrix: { a: 0.001, b: 0, c: 0, d: 0.001, tx: 275, ty: 200 }, centerPoint3D: { x: 275.06, y: 200.03 } };
+    const grown = withInstanceMatrix(tiny, { a: 1, b: 0, c: 0, d: 1, tx: 225, ty: 170 }).centerPoint3D!;
+    expect(grown.x).toBeCloseTo(275.01, 6);
+    expect(grown.y).toBeCloseTo(200, 6);
   });
 
   it('keeps the 3D center with the instance through an object motion tween', async () => {

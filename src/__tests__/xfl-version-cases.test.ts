@@ -192,6 +192,21 @@ describe('classic tween rotation direction', () => {
       close(interpolateDecomposed(zero, turn(90, 2), 0.5), turn(45, 1));
     });
 
+    it('interpolates entry by entry between a mirrored key and one scaled flat', () => {
+      // The second half of a card flip, and its reverse; then a vertical flip.
+      const m = (a: number, d: number) => ({ a, b: 0, c: 0, d, tx: 0, ty: 0 });
+      close(interpolateDecomposed(m(0, 1), m(-1, 1), 0.5), m(-0.5, 1));
+      close(interpolateDecomposed(m(-1, 1), m(0, 1), 0.5), m(-0.5, 1));
+      close(interpolateDecomposed(m(1, 0), m(1, -1), 0.5), m(1, -0.5));
+    });
+
+    it('does not spin a whole turn between keys at the same angle', () => {
+      const nearly = turn(30 - 1e-9, 2);
+      close(interpolateDecomposed(turn(30), nearly, 0.5, { direction: 'cw', turns: 0 }), turn(30, 1.5));
+      close(interpolateDecomposed(turn(30), turn(30 + 1e-9, 2), 0.5, { direction: 'ccw', turns: 0 }), turn(30, 1.5));
+      close(interpolateDecomposed(turn(30), nearly, 0.5, { direction: 'cw', turns: 1 }), turn(210, 1.5));
+    });
+
     it('interpolates entry by entry when the tween mirrors the instance', () => {
       const flipped = { a: -1, b: 0, c: 0, d: 1, tx: 10, ty: 0 };
       close(interpolateDecomposed(turn(0), flipped, 0.5), { a: 0, b: 0, c: 0, d: 1, tx: 5, ty: 0 });

@@ -118,9 +118,11 @@ way plus `motionTweenRotateTimes` whole turns; skewX turns by the same amount pl
 short-way change in the skew between them, so a half turn can't shear the instance flat.
 An exact 180 degree turn with no direction set goes counter-clockwise. A mirrored instance
 (negative determinant at both keys) gets a negative x scale and stays mirrored, spins
-included. A tween that mirrors the instance (determinant changes sign) is lerped entry by
-entry, through zero width; a key scaled to nothing (determinant 0) is decomposed with angle
-0. These cases are inferred from the CreateJS runtime, not checked against Animate.
+included. A tween that mirrors the instance (determinant changes sign), or runs between a
+mirrored key and one scaled flat (determinant 0), is lerped entry by entry, through zero
+width; between a flat key and an unmirrored one the flat key is decomposed with angle 0.
+Keys at the same angle up to rounding never spin a whole extra turn. These cases are
+inferred from the CreateJS runtime, not checked against Animate.
 
 ### Matrix Transform
 
@@ -224,7 +226,9 @@ Animate's own camera is a layer type, not a naming convention (`src/native-camer
 - Main timeline only, as in the runtime. Masks clip in their own layer's view
   (`renderMaskGroup`). Follow camera mode keeps every layer's view and depth stacking, and
   follows the ramka where its own layer view puts it (so under a 200% native zoom a ramka
-  framing the stage shows the stage at its own size). The SVG exporter uses the camera
+  framing the stage shows the stage at its own size); it centers on the ramka matrix times
+  its transformation point, turned with the ramka and the camera view, but does not undo
+  their rotation. The SVG exporter uses the camera
   keyframe's matrix without tweening.
 
 **Layer depth (Animate 2019+).** `layer.setZDepthAtFrame` is saved as `frameZDepth` on the
@@ -894,7 +898,8 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   Known gaps: Animate's rig parent is per-keyframe (JSFL `setRigParentAtFrame`), but the parser
   only reads layer-level `parentLayerIndex`; the SVG exporter does not compose (it also does
   not interpolate tweens); a parent drawn with a 3D transform (rotationX/Y/Z, z) is rigged by
-  its 2D `matrix` only.
+  its 2D `matrix` only; a 9-slice child drawn through the rig path sizes its corners from its
+  matrix in the parent's space, so a stretching parent stretches them.
 
 ### Masks (issue #47)
 - `renderMaskGroup` builds ONE `Path2D` from the mask layer's **fill area** and clips once.
@@ -1022,8 +1027,9 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   only frame the view, while Animate's native camera and layer depth are part of the stage.
   Every matrix change (classic and object tweens, layer-parenting rigs, IK poses) takes the 3D
   center along with the point of the instance it is on (`withInstanceMatrix`: new matrix
-  times the inverse of the old), so a moved center turns with the instance; from a matrix
-  scaled to nothing it moves with the transformation point. Malformed rotations and
+  times the inverse of the old), so a moved center turns with the instance; a center within
+  1px of the transformation point, or one on a matrix scaled to nothing, moves with the
+  transformation point. Malformed rotations and
   centers are dropped at parse time, and a projection that is not finite falls back to the
   2D matrix. `matrix3D` itself is not read: its translation (twips) fits no simple
   model (x/z equal `center - R * matrixTranslation` in the menus, y is off in some, and none of

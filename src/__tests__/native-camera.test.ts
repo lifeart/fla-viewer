@@ -337,6 +337,22 @@ describe('layer depth rendering', () => {
     expect(colorAt(canvas, 290, 200)).toBe(WHITE);
   });
 
+  it('follows a ramka to the stage center under a turned native camera', async () => {
+    // The camera turns 90 degrees about the stage center; the ramka framing
+    // the stage still has its center there, so the center square stays put.
+    const ramka = `<DOMLayer name="ramka" layerType="guide"><frames><DOMFrame index="0" duration="20"><elements>
+      <DOMSymbolInstance libraryItemName="Ramka" symbolType="graphic"><matrix><Matrix/></matrix>
+        <transformationPoint><Point x="${W / 2}" y="${H / 2}"/></transformationPoint></DOMSymbolInstance>
+    </elements></DOMFrame></frames></DOMLayer>`;
+    for (const turn of [`a="0" b="1" c="-1" d="0"`, `a="0.866025" b="0.5" c="-0.5" d="0.866025"`]) {
+      await renderer.setDocument(await parseXfl({ 'DOMDocument.xml': domDocument(
+        cameraLayer([{ index: 0, duration: 20, matrix: `${turn} ${CENTERED}` }]) + ramka + contentLayer('Layer_1', centerSquare)) }));
+      renderer.setFollowCamera(true);
+      renderer.renderFrame(0);
+      expect(colorAt(canvas, 275, 200)).toBe(RED);
+    }
+  });
+
   it('scales a near layer up about the stage center', async () => {
     // Depth -f/2 doubles the size: the 20px square becomes 40px (255..295).
     await render(contentLayer('Near', centerSquare, '', `frameZDepth="${-f / 2}"`));
