@@ -133,6 +133,16 @@ export function parseMotionTweenRotate(value: string | null): 'cw' | 'ccw' | 'no
   }
 }
 
+/**
+ * Normalize an XFL `symbolType` (on a DOMSymbolItem or a symbol instance).
+ * Animate writes it only for `"graphic"` and `"button"`; a movie clip is the
+ * default and has no attribute (JSFL spells that type `"movie clip"`, which is
+ * accepted too, as is the internal `"movieclip"`).
+ */
+export function parseSymbolType(value: string | null): 'graphic' | 'movieclip' | 'button' {
+  return value === 'graphic' || value === 'button' ? value : 'movieclip';
+}
+
 export class FLAParser {
   private zip: JSZip | null = null;
   private symbolCache: Map<string, Symbol> = new Map();
@@ -479,8 +489,8 @@ export class FLAParser {
         if (hasWithNormalizedPath(this.symbolCache, rawName)) return;
 
         const itemID = symbolRoot.getAttribute('itemID') || '';
-        // Compiled clips are movie clips; they carry no symbolType attribute.
-        const symbolType = (symbolRoot.getAttribute('symbolType') || (isCompiledClip ? 'movieclip' : 'graphic')) as 'graphic' | 'movieclip' | 'button';
+        // Movie clips (compiled clips included) carry no symbolType attribute.
+        const symbolType = parseSymbolType(symbolRoot.getAttribute('symbolType'));
 
         // ActionScript linkage (Export for ActionScript). Used by tooling to map
         // a library symbol to its AS class / attachMovie identifier.
@@ -1012,10 +1022,8 @@ export class FLAParser {
     // Instance name (Properties panel) — the AS identifier for this object.
     // The renderer ignores it; tooling (code completion) relies on it.
     const name = el.getAttribute('name') || undefined;
-    // Components have no symbolType attribute but are movie clips; symbol
-    // instances default to graphic.
-    const symbolType = (el.getAttribute('symbolType') ||
-      (el.tagName === 'DOMComponentInstance' ? 'movieclip' : 'graphic')) as 'graphic' | 'movieclip' | 'button';
+    // Movie clip instances (components included) carry no symbolType attribute.
+    const symbolType = parseSymbolType(el.getAttribute('symbolType'));
     const loop = (el.getAttribute('loop') || 'loop') as SymbolInstance['loop'];
     const firstFrame = el.getAttribute('firstFrame');
     const lastFrame = el.getAttribute('lastFrame');

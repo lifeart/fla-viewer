@@ -1,4 +1,4 @@
-import type { SymbolInstance } from './types';
+import type { SymbolInstance, Timeline } from './types';
 
 /**
  * Which frame of its own timeline a graphic symbol instance shows, `frameOffset`
@@ -46,4 +46,32 @@ export function graphicSymbolFrame(
 
   const k = repeats ? offset % length : Math.min(offset, length - 1);
   return mod(first + step * k);
+}
+
+// A call to the clip's own stop(): bare or through `this.`, but not `mc.stop()`,
+// `sound.stop()` or gotoAndStop().
+const OWN_STOP_CALL = /(?:^|[^\w$.])(?:this\s*\.\s*)?stop\s*\(\s*\)/;
+
+/** True when a frame script calls the timeline's own `stop()`. */
+export function callsStop(script: string): boolean {
+  const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  return OWN_STOP_CALL.test(code);
+}
+
+/**
+ * Frames of a movie clip's timeline where its playhead stops: keyframes whose
+ * frame script calls `stop()`. Scripts are not run, but a clip that stops
+ * itself (a state clip holding one pose per frame, a one-shot effect) would
+ * otherwise cycle through all its frames. A conditional `if (…) stop();`
+ * counts as a stop. Guide layers are not published, so their scripts never run.
+ */
+export function movieClipStopFrames(timeline: Timeline): Set<number> {
+  const stops = new Set<number>();
+  for (const layer of timeline.layers) {
+    if (layer.layerType === 'guide') continue;
+    for (const frame of layer.frames) {
+      if (frame.actionScript && callsStop(frame.actionScript)) stops.add(frame.index);
+    }
+  }
+  return stops;
 }

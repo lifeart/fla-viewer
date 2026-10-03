@@ -429,6 +429,7 @@ export interface MovieClipInstanceState {
   totalFrames: number;     // Total frames in this MovieClip
   startParentFrame: number; // Parent frame when this instance first appeared
   isPlaying: boolean;      // Whether this instance is currently playing
+  stopFrames?: ReadonlySet<number>; // Frames whose script calls stop(); the playhead holds there
 }
 
 // Filters

@@ -129,7 +129,7 @@ piecewise cubic bezier (3n+1 points), not a single 4-point curve.
 ```xml
 <DOMSymbolInstance
     libraryItemName="SymbolName"
-    symbolType="graphic"           <!-- graphic | movieclip | button -->
+    symbolType="graphic"           <!-- graphic | button; omitted for a movie clip -->
     loop="loop"                    <!-- loop | play once | single frame -->
     firstFrame="0"                 <!-- Starting frame for nested timeline -->
     centerPoint3DX="100"           <!-- 3D center point for transforms -->
@@ -845,6 +845,11 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
 - **Reverse loops (Animate 2021).** `loop="loop reverse"`/`"play once reverse"`;
   `graphicSymbolFrame` (`src/symbol-loop.ts`) is shared by the renderer and the SVG exporter.
 - **TLF text (CS5-CS6).** `<DOMTLFText>` is read as static text from its `<TextFlow>` spans.
+- **Movie clips have no `symbolType`.** Animate writes it only for `graphic`/`button`
+  (instances and library items); a missing value is a movie clip (`parseSymbolType`). Movie
+  clips run their own playheads (`advanceMovieClipPlayheads`, called by the player and every
+  frame-sequence exporter) and hold on a keyframe whose script calls their own `stop()`
+  (`movieClipStopFrames`); other scripts are not run.
 
 ### Pre-CS5 binary FLA (issue #8)
 - Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not

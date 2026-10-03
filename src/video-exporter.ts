@@ -236,6 +236,8 @@ export async function exportVideo(
 
     // Render frame to canvas
     renderer.renderFrame(frameIndex);
+    // Movie clips step their own timelines once per exported frame, as in the player.
+    renderer.advanceMovieClipPlayheads();
 
     // Force canvas to complete rendering (prevents black frames when tab is hidden)
     // Reading a pixel forces the GPU to flush all pending operations
@@ -423,6 +425,8 @@ export async function exportWebM(
 
     // Render frame to canvas
     renderer.renderFrame(frameIndex);
+    // Movie clips step their own timelines once per exported frame, as in the player.
+    renderer.advanceMovieClipPlayheads();
 
     // Force canvas to complete rendering
     ctx.getImageData(0, 0, 1, 1);
@@ -739,6 +743,8 @@ export async function exportPNGSequence(
 
     // Render frame to canvas
     renderer.renderFrame(frameIndex);
+    // Movie clips step their own timelines once per exported frame, as in the player.
+    renderer.advanceMovieClipPlayheads();
 
     // Convert to PNG blob
     const blob = await canvas.convertToBlob({ type: 'image/png' });
@@ -904,6 +910,8 @@ export async function exportGIF(
 
     // Render frame
     renderer.renderFrame(frameIndex);
+    // Movie clips step their own timelines once per exported frame, as in the player.
+    renderer.advanceMovieClipPlayheads();
 
     // Get pixel data
     const ctx = canvas.getContext('2d')!;
@@ -1016,6 +1024,8 @@ export async function exportSpriteSheet(
 
     // Render frame
     renderer.renderFrame(frameIndex);
+    // Movie clips step their own timelines once per exported frame, as in the player.
+    renderer.advanceMovieClipPlayheads();
 
     // Calculate position on sprite sheet
     const col = i % columns;

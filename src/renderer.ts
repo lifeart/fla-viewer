@@ -30,7 +30,7 @@ import type {
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
 import { evaluateMotionObject } from './motion-object';
-import { graphicSymbolFrame } from './symbol-loop';
+import { graphicSymbolFrame, movieClipStopFrames } from './symbol-loop';
 import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
@@ -98,6 +98,7 @@ export class FLARenderer {
   // MovieClip instance state tracking for independent playback
   // Key format: "instancePath:symbolName" where instancePath is the path through nested symbols
   private movieClipStates = new Map<string, MovieClipInstanceState>();
+  private stopFramesCache = new WeakMap<Timeline, ReadonlySet<number>>();
   private currentInstancePath: string[] = []; // Stack of instance identifiers for nested symbols
 
   // Current scene index for multiple scene support
@@ -393,16 +394,23 @@ export class FLARenderer {
   private getOrCreateMovieClipState(
     key: string,
     totalFrames: number,
-    parentFrame: number
+    parentFrame: number,
+    timeline: Timeline
   ): MovieClipInstanceState {
     let state = this.movieClipStates.get(key);
     if (!state) {
+      let stopFrames = this.stopFramesCache.get(timeline);
+      if (!stopFrames) {
+        stopFrames = movieClipStopFrames(timeline);
+        this.stopFramesCache.set(timeline, stopFrames);
+      }
       // New instance - create initial state
       state = {
         playhead: 0,
         totalFrames,
         startParentFrame: parentFrame,
-        isPlaying: true
+        isPlaying: true,
+        stopFrames
       };
       this.movieClipStates.set(key, state);
     }
@@ -410,12 +418,16 @@ export class FLARenderer {
   }
 
   // Advance all MovieClip playheads by one frame
-  // Called by the player when advancing to the next frame
+  // Called by the player (and the exporters) when advancing to the next frame
   advanceMovieClipPlayheads(): void {
     for (const state of this.movieClipStates.values()) {
-      if (state.isPlaying && state.totalFrames > 1) {
-        state.playhead = (state.playhead + 1) % state.totalFrames;
+      if (!state.isPlaying || state.totalFrames <= 1) continue;
+      // A frame script's stop() halts the clip on that frame.
+      if (state.stopFrames?.has(state.playhead)) {
+        state.isPlaying = false;
+        continue;
       }
+      state.playhead = (state.playhead + 1) % state.totalFrames;
     }
   }
 
@@ -2206,7 +2218,8 @@ export class FLARenderer {
       const state = this.getOrCreateMovieClipState(
         instanceKey,
         totalSymbolFrames,
-        parentFrameIndex
+        parentFrameIndex,
+        symbol.timeline
       );
 
       // Use the instance's independent playhead

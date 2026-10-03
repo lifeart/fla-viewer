@@ -3607,7 +3607,10 @@ describe('FLAParser', () => {
 
       expect(doc.symbols.has('MyMovieClip')).toBe(true);
       const symbol = doc.symbols.get('MyMovieClip');
-      expect(symbol!.symbolType).toBe('movie clip');
+      // JSFL's "movie clip" spelling is normalized to the internal 'movieclip'.
+      expect(symbol!.symbolType).toBe('movieclip');
+      const instance = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(instance.type === 'symbol' && instance.symbolType).toBe('movieclip');
     });
   });
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { graphicSymbolFrame } from '../symbol-loop';
-import type { SymbolInstance } from '../types';
+import { graphicSymbolFrame, callsStop, movieClipStopFrames } from '../symbol-loop';
+import type { Frame, Layer, SymbolInstance, Timeline } from '../types';
 
 // Frames shown on parent frames 0..count-1 of a keyframe, for a 10-frame symbol.
 const run = (loop: SymbolInstance['loop'], first: number, last: number | undefined, count = 12) =>
@@ -58,5 +58,40 @@ describe('graphicSymbolFrame', () => {
   it('clamps lastFrame to the timeline and ignores -1 (unset)', () => {
     expect(run('play once', 7, 50, 5)).toEqual([7, 8, 9, 9, 9]);
     expect(run('loop', 7, -1, 4)).toEqual([7, 8, 9, 0]);
+  });
+});
+
+describe('movie clip stop() frames', () => {
+  it.each([
+    ['stop();', true],
+    ['this.stop();', true],
+    ['this . stop ( );', true],
+    ['if (done) stop();', true],
+    ['trace("x");\nstop();', true],
+    ['mc.stop();', false],
+    ['snd.stop();', false],
+    ['gotoAndStop(3);', false],
+    ['stopAllSounds();', false],
+    ['// stop();', false],
+    ['/* stop(); */ play();', false],
+  ])('callsStop(%j) is %s', (script, expected) => {
+    expect(callsStop(script)).toBe(expected);
+  });
+
+  const layer = (frames: Partial<Frame>[], layerType?: Layer['layerType']): Layer =>
+    ({ name: 'L', color: '#000000', visible: true, locked: false, layerType, frames: frames as Frame[] }) as Layer;
+
+  it('collects the keyframes whose script stops the clip, ignoring guide layers', () => {
+    const timeline = {
+      name: 'Clip',
+      totalFrames: 10,
+      referenceLayers: new Set<number>(),
+      layers: [
+        layer([{ index: 0, duration: 4 }, { index: 4, duration: 6, actionScript: 'stop();' }]),
+        layer([{ index: 2, duration: 1, actionScript: 'this.stop();' }, { index: 3, duration: 7, actionScript: 'play();' }]),
+        layer([{ index: 7, duration: 1, actionScript: 'stop();' }], 'guide'),
+      ],
+    } as Timeline;
+    expect([...movieClipStopFrames(timeline)].sort()).toEqual([2, 4]);
   });
 });

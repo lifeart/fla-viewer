@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import JSZip from 'jszip';
-import { FLAParser, parseMotionTweenRotate } from '../fla-parser';
+import { FLAParser, parseMotionTweenRotate, parseSymbolType } from '../fla-parser';
 import { FLARenderer } from '../renderer';
+import { exportSpriteSheet } from '../video-exporter';
 import { readDirectoryEntry, xflFolderToZip, isXFLStub, XFL_STUB_CONTENT, type XFLFolderEntry } from '../xfl-folder';
 import type { FLADocument, Shape, SymbolInstance, TextInstance } from '../types';
 
@@ -530,3 +531,101 @@ function hasRed(canvas: HTMLCanvasElement): boolean {
   }
   return false;
 }
+
+describe('movie clip instances (no symbolType attribute)', () => {
+  it.each([
+    [null, 'movieclip'],
+    ['movie clip', 'movieclip'],
+    ['movieclip', 'movieclip'],
+    ['graphic', 'graphic'],
+    ['button', 'button'],
+  ])('maps symbolType=%s to %s', (value, expected) => {
+    expect(parseSymbolType(value)).toBe(expected);
+  });
+
+  const R = '#FF0000', G = '#00FF00', B = '#0000FF';
+
+  /**
+   * A 3-frame symbol (red, green, blue) as Animate saves a movie clip: no
+   * symbolType on the item. `scripts[i]` is frame i's frame script.
+   */
+  function clipItem(scripts: Record<number, string> = {}): string {
+    const frame = (i: number, color: string) => {
+      const script = scripts[i] ? `<Actionscript><script><![CDATA[${scripts[i]}]]></script></Actionscript>` : '';
+      return `<DOMFrame index="${i}">${script}<elements>${rectShape(0, 0, 20, 20, color)}</elements></DOMFrame>`;
+    };
+    return `<DOMSymbolItem xmlns="http://ns.adobe.com/xfl/2008/" name="Clip">
+      <timeline><DOMTimeline name="Clip"><layers><DOMLayer name="Layer 1"><frames>
+        ${frame(0, R)}${frame(1, G)}${frame(2, B)}
+      </frames></DOMLayer></layers></DOMTimeline></timeline>
+    </DOMSymbolItem>`;
+  }
+
+  /** Main timeline: `keyframes` one-frame keyframes, each placing the same Clip instance. */
+  async function clipDoc(instanceAttrs = '', scripts: Record<number, string> = {}, keyframes = 1): Promise<FLADocument> {
+    const frames = Array.from({ length: keyframes }, (_, i) => `<DOMFrame index="${i}"><elements>
+      <DOMSymbolInstance libraryItemName="Clip" ${instanceAttrs}><matrix><Matrix tx="100" ty="100"/></matrix></DOMSymbolInstance>
+    </elements></DOMFrame>`).join('');
+    return parseXfl({
+      'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames>${frames}</frames></DOMLayer>`, ['Clip']),
+      'LIBRARY/Clip.xml': clipItem(scripts),
+    });
+  }
+
+  /** Colors over `ticks` player ticks on main frame 0 (render, then advance like the player). */
+  async function playOnFrame0(doc: FLADocument, ticks = 4): Promise<string[]> {
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(doc);
+    const colors: string[] = [];
+    for (let i = 0; i < ticks; i++) {
+      renderer.renderFrame(0);
+      colors.push(colorAt(canvas, 110, 110));
+      renderer.advanceMovieClipPlayheads();
+    }
+    return colors;
+  }
+
+  it('reads an instance and a library item without symbolType as movie clips', async () => {
+    const doc = await clipDoc();
+    const instance = doc.timelines[0].layers[0].frames[0].elements[0] as SymbolInstance;
+    expect(instance.symbolType).toBe('movieclip');
+    expect(doc.symbols.get('Clip')?.symbolType).toBe('movieclip');
+  });
+
+  it('plays a movie clip on a one-frame main timeline', async () => {
+    expect(await playOnFrame0(await clipDoc())).toEqual([R, G, B, R]);
+  });
+
+  it('keeps a symbolType="graphic" instance in step with its one-frame parent', async () => {
+    expect(await playOnFrame0(await clipDoc('symbolType="graphic"'))).toEqual([R, R, R, R]);
+  });
+
+  it('holds a movie clip on a frame whose script calls stop()', async () => {
+    expect(await playOnFrame0(await clipDoc('', { 1: 'stop();' }))).toEqual([R, G, G, G]);
+    expect(await playOnFrame0(await clipDoc('', { 0: 'this.stop();' }))).toEqual([R, R, R, R]);
+  });
+
+  it('keeps playing past scripts that stop something else', async () => {
+    const scripts = { 1: '// stop();\nsnd.stop();\ngotoAndStop(2);' };
+    expect(await playOnFrame0(await clipDoc('', scripts))).toEqual([R, G, B, R]);
+  });
+
+  it('advances movie clips frame by frame in exports, across parent keyframes', async () => {
+    // Three one-frame keyframes holding the same instance: a graphic would restart
+    // at every keyframe (red, red, red); a movie clip keeps playing.
+    const doc = await clipDoc('', {}, 3);
+    const sheet = await exportSpriteSheet(doc, { includeJson: false });
+    const bitmap = await createImageBitmap(sheet.image);
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const ctx = canvas.getContext('2d')!;
+    ctx.drawImage(bitmap, 0, 0);
+    const colors = [0, 1, 2].map((i) => {
+      const x = (i % sheet.columns) * sheet.frameWidth + 110;
+      const y = Math.floor(i / sheet.columns) * sheet.frameHeight + 110;
+      const d = ctx.getImageData(x, y, 1, 1).data;
+      return '#' + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase();
+    });
+    expect(colors).toEqual([R, G, B]);
+  });
+});
