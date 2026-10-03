@@ -22,7 +22,7 @@ export interface RectanglePrimitive {
   bottomLeftRadius: number;
 }
 
-/** Closed outline of a (rounded) rectangle primitive, clockwise on screen. */
+/** Closed outline of a (rounded) rectangle primitive, clockwise on screen, ending in Z. */
 export function rectanglePrimitivePath(r: RectanglePrimitive): PathCommand[] {
   const { x, y } = r;
   const w = Math.max(0, r.width);
@@ -70,6 +70,8 @@ export function rectanglePrimitivePath(r: RectanglePrimitive): PathCommand[] {
   corner(bl, x, y + h, 1, 0, 0, -1);
   cmds.push({ type: 'L', x, y: y + Math.abs(tl) });
   corner(tl, x, y, 0, 1, 1, 0);
+  // Close explicitly so a stroke joins at the start point instead of capping it.
+  cmds.push({ type: 'Z' });
   return cmds;
 }
 
@@ -113,7 +115,8 @@ function arc(cmds: PathCommand[], cx: number, cy: number, rx: number, ry: number
  * Outline of an oval primitive. Angles are measured from 3 o'clock and grow
  * clockwise on screen (y points down), like the Oval Primitive tool's handles.
  * Returns one command list per contour (a full ring has two) and whether the
- * outline is a closed, fillable area.
+ * outline is a closed, fillable area. Closed contours end in Z, so strokes join
+ * at the start point.
  */
 export function ovalPrimitivePath(o: OvalPrimitive): { contours: PathCommand[][]; closed: boolean } {
   const rx = Math.max(0, o.width) / 2;
@@ -137,11 +140,13 @@ export function ovalPrimitivePath(o: OvalPrimitive): { contours: PathCommand[][]
   arc(outer, cx, cy, rx, ry, a0, a1);
 
   if (full) {
+    outer.push({ type: 'Z' });
     if (inner === 0) return { contours: [outer], closed: true };
     // Hole: the inner ellipse wound the other way, so nonzero filling leaves it empty.
     const s = at(a0, irx, iry);
     const hole: PathCommand[] = [{ type: 'M', x: s.x, y: s.y }];
     arc(hole, cx, cy, irx, iry, a0, a0 - 2 * Math.PI);
+    hole.push({ type: 'Z' });
     return { contours: [outer, hole], closed: true };
   }
 
@@ -155,6 +160,6 @@ export function ovalPrimitivePath(o: OvalPrimitive): { contours: PathCommand[][]
   } else {
     outer.push({ type: 'L', x: cx, y: cy });
   }
-  outer.push({ type: 'L', x: start.x, y: start.y });
+  outer.push({ type: 'L', x: start.x, y: start.y }, { type: 'Z' });
   return { contours: [outer], closed: true };
 }

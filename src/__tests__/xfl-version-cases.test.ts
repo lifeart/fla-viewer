@@ -4,7 +4,8 @@ import { FLAParser, parseMotionTweenRotate, parseSymbolType } from '../fla-parse
 import { FLARenderer } from '../renderer';
 import { exportSpriteSheet } from '../video-exporter';
 import { readDirectoryEntry, xflFolderToZip, isXFLStub, XFL_STUB_CONTENT, type XFLFolderEntry } from '../xfl-folder';
-import type { FLADocument, Shape, SymbolInstance, TextInstance } from '../types';
+import { ovalPrimitivePath } from '../primitive-shapes';
+import type { FLADocument, PathCommand, Shape, SymbolInstance, TextInstance } from '../types';
 
 // Version-specific XFL cases that real Flash CS4..Animate files contain. The XML
 // below mirrors what Flash CS5/CS6 writes (attribute names and value spellings
@@ -269,11 +270,34 @@ describe('primitive rectangles and ovals (DOMRectangleObject / DOMOvalObject)', 
     expect(shape.strokes).toMatchObject([{ index: 1, type: 'solid', color: '#CCCCCC', weight: 2 }]);
     expect(shape.edges).toHaveLength(1);
     expect(shape.edges[0]).toMatchObject({ fillStyle1: 1, strokeStyle: 1 });
+    expect(shape.exactEdges).toBe(true);
     const cmds = shape.edges[0].commands;
     expect(cmds[0]).toEqual({ type: 'M', x: 130, y: -10 });
-    // Rounded corners are cubic arcs; the outline ends where it started.
+    // Rounded corners are cubic arcs; the outline ends where it started, then closes.
     expect(cmds.filter((c) => c.type === 'C')).toHaveLength(4);
-    expect(cmds[cmds.length - 1]).toMatchObject({ x: 130, y: -10 });
+    expect(cmds[cmds.length - 2]).toMatchObject({ x: 130, y: -10 });
+    expect(cmds[cmds.length - 1]).toEqual({ type: 'Z' });
+  });
+
+  it('closes every closed contour with Z, but not an open arc', () => {
+    const base = { x: 0, y: 0, width: 100, height: 100, startAngle: 0, endAngle: 0, innerRadius: 0, closePath: true };
+    const last = (cmds: PathCommand[]) => cmds[cmds.length - 1].type;
+    expect(ovalPrimitivePath(base).contours.map(last)).toEqual(['Z']);
+    expect(ovalPrimitivePath({ ...base, innerRadius: 50 }).contours.map(last)).toEqual(['Z', 'Z']);
+    expect(ovalPrimitivePath({ ...base, endAngle: 90 }).contours.map(last)).toEqual(['Z']);
+    expect(ovalPrimitivePath({ ...base, endAngle: 90, innerRadius: 50 }).contours.map(last)).toEqual(['Z']);
+    expect(ovalPrimitivePath({ ...base, endAngle: 90, closePath: false }).contours.map(last)).toEqual(['C']);
+  });
+
+  it('joins a mitered stroke at the corner where the outline starts', async () => {
+    const BLUE = '#0000FF';
+    const canvas = await render(`<DOMRectangleObject objectWidth="100" objectHeight="100" x="200" y="200">
+      <stroke><SolidStroke weight="20" joints="miter" caps="none"><fill><SolidColor color="${BLUE}"/></fill></SolidStroke></stroke>
+    </DOMRectangleObject>`);
+    // The outline starts at the top-left corner; all four outer corners are covered.
+    for (const [x, y] of [[193, 193], [306, 193], [306, 306], [193, 306]]) {
+      expect(colorAt(canvas, x, y), `corner ${x},${y}`).toBe(BLUE);
+    }
   });
 
   it('finds primitives inside groups', async () => {
@@ -315,6 +339,18 @@ describe('primitive rectangles and ovals (DOMRectangleObject / DOMOvalObject)', 
     expect(colorAt(canvas, 200, 150)).toBe(RED);
     expect(colorAt(canvas, 105, 150)).toBe(RED);
     expect(colorAt(canvas, 110, 108)).toBe(WHITE);
+  });
+
+  it('fills a ring thinner than the XFL edge-gap tolerance all the way round', async () => {
+    // Outer radius 100, inner 94: a 6px ring. Stitched with the 8px XFL tolerance, the
+    // hole joined the outer edge and a wedge of the ring went missing.
+    const canvas = await render(`<DOMOvalObject objectWidth="200" objectHeight="200" x="100" y="100" innerRadius="94">${redFill}</DOMOvalObject>`);
+    for (const deg of [-5, -15, -60, 90, 180, 270]) {
+      const a = (deg * Math.PI) / 180;
+      expect(colorAt(canvas, 200 + 97 * Math.cos(a), 200 + 97 * Math.sin(a)), `${deg} degrees`).toBe(RED);
+    }
+    expect(colorAt(canvas, 200, 200)).toBe(WHITE);
+    expect(colorAt(canvas, 280, 200)).toBe(WHITE);
   });
 
   it('leaves the hole of an oval with an inner radius empty', async () => {
@@ -510,6 +546,17 @@ describe('TLF text (DOMTLFText, Flash CS5-CS6)', () => {
     expect(text.textRuns[1]).toMatchObject({ size: 20, fillColor: '#0000FF', italic: true, alignment: 'center' });
     expect(text.textRuns[2]).toMatchObject({ alignment: 'right', underline: true, lineHeight: 30, letterSpacing: 2 });
     expect(text.textRuns[4]).toMatchObject({ alignment: 'right', underline: true, size: 20 });
+  });
+
+  it('applies textAlpha as the color alpha', async () => {
+    const text = await parseText(tlf(`<p><span color="#FF0000" textAlpha="0.5">a</span><span color="#00FF00" textAlpha="1">b</span></p>`));
+    expect(text.textRuns.map((r) => r.fillColor)).toEqual(['#FF000080', '#00FF00']);
+  });
+
+  it('keeps an empty first paragraph as a blank line', async () => {
+    const text = await parseText(tlf(`<p fontSize="40"><span></span></p><p><span fontSize="10">Text</span></p>`));
+    expect(text.textRuns.map((r) => r.characters)).toEqual(['\r', 'Text']);
+    expect(text.textRuns[0].size).toBe(40);
   });
 
   it('draws TLF text', async () => {

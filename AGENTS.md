@@ -840,6 +840,8 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
 - **Primitives (CS3+).** `<DOMRectangleObject>`/`<DOMOvalObject>` have parameters and a singular
   `<fill>`/`<stroke>`, no edges; `src/primitive-shapes.ts` rebuilds the outline. x/y is the
   top-left in the element's own space; oval angles are degrees from 3 o'clock, clockwise.
+  The outline is exact (`exactEdges`): the 8px XFL stitch tolerance would close a thin ring's
+  hole onto its outer edge. Closed contours end in `Z` so strokes join at the start point.
 - **Uncompressed XFL (CS5+).** A folder with DOMDocument.xml and a `.xfl` stub (`PROXY-CS5`);
   `src/xfl-folder.ts` packs it into an in-memory zip. Drop the folder on the viewer.
 - **Reverse loops (Animate 2021).** `loop="loop reverse"`/`"play once reverse"`;

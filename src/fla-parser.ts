@@ -1331,13 +1331,18 @@ export class FLAParser {
       const letterSpacing = tracking
         ? (tracking.endsWith('%') ? size * (parseFloat(tracking) || 0) / 100 : parseFloat(tracking) || 0)
         : 0;
+      const color = format(leaf, 'color') || '#000000';
+      const alpha = parseFloat(format(leaf, 'textAlpha') ?? '1');
       const run: TextRun = {
         characters,
         alignment,
         size,
         lineHeight,
         face: format(leaf, 'fontFamily'),
-        fillColor: format(leaf, 'color') || '#000000',
+        // textAlpha (0..1) becomes the hex color's alpha byte.
+        fillColor: alpha >= 0 && alpha < 1 && /^#[0-9a-f]{6}$/i.test(color)
+          ? color + Math.round(alpha * 255).toString(16).padStart(2, '0')
+          : color,
         bold: format(leaf, 'fontWeight') === 'bold',
         italic: format(leaf, 'fontStyle') === 'italic',
         ...(letterSpacing !== 0 && { letterSpacing }),
@@ -1349,6 +1354,7 @@ export class FLAParser {
     const paragraphs = Array.from(el.getElementsByTagName('*')).filter((n) => n.localName === 'p');
     paragraphs.forEach((p, pIndex) => {
       const alignment = alignOf(p);
+      const runsBefore = textRuns.length;
       // Walk the paragraph in document order: text inside <span>s becomes runs,
       // <br/> a line break and <tab/> a tab (markup whitespace between tags is ignored).
       const walk = (node: globalThis.Element) => {
@@ -1370,8 +1376,10 @@ export class FLAParser {
       };
       walk(p);
       // A paragraph ends with a line break (the renderer breaks after a run's \r).
+      // An empty paragraph is a blank line in the paragraph's own format.
       if (pIndex < paragraphs.length - 1) {
-        if (textRuns.length > 0) textRuns[textRuns.length - 1].characters += '\r';
+        if (textRuns.length > runsBefore) textRuns[textRuns.length - 1].characters += '\r';
+        else textRuns.push(runFor(p, '\r', alignment));
       }
     });
 
@@ -1470,7 +1478,9 @@ export class FLAParser {
       commands,
     }));
 
-    return { type: 'shape', matrix, fills: hasFill ? fills : [], strokes, edges };
+    // The outline is exact, so contours are stitched without the 8px XFL gap
+    // tolerance (which would join a thin ring's hole onto its outer edge).
+    return { type: 'shape', matrix, fills: hasFill ? fills : [], strokes, edges, exactEdges: true };
   }
 
   private parseFills(shape: globalThis.Element, fillElements: Iterable<globalThis.Element> = shape.querySelectorAll('fills > FillStyle')): FillStyle[] {
