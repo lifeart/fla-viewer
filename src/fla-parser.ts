@@ -46,6 +46,7 @@ import {
 } from './flv-parser';
 import { isOLE2 } from './ole2-reader';
 import { parseBinaryFLA } from './binary-fla-parser';
+import { getMaskLayerIndex } from './layer-utils';
 
 // Debug flag - enabled via ?debug=true URL parameter or setParserDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -625,15 +626,15 @@ export class FLAParser {
       });
     }
 
-    // Build mask relationships: layers with parentLayerIndex pointing to a mask layer are masked
+    // Build mask relationships: layers linked (directly, or through a folder
+    // nested in the mask group) under a mask layer are masked by it. Guide and
+    // folder children keep their type — re-typing them as 'masked' would make a
+    // guide render, and would leave a masked folder's children unclipped.
     for (let i = 0; i < layers.length; i++) {
-      const layer = layers[i];
-      if (layer.parentLayerIndex !== undefined) {
-        const parentLayer = layers[layer.parentLayerIndex];
-        if (parentLayer && parentLayer.layerType === 'mask') {
-          layer.layerType = 'masked';
-          layer.maskLayerIndex = layer.parentLayerIndex;
-        }
+      const maskIndex = getMaskLayerIndex(layers, i);
+      if (maskIndex !== undefined) {
+        layers[i].layerType = 'masked';
+        layers[i].maskLayerIndex = maskIndex;
       }
     }
 

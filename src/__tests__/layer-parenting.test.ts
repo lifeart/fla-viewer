@@ -36,6 +36,10 @@ import type { Symbol as FlaSymbol } from '../types';
  * stored matrix AS-IS. Composing childWorld = parentWorld * childStored would
  * DOUBLE-transform the rig and break it. These tests fail if such blanket
  * parent->child composition is ever introduced.
+ *
+ * (Between child keyframes the renderer DOES compose the parent's motion
+ * relative to the child keyframe — identity when the parent is static or the
+ * keys line up — see layer-parenting-rig.test.ts.)
  */
 describe('Layer parenting (normal-layer parent) transform composition', () => {
   let canvas: HTMLCanvasElement;

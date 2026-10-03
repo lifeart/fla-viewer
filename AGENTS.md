@@ -813,11 +813,51 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
 - The renderer honors `layer.visible` and cascades a hidden folder/parent to its children
   via `isLayerVisibleInFla` (`src/layer-utils.ts`, shared with the SVG/video exporter).
   Mask groups honor visibility too (guarded inside `renderMaskGroup`).
-- **Not implemented:** layer-parenting *transforms* (composing a parent layer's transform
-  onto its children). In observed files the child keyframe matrices are already world-space,
-  so the rig renders correctly without composition; the open gap is interpolation when a
-  parent tweens while a child holds a single keyframe. Do NOT blindly add
-  `childWorld = parentWorld × childLocal` — it double-transforms world-space children.
+- **Rig transforms (layer parenting):** child keyframe matrices are stored **world-space**
+  (Animate bakes the parent in at author time: Weird Al sample; editing a parent rewrites only
+  the child key under the playhead; JSFL edits to a parent don't move children), but Animate
+  evaluates the rig **live between child keyframes** (that's why CS6, which ignores parenting,
+  shows "offset issues" and people bake every frame before archiving). The renderer
+  (`getRigCorrection` in `src/renderer.ts`) composes, per child keyframe span [k0,k1):
+  holding child `world(t) = P(t)·inv(P(k0))·C0`; tweening child
+  `world(t) = P(t)·lerp(inv(P(k0))·C0, inv(P(k1))·C1)`. This is exact at child keys and the
+  identity when the parent is static over the span, so it never double-transforms.
+  Only normal→normal links count (`getRigParentIndex` in `src/layer-utils.ts`; folder/mask/
+  guide links are ignored), and only when the parent frame holds exactly ONE symbol instance;
+  otherwise it falls back to stored matrices. Shape-tween child spans are not composed.
+  Parent world matrices come from `getRigLayerWorldMatrix`, which mirrors renderLayer (same
+  tween easing/rotation) and is memoized per `renderFrame` (each level needs its parent at t, k0
+  and k1, so an unmemoized chain is 3^depth). `getRigParentIndex` drops layers on a rig cycle.
+  A missing/empty/singular parent frame at t, k0 or k1 falls back to stored matrices.
+  Do NOT add blanket `childWorld = parentWorld × childStored` — that double-transforms.
+  Known gaps: Animate's rig parent is per-keyframe (JSFL `setRigParentAtFrame`), but the parser
+  only reads layer-level `parentLayerIndex`; the SVG exporter does not compose (it also does
+  not interpolate tweens); a parent drawn with a 3D transform (rotationX/Y/Z, z) is rigged by
+  its 2D `matrix` only.
+
+### Masks (issue #47)
+- `renderMaskGroup` builds ONE `Path2D` from the mask layer's **fill area** and clips once.
+  Never call `ctx.clip()` inside a `save()/restore()` pair (restore discards the clip — the
+  original bug), and never clip once per shape (successive clips **intersect**; masks union).
+- Mask geometry comes from `addLayerToMaskPath`/`addElementToMaskPath`: shapes, shapes nested
+  in symbols at their current frame (transforms composed via `Path2D.addPath(p, matrix)`),
+  motion/shape tweens, and text/bitmap/video bounding boxes. Strokes never contribute.
+- Mask membership is `getMaskLayerIndex` (`src/layer-utils.ts`): explicit `maskLayerIndex` (only if
+  it names a mask layer), else the `parentLayerIndex` chain through folders, else (binary FLAs) the nearest mask above a
+  contiguous run of `masked` layers. Guide/folder children of a mask are never re-typed `masked`.
+- **Winding:** mask regions wind either way (fillStyle0 vs fillStyle1 sides, mirrored instances,
+  `Path2D.rect()` text/bitmap/video bounds), and in one nonzero path opposite windings CANCEL
+  where they overlap. Each region is therefore sorted by on-screen direction (`fillAreas` signed
+  area from `getOrComputeShapePaths` / `morphSegmentArea` × the transform's determinant) and
+  `buildMaskClipPath` repeats the smaller direction group (larger-group count + 1) times so the
+  union is exact. Don't go back to a plain single `addPath` union.
+- An empty mask keyframe (or a frame past the mask layer's end) leaves masked layers unclipped;
+  a mask whose content has no fill area (stroke-only, empty symbol frame) hides them.
+- The SVG exporter (`exportSVG` in `src/video-exporter.ts`) has its own `<clipPath>` mask path:
+  membership uses `getMaskLayerIndex`, the shape matrix goes on each clip `<path>` (`<g>` is not
+  allowed in `<clipPath>`), but symbol/text/bitmap masks still don't clip there.
+- Known approximations: masked layers *inside* a symbol used as a mask contribute unclipped;
+  9-slice and 3D (`rotationX/Y/Z`, `z`) mask instances use their plain 2D matrix.
 
 ### Pre-CS5 binary FLA (issue #8)
 - Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not
@@ -844,3 +884,8 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
 - The exporter checks `AudioEncoder.isConfigSupported` and **degrades to video-only** (with a
   `console.warn`) when the audio codec is unavailable — headless CI lacks the AAC encoder, and
   this also prevents a real user-facing crash. Don't reintroduce an unconditional `AudioEncoder`.
+- **MP4 audio codec fallback (issue #46):** Firefox's WebCodecs has **no AAC encoder**, so MP4
+  exports were silent while WebM (Opus) had sound. `selectMp4AudioCodec` tries AAC@44.1k, then
+  **Opus-in-MP4** @48k (then @44.1k); audio is mixed at the chosen rate so encoder, `AudioData` and
+  muxer configs agree. Only if none is supported does it go video-only, and it then reports the
+  degrade via the `onWarning` callback (main.ts shows an `alert`).

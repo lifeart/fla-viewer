@@ -1,5 +1,5 @@
 import type { FLADocument, SoundItem, FrameSound } from './types';
-import { isLayerVisibleInFla } from './layer-utils';
+import { isLayerVisibleInFla, getMaskLayerIndex } from './layer-utils';
 import { FLARenderer } from './renderer';
 
 export interface ExportProgress {
@@ -10,6 +10,11 @@ export interface ExportProgress {
 
 export type ProgressCallback = (progress: ExportProgress) => void;
 export type CancellationCheck = () => boolean;
+/**
+ * Receives a human-readable, user-facing message when an export completes
+ * with degraded output (e.g. the audio track had to be dropped).
+ */
+export type ExportWarningCallback = (message: string) => void;
 
 /**
  * Check whether an AudioEncoder for the given config can be constructed in the
@@ -37,6 +42,60 @@ async function isAudioCodecSupported(
   return result.supported === true;
 }
 
+export interface Mp4AudioChoice {
+  /** Config passed to `AudioEncoder.configure`. */
+  encoderConfig: AudioEncoderConfig;
+  /** Matching `mp4-muxer` audio codec id. */
+  muxerCodec: 'aac' | 'opus';
+}
+
+/**
+ * Candidate audio encodings for the MP4 container, in preference order.
+ *
+ * AAC is the most compatible MP4 audio codec, but some WebCodecs
+ * implementations don't ship an AAC encoder at all -- notably Firefox
+ * (issue #46: MP4 exports from Firefox were silent while WebM, which uses
+ * Opus, had sound) and headless CI Chromium. Opus-in-MP4 (`Opus`/`dOps`
+ * sample entry, supported by mp4-muxer) plays in all modern browsers and
+ * VLC/ffmpeg, so we fall back to it before giving up on audio entirely.
+ *
+ * Opus is preferred at 48 kHz: that is Opus's native rate and the timescale
+ * the Opus-in-ISOBMFF spec recommends; 44.1 kHz is a last resort for
+ * encoders that only accept the input rate we'd otherwise mix at.
+ */
+const MP4_AUDIO_CANDIDATES: readonly Mp4AudioChoice[] = [
+  {
+    encoderConfig: { codec: 'mp4a.40.2', numberOfChannels: 2, sampleRate: 44100, bitrate: 128_000 },
+    muxerCodec: 'aac',
+  },
+  {
+    encoderConfig: { codec: 'opus', numberOfChannels: 2, sampleRate: 48000, bitrate: 128_000 },
+    muxerCodec: 'opus',
+  },
+  {
+    encoderConfig: { codec: 'opus', numberOfChannels: 2, sampleRate: 44100, bitrate: 128_000 },
+    muxerCodec: 'opus',
+  },
+];
+
+/**
+ * Pick the first MP4-compatible audio encoding this environment can encode
+ * (AAC, then Opus), or `null` if none is supported.
+ */
+export async function selectMp4AudioCodec(): Promise<Mp4AudioChoice | null> {
+  for (const candidate of MP4_AUDIO_CANDIDATES) {
+    try {
+      if (await isAudioCodecSupported(candidate.encoderConfig)) {
+        return { encoderConfig: { ...candidate.encoderConfig }, muxerCodec: candidate.muxerCodec };
+      }
+    } catch {
+      // isConfigSupported rejects (TypeError) for configs it considers
+      // invalid rather than merely unsupported; treat as unsupported.
+    }
+  }
+  return null;
+}
+
 interface StreamSound {
   sound: FrameSound;
   soundItem: SoundItem;
@@ -47,7 +106,8 @@ interface StreamSound {
 export async function exportVideo(
   doc: FLADocument,
   onProgress?: ProgressCallback,
-  isCancelled?: CancellationCheck
+  isCancelled?: CancellationCheck,
+  onWarning?: ExportWarningCallback
 ): Promise<Blob> {
   // Lazy load mp4-muxer
   const mp4Muxer = await import('mp4-muxer');
@@ -80,35 +140,32 @@ export async function exportVideo(
   const streamSounds = findStreamSounds(doc);
   const hasAudio = streamSounds.length > 0;
 
-  // Prepare audio data if we have sounds
+  // Pick an MP4 audio encoding this environment supports: AAC first, then
+  // Opus (Firefox has no WebCodecs AAC encoder -- issue #46). Only if neither
+  // is available do we degrade to a valid video-only file instead of
+  // crashing on NotSupportedError.
+  const audioChoice = hasAudio ? await selectMp4AudioCodec() : null;
+
+  // Mix at the chosen encoder's sample rate so AudioData, the encoder config
+  // and the muxer's track config all agree.
   let audioData: Float32Array | null = null;
-  let sampleRate = 44100;
-
-  if (hasAudio) {
-    const result = mixAudio(streamSounds, totalFrames, frameRate);
-    audioData = result.data;
-    sampleRate = result.sampleRate;
+  if (audioChoice) {
+    audioData = mixAudio(
+      streamSounds,
+      totalFrames,
+      frameRate,
+      audioChoice.encoderConfig.sampleRate
+    ).data;
   }
-
-  // Determine whether we can actually encode the audio track. The AAC encoder
-  // (`mp4a.40.2`) is unavailable in some environments (e.g. headless CI
-  // Chromium), where constructing an AudioEncoder would otherwise throw
-  // NotSupportedError. If the codec is unsupported we degrade gracefully and
-  // export a valid video-only file rather than crashing the whole export.
-  const audioEncoderConfig: AudioEncoderConfig = {
-    codec: 'mp4a.40.2', // AAC-LC
-    numberOfChannels: 2,
-    sampleRate,
-    bitrate: 128_000, // 128 kbps
-  };
-  const encodeAudio =
-    hasAudio && audioData !== null && (await isAudioCodecSupported(audioEncoderConfig));
+  const encodeAudio = audioChoice !== null && audioData !== null;
 
   if (hasAudio && !encodeAudio) {
-    console.warn(
-      'exportVideo: audio codec "mp4a.40.2" (AAC) is not supported in this ' +
-        'environment; exporting video-only without an audio track.'
-    );
+    const message =
+      'This browser cannot encode MP4 audio (neither AAC "mp4a.40.2" nor Opus ' +
+      'is supported by its AudioEncoder), so the MP4 was exported without ' +
+      'sound. Try the WebM format to keep the audio.';
+    console.warn(`exportVideo: ${message}`);
+    onWarning?.(message);
   }
 
   // Create MP4 muxer target
@@ -124,13 +181,17 @@ export async function exportVideo(
       height,
     },
     fastStart: 'in-memory',
+    // Like the WebM path: tolerate an encoder whose first chunk isn't at t=0
+    // (e.g. Opus pre-skip handling differs between browsers) instead of
+    // having mp4-muxer throw on it.
+    firstTimestampBehavior: 'offset',
   };
 
-  if (encodeAudio) {
+  if (audioChoice) {
     muxerOptions.audio = {
-      codec: 'aac',
-      numberOfChannels: 2,
-      sampleRate,
+      codec: audioChoice.muxerCodec,
+      numberOfChannels: audioChoice.encoderConfig.numberOfChannels,
+      sampleRate: audioChoice.encoderConfig.sampleRate,
     };
   }
 
@@ -200,60 +261,16 @@ export async function exportVideo(
   videoEncoder.close();
 
   // Encode audio if present and the codec is supported
-  if (encodeAudio && audioData) {
+  if (audioChoice && audioData) {
     onProgress?.({
       currentFrame: totalFrames,
       totalFrames,
       stage: 'encoding-audio',
     });
 
-    const audioEncoder = new AudioEncoder({
-      output: (chunk, meta) => {
-        muxer.addAudioChunk(chunk, meta);
-      },
-      error: (e) => {
-        console.error('AudioEncoder error:', e);
-      },
+    await encodeAudioTrack(audioData, audioChoice.encoderConfig, (chunk, meta) => {
+      muxer.addAudioChunk(chunk, meta);
     });
-
-    audioEncoder.configure(audioEncoderConfig);
-
-    // Encode audio in chunks
-    const samplesPerChunk = 1024;
-    const totalSamples = audioData.length / 2; // stereo
-    let sampleOffset = 0;
-
-    while (sampleOffset < totalSamples) {
-      const chunkSamples = Math.min(samplesPerChunk, totalSamples - sampleOffset);
-      const chunkData = new Float32Array(chunkSamples * 2);
-
-      for (let i = 0; i < chunkSamples * 2; i++) {
-        chunkData[i] = audioData[sampleOffset * 2 + i] || 0;
-      }
-
-      const planarData = interleaveToPlanes(chunkData, chunkSamples);
-      const audioFrame = new AudioData({
-        format: 'f32-planar',
-        sampleRate,
-        numberOfFrames: chunkSamples,
-        numberOfChannels: 2,
-        timestamp: Math.round((sampleOffset / sampleRate) * 1_000_000),
-        data: planarData.buffer as ArrayBuffer,
-      });
-
-      audioEncoder.encode(audioFrame);
-      audioFrame.close();
-
-      sampleOffset += chunkSamples;
-
-      // Yield periodically
-      if (sampleOffset % (samplesPerChunk * 100) === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-    }
-
-    await audioEncoder.flush();
-    audioEncoder.close();
   }
 
   // Finalize encoding
@@ -277,7 +294,8 @@ export async function exportVideo(
 export async function exportWebM(
   doc: FLADocument,
   onProgress?: ProgressCallback,
-  isCancelled?: CancellationCheck
+  isCancelled?: CancellationCheck,
+  onWarning?: ExportWarningCallback
 ): Promise<Blob> {
   // Lazy load webm-muxer
   const webmMuxer = await import('webm-muxer');
@@ -336,6 +354,9 @@ export async function exportWebM(
     console.warn(
       'exportWebM: audio codec "opus" is not supported in this environment; ' +
         'exporting video-only without an audio track.'
+    );
+    onWarning?.(
+      'This browser cannot encode Opus audio, so the WebM was exported without sound.'
     );
   }
 
@@ -433,53 +454,9 @@ export async function exportWebM(
       stage: 'encoding-audio',
     });
 
-    const audioEncoder = new AudioEncoder({
-      output: (chunk, meta) => {
-        muxer.addAudioChunk(chunk, meta);
-      },
-      error: (e) => {
-        console.error('AudioEncoder error:', e);
-      },
+    await encodeAudioTrack(audioData, audioEncoderConfig, (chunk, meta) => {
+      muxer.addAudioChunk(chunk, meta);
     });
-
-    audioEncoder.configure(audioEncoderConfig);
-
-    // Encode audio in chunks
-    const samplesPerChunk = 1024;
-    const totalSamples = audioData.length / 2;
-    let sampleOffset = 0;
-
-    while (sampleOffset < totalSamples) {
-      const chunkSamples = Math.min(samplesPerChunk, totalSamples - sampleOffset);
-      const chunkData = new Float32Array(chunkSamples * 2);
-
-      for (let i = 0; i < chunkSamples * 2; i++) {
-        chunkData[i] = audioData[sampleOffset * 2 + i] || 0;
-      }
-
-      const planarData = interleaveToPlanes(chunkData, chunkSamples);
-      const audioFrame = new AudioData({
-        format: 'f32-planar',
-        sampleRate,
-        numberOfFrames: chunkSamples,
-        numberOfChannels: 2,
-        timestamp: Math.round((sampleOffset / sampleRate) * 1_000_000),
-        data: planarData.buffer as ArrayBuffer,
-      });
-
-      audioEncoder.encode(audioFrame);
-      audioFrame.close();
-
-      sampleOffset += chunkSamples;
-
-      // Yield periodically
-      if (sampleOffset % (samplesPerChunk * 100) === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-    }
-
-    await audioEncoder.flush();
-    audioEncoder.close();
   }
 
   // Finalize encoding
@@ -521,12 +498,13 @@ function findStreamSounds(doc: FLADocument): StreamSound[] {
   return streamSounds;
 }
 
-function mixAudio(
+/** @internal Exported for tests. */
+export function mixAudio(
   streamSounds: StreamSound[],
   totalFrames: number,
-  frameRate: number
+  frameRate: number,
+  sampleRate = 44100
 ): { data: Float32Array; sampleRate: number } {
-  const sampleRate = 44100;
   const totalDuration = totalFrames / frameRate;
   const totalSamples = Math.ceil(totalDuration * sampleRate);
 
@@ -578,6 +556,79 @@ function mixAudio(
   }
 
   return { data: mixBuffer, sampleRate };
+}
+
+/**
+ * Encode interleaved stereo `audioData` (at `config.sampleRate`) with a
+ * WebCodecs AudioEncoder, handing each chunk (with its metadata, which carries
+ * the decoderConfig description the muxers need for esds/dOps/CodecPrivate)
+ * to `onChunk`.
+ */
+async function encodeAudioTrack(
+  audioData: Float32Array,
+  config: AudioEncoderConfig,
+  onChunk: (chunk: EncodedAudioChunk, meta?: EncodedAudioChunkMetadata) => void
+): Promise<void> {
+  const { sampleRate, numberOfChannels } = config;
+  let encoderError: unknown = null;
+  // Exceptions thrown from a WebCodecs output callback are only reported to
+  // the console, never to flush(); capture muxer failures so the export
+  // rejects instead of silently producing a file without audio.
+  let outputError: unknown = null;
+  const audioEncoder = new AudioEncoder({
+    output: (chunk, meta) => {
+      if (outputError) return;
+      try {
+        onChunk(chunk, meta);
+      } catch (e) {
+        outputError = e;
+      }
+    },
+    error: (e) => {
+      encoderError = e;
+      console.error('AudioEncoder error:', e);
+    },
+  });
+
+  try {
+    audioEncoder.configure(config);
+
+    // Encode audio in chunks
+    const samplesPerChunk = 1024;
+    const totalSamples = audioData.length / 2; // stereo
+    let sampleOffset = 0;
+
+    while (sampleOffset < totalSamples && !encoderError && !outputError) {
+      const chunkSamples = Math.min(samplesPerChunk, totalSamples - sampleOffset);
+      const chunkData = audioData.subarray(sampleOffset * 2, (sampleOffset + chunkSamples) * 2);
+
+      const planarData = interleaveToPlanes(chunkData, chunkSamples);
+      const audioFrame = new AudioData({
+        format: 'f32-planar',
+        sampleRate,
+        numberOfFrames: chunkSamples,
+        numberOfChannels,
+        timestamp: Math.round((sampleOffset / sampleRate) * 1_000_000),
+        data: planarData.buffer as ArrayBuffer,
+      });
+
+      audioEncoder.encode(audioFrame);
+      audioFrame.close();
+
+      sampleOffset += chunkSamples;
+
+      // Yield periodically
+      if (sampleOffset % (samplesPerChunk * 100) === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    if (encoderError) throw encoderError;
+    if (!outputError) await audioEncoder.flush();
+    if (outputError) throw outputError;
+  } finally {
+    if (audioEncoder.state !== 'closed') audioEncoder.close();
+  }
 }
 
 function interleaveToPlanes(interleaved: Float32Array, frames: number): Float32Array {
@@ -1490,6 +1541,10 @@ export async function exportSVG(
   // exactly like fillPaths in the renderer. clip-path ignores fill/stroke
   // paint, so we emit pure `d` geometry without paint attributes.
   const maskShapeToClipPaths = (shape: import('./types').Shape): string => {
+    // <clipPath> may only hold shapes/text/<use> — a wrapping <g> is ignored —
+    // so the shape matrix goes on each <path>.
+    const transform = matrixToTransform(shape.matrix);
+    const transformAttr = transform ? ` transform="${transform}"` : '';
     const paths: string[] = [];
     for (const edge of shape.edges) {
       // A mask clips by FILLED regions only (mirror renderer fillPaths).
@@ -1498,13 +1553,7 @@ export async function exportSVG(
       }
       const pathData = commandsToPath(edge.commands);
       if (!pathData) continue;
-      paths.push(`<path d="${pathData}"/>`);
-    }
-    if (paths.length === 0) return '';
-    const transform = matrixToTransform(shape.matrix);
-    const transformAttr = transform ? ` transform="${transform}"` : '';
-    if (transformAttr) {
-      return `<g${transformAttr}>${paths.join('')}</g>`;
+      paths.push(`<path d="${pathData}"${transformAttr}/>`);
     }
     return paths.join('');
   };
@@ -1744,8 +1793,8 @@ export async function exportSVG(
   // last) to match the renderer and the prior export behavior.
   //
   // Mask handling:
-  //  - Build masked-layer -> mask-layer grouping from layer.maskLayerIndex
-  //    (renderer.ts:833-837).
+  //  - Build masked-layer -> mask-layer grouping with getMaskLayerIndex
+  //    (src/layer-utils.ts), the same resolution the renderer uses.
   //  - A `mask` layer: if hidden, the WHOLE group is omitted (renderer.ts:874-
   //    875). Otherwise its shape geometry becomes a <clipPath> and its masked
   //    children render inside one <g clip-path="url(#...)">.
@@ -1762,11 +1811,12 @@ export async function exportSVG(
     referenceLayers: Set<number>,
     out: string[]
   ): void => {
-    // masked layer index -> mask layer index (renderer.ts:833-837)
+    // masked layer index -> mask layer index
     const maskedLayers = new Map<number, number>();
     for (let i = 0; i < layers.length; i++) {
-      if (layers[i].maskLayerIndex !== undefined) {
-        maskedLayers.set(i, layers[i].maskLayerIndex!);
+      const maskIndex = getMaskLayerIndex(layers, i);
+      if (maskIndex !== undefined) {
+        maskedLayers.set(i, maskIndex);
       }
     }
 
