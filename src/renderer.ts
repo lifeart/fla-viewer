@@ -30,7 +30,7 @@ import type {
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
 import { evaluateMotionObject } from './motion-object';
-import { graphicSymbolFrame, movieClipAppearance, movieClipPlayhead, movieClipStopFrames } from './symbol-loop';
+import { graphicSymbolFrame, movieClipPlayhead, movieClipRun, movieClipStopFrames, movieClipTicks } from './symbol-loop';
 import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
@@ -99,7 +99,12 @@ export class FLARenderer {
   // Key format: "instancePath:symbolName" where instancePath is the path through nested symbols
   private movieClipStates = new Map<string, MovieClipInstanceState>();
   private stopFramesCache = new WeakMap<Timeline, ReadonlySet<number>>();
-  private currentInstancePath: string[] = []; // Stack of instance identifiers for nested symbols
+  // Symbol instances being drawn, outermost first: each one's slot (see
+  // instanceSlot) and, for a movie clip, its playhead state.
+  private instanceStack: { slot: string; clip: MovieClipInstanceState | null }[] = [];
+  // Movie clip state getSymbolFrame resolved last (null for other symbols).
+  private resolvedClip: MovieClipInstanceState | null = null;
+  private clipRunCache = new WeakMap<Frame, Map<string, { start: number; end: number }>>();
   // Movie clip states reached by the current renderFrame; the rest have left
   // the stage and are dropped when it ends (a clip placed again starts over).
   private touchedMovieClips = new Set<string>();
@@ -388,7 +393,7 @@ export class FLARenderer {
     this.symbolBitmapCache.clear();
     // Clear MovieClip instance states
     this.movieClipStates.clear();
-    this.currentInstancePath = [];
+    this.instanceStack = [];
   }
 
   // Record the layer and keyframe whose element is about to be drawn.
@@ -399,7 +404,7 @@ export class FLARenderer {
   }
 
   // An instance's place in its parent timeline: symbol, layer and element index.
-  // Joined along currentInstancePath it identifies one instance on stage.
+  // Joined along instanceStack it identifies one instance on stage.
   private instanceSlot(symbolName: string, elementIndex: number): string {
     let layerId = 0;
     if (this.currentLayer) {
@@ -423,22 +428,29 @@ export class FLARenderer {
     parentFrame: number,
     timeline: Timeline
   ): MovieClipInstanceState {
+    const run = this.clipRun(elementIndex, instance.libraryItemName, parentFrame);
     let state = this.movieClipStates.get(key);
-    if (!state) {
+    // A different run of keyframes (e.g. after the parent timeline loops back
+    // over a gap) is a new instance.
+    if (!state || state.startParentFrame !== run.start) {
       let stopFrames = this.stopFramesCache.get(timeline);
       if (!stopFrames) {
         stopFrames = movieClipStopFrames(timeline);
         this.stopFramesCache.set(timeline, stopFrames);
       }
-      const appeared = this.currentLayer && this.currentKeyframe
-        ? movieClipAppearance(this.currentLayer.frames, this.currentKeyframe, elementIndex, instance.libraryItemName)
-        : parentFrame;
-      const { frame, stopped } = movieClipPlayhead(parentFrame - appeared, totalFrames, stopFrames);
+      const parent = this.instanceStack[this.instanceStack.length - 1]?.clip;
+      const ticks = movieClipTicks(parentFrame, run, parent ? {
+        ticks: parent.elapsed,
+        totalFrames: parent.totalFrames,
+        stopFrames: parent.stopFrames ?? new Set<number>(),
+      } : undefined);
+      const { frame, stopped } = movieClipPlayhead(ticks, totalFrames, stopFrames);
       state = {
         playhead: frame,
         totalFrames,
-        startParentFrame: appeared,
+        startParentFrame: run.start,
         isPlaying: !stopped,
+        elapsed: ticks,
         stopFrames
       };
       this.movieClipStates.set(key, state);
@@ -447,10 +459,31 @@ export class FLARenderer {
     return state;
   }
 
+  // The run of keyframes holding the movie clip at `elementIndex` of the
+  // current keyframe (memoized per keyframe).
+  private clipRun(elementIndex: number, libraryItemName: string, parentFrame: number): { start: number; end: number } {
+    const layer = this.currentLayer;
+    const keyframe = this.currentKeyframe;
+    if (!layer || !keyframe) return { start: parentFrame, end: parentFrame + 1 };
+    let runs = this.clipRunCache.get(keyframe);
+    if (!runs) {
+      runs = new Map();
+      this.clipRunCache.set(keyframe, runs);
+    }
+    const id = `${elementIndex}|${libraryItemName}`;
+    let run = runs.get(id);
+    if (!run) {
+      run = movieClipRun(layer.frames, keyframe, elementIndex, libraryItemName);
+      runs.set(id, run);
+    }
+    return run;
+  }
+
   // Advance all MovieClip playheads by one frame
   // Called by the player (and the exporters) when advancing to the next frame
   advanceMovieClipPlayheads(): void {
     for (const state of this.movieClipStates.values()) {
+      state.elapsed++;
       if (!state.isPlaying || state.totalFrames <= 1) continue;
       // A frame script's stop() halts the clip on that frame.
       if (state.stopFrames?.has(state.playhead)) {
@@ -550,7 +583,7 @@ export class FLARenderer {
     this.loadedFonts.clear();
     this.loadingFonts.clear();
     this.movieClipStates.clear();
-    this.currentInstancePath = [];
+    this.instanceStack = [];
     this.releaseVideoElements();
     this.zoomLevel = 1;
     this.panX = 0;
@@ -888,7 +921,7 @@ export class FLARenderer {
 
     // Render current scene's timeline
     this.touchedMovieClips.clear();
-    this.currentInstancePath = [];
+    this.instanceStack = [];
     if (doc.timelines.length > this.currentScene) {
       this.renderTimelineWithCamera(doc.timelines[this.currentScene], frameIndex, viewport);
     }
@@ -1208,7 +1241,7 @@ export class FLARenderer {
 
       const slot = this.instanceSlot(element.libraryItemName, elementIndex);
       const symbolFrame = this.getSymbolFrame(element, symbol, parentFrameIndex, elementIndex);
-      this.currentInstancePath.push(slot);
+      this.instanceStack.push({ slot, clip: this.resolvedClip });
       const layers = symbol.timeline.layers;
       for (let i = 0; i < layers.length; i++) {
         const type = (layers[i].layerType as string | undefined)?.toLowerCase();
@@ -1219,7 +1252,7 @@ export class FLARenderer {
         if (!this.isLayerVisibleInFla(layers, i)) continue;
         this.addLayerToMaskPath(layers[i], symbolFrame, m, clip, depth + 1);
       }
-      this.currentInstancePath.pop();
+      this.instanceStack.pop();
     } else {
       // Text, bitmaps and video mask by their bounding box.
       let x = 0;
@@ -2240,10 +2273,11 @@ export class FLARenderer {
     const firstFrame = instance.firstFrame || 0;
     const lastFrame = instance.lastFrame;
     const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
+    this.resolvedClip = null;
 
     // MovieClips play independently from parent timeline with their own playhead
     if (instance.symbolType === 'movieclip') {
-      const instanceKey = [...this.currentInstancePath, this.instanceSlot(instance.libraryItemName, elementIndex)].join('/');
+      const instanceKey = [...this.instanceStack.map((e) => e.slot), this.instanceSlot(instance.libraryItemName, elementIndex)].join('/');
       const state = this.getOrCreateMovieClipState(
         instanceKey,
         instance,
@@ -2253,6 +2287,7 @@ export class FLARenderer {
         symbol.timeline
       );
 
+      this.resolvedClip = state;
       // Use the instance's independent playhead
       return state.playhead % totalSymbolFrames;
     }
@@ -2374,7 +2409,7 @@ export class FLARenderer {
     const slot = this.instanceSlot(instance.libraryItemName, elementIndex);
     const symbolFrame = this.getSymbolFrame(instance, symbol, parentFrameIndex, elementIndex);
     // Movie clips nested in this instance are keyed by the instances above them.
-    this.currentInstancePath.push(slot);
+    this.instanceStack.push({ slot, clip: this.resolvedClip });
 
     if (instance.symbolType === 'button') {
       // Track button hit area for debug click detection
@@ -2455,7 +2490,7 @@ export class FLARenderer {
       this.debugSymbolPath.pop();
     }
 
-    this.currentInstancePath.pop();
+    this.instanceStack.pop();
 
     // Clear filters if applied
     if (hasFilters) {

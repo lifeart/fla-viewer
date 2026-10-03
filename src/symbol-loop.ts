@@ -49,26 +49,59 @@ export function graphicSymbolFrame(
 }
 
 /**
- * The part of a frame script that runs when the frame is entered: comments and
- * string literals are dropped, and so are function bodies (event handlers and
- * callbacks run later, if ever).
+ * The part of a frame script that runs when the frame is entered: comments,
+ * string and regex literals are dropped, and so are function bodies, block or
+ * arrow-expression (event handlers and callbacks run later, if ever).
  */
 function frameEntryCode(script: string): string {
   let code = '';
   const braces: boolean[] = []; // per open brace: is it (inside) a function body?
   let inFunction = 0;
+  let arrowDepth = -1; // >= 0 while inside an arrow function's expression body
+  let prev = ''; // last significant character, to tell a regex literal from division
+  const skipping = () => inFunction > 0 || arrowDepth >= 0;
   for (let i = 0; i < script.length; i++) {
     const ch = script[i];
     const next = script[i + 1];
     if (ch === '/' && (next === '/' || next === '*')) {
       const end = next === '/' ? script.indexOf('\n', i) : script.indexOf('*/', i + 2);
       i = end < 0 ? script.length : next === '/' ? end - 1 : end + 1;
-      if (!inFunction) code += ' ';
-    } else if (ch === '"' || ch === "'" || ch === '`') {
+      if (!skipping()) code += ' ';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`' || (ch === '/' && (prev === '' || /[(,=:[!&|?{};+\-*%<>~^]/.test(prev)))) {
+      // String or regex literal: skip to its closing delimiter.
       let j = i + 1;
-      while (j < script.length && script[j] !== ch) j += script[j] === '\\' ? 2 : 1;
+      let inClass = false;
+      for (; j < script.length; j++) {
+        const c = script[j];
+        if (c === '\\') { j++; continue; }
+        if (ch !== '/') { if (c === ch) break; continue; }
+        if (c === '\n') break;
+        if (c === '[') inClass = true;
+        else if (c === ']') inClass = false;
+        else if (c === '/' && !inClass) break;
+      }
       i = j;
-      if (!inFunction) code += '""';
+      prev = '"';
+      if (!skipping()) code += '""';
+      continue;
+    }
+    if (arrowDepth >= 0) {
+      // The expression ends at a `,` / `;` or an unmatched closer at its own level.
+      if ('([{'.includes(ch)) {
+        arrowDepth++;
+      } else if (')]},;'.includes(ch)) {
+        if (arrowDepth === 0) {
+          arrowDepth = -1;
+          i--; // handle the terminator as ordinary code
+          continue;
+        }
+        if (')]}'.includes(ch)) arrowDepth--;
+      }
+    } else if (ch === '=' && next === '>' && !inFunction && script.slice(i + 2).trimStart()[0] !== '{') {
+      arrowDepth = 0;
+      i++;
     } else if (ch === '{') {
       const opensFunction = inFunction > 0 || /(?:\bfunction\b[^{};]*|=>\s*)$/.test(code);
       braces.push(opensFunction);
@@ -80,6 +113,7 @@ function frameEntryCode(script: string): string {
     } else if (!inFunction) {
       code += ch;
     }
+    if (!/\s/.test(ch)) prev = ch;
   }
   return code;
 }
@@ -137,26 +171,56 @@ export function movieClipPlayhead(
 }
 
 /**
- * First frame of the run of back-to-back keyframes on a layer that hold the same
- * movie clip instance as `keyframe` (the same library item at the same element
- * index). Flash keeps one instance alive across such keyframes, so its playhead
- * has been running since then.
+ * The run of back-to-back keyframes on a layer that hold the same movie clip
+ * instance as `keyframe` (the same library item at the same element index), as
+ * [start, end) parent frames. Flash keeps one instance alive across such
+ * keyframes, so its playhead has been running since `start`.
  */
-export function movieClipAppearance(
+export function movieClipRun(
   frames: readonly Frame[],
   keyframe: Frame,
   elementIndex: number,
   libraryItemName: string
-): number {
+): { start: number; end: number } {
+  const holdsClip = (frame: Frame) => {
+    const element = frame.elements[elementIndex];
+    return !!element && element.type === 'symbol' && element.symbolType === 'movieclip' &&
+      element.libraryItemName === libraryItemName;
+  };
   let k = frames.indexOf(keyframe);
-  if (k < 0) return keyframe.index;
-  while (k > 0) {
-    const prev = frames[k - 1];
-    if (prev.index + prev.duration !== frames[k].index) break;
-    const element = prev.elements[elementIndex];
-    if (!element || element.type !== 'symbol' || element.symbolType !== 'movieclip' ||
-        element.libraryItemName !== libraryItemName) break;
-    k--;
-  }
-  return frames[k].index;
+  if (k < 0) return { start: keyframe.index, end: keyframe.index + keyframe.duration };
+  let first = k;
+  while (first > 0 && frames[first - 1].index + frames[first - 1].duration === frames[first].index &&
+         holdsClip(frames[first - 1])) first--;
+  while (k + 1 < frames.length && frames[k].index + frames[k].duration === frames[k + 1].index &&
+         holdsClip(frames[k + 1])) k++;
+  return { start: frames[first].index, end: frames[k].index + frames[k].duration };
+}
+
+/** How long an enclosing movie clip has played: ticks since it appeared, and its timeline. */
+export interface EnclosingClip {
+  ticks: number;
+  totalFrames: number;
+  stopFrames: ReadonlySet<number>;
+}
+
+/**
+ * How many ticks a movie clip has been on stage, from the run of keyframes that
+ * holds it in its parent timeline. On the main timeline (or inside a graphic)
+ * that is the parent's frame minus the run start. Inside another movie clip it
+ * is the time since that clip's playhead last entered the run: the enclosing
+ * clip plays from frame 0, looping, or holds at its first stop() frame.
+ */
+export function movieClipTicks(
+  parentFrame: number,
+  run: { start: number; end: number },
+  enclosing?: EnclosingClip
+): number {
+  if (!enclosing) return Math.max(0, parentFrame - run.start);
+  const n = Math.max(1, enclosing.totalFrames);
+  const holds = n === 1 || [...enclosing.stopFrames].some((f) => f >= 0 && f < n);
+  // A holding clip went through the run once; a looping one that never leaves
+  // the run has kept the instance since it appeared itself.
+  if (holds || (run.start <= 0 && run.end >= n)) return Math.max(0, enclosing.ticks - run.start);
+  return Math.max(0, (enclosing.ticks % n) - run.start);
 }

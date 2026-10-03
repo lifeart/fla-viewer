@@ -760,6 +760,79 @@ describe('movie clip instances (no symbolType attribute)', () => {
     expect(await playFrames(doc, [0, 1, 2], 310)).toEqual([WHITE, R, G]);
   });
 
+  it('starts a clip over when the timeline loops back over a gap', async () => {
+    // On at 0-2, gone at 3-5, back at 6-9: after the loop, frame 0 is a new instance.
+    const doc = await docWith(`<DOMLayer name="L"><frames>
+      <DOMFrame index="0" duration="3"><elements>${clip()}</elements></DOMFrame>
+      <DOMFrame index="3" duration="3"><elements></elements></DOMFrame>
+      <DOMFrame index="6" duration="4"><elements>${clip()}</elements></DOMFrame>
+    </frames></DOMLayer>`);
+    const colors = await playFrames(doc, [6, 7, 8, 9, 0]);
+    expect(colors).toEqual([R, G, B, R, R]);
+  });
+
+  describe('movie clips inside movie clips', () => {
+    // Main timeline: 10 frames holding Outer at (100,100). Outer: 4 frames whose
+    // keyframes are `outerFrames`, holding Inner (3 frames: red, green, blue).
+    const innerItem = clipItem().replace(/name="Clip"/g, 'name="Inner"');
+    const nested = (outerFrames: string, outerAttrs = '') => parseXfl({
+      'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0" duration="10"><elements>
+        <DOMSymbolInstance libraryItemName="Outer" ${outerAttrs}><matrix><Matrix tx="100" ty="100"/></matrix></DOMSymbolInstance>
+      </elements></DOMFrame></frames></DOMLayer>`, ['Outer', 'Inner']),
+      'LIBRARY/Inner.xml': innerItem,
+      'LIBRARY/Outer.xml': `<DOMSymbolItem xmlns="http://ns.adobe.com/xfl/2008/" name="Outer">
+        <timeline><DOMTimeline name="Outer"><layers><DOMLayer name="Layer 1"><frames>${outerFrames}</frames></DOMLayer></layers></DOMTimeline></timeline>
+      </DOMSymbolItem>`,
+    });
+    const inner = '<DOMSymbolInstance libraryItemName="Inner"><matrix><Matrix/></matrix></DOMSymbolInstance>';
+    const frames = [...Array(10).keys()];
+    const coldColors = async (doc: FLADocument) => {
+      const colors: string[] = [];
+      for (const f of frames) colors.push(...await playFrames(doc, [f]));
+      return colors;
+    };
+
+    it('agrees between playback and seeking when the outer clip loops', async () => {
+      const doc = await nested(`<DOMFrame index="0" duration="4"><elements>${inner}</elements></DOMFrame>`);
+      const played = await playFrames(doc, frames);
+      expect(played).toEqual([R, G, B, R, G, B, R, G, B, R]);
+      expect(await coldColors(doc)).toEqual(played);
+    });
+
+    it('restarts the inner clip on each pass when it covers only part of the outer clip', async () => {
+      const doc = await nested(`<DOMFrame index="0" duration="2"><elements>${inner}</elements></DOMFrame>
+        <DOMFrame index="2" duration="2"><elements></elements></DOMFrame>`);
+      const played = await playFrames(doc, frames);
+      expect(played).toEqual([R, G, WHITE, WHITE, R, G, WHITE, WHITE, R, G]);
+      expect(await coldColors(doc)).toEqual(played);
+    });
+
+    it('keeps the inner clip playing while the outer clip holds at stop()', async () => {
+      const doc = await nested(`<DOMFrame index="0" duration="4"><Actionscript><script><![CDATA[stop();]]></script></Actionscript><elements>${inner}</elements></DOMFrame>`);
+      const played = await playFrames(doc, frames);
+      expect(played).toEqual([R, G, B, R, G, B, R, G, B, R]);
+      expect(await coldColors(doc)).toEqual(played);
+      const bitmap = await createImageBitmap(await exportSingleFrame(doc, 7));
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(bitmap, 0, 0);
+      expect(Array.from(ctx.getImageData(110, 110, 1, 1).data.slice(0, 3))).toEqual([0, 255, 0]);
+      const svg = await (await exportSVG(doc, 7)).text();
+      expect(svg).toContain(G);
+      expect(svg).not.toContain(R);
+    });
+
+    it('keeps the inner clip in step after frames drawn from a cacheAsBitmap cache', async () => {
+      // Outer frame 0 (ticks 0, 4, 8) is drawn from the cached bitmap, which never
+      // reaches the inner clip; the live frames after it must still be in step.
+      const outer = `<DOMFrame index="0" duration="4"><elements>${inner}</elements></DOMFrame>`;
+      const plain = await playFrames(await nested(outer), frames);
+      const cached = await playFrames(await nested(outer, 'cacheAsBitmap="true"'), frames);
+      const live = (colors: string[]) => colors.filter((_, tick) => tick % 4 !== 0);
+      expect(live(cached)).toEqual(live(plain));
+    });
+  });
+
   describe('seeking and single-frame exports', () => {
     // Three back-to-back keyframes holding the same instance: one clip instance
     // that has been playing since frame 0.
@@ -788,10 +861,12 @@ describe('movie clip instances (no symbolType attribute)', () => {
       ctx.drawImage(bitmap, 0, 0);
       expect(Array.from(ctx.getImageData(110, 110, 1, 1).data.slice(0, 3))).toEqual([0, 0, 255]);
 
-      // The SVG exporter counts from the instance's keyframe (frame 2 starts one).
-      const svg = await (await exportSVG(doc, 4)).text();
-      expect(svg).toContain('#00FF00');
-      expect(svg).not.toContain('#FF0000');
+      // SVG counts from the start of the run of keyframes too.
+      for (const [frame, color] of [[2, B], [4, G]] as const) {
+        const svg = await (await exportSVG(doc, frame)).text();
+        expect(svg, `frame ${frame}`).toContain(color);
+        expect([R, G, B].filter((c) => c !== color).some((c) => svg.includes(c)), `frame ${frame}`).toBe(false);
+      }
     });
   });
 

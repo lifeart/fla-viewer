@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { graphicSymbolFrame, callsStop, movieClipAppearance, movieClipPlayhead, movieClipStopFrames } from '../symbol-loop';
+import { graphicSymbolFrame, callsStop, movieClipPlayhead, movieClipRun, movieClipStopFrames, movieClipTicks } from '../symbol-loop';
 import type { Frame, Layer, SymbolInstance, Timeline } from '../types';
 
 // Frames shown on parent frames 0..count-1 of a keyframe, for a 10-frame symbol.
@@ -83,6 +83,12 @@ describe('movie clip stop() frames', () => {
     ["var s = 'it\\'s'; stop();", true],
     ['if (done) { stop(); }', true],
     ['btn.onRelease = function() { play(); };\nstop();', true],
+    ['this.btn.on("click", () => this.stop());', false],
+    ['setTimeout(() => this.stop(), 100); play();', false],
+    ['var f = () => 1; stop();', true],
+    ['var r = /"/; stop();', true],
+    ['var r = /[/]/g; stop();', true],
+    ['var half = total / 2; stop();', true],
   ])('callsStop(%j) is %s', (script, expected) => {
     expect(callsStop(script)).toBe(expected);
   });
@@ -127,25 +133,47 @@ describe('movieClipPlayhead', () => {
   });
 });
 
-describe('movieClipAppearance', () => {
+describe('movieClipRun', () => {
   const instance = (name: string, symbolType: SymbolInstance['symbolType'] = 'movieclip') =>
     ({ type: 'symbol', libraryItemName: name, symbolType }) as SymbolInstance;
   const key = (index: number, duration: number, elements: SymbolInstance[]) =>
     ({ index, duration, elements }) as unknown as Frame;
 
-  it('goes back over back-to-back keyframes holding the same instance', () => {
-    const frames = [key(0, 2, [instance('A')]), key(2, 1, [instance('A')]), key(3, 4, [instance('A')])];
-    expect(movieClipAppearance(frames, frames[2], 0, 'A')).toBe(0);
+  it('spans back-to-back keyframes holding the same instance', () => {
+    const frames = [key(0, 2, [instance('A')]), key(2, 1, [instance('A')]), key(3, 4, [instance('A')]), key(7, 1, [])];
+    expect(movieClipRun(frames, frames[1], 0, 'A')).toEqual({ start: 0, end: 7 });
   });
 
   it('stops at a gap, another symbol, another slot or a graphic', () => {
     const gap = [key(0, 1, [instance('A')]), key(2, 1, [instance('A')])];
-    expect(movieClipAppearance(gap, gap[1], 0, 'A')).toBe(2);
-    const other = [key(0, 1, [instance('B')]), key(1, 1, [instance('A')])];
-    expect(movieClipAppearance(other, other[1], 0, 'A')).toBe(1);
+    expect(movieClipRun(gap, gap[1], 0, 'A')).toEqual({ start: 2, end: 3 });
+    const other = [key(0, 1, [instance('B')]), key(1, 1, [instance('A')]), key(2, 1, [instance('B')])];
+    expect(movieClipRun(other, other[1], 0, 'A')).toEqual({ start: 1, end: 2 });
     const slot = [key(0, 1, [instance('B'), instance('A')]), key(1, 1, [instance('A')])];
-    expect(movieClipAppearance(slot, slot[1], 0, 'A')).toBe(1);
+    expect(movieClipRun(slot, slot[1], 0, 'A')).toEqual({ start: 1, end: 2 });
     const graphic = [key(0, 1, [instance('A', 'graphic')]), key(1, 1, [instance('A')])];
-    expect(movieClipAppearance(graphic, graphic[1], 0, 'A')).toBe(1);
+    expect(movieClipRun(graphic, graphic[1], 0, 'A')).toEqual({ start: 1, end: 2 });
+  });
+});
+
+describe('movieClipTicks', () => {
+  const clip = (ticks: number, totalFrames: number, stops: number[] = []) => ({ ticks, totalFrames, stopFrames: new Set(stops) });
+
+  it('counts from the run start on the main timeline or in a graphic', () => {
+    expect(movieClipTicks(7, { start: 5, end: 10 })).toBe(2);
+  });
+
+  it('counts the enclosing clip\'s whole life when its run covers its timeline', () => {
+    expect(movieClipTicks(1, { start: 0, end: 4 }, clip(9, 4))).toBe(9);
+  });
+
+  it('restarts with every pass of a looping enclosing clip otherwise', () => {
+    // Enclosing 4-frame clip, 9 ticks old: on its frame 1; the run [0, 2) began at tick 8.
+    expect(movieClipTicks(1, { start: 0, end: 2 }, clip(9, 4))).toBe(1);
+  });
+
+  it('counts from the run start in an enclosing clip that held at a stop()', () => {
+    expect(movieClipTicks(0, { start: 0, end: 1 }, clip(9, 4, [0]))).toBe(9);
+    expect(movieClipTicks(2, { start: 1, end: 3 }, clip(9, 4, [2]))).toBe(8);
   });
 });

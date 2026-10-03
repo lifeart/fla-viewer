@@ -851,14 +851,17 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   (instances and library items); a missing value is a movie clip (`parseSymbolType`). Movie
   clips run their own playheads (`advanceMovieClipPlayheads`, called by the player on every
   tick including a timeline wrap, and by every frame-sequence exporter) and hold on a keyframe
-  whose script calls their own `stop()` at frame entry (`callsStop` ignores comments, strings
-  and function bodies); other scripts are not run. Playhead state is keyed by the instance
-  path (symbol, layer, element index at each level) and dropped at the end of a `renderFrame`
-  that didn't reach it, so a clip placed again starts over. A clip seen for the first time
-  (after a seek, in a single-frame or mid-range export) is seeded to where playing since its
-  run of back-to-back keyframes began would put it (`movieClipAppearance`, `movieClipPlayhead`);
-  for a clip nested in a looping clip that ignores the parent's earlier loops. The SVG exporter
-  seeds from the instance's own keyframe.
+  whose script calls their own `stop()` at frame entry (`callsStop` ignores comments, string
+  and regex literals, and function bodies including arrow expressions); other scripts are not
+  run. Playhead state is keyed by the instance path (symbol, layer, element index at each
+  level). A state is dropped at the end of a `renderFrame` that didn't reach it, and replaced
+  when the instance's run of back-to-back keyframes (`movieClipRun`) changes, e.g. when the
+  timeline loops back over a gap; either way a clip placed again starts over. A new state is
+  seeded to where continuous playback would be (`movieClipTicks` + `movieClipPlayhead`): ticks
+  since the run began, measured on the parent's frames, or inside another movie clip on that
+  clip's own elapsed ticks (it loops from frame 0 or holds at its first stop()). So a seek, a
+  single-frame/SVG/mid-range export, or a frame after a `cacheAsBitmap` frame agrees with
+  playback. A `cacheAsBitmap` frame itself still shows the cached subtree.
 
 ### Pre-CS5 binary FLA (issue #8)
 - Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not
