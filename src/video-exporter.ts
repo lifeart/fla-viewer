@@ -1,6 +1,6 @@
 import type { FLADocument, SoundItem, FrameSound } from './types';
 import { isLayerVisibleInFla, getMaskLayerIndex, invertMatrix } from './layer-utils';
-import { stageLayerViews, type StageLayerViews } from './native-camera';
+import { layerZDepthAt, sortByStageDepth, stageLayerViews, type StageLayerViews } from './native-camera';
 import { FLARenderer } from './renderer';
 import {
   graphicSymbolFrame, instanceClock, movieClipClock, movieClipPlayhead, movieClipRun, movieClipStopFrames,
@@ -1839,9 +1839,9 @@ export async function exportSVG(
   //  - Masked children are NOT rendered again when their index comes up in the
   //    normal loop (tracked via maskedLayers).
   //
-  // `stageViews` (main timeline only) applies Animate's native camera: each
-  // layer's output is wrapped in its view transform, as in the renderer
-  // (src/native-camera.ts).
+  // `stageViews` (main timeline only) applies Animate's native camera and layer
+  // depth: each layer's output is wrapped in its view transform and layers are
+  // stacked by depth, as in the renderer (src/native-camera.ts).
   const renderLayerStack = (
     layers: import('./types').Layer[],
     atFrameIndex: number,
@@ -1860,7 +1860,7 @@ export async function exportSVG(
       }
     }
 
-    // A layer's output in its stage view (dropped when it is not drawn).
+    // A layer's output in its stage view (dropped when behind the camera).
     const pushInView = (target: string[], layerOut: string[], layerIndex: number): void => {
       if (layerOut.length === 0) return;
       const view = stageViews ? stageViews.matrices[layerIndex] : undefined;
@@ -1874,7 +1874,8 @@ export async function exportSVG(
     };
 
     const indices = [...Array(layers.length).keys()].reverse();
-    for (const layerIndex of indices) {
+    const paintOrder = stageViews ? sortByStageDepth(indices, stageViews) : indices;
+    for (const layerIndex of paintOrder) {
       const layer = layers[layerIndex];
 
       if (referenceLayers.has(layerIndex)) continue;
@@ -1908,7 +1909,7 @@ export async function exportSVG(
         const maskFrame = findActiveFrame(layer, atFrameIndex);
         const clipId = maskFrame ? buildMaskClipDef(maskFrame) : null;
         const maskView = stageViews ? stageViews.matrices[layerIndex] : undefined;
-        if (clipId && maskView === null) continue; // the mask is not drawn: no mask area
+        if (clipId && maskView === null) continue; // the mask is behind the camera: no mask area
         const maskInverse = clipId && maskView ? invertMatrix(maskView) : null;
         if (clipId && maskView && maskInverse) {
           // The clip is in the mask's view; the children are already in stage space.
@@ -1939,13 +1940,13 @@ export async function exportSVG(
   }
 
   // Animate's native camera, at its keyframe matrix (this exporter does not
-  // interpolate tweens).
+  // interpolate tweens), plus its layer depth.
   const cameraLayer = timeline.nativeCameraLayerIndex !== undefined
     ? timeline.layers[timeline.nativeCameraLayerIndex]
     : undefined;
   const cameraElement = cameraLayer ? findActiveFrame(cameraLayer, frameIndex)?.elements[0] : undefined;
   const camera = cameraLayer && cameraElement?.type === 'symbol'
-    ? { matrix: cameraElement.matrix }
+    ? { matrix: cameraElement.matrix, zDepth: layerZDepthAt(cameraLayer, frameIndex) }
     : null;
 
   const renderedElements: string[] = [];
@@ -1958,7 +1959,7 @@ export async function exportSVG(
     timeline.referenceLayers,
     renderedElements,
     rootClock(frameIndex),
-    stageLayerViews(timeline.layers, camera, width, height)
+    stageLayerViews(timeline.layers, frameIndex, camera, width, height)
   );
 
   // Build SVG

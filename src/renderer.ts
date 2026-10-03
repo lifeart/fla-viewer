@@ -37,7 +37,7 @@ import {
 } from './symbol-loop';
 import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 import { variableWidthStrokePolygons } from './variable-width-stroke';
-import { stageLayerViews, type StageCamera, type StageLayerViews } from './native-camera';
+import { layerZDepthAt, sortByStageDepth, stageLayerViews, type StageCamera, type StageLayerViews } from './native-camera';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -1100,7 +1100,7 @@ export class FLARenderer {
   ): void {
     const ctx = this.ctx;
     const maskLayer = timeline.layers[maskLayerIndex];
-    // The mask's own camera view (null: not drawn, so no mask area).
+    // The mask's own camera/depth view (null: behind the camera, so no mask area).
     const maskView = stageViews ? stageViews.matrices[maskLayerIndex] : undefined;
 
     // Find the frame at the current index for the mask layer. With no mask
@@ -1301,11 +1301,12 @@ export class FLARenderer {
 
     const ctx = this.ctx;
 
-    // Animate's native camera (main timeline only): each layer gets its own
-    // stage transform. Null without a camera.
+    // Animate's native camera and layer depth (main timeline only): each layer
+    // gets its own stage transform, and layers stack by depth. Null when
+    // neither applies at this frame.
     const nativeCamera = depth === 0 ? this.getNativeCamera(timeline, frameIndex) : null;
     const stageViews = depth === 0 && this.doc
-      ? stageLayerViews(timeline.layers, nativeCamera, this.doc.width, this.doc.height)
+      ? stageLayerViews(timeline.layers, frameIndex, nativeCamera, this.doc.width, this.doc.height)
       : null;
 
     // Determine which camera layer to use (if any)
@@ -1336,9 +1337,10 @@ export class FLARenderer {
 
     // Render layers based on layerOrder setting (main) or nestedLayerOrder (nested symbols)
     const order = depth === 0 ? this.layerOrder : this.nestedLayerOrder;
-    const indices = order === 'reverse'
+    const timelineOrder = order === 'reverse'
       ? [...Array(timeline.layers.length).keys()].reverse()  // [len-1, len-2, ..., 0]
       : [...Array(timeline.layers.length).keys()];           // [0, 1, ..., len-1]
+    const indices = stageViews ? sortByStageDepth(timelineOrder, stageViews) : timelineOrder;
 
     // Track which layers are masked and their mask layer index
     const maskedLayers = new Map<number, number>(); // masked layer index -> mask layer index
@@ -1459,17 +1461,18 @@ export class FLARenderer {
     return this.applyMotionObject(frame, element, frameIndex).matrix;
   }
 
-  // Animate's native camera at a frame: its `__Camera__` instance's matrix,
-  // tweened like any instance.
+  // Animate's native camera at a frame: its `__Camera__` instance's matrix
+  // (tweened like any instance) and the camera layer's depth.
   private getNativeCamera(timeline: Timeline, frameIndex: number): StageCamera | null {
     const index = timeline.nativeCameraLayerIndex;
     const cameraLayer = index !== undefined ? timeline.layers[index] : undefined;
     if (!cameraLayer) return null;
     const matrix = this.getCameraTransform(cameraLayer, frameIndex);
-    return matrix ? { matrix } : null;
+    return matrix ? { matrix, zDepth: layerZDepthAt(cameraLayer, frameIndex) } : null;
   }
 
-  // Draw a main-timeline layer through its native camera view.
+  // Draw a main-timeline layer through its native camera/layer depth view.
+  // A layer behind the camera is not drawn.
   private withStageView(stageViews: StageLayerViews | null, layerIndex: number, draw: () => void): void {
     if (!stageViews) {
       draw();

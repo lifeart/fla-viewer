@@ -209,6 +209,18 @@ Animate's own camera is a layer type, not a naming convention (`src/native-camer
 - Main timeline only, as in the runtime. Masks clip in their own layer's view
   (`renderMaskGroup`). The SVG exporter uses the camera keyframe's matrix without tweening.
 
+**Layer depth (Animate 2019+).** `layer.setZDepthAtFrame` is saved as `frameZDepth` on the
+layer's keyframes (absent is 0; negative is nearer). The runtime (`_applyLayerZDepth`,
+`_getProjectionMatrix`, `___GetDepth___`) draws each main-timeline layer through
+`P(z) * cameraView`, where `P(z)` scales about the stage center by `f / (f + z)` with the fixed
+`f = 528.25` (`LAYER_DEPTH_FOCAL_LENGTH`) and `z` is the layer's depth minus the camera's
+(attached layers: their own depth, no camera). So near layers grow and pan faster (parallax);
+at `z <= -f` the layer is behind the camera and not drawn. Root layers are re-stacked by depth,
+furthest first, stable for equal depths; an attached layer sorts at `2 * depth + cameraDepth`
+when the camera has a depth. Depth tweens linearly across a classic tween (the published code
+is `Tween.get(layer).to({depth: -39}, 71)` for `frameZDepth="-3"` -> `"-39"` over 71 frames).
+Checked against joao-cesar/adobe `parallax_effect` and dailybruin `lessons-in-laughter`.
+
 ### Video Instance
 
 ```xml
@@ -355,6 +367,8 @@ Decodes to:
 
 - [x] **Native Camera** (Animate CC 2017+): `layerType="camera"` pan, zoom and rotation;
   `attachedToCamera` layers stay fixed (see "Native Camera" above)
+- [x] **Layer Depth** (Animate 2019+): `frameZDepth` perspective scale, parallax with the
+  camera, and stacking by depth
 
 - [x] **Video Instance Support**: Placeholder rendering for DOMVideoInstance
   - Parses video dimensions and position
@@ -473,6 +487,10 @@ strokes and the Vitest suite. What is still open:
   uses one has been found, so how a stroke refers to its brush is unknown
 - [ ] **Native camera**: color effects (tint, color filter) are not applied (how they are
   saved is unverified); the SVG exporter does not tween the camera
+- [ ] **Layer depth**: the camera's own depth is read from the camera layer's `frameZDepth`
+  (inferred; no real file with a nonzero camera depth found); eased depth tweens are linear;
+  depth inside symbols and the runtime's size-locked `layerDepth` (always 0 in the published
+  samples) are ignored
 
 `TODO.md` has the detailed feature-by-feature status against JPEXS; `review.md` is an
 older code review checklist.
@@ -494,6 +512,7 @@ older code review checklist.
 | DOMLayer | `parentLayerIndex` | Folder hierarchy |
 | DOMLayer | `layerType="camera"`, `attachedToCamera` | Native camera (`src/native-camera.ts`) |
 | DOMTimeline | `cameraLayerEnabled` | Native camera on/off |
+| DOMFrame | `frameZDepth` | Layer depth (`src/native-camera.ts`) |
 | DOMFrame | `index`, `duration`, `keyMode` | Frame timing |
 | DOMFrame | `tweenType`, `acceleration` | Motion tween |
 | DOMSymbolInstance | `libraryItemName`, `symbolType` | Symbol reference |
@@ -594,7 +613,7 @@ Edge contributions are collected per fill style, then sorted into connected chai
 | `src/xfl-folder.ts` | Uncompressed XFL folders |
 | `src/path-utils.ts` | Library path normalization |
 | `src/layer-utils.ts` | Layer visibility cascade, mask membership, rig parent lookup (shared by renderer and exporter) |
-| `src/native-camera.ts` | Animate's native camera: per-layer stage views (shared by renderer and SVG exporter) |
+| `src/native-camera.ts` | Animate's native camera and layer depth: per-layer stage views and stacking (shared by renderer and SVG exporter) |
 | `src/renderer.ts` | Canvas 2D rendering engine, edge sorting, path building, masks, rig transforms |
 | `src/player.ts` | Timeline playback, scenes, audio sync, zoom/pan |
 | `src/video-exporter.ts` | MP4/WebM (WebCodecs), GIF, PNG sequence, PNG/SVG frame, sprite sheet export |
@@ -945,7 +964,8 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   but every real profile seen is symmetric. Shape tweens keep a constant width.
 - **Native camera (Animate CC 2017+).** `layerType="camera"` holding one `__Camera__` instance,
   plus `attachedToCamera` on layers; see "Native Camera" above. It is not a ramka layer, though
-  it is usually named "Camera". Tests: `src/__tests__/native-camera.test.ts`.
+  it is usually named "Camera". Layer depth (Animate 2019+) is `frameZDepth` on keyframes.
+  Tests: `src/__tests__/native-camera.test.ts`.
 - **Movie clips have no `symbolType`.** Animate writes it only for `graphic`/`button`
   (instances and library items); a missing value is a movie clip (`parseSymbolType`). Movie
   clips run their own playheads (`advanceMovieClipPlayheads`, called by the player on every

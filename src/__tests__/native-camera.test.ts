@@ -3,14 +3,20 @@ import JSZip from 'jszip';
 import { FLAParser } from '../fla-parser';
 import { FLARenderer } from '../renderer';
 import { exportSVG } from '../video-exporter';
-import { cameraViewMatrix, stageLayerViews } from '../native-camera';
+import {
+  LAYER_DEPTH_FOCAL_LENGTH,
+  cameraViewMatrix,
+  layerZDepthAt,
+  stageLayerViews,
+} from '../native-camera';
 import type { FLADocument, Matrix, SymbolInstance } from '../types';
 
-// Animate's native camera (CC 2017+). The XML mirrors real Animate saves:
-// eliasku/animate-tests assets/camera_layer (Animate 20, attachedToCamera
-// layers) and dailybruin lessons-in-laughter (Animate 18, camera zoom tween),
-// whose published HTML5 output gives the expected behavior
-// (`_applyLayerZDepth`, `AdobeAn.VirtualCamera`).
+// Animate's native camera (CC 2017+) and layer depth (Animate 2019+). The XML
+// mirrors real Animate saves: eliasku/animate-tests assets/camera_layer (Animate
+// 20, attachedToCamera layers), joao-cesar/adobe parallax_effect (Animate 19,
+// frameZDepth parallax) and dailybruin lessons-in-laughter (Animate 18, camera
+// zoom tween and a frameZDepth tween), whose published HTML5 output gives the
+// expected behavior (`_applyLayerZDepth`, `AdobeAn.VirtualCamera`).
 
 const W = 550;
 const H = 400;
@@ -104,6 +110,20 @@ describe('native camera parsing', () => {
     expect(layers[4].attachedToCamera).toBeUndefined();
   });
 
+  it('reads frameZDepth onto keyframes (absent is depth 0)', async () => {
+    const doc = await parseXfl({
+      'DOMDocument.xml': domDocument(
+        `<DOMLayer name="chairs"><frames>
+          <DOMFrame index="0" duration="71" tweenType="motion" motionTweenSnap="true" keyMode="22017" frameZDepth="-3"><elements>${rectShape(0, 0, 10, 10, RED)}</elements></DOMFrame>
+          <DOMFrame index="71" duration="2" tweenType="motion" motionTweenSnap="true" keyMode="22017" frameZDepth="-39"><elements>${rectShape(0, 0, 10, 10, RED)}</elements></DOMFrame>
+        </frames></DOMLayer>` +
+        contentLayer('Level_0', rectShape(0, 0, 10, 10, BLUE))
+      ),
+    });
+    const [chairs, level0] = doc.timelines[0].layers;
+    expect(chairs.frames.map((f) => f.zDepth)).toEqual([-3, -39]);
+    expect(level0.frames[0].zDepth).toBeUndefined();
+  });
 });
 
 describe('native camera math', () => {
@@ -123,14 +143,45 @@ describe('native camera math', () => {
       ...(attachedToCamera && { attachedToCamera }),
       frames: [{ index: 0, duration: 1, keyMode: 9728, elements: [] }],
     });
-    const views = stageLayerViews([layer(), layer(true)], { matrix: { ...identity, a: 0.5, d: 0.5, tx: W / 2, ty: H / 2 } }, W, H)!;
+    const camera = { matrix: { ...identity, a: 0.5, d: 0.5, tx: W / 2, ty: H / 2 }, zDepth: 0 };
+    const views = stageLayerViews([layer(), layer(true)], 0, camera, W, H)!;
     expect(views.matrices[0]).toMatchObject({ a: 2, d: 2, tx: -W / 2, ty: -H / 2 });
     expect(views.matrices[1]).toEqual(identity);
   });
 
-  it('has nothing to do without a camera', () => {
+  it('tweens a layer depth linearly across a classic tween, as the runtime tweens `depth`', () => {
+    const layer = {
+      name: 'chairs', color: '#000000', visible: true, locked: false, outline: false,
+      frames: [
+        { index: 0, duration: 71, keyMode: 22017, tweenType: 'motion' as const, zDepth: -3, elements: [] },
+        { index: 71, duration: 2, keyMode: 22017, tweenType: 'motion' as const, zDepth: -39, elements: [] },
+      ],
+    };
+    expect(layerZDepthAt(layer, 0)).toBe(-3);
+    expect(layerZDepthAt(layer, 35)).toBeCloseTo(-3 - 36 * 35 / 71, 9);
+    expect(layerZDepthAt(layer, 72)).toBe(-39);
+    // Without a tween the depth holds until the next keyframe.
+    layer.frames[0].tweenType = 'none' as never;
+    expect(layerZDepthAt(layer, 35)).toBe(-3);
+  });
+
+  it('offsets layer depth by the camera depth, except for layers attached to the camera', () => {
+    const layer = (attachedToCamera?: boolean) => ({
+      name: 'L', color: '#000000', visible: true, locked: false, outline: false,
+      ...(attachedToCamera && { attachedToCamera }),
+      frames: [{ index: 0, duration: 1, keyMode: 9728, elements: [] }],
+    });
+    const camera = { matrix: { ...identity, tx: W / 2, ty: H / 2 }, zDepth: LAYER_DEPTH_FOCAL_LENGTH / 2 };
+    const views = stageLayerViews([layer(), layer(true)], 0, camera, W, H)!;
+    // Moving the camera half the focal length into the scene doubles a depth-0 layer...
+    expect(views.matrices[0]!.a).toBeCloseTo(LAYER_DEPTH_FOCAL_LENGTH / (LAYER_DEPTH_FOCAL_LENGTH / 2), 9);
+    // ...but not one attached to the camera.
+    expect(views.matrices[1]!.a).toBeCloseTo(1, 9);
+  });
+
+  it('has nothing to do without a camera or layer depth', () => {
     const layer = { name: 'L', color: '#000000', visible: true, locked: false, outline: false, frames: [{ index: 0, duration: 1, keyMode: 9728, elements: [] }] };
-    expect(stageLayerViews([layer], null, W, H)).toBeNull();
+    expect(stageLayerViews([layer], 0, null, W, H)).toBeNull();
   });
 });
 
@@ -220,6 +271,75 @@ describe('native camera rendering', () => {
   });
 });
 
+describe('layer depth rendering', () => {
+  let canvas: HTMLCanvasElement;
+  let renderer: FLARenderer;
+
+  beforeEach(() => {
+    canvas = document.createElement('canvas');
+    renderer = new FLARenderer(canvas);
+  });
+
+  async function render(layers: string, frame = 0): Promise<void> {
+    await renderer.setDocument(await parseXfl({ 'DOMDocument.xml': domDocument(layers) }));
+    renderer.renderFrame(frame);
+  }
+
+  const f = LAYER_DEPTH_FOCAL_LENGTH;
+  const centerSquare = rectShape(265, 190, 20, 20, RED);
+
+  it('scales a near layer up about the stage center', async () => {
+    // Depth -f/2 doubles the size: the 20px square becomes 40px (255..295).
+    await render(contentLayer('Near', centerSquare, '', `frameZDepth="${-f / 2}"`));
+    expect(colorAt(canvas, 258, 200)).toBe(RED);
+    expect(colorAt(canvas, 250, 200)).toBe(WHITE);
+  });
+
+  it('scales a far layer down', async () => {
+    // Depth f halves the size: 10px (270..280).
+    await render(contentLayer('Far', centerSquare, '', `frameZDepth="${f}"`));
+    expect(colorAt(canvas, 275, 200)).toBe(RED);
+    expect(colorAt(canvas, 267, 200)).toBe(WHITE);
+  });
+
+  it('pans near layers faster than far ones (parallax)', async () => {
+    // The camera moves 100px right. A depth-0 square moves 100px left; one at
+    // depth -f/2 moves twice as far.
+    await render(cameraLayer([{ index: 0, duration: 20, matrix: `tx="${W / 2 + 100}" ty="${H / 2}"` }]) +
+      contentLayer('Near', rectShape(270, 100, 10, 10, BLUE), '', `frameZDepth="${-f / 2}"`) +
+      contentLayer('Mid', rectShape(270, 300, 10, 10, RED)));
+    expect(colorAt(canvas, 175, 305)).toBe(RED);
+    // Near: center (275,105) -> 2 * (175 - 275, 105 - 200) + (275, 200) = (75, 10).
+    expect(colorAt(canvas, 75, 10)).toBe(BLUE);
+  });
+
+  it('stacks layers by depth, furthest first', async () => {
+    // The top layer is further away, so the bottom layer covers it.
+    await render(
+      contentLayer('Top', rectShape(200, 150, 150, 100, RED), '', 'frameZDepth="100"') +
+      contentLayer('Bottom', rectShape(200, 150, 150, 100, BLUE))
+    );
+    expect(colorAt(canvas, 275, 200)).toBe(BLUE);
+  });
+
+  it('does not draw a layer behind the camera', async () => {
+    await render(contentLayer('Behind', centerSquare, '', `frameZDepth="${-f - 10}"`));
+    expect(colorAt(canvas, 275, 200)).toBe(WHITE);
+  });
+
+  it('tweens depth across a classic tween', async () => {
+    // Depth 0 -> -f/2 over 10 frames: at frame 5 the depth is -f/4, scale 4/3.
+    const keyframes = `<DOMLayer name="Zoom"><frames>
+      <DOMFrame index="0" duration="10" tweenType="motion" keyMode="22017"><elements>${centerSquare}</elements></DOMFrame>
+      <DOMFrame index="10" duration="10" tweenType="motion" keyMode="22017" frameZDepth="${-f / 2}"><elements>${centerSquare}</elements></DOMFrame>
+    </frames></DOMLayer>`;
+    await render(keyframes, 5);
+    // Half-width 10 * 4/3 = 13.3: x 261.7..288.3.
+    expect(colorAt(canvas, 263, 200)).toBe(RED);
+    expect(colorAt(canvas, 259, 200)).toBe(WHITE);
+  });
+});
+
 describe('native camera in SVG export', () => {
   it('wraps layers in their camera view', async () => {
     const doc = await parseXfl({
@@ -233,6 +353,23 @@ describe('native camera in SVG export', () => {
     // Layer_1 pans 100px left.
     expect(svg).toContain('<g transform="matrix(1 0 0 1 -100 0)">');
     // The attached overlay is untransformed: Layer_1's is the only view group.
+    expect(svg.match(/<g transform="/g)).toHaveLength(1);
+  });
+
+  it('scales layers by depth and stacks them furthest first', async () => {
+    const doc = await parseXfl({
+      'DOMDocument.xml': domDocument(
+        cameraLayer([{ index: 0, duration: 20, matrix: `tx="${W / 2 + 100}" ty="${H / 2}"` }]) +
+        contentLayer('Far', rectShape(0, 0, 10, 10, RED), '', `frameZDepth="${LAYER_DEPTH_FOCAL_LENGTH}"`) +
+        contentLayer('Overlay', rectShape(0, 0, 10, 10, BLUE), 'attachedToCamera="true"')
+      ),
+    });
+    const svg = await (await exportSVG(doc, 0)).text();
+    // Far: scale 0.5 about the center after the -100px pan.
+    expect(svg).toContain('<g transform="matrix(0.5 0 0 0.5 87.5 100)">');
+    // The far layer is drawn before (under) the overlay even though it is above it.
+    expect(svg.indexOf('fill="#FF0000"')).toBeLessThan(svg.indexOf('fill="#0000FF"'));
+    // The attached overlay is untransformed: the far layer's is the only view group.
     expect(svg.match(/<g transform="/g)).toHaveLength(1);
   });
 });

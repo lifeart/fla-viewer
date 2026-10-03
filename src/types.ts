@@ -115,6 +115,11 @@ export interface Frame {
    * top of the element's own matrix (`pose * matrix`); the first is the identity.
    */
   ikPoseMatrices?: Matrix[][];
+  /**
+   * Layer depth at this keyframe (`frameZDepth`, Animate 2019+): negative is
+   * nearer the camera, positive further away. Absent means 0.
+   */
+  zDepth?: number;
   elements: DisplayElement[];
   tweens?: Tween[];
   sound?: FrameSound;

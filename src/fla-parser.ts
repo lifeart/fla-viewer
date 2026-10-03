@@ -846,6 +846,8 @@ export class FLAParser {
       const keyMode = parseInt(frameEl.getAttribute('keyMode') || '0');
       const tweenType = frameEl.getAttribute('tweenType') as Frame['tweenType'] | null;
       const acceleration = frameEl.getAttribute('acceleration');
+      // Layer depth (Animate 2019+); a missing value is depth 0.
+      const zDepth = parseFloat(frameEl.getAttribute('frameZDepth') ?? '');
 
       // Motion tween properties
       const motionTweenRotate = parseMotionTweenRotate(frameEl.getAttribute('motionTweenRotate'));
@@ -893,6 +895,7 @@ export class FLAParser {
         ...(morphShape && { morphShape }),
         ...(motionObject && { motionObject }),
         ...(ikPoseMatrices && { ikPoseMatrices }),
+        ...(Number.isFinite(zDepth) && zDepth !== 0 && { zDepth }),
         ...(label && { label }),
         ...(labelType && { labelType }),
         ...(actionScript && { actionScript }),
