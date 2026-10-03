@@ -97,13 +97,35 @@ async function toBytes(input: FLAInput): Promise<Uint8Array> {
   return new Uint8Array(await input.arrayBuffer());
 }
 
-// Animate's default "Dashed" line style when <DashedStroke> omits dashLength/spaceLength.
+// Animate's default "Dashed" line style when <DashedStroke> omits dash1/dash2.
 // Source: the Property Inspector "Dashed" stroke style (Stroke Style dialog) defaults; the
 // Adobe JSFL Stroke object documents dash1 (solid run) and dash2 (gap) as integers but does
 // not publish the absent-attribute defaults, so we mirror the UI default 4-unit dash + 4-unit
 // gap. Units match `weight` (1:1 with canvas lineWidth/user space), so no conversion is needed.
 const DEFAULT_DASH_LENGTH = 4;
 const DEFAULT_DASH_SPACE_LENGTH = 4;
+// Default gap between dots of a <DottedStroke> without `dotSpace` (flacomdoc's XFL reader).
+const DEFAULT_DOT_SPACE = 3;
+
+/**
+ * Normalize a classic tween's `motionTweenRotate`. Animate writes the long forms
+ * `"clockwise"` / `"counter-clockwise"` (JSFL `frame.motionTweenRotate`); the short
+ * `cw`/`ccw` forms are accepted too. Anything else (`"auto"`, absent) means no forced spin.
+ */
+export function parseMotionTweenRotate(value: string | null): 'cw' | 'ccw' | 'none' | undefined {
+  switch (value) {
+    case 'clockwise':
+    case 'cw':
+      return 'cw';
+    case 'counter-clockwise':
+    case 'ccw':
+      return 'ccw';
+    case 'none':
+      return 'none';
+    default:
+      return undefined;
+  }
+}
 
 export class FLAParser {
   private zip: JSZip | null = null;
@@ -735,7 +757,7 @@ export class FLAParser {
       const acceleration = frameEl.getAttribute('acceleration');
 
       // Motion tween properties
-      const motionTweenRotate = frameEl.getAttribute('motionTweenRotate') as 'cw' | 'ccw' | 'none' | null;
+      const motionTweenRotate = parseMotionTweenRotate(frameEl.getAttribute('motionTweenRotate'));
       const motionTweenRotateTimes = frameEl.getAttribute('motionTweenRotateTimes');
       const motionTweenScale = frameEl.getAttribute('motionTweenScale');
       const motionTweenOrientToPath = frameEl.getAttribute('motionTweenOrientToPath');
@@ -1483,28 +1505,47 @@ export class FLAParser {
         continue;
       }
 
-      // Check for DashedStroke (a solid-colored line drawn with a dash pattern)
-      const dashedStroke = strokeEl.querySelector('DashedStroke');
-      if (dashedStroke) {
-        const commonProps = parseCommonStrokeProps(dashedStroke);
-        const solidColor = dashedStroke.querySelector('fill > SolidColor');
+      // Patterned strokes: Dashed plus the older "artistic" styles (Dotted, Hatched,
+      // Ragged, Stipple) that Flash MX..CS6 could draw and that still appear in
+      // XFL files. They are solid-colored; only Dashed and Dotted map to a canvas
+      // dash pattern, the rest are drawn as a plain line so the outline is not lost.
+      const styledStroke = strokeEl.querySelector(
+        ':scope > DashedStroke, :scope > DottedStroke, :scope > HatchedStroke, :scope > RaggedStroke, :scope > StippleStroke'
+      );
+      if (styledStroke) {
+        const commonProps = parseCommonStrokeProps(styledStroke);
+        const solidColor = styledStroke.querySelector('fill > SolidColor');
         const color = solidColor?.getAttribute('color') || '#000000';
 
-        // XFL <DashedStroke dashLength="…" spaceLength="…"> — lengths are in the
-        // same user-space units as `weight`, so they map 1:1 to canvas setLineDash.
-        // Real Animate files routinely omit both attributes and rely on the UI
-        // default "Dashed" line style, which is a 4-unit dash + 4-unit gap.
-        const dashLengthAttr = dashedStroke.getAttribute('dashLength');
-        const spaceLengthAttr = dashedStroke.getAttribute('spaceLength');
-        const dashLength = dashLengthAttr !== null ? parseFloat(dashLengthAttr) : DEFAULT_DASH_LENGTH;
-        const spaceLength = spaceLengthAttr !== null ? parseFloat(spaceLengthAttr) : DEFAULT_DASH_SPACE_LENGTH;
+        let dash: number[] | undefined;
+        let caps = commonProps.caps;
+        if (styledStroke.tagName === 'DashedStroke') {
+          // Animate writes <DashedStroke dash1="…" dash2="…"> (JSFL stroke.dash1/dash2:
+          // solid run, then gap). `dashLength`/`spaceLength` are accepted as aliases.
+          // Lengths are in the same user-space units as `weight`, so they map 1:1 to
+          // canvas setLineDash. Files often omit both and rely on the UI default.
+          const dash1 = styledStroke.getAttribute('dash1') ?? styledStroke.getAttribute('dashLength');
+          const dash2 = styledStroke.getAttribute('dash2') ?? styledStroke.getAttribute('spaceLength');
+          dash = [
+            dash1 !== null ? parseFloat(dash1) : DEFAULT_DASH_LENGTH,
+            dash2 !== null ? parseFloat(dash2) : DEFAULT_DASH_SPACE_LENGTH,
+          ];
+        } else if (styledStroke.tagName === 'DottedStroke') {
+          // Round dots `weight` wide with `dotSpace` between them (JSFL stroke.dotSpace).
+          // A zero-length dash with round caps draws one dot per period.
+          const dotSpaceAttr = styledStroke.getAttribute('dotSpace');
+          const dotSpace = dotSpaceAttr !== null ? parseFloat(dotSpaceAttr) : DEFAULT_DOT_SPACE;
+          dash = [0, (commonProps.weight ?? 1) + dotSpace];
+          caps = 'round';
+        }
 
         strokes.push({
           index,
           type: 'solid',
           color,
-          dash: [dashLength, spaceLength],
-          ...commonProps
+          ...commonProps,
+          ...(caps && { caps }),
+          ...(dash && { dash }),
         } as StrokeStyle);
         continue;
       }
