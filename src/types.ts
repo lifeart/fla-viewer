@@ -453,7 +453,7 @@ export interface GlowFilter {
   blurX: number;
   blurY: number;
   color: string;
-  strength: number; // 0-1 (normalized from 0-255)
+  strength: number; // ratio, 1 = 100% (XFL `strength`, SWF FIXED8)
   alpha?: number;
   inner?: boolean;
   knockout?: boolean;
@@ -465,7 +465,7 @@ export interface DropShadowFilter {
   blurX: number;
   blurY: number;
   color: string;
-  strength: number; // 0-1 (normalized from 0-255)
+  strength: number; // ratio, 1 = 100% (XFL `strength`, SWF FIXED8)
   alpha?: number;
   distance: number;
   angle: number; // in degrees
@@ -479,7 +479,7 @@ export interface BevelFilter {
   type: 'bevel';
   blurX: number;
   blurY: number;
-  strength: number; // 0-1 (normalized from 0-255)
+  strength: number; // ratio, 1 = 100% (XFL `strength`, SWF FIXED8)
   highlightColor: string;
   highlightAlpha?: number;
   shadowColor: string;

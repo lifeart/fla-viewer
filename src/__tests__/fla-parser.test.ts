@@ -5328,7 +5328,7 @@ describe('FLAParser', () => {
                         <matrix><Matrix/></matrix>
                         <transformationPoint><Point/></transformationPoint>
                         <filters>
-                          <GlowFilter blurX="8" blurY="8" color="#FF0000" strength="200" alpha="0.8" inner="true" knockout="true" quality="3"/>
+                          <GlowFilter blurX="8" blurY="8" color="#FF0000" strength="2" alpha="0.8" inner="true" knockout="true" quality="3"/>
                         </filters>
                       </DOMSymbolInstance>
                     </elements>
@@ -5350,7 +5350,7 @@ describe('FLAParser', () => {
           expect(filter.blurX).toBe(8);
           expect(filter.blurY).toBe(8);
           expect(filter.color).toBe('#FF0000');
-          expect(filter.strength).toBeCloseTo(200 / 255, 2);
+          expect(filter.strength).toBe(2);
           expect(filter.alpha).toBe(0.8);
           expect(filter.inner).toBe(true);
           expect(filter.knockout).toBe(true);
@@ -5372,7 +5372,7 @@ describe('FLAParser', () => {
                         <matrix><Matrix/></matrix>
                         <transformationPoint><Point/></transformationPoint>
                         <filters>
-                          <DropShadowFilter blurX="5" blurY="5" color="#000000" strength="128" alpha="0.5" distance="10" angle="45" inner="false" knockout="false" hideObject="true" quality="1"/>
+                          <DropShadowFilter blurX="5" blurY="5" color="#000000" strength="0.5" alpha="0.5" distance="10" angle="45" inner="false" knockout="false" hideObject="true" quality="1"/>
                         </filters>
                       </DOMSymbolInstance>
                     </elements>
@@ -5394,7 +5394,7 @@ describe('FLAParser', () => {
           expect(filter.blurX).toBe(5);
           expect(filter.blurY).toBe(5);
           expect(filter.color).toBe('#000000');
-          expect(filter.strength).toBeCloseTo(128 / 255, 2);
+          expect(filter.strength).toBe(0.5);
           expect(filter.alpha).toBe(0.5);
           expect(filter.distance).toBe(10);
           expect(filter.angle).toBe(45);
@@ -5443,6 +5443,42 @@ describe('FLAParser', () => {
       }
     });
 
+    it('reads strength as a ratio and omitted glow attributes as Animate\'s defaults', async () => {
+      // Both lines are from real Animate saves whose object tweens record the same
+      // filters as curves: DropShadow_Strength 60, and Glow_BlurX/BlurY 5,
+      // Glow_Strength 100, Glow_Color 0xff0000ff.
+      const timelines = `
+        <timelines>
+          <DOMTimeline name="Scene 1">
+            <layers>
+              <DOMLayer name="Layer 1">
+                <frames>
+                  <DOMFrame index="0">
+                    <elements>
+                      <DOMSymbolInstance libraryItemName="TestSymbol" symbolType="graphic">
+                        <matrix><Matrix/></matrix>
+                        <transformationPoint><Point/></transformationPoint>
+                        <filters>
+                          <DropShadowFilter alpha="0.898039215686275" blurX="60" blurY="60" distance="15" quality="3" strength="0.6"/>
+                          <GlowFilter quality="3"/>
+                        </filters>
+                      </DOMSymbolInstance>
+                    </elements>
+                  </DOMFrame>
+                </frames>
+              </DOMLayer>
+            </layers>
+          </DOMTimeline>
+        </timelines>`;
+
+      const doc = await parser.parse(await createFlaZip(createDOMDocument({ timelines })));
+      const element = doc.timelines[0].layers[0].frames[0].elements[0];
+      expect(element.type).toBe('symbol');
+      const filters = element.type === 'symbol' ? element.filters : undefined;
+      expect(filters?.[0]).toMatchObject({ type: 'dropShadow', strength: 0.6, color: '#000000', angle: 45, distance: 15 });
+      expect(filters?.[1]).toMatchObject({ type: 'glow', blurX: 5, blurY: 5, color: '#FF0000', alpha: 1, strength: 1, quality: 3 });
+    });
+
     it('should parse BevelFilter with all attributes', async () => {
       const timelines = `
         <timelines>
@@ -5456,7 +5492,7 @@ describe('FLAParser', () => {
                         <matrix><Matrix/></matrix>
                         <transformationPoint><Point/></transformationPoint>
                         <filters>
-                          <BevelFilter blurX="6" blurY="8" strength="150" highlightColor="#FFFFFF" highlightAlpha="0.9" shadowColor="#333333" shadowAlpha="0.7" distance="5" angle="135" inner="true" knockout="false" quality="2" type="full"/>
+                          <BevelFilter blurX="6" blurY="8" strength="1.5" highlightColor="#FFFFFF" highlightAlpha="0.9" shadowColor="#333333" shadowAlpha="0.7" distance="5" angle="135" inner="true" knockout="false" quality="2" type="full"/>
                         </filters>
                       </DOMSymbolInstance>
                     </elements>
@@ -5477,7 +5513,7 @@ describe('FLAParser', () => {
         if (filter.type === 'bevel') {
           expect(filter.blurX).toBe(6);
           expect(filter.blurY).toBe(8);
-          expect(filter.strength).toBeCloseTo(150 / 255, 2);
+          expect(filter.strength).toBe(1.5);
           expect(filter.highlightColor).toBe('#FFFFFF');
           expect(filter.highlightAlpha).toBe(0.9);
           expect(filter.shadowColor).toBe('#333333');
@@ -5673,7 +5709,7 @@ describe('FLAParser', () => {
                         <matrix><Matrix/></matrix>
                         <transformationPoint><Point/></transformationPoint>
                         <filters>
-                          <GradientGlowFilter blurX="10" blurY="10" strength="200" distance="8" angle="90" inner="false" knockout="true" quality="2">
+                          <GradientGlowFilter blurX="10" blurY="10" strength="2" distance="8" angle="90" inner="false" knockout="true" quality="2">
                             <GradientEntry color="#FF0000" alpha="1" ratio="0"/>
                             <GradientEntry color="#FFFF00" alpha="0.8" ratio="128"/>
                             <GradientEntry color="#00FF00" alpha="0.5" ratio="255"/>
@@ -5698,7 +5734,7 @@ describe('FLAParser', () => {
         if (filter.type === 'gradientGlow') {
           expect(filter.blurX).toBe(10);
           expect(filter.blurY).toBe(10);
-          expect(filter.strength).toBeCloseTo(200 / 255, 2);
+          expect(filter.strength).toBe(2);
           expect(filter.distance).toBe(8);
           expect(filter.angle).toBe(90);
           expect(filter.inner).toBe(false);
@@ -5728,7 +5764,7 @@ describe('FLAParser', () => {
                         <matrix><Matrix/></matrix>
                         <transformationPoint><Point/></transformationPoint>
                         <filters>
-                          <GradientBevelFilter blurX="6" blurY="6" strength="128" distance="4" angle="45" inner="true" knockout="false" quality="1">
+                          <GradientBevelFilter blurX="6" blurY="6" strength="0.5" distance="4" angle="45" inner="true" knockout="false" quality="1">
                             <GradientEntry color="#FFFFFF" alpha="1" ratio="0"/>
                             <GradientEntry color="#808080" alpha="1" ratio="128"/>
                             <GradientEntry color="#000000" alpha="1" ratio="255"/>
@@ -5753,7 +5789,7 @@ describe('FLAParser', () => {
         if (filter.type === 'gradientBevel') {
           expect(filter.blurX).toBe(6);
           expect(filter.blurY).toBe(6);
-          expect(filter.strength).toBeCloseTo(128 / 255, 2);
+          expect(filter.strength).toBe(0.5);
           expect(filter.distance).toBe(4);
           expect(filter.angle).toBe(45);
           expect(filter.inner).toBe(true);

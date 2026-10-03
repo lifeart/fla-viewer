@@ -861,6 +861,8 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
     `evaluateFilters` replaces the instance's next filter of each kind (or appends one) and
     keeps the rest; `applyMotionObject` passes the result to the symbol/text filter path.
     Gradient colors and bevel/gradient `Type` come from the instance's own filter.
+    A static filter's `strength` attribute is the same ratio (`0.6` = 60%, default 1), not
+    0..255, and a `<GlowFilter>` with no attributes is blur 5, red, 100% (`parseFilters`).
 - **Primitives (CS3+).** `<DOMRectangleObject>`/`<DOMOvalObject>` have parameters and a singular
   `<fill>`/`<stroke>`, no edges; `src/primitive-shapes.ts` rebuilds the outline. x/y is the
   top-left in the element's own space; oval angles are degrees from 3 o'clock, clockwise.

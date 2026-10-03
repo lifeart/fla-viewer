@@ -3236,7 +3236,9 @@ export class FLAParser {
     };
   }
 
-  // Parse filters from <filters> element
+  // Parse filters from <filters> element. `strength` is a ratio (1 = 100%, the
+  // default): JPEXS writes SWF's FIXED8 strength as is, and Animate saves a 60%
+  // drop shadow as strength="0.6" (its object tween curve says 60).
   private parseFilters(el: globalThis.Element): Filter[] {
     const filtersEl = el.querySelector(':scope > filters');
     if (!filtersEl) return [];
@@ -3255,13 +3257,14 @@ export class FLAParser {
           break;
 
         case 'GlowFilter':
+          // Animate omits defaults: a saved <GlowFilter quality="3"/> tweens from
+          // blur 5, strength 100% and opaque red (its object tween's Glow_* curves).
           filters.push({
             type: 'glow',
-            blurX: parseFloat(child.getAttribute('blurX') || '0'),
-            blurY: parseFloat(child.getAttribute('blurY') || '0'),
-            color: child.getAttribute('color') || '#000000',
-            // Strength is stored as 0-255 in XFL, normalize to 0-1
-            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            blurX: parseFloat(child.getAttribute('blurX') || '5'),
+            blurY: parseFloat(child.getAttribute('blurY') || '5'),
+            color: child.getAttribute('color') || '#FF0000',
+            strength: parseFloat(child.getAttribute('strength') || '1'),
             alpha: parseFloat(child.getAttribute('alpha') || '1'),
             inner: child.getAttribute('inner') === 'true',
             knockout: child.getAttribute('knockout') === 'true',
@@ -3275,7 +3278,7 @@ export class FLAParser {
             blurX: parseFloat(child.getAttribute('blurX') || '0'),
             blurY: parseFloat(child.getAttribute('blurY') || '0'),
             color: child.getAttribute('color') || '#000000',
-            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            strength: parseFloat(child.getAttribute('strength') || '1'),
             alpha: parseFloat(child.getAttribute('alpha') || '1'),
             distance: parseFloat(child.getAttribute('distance') || '4'),
             angle: parseFloat(child.getAttribute('angle') || '45'),
@@ -3291,7 +3294,7 @@ export class FLAParser {
             type: 'bevel',
             blurX: parseFloat(child.getAttribute('blurX') || '4'),
             blurY: parseFloat(child.getAttribute('blurY') || '4'),
-            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            strength: parseFloat(child.getAttribute('strength') || '1'),
             highlightColor: child.getAttribute('highlightColor') || '#FFFFFF',
             highlightAlpha: parseFloat(child.getAttribute('highlightAlpha') || '1'),
             shadowColor: child.getAttribute('shadowColor') || '#000000',
@@ -3364,7 +3367,7 @@ export class FLAParser {
             type: 'gradientGlow',
             blurX: parseFloat(child.getAttribute('blurX') || '4'),
             blurY: parseFloat(child.getAttribute('blurY') || '4'),
-            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            strength: parseFloat(child.getAttribute('strength') || '1'),
             distance: parseFloat(child.getAttribute('distance') || '4'),
             angle: parseFloat(child.getAttribute('angle') || '45'),
             colors: this.parseGradientFilterColors(child),
@@ -3379,7 +3382,7 @@ export class FLAParser {
             type: 'gradientBevel',
             blurX: parseFloat(child.getAttribute('blurX') || '4'),
             blurY: parseFloat(child.getAttribute('blurY') || '4'),
-            strength: parseFloat(child.getAttribute('strength') || '100') / 255,
+            strength: parseFloat(child.getAttribute('strength') || '1'),
             distance: parseFloat(child.getAttribute('distance') || '4'),
             angle: parseFloat(child.getAttribute('angle') || '45'),
             colors: this.parseGradientFilterColors(child),
