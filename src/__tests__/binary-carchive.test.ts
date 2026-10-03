@@ -228,7 +228,9 @@ describe('scanCArchiveObjectStarts', () => {
     const data = Uint8Array.from([
       0x01, ...classDecl('CPicPage'), 0x05, ...classDecl('CPicFrame'), 0x00, ...classRef(3), 0x00,
       // The scan only matches tags with the class bit (a plain small index is
-      // indistinguishable from data); landing on an object slot is a back-reference.
+      // indistinguishable from data). One that lands on an object slot is
+      // reported as object_backref; MFC never writes that, so callers that
+      // count objects skip it.
       ...classRef(4), 0x00,
     ]);
     const starts = scanCArchiveObjectStarts(data);
@@ -242,8 +244,16 @@ describe('scanCArchiveObjectStarts', () => {
     expect(starts.every((s, i) => i === 0 || s.bodyStart > starts[i - 1].bodyStart)).toBe(true);
   });
 
-  it('keeps only the classes asked for', () => {
-    const data = Uint8Array.from([...classDecl('CPicPage'), ...classDecl('MFIFoo'), ...classRef(3), 0, 0]);
-    expect(scanCArchiveObjectStarts(data, new Set(['CPicPage'])).map((s) => s.className)).toEqual(['CPicPage']);
+  it('keeps only the classes asked for, but still numbers the others', () => {
+    // MFIFoo takes slots 3 and 4 and its new object slot 5, so 0x8006 names
+    // the CPicFrame declared after it.
+    const data = Uint8Array.from([
+      ...classDecl('CPicPage'), ...classDecl('MFIFoo'), ...classRef(3), 0x00, ...classDecl('CPicFrame'), 0x00, ...classRef(6), 0, 0,
+    ]);
+    expect(scanCArchiveObjectStarts(data, new Set(['CPicPage', 'CPicFrame'])).map((s) => [s.className, s.referenceKind])).toEqual([
+      ['CPicPage', 'new_class'],
+      ['CPicFrame', 'new_class'],
+      ['CPicFrame', 'class_backref'],
+    ]);
   });
 });

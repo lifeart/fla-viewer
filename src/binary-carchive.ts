@@ -550,15 +550,19 @@ export function scanCArchiveObjectStarts(
 
   while (i < data.length - 2) {
     const declared = readNewClassNameAt(data, i);
-    if (declared && (!knownClasses || knownClasses.has(declared.className))) {
+    if (declared) {
+      // Every declaration takes its two slots, listed or not; skipping one
+      // would shift every later reference.
       loadArray.push(`class:${declared.className}`);
       loadArray.push(`obj:${declared.className}`);
-      starts.push({
-        bodyStart: declared.bodyStart,
-        className: declared.className,
-        recoveredVia: 'class_decl',
-        referenceKind: 'new_class',
-      });
+      if (!knownClasses || knownClasses.has(declared.className)) {
+        starts.push({
+          bodyStart: declared.bodyStart,
+          className: declared.className,
+          recoveredVia: 'class_decl',
+          referenceKind: 'new_class',
+        });
+      }
       i = declared.bodyStart;
       continue;
     }
@@ -573,10 +577,10 @@ export function scanCArchiveObjectStarts(
       if (idx >= 1 && idx <= loadArray.length) {
         const item = loadArray[idx - 1];
         const className = classNameFromCombinedEntry(item);
+        if (item.startsWith('class:')) {
+          loadArray.push(`obj:${className}`);
+        }
         if (!knownClasses || knownClasses.has(className)) {
-          if (item.startsWith('class:')) {
-            loadArray.push(`obj:${className}`);
-          }
           starts.push({
             bodyStart: i + (isLongBackref ? 6 : 2),
             className,

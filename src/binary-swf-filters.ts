@@ -114,7 +114,8 @@ export function parseSwfFilterStack(
             strength,
             inner: (flags & 0x80) !== 0,
             knockout: (flags & 0x40) !== 0,
-            hideObject: (flags & 0x20) !== 0,
+            // 0x20 is CompositeSource: set when the object is drawn too.
+            hideObject: (flags & 0x20) === 0,
             quality,
           });
           break;

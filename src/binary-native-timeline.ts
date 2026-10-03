@@ -21,6 +21,7 @@ import {
   CArchiveReader,
   scanCArchiveObjectStarts,
   type CArchiveObjectHeader,
+  type CArchiveObjectStart,
 } from './binary-carchive';
 import { decodeUtf16Le, readStrictFlashStringAt } from './binary-flash-string';
 import { readCPicText, type CPicTextResult } from './binary-cpic-text';
@@ -113,30 +114,87 @@ const CPIC_SYNC_CLASSES = new Set([
   'CPicShapeObj',
   'CPicText',
 ]);
-const cpicObjectStartsCache = new WeakMap<Uint8Array, ReturnType<typeof scanCArchiveObjectStarts>>();
-const cpicObjectBodyStartSetCache = new WeakMap<Uint8Array, ReadonlySet<number>>();
+const CHILD_CLASSES = ['CPicShape', 'CPicSprite', 'CPicSymbol', 'CPicButton', 'CPicShapeObj', 'CPicText'];
+const PLACEMENT_CLASSES = new Set(['CPicSprite', 'CPicSymbol', 'CPicButton', 'CPicShapeObj']);
 
-function cpicObjectStarts(data: Uint8Array): ReturnType<typeof scanCArchiveObjectStarts> {
-  const cached = cpicObjectStartsCache.get(data);
+/**
+ * The flat object scan of one stream, indexed for the walker's lookups (they
+ * run per byte inside resync scans, so a linear filter per call was quadratic).
+ */
+interface ObjectStartIndex {
+  /** All starts, sorted by bodyStart. */
+  starts: CArchiveObjectStart[];
+  bodyStarts: number[];
+  /** Sorted bodyStarts per class. */
+  byClass: Map<string, number[]>;
+  /** First scanned start at each bodyStart. */
+  atBodyStart: Map<number, CArchiveObjectStart>;
+  bodyStartSet: ReadonlySet<number>;
+}
+const objectStartIndexCache = new WeakMap<Uint8Array, ObjectStartIndex>();
+
+function objectStartIndex(data: Uint8Array): ObjectStartIndex {
+  const cached = objectStartIndexCache.get(data);
   if (cached) return cached;
   const starts = scanCArchiveObjectStarts(data, CPIC_SYNC_CLASSES);
-  cpicObjectStartsCache.set(data, starts);
-  return starts;
+  const byClass = new Map<string, number[]>();
+  const atBodyStart = new Map<number, CArchiveObjectStart>();
+  for (const start of starts) {
+    const list = byClass.get(start.className);
+    if (list) list.push(start.bodyStart);
+    else byClass.set(start.className, [start.bodyStart]);
+    if (!atBodyStart.has(start.bodyStart)) atBodyStart.set(start.bodyStart, start);
+  }
+  const bodyStarts = starts.map((start) => start.bodyStart);
+  const index = { starts, bodyStarts, byClass, atBodyStart, bodyStartSet: new Set(bodyStarts) };
+  objectStartIndexCache.set(data, index);
+  return index;
+}
+
+/** Index of the first element of sorted `values` greater than `after`. */
+function upperBound(values: readonly number[], after: number): number {
+  let lo = 0;
+  let hi = values.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (values[mid] <= after) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** Smallest scanned bodyStart > `after` among `classes`, or null. */
+function nextScannedBody(data: Uint8Array, classes: readonly string[], after: number): number | null {
+  const { byClass } = objectStartIndex(data);
+  let best: number | null = null;
+  for (const className of classes) {
+    const list = byClass.get(className);
+    if (!list) continue;
+    const i = upperBound(list, after);
+    if (i < list.length && (best === null || list[i] < best)) best = list[i];
+  }
+  return best;
+}
+
+/** Scanned placement starts with `after < bodyStart < before`, in order. */
+function scannedPlacementsBetween(data: Uint8Array, after: number, before: number): CArchiveObjectStart[] {
+  const { starts, bodyStarts } = objectStartIndex(data);
+  const out: CArchiveObjectStart[] = [];
+  for (let i = upperBound(bodyStarts, after); i < starts.length && starts[i].bodyStart < before; i++) {
+    if (PLACEMENT_CLASSES.has(starts[i].className)) out.push(starts[i]);
+  }
+  return out;
 }
 
 function cpicObjectBodyStarts(data: Uint8Array): ReadonlySet<number> {
-  const cached = cpicObjectBodyStartSetCache.get(data);
-  if (cached) return cached;
-  const starts = new Set(cpicObjectStarts(data).map((object) => object.bodyStart));
-  cpicObjectBodyStartSetCache.set(data, starts);
-  return starts;
+  return objectStartIndex(data).bodyStartSet;
 }
 
 function correctHeaderFromScannedObjectStart(
   header: CArchiveObjectHeader,
   reader: CArchiveReader
 ): CArchiveObjectHeader {
-  const scanned = cpicObjectStarts(reader.data).find((object) => object.bodyStart === header.bodyStart);
+  const scanned = objectStartIndex(reader.data).atBodyStart.get(header.bodyStart);
   if (!scanned || scanned.className === header.className) return header;
   return reader.correctLastObjectHeader(header, scanned.className, scanned.referenceKind);
 }
@@ -225,18 +283,11 @@ function findNextScannedObjectBody(
   start: number,
   className: string
 ): number | null {
-  const next = cpicObjectStarts(data)
-    .filter((object) => object.className === className && object.bodyStart > start)
-    .sort((a, b) => a.bodyStart - b.bodyStart)[0];
-  return next?.bodyStart ?? null;
+  return nextScannedBody(data, [className], start);
 }
 
 function findNextScannedChildObjectBody(data: Uint8Array, start: number): number | null {
-  const childClasses = new Set(['CPicShape', 'CPicSprite', 'CPicSymbol', 'CPicButton', 'CPicShapeObj', 'CPicText']);
-  const next = cpicObjectStarts(data)
-    .filter((object) => childClasses.has(object.className) && object.bodyStart > start)
-    .sort((a, b) => a.bodyStart - b.bodyStart)[0];
-  return next?.bodyStart ?? null;
+  return nextScannedBody(data, CHILD_CLASSES, start);
 }
 
 function findFrameTailAfterShapeData(data: Uint8Array, start: number): number | null {
@@ -249,10 +300,8 @@ function findFrameTailAfterShapeData(data: Uint8Array, start: number): number | 
 function findNearbyFrameTail(data: Uint8Array, start: number, maxDistance: number): number | null {
   const limit = Math.min(data.length - 24, start + maxDistance);
   const hasSaneNextFrameGap = (pos: number): boolean => {
-    const nextFrame = cpicObjectStarts(data)
-      .filter((object) => object.className === 'CPicFrame' && object.bodyStart > pos)
-      .sort((a, b) => a.bodyStart - b.bodyStart)[0];
-    return !!nextFrame && nextFrame.bodyStart - pos >= 64;
+    const nextFrame = nextScannedBody(data, ['CPicFrame'], pos);
+    return nextFrame !== null && nextFrame - pos >= 64;
   };
   for (let p = start; p <= limit; p++) {
     const keyMode = readU16At(data, p + 3);
@@ -278,10 +327,8 @@ function findNearbyFrameTail(data: Uint8Array, start: number, maxDistance: numbe
 }
 
 function findNextScannedFrameTag(data: Uint8Array, start: number, end: number): number | null {
-  const next = cpicObjectStarts(data)
-    .filter((object) => object.className === 'CPicFrame' && object.bodyStart > start && object.bodyStart < end)
-    .sort((a, b) => a.bodyStart - b.bodyStart)[0];
-  return next ? next.bodyStart - 2 : null;
+  const next = nextScannedBody(data, ['CPicFrame'], start);
+  return next !== null && next < end ? next - 2 : null;
 }
 
 function findNextScannedTimelineTag(
@@ -289,13 +336,8 @@ function findNextScannedTimelineTag(
   start: number,
   classes: readonly string[] = ['CPicFrame', 'CPicLayer']
 ): number | null {
-  const next = cpicObjectStarts(data)
-    .filter((object) =>
-      classes.includes(object.className) &&
-      object.bodyStart > start
-    )
-    .sort((a, b) => a.bodyStart - b.bodyStart)[0];
-  return next ? next.bodyStart - 2 : null;
+  const next = nextScannedBody(data, classes, start);
+  return next !== null ? next - 2 : null;
 }
 
 function clampEmptyFrameBeforeNextScannedFrame(
@@ -541,16 +583,7 @@ function extractCompactInlineFrameSegments(
   base: CPicObjBase<NativeCPicChild>,
   bodyEnd: number
 ): { firstDuration?: number; segments: NativeCPicInlineFrameSegment[] } {
-  const placementStarts = cpicObjectStarts(data)
-    .filter((object) =>
-      (object.className === 'CPicSprite' ||
-        object.className === 'CPicSymbol' ||
-        object.className === 'CPicButton' ||
-        object.className === 'CPicShapeObj') &&
-      object.bodyStart > base.bodyEnd &&
-      object.bodyStart < bodyEnd
-    )
-    .sort((a, b) => a.bodyStart - b.bodyStart);
+  const placementStarts = scannedPlacementsBetween(data, base.bodyEnd, bodyEnd);
 
   const decoded: CPicChild<NativeCPicChild>[] = [];
   for (const start of placementStarts) {
@@ -602,16 +635,7 @@ function extractModernInlineFrameSegments(
   bodyEnd: number
 ): NativeCPicInlineFrameSegment[] {
   if (bodyEnd <= start) return [];
-  const placementStarts = cpicObjectStarts(data)
-    .filter((object) =>
-      (object.className === 'CPicSprite' ||
-        object.className === 'CPicSymbol' ||
-        object.className === 'CPicButton' ||
-        object.className === 'CPicShapeObj') &&
-      object.bodyStart > start &&
-      object.bodyStart < bodyEnd
-    )
-    .sort((a, b) => a.bodyStart - b.bodyStart);
+  const placementStarts = scannedPlacementsBetween(data, start, bodyEnd);
 
   const decoded: CPicChild<NativeCPicChild>[] = [];
   for (const start of placementStarts) {
@@ -1516,15 +1540,18 @@ export function decodeNativeStreamTimeline(data: Uint8Array): DecodedStreamTimel
  * yield exactly as many keyframes as there are CPicFrame objects in its byte
  * range. When a frame's shape data cannot be read, the walker resyncs on a
  * later frame tail and silently merges the frames in between; on the CS4 test
- * files this catches 15 of 233 otherwise accepted timelines.
+ * files this rejects 14 of 233 otherwise accepted timelines.
  */
 function keyframeCountsMatchFrameObjects(
   page: NativeCPicPage,
   timeline: DecodedStreamTimeline,
   data: Uint8Array
 ): boolean {
-  const frameStarts = cpicObjectStarts(data)
-    .filter((object) => object.className === 'CPicFrame')
+  // Only declarations and class references create objects; the scan's
+  // class-bit tags that land on an object slot are byte noise (a layer colour
+  // such as FF 80 reads as tag 0x80FF once the load array is that long).
+  const frameStarts = objectStartIndex(data)
+    .starts.filter((object) => object.className === 'CPicFrame' && object.referenceKind !== 'object_backref')
     .map((object) => object.bodyStart);
   return page.layers.every((layer, index) => {
     const start = layer.header.bodyStart;

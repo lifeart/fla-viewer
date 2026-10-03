@@ -131,7 +131,8 @@ export function readStrictFlashStringAt(
 
 /**
  * Read NUL-terminated raw UTF-16LE at `pos` (no length prefix). Returns null
- * when the first code unit is NUL or missing; `end` is just past the NUL.
+ * when the first code unit is NUL or missing; `end` is just past the NUL, or
+ * the end of `data` when there is none.
  */
 export function decodeRawUtf16UntilNull(
   data: Uint8Array,
@@ -146,5 +147,5 @@ export function decodeRawUtf16UntilNull(
     value += String.fromCharCode(c);
     i += 2;
   }
-  return { value, end: i + 2 };
+  return { value, end: Math.min(i + 2, data.length) };
 }

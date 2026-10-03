@@ -119,6 +119,10 @@ describe('decodeRawUtf16UntilNull', () => {
     expect(decodeRawUtf16UntilNull(data, 0)).toEqual({ value: 'Hi!', end: 8 });
   });
 
+  it('stops at the end of the data when there is no NUL', () => {
+    expect(decodeRawUtf16UntilNull(Uint8Array.from(utf16le('Hi')), 0)).toEqual({ value: 'Hi', end: 4 });
+  });
+
   it('returns null for an empty string or no data', () => {
     expect(decodeRawUtf16UntilNull(Uint8Array.from([0, 0, 0x41, 0]), 0)).toBeNull();
     expect(decodeRawUtf16UntilNull(Uint8Array.from([0x41]), 0)).toBeNull();

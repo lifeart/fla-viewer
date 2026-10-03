@@ -175,14 +175,19 @@ describe('decodeNativeStreamTimeline', () => {
     expect(still.soundRef).toBeUndefined();
   });
 
-  it('records locked and hidden layers', () => {
-    const data = cs4Stream([{ name: 'L', frames: [{ span: 1 }, { span: 1 }] }]);
-    // Patch the locked/hidden bytes after the layer name.
-    const name = flashStr('L');
-    const at = data.findIndex((_, i) => name.every((b, j) => data[i + j] === b)) + name.length;
-    data[at + 1] = 1;
-    data[at + 2] = 1;
-    expect(decodeNativeStreamTimeline(data)!.layers[0]).toMatchObject({ locked: true, visible: false });
+  it('reads the locked and hidden flags in that order', () => {
+    // Layer tail after the name: u8 current, u8 locked, u8 hidden.
+    const withFlags = (locked: number, hidden: number) => {
+      const data = cs4Stream([{ name: 'L', frames: [{ span: 1 }, { span: 1 }] }]);
+      const name = flashStr('L');
+      const at = data.findIndex((_, i) => name.every((b, j) => data[i + j] === b)) + name.length;
+      data[at] = 0; // not the current layer
+      data[at + 1] = locked;
+      data[at + 2] = hidden;
+      return decodeNativeStreamTimeline(data)!.layers[0];
+    };
+    expect(withFlags(1, 0)).toMatchObject({ locked: true, visible: true });
+    expect(withFlags(0, 1)).toMatchObject({ locked: false, visible: false });
   });
 
   it('returns null when no layer has more than one keyframe', () => {
@@ -211,6 +216,20 @@ describe('decodeNativeStreamTimeline', () => {
     // Same stream with a readable canvas shape passes.
     layers[0].frames[0].badCubics = false;
     expect(decodeNativeStreamTimeline(cs4Stream(layers))?.layers.map((l) => l.keyframes.length)).toEqual([3, 2]);
+  });
+
+  it('does not count class-bit noise on an object slot as a frame', () => {
+    // 260 frames push the load array past 255 entries, so the bytes FF 80 in
+    // each layer colour read as tag 0x80FF, a reference to object slot 255.
+    const many = Array.from({ length: 260 }, () => ({ span: 1 }));
+    const tl = decodeNativeStreamTimeline(
+      cs4Stream([
+        { name: 'Long', frames: many },
+        { name: 'Short', frames: [{ span: 2 }, { span: 3 }] },
+      ])
+    );
+    expect(tl?.layers.map((l) => l.keyframes.length)).toEqual([260, 2]);
+    expect(tl?.totalFrames).toBe(260);
   });
 
   it('never throws on truncated or garbage input', () => {

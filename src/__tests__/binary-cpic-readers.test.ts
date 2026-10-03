@@ -149,15 +149,17 @@ describe('readCPicPlacement', () => {
 
 describe('parseSwfFilterStack', () => {
   it('decodes drop shadow, blur and glow filters', () => {
-    const shadow = [0, 0x11, 0x22, 0x33, 255, ...fixed(5), ...fixed(5), ...fixed(Math.PI / 4), ...fixed(8), ...u16(512), 0x80 | 2];
+    // Flags: inner shadow, composite source, 18 passes.
+    const shadow = [0, 0x11, 0x22, 0x33, 255, ...fixed(5), ...fixed(5), ...fixed(Math.PI / 4), ...fixed(8), ...u16(512), 0x80 | 0x20 | 18];
     const blur = [1, ...fixed(3), ...fixed(3), 3 << 3];
     const glow = [2, 0xff, 0, 0, 128, ...fixed(10), ...fixed(10), ...u16(256), 0];
     const data = Uint8Array.from([3, ...shadow, ...blur, ...glow, 0xee]);
     const result = parseSwfFilterStack(data, 0)!;
     expect(result.end).toBe(data.length - 1);
     expect(result.filters.map((f) => f.type)).toEqual(['dropShadow', 'blur', 'glow']);
-    expect(result.filters[0]).toMatchObject({ color: '#112233', distance: 8, strength: 2, inner: true, quality: 2 });
+    expect(result.filters[0]).toMatchObject({ color: '#112233', distance: 8, strength: 2, inner: true, hideObject: false, quality: 18 });
     expect(result.filters[0].type === 'dropShadow' && result.filters[0].angle).toBeCloseTo(45, 3);
+    expect(result.filters[1]).toMatchObject({ quality: 3 }); // blur keeps passes in the top 5 bits
     expect(result.filters[2]).toMatchObject({ color: '#FF0000', strength: 1, quality: 1 });
   });
 

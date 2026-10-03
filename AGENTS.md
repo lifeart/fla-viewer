@@ -837,8 +837,10 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   scanning for frame tails and object tags when a body doesn't parse; that is heuristic and
   tuned on SkyUI CS4 files (layer schema 13, frame schema 29). It fails on older schemas, so
   the old walker stays first. Its output is kept only if every layer's keyframe count equals
-  the number of CPicFrame objects a flat scan finds in that layer: a misread shape makes the
-  walker resync on a later frame tail and merge the frames in between. The walker supplies
+  the number of CPicFrame objects a flat scan finds in that layer (declarations and class
+  references only: a class-bit tag landing on an object slot is byte noise): a misread shape
+  makes the walker resync on a later frame tail and merge the frames in between. The scan is
+  indexed per stream; the walker's per-byte resync lookups must stay binary searches. The walker supplies
   structure only (keyframe spans, byte ranges, motion tween flag); content still comes from
   the shape/instance scanners. Not used yet: its decoded placements, text and parent-layer
   (mask) references.
