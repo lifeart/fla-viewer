@@ -117,25 +117,34 @@ interface LayerSpec {
 
 /**
  * A `Page N` stream: CPicPage → CPicLayer* → CPicFrame* (frame_schema 19).
- * Combined class table: CPicPage 1/2, CPicLayer 3/4, CPicFrame 5/6, CPicShape
- * 7/8 — classes are declared on first use and back-referenced afterwards, so a
- * second layer begins with the `03 80` back-ref to CPicLayer (§2).
+ * Classes are declared on first use and back-referenced afterwards, numbered
+ * like MFC's CArchive load array: a declaration takes two slots (class, then
+ * object), and every later object of a known class takes one more. So a second
+ * layer begins with the `03 80` back-ref to CPicLayer (§2).
  * `trailing` bytes are appended after the page terminator.
  */
 function pageStream(layers: LayerSpec[], trailing: number[] = []): Uint8Array {
-  const out: number[] = [0x01, ...decl('CPicPage'), ...u8(2, 0)];
-  let frameDeclared = false;
-  let shapeDeclared = false;
-  layers.forEach((layer, li) => {
-    out.push(...(li === 0 ? decl('CPicLayer') : backref(3)));
+  const classSlot = new Map<string, number>();
+  let loadArrayLength = 0;
+  const newObject = (name: string): number[] => {
+    const slot = classSlot.get(name);
+    if (slot !== undefined) {
+      loadArrayLength += 1;
+      return backref(slot);
+    }
+    classSlot.set(name, loadArrayLength + 1);
+    loadArrayLength += 2;
+    return decl(name);
+  };
+  const out: number[] = [0x01, ...newObject('CPicPage'), ...u8(2, 0)];
+  layers.forEach((layer) => {
+    out.push(...newObject('CPicLayer'));
     out.push(...u8(2, 0)); // layer CPicObj base
     for (const f of layer.frames) {
-      out.push(...(frameDeclared ? backref(5) : decl('CPicFrame')));
-      frameDeclared = true;
+      out.push(...newObject('CPicFrame'));
       out.push(...u8(2, 0)); // frame CPicObj base
       if (f.x !== undefined) {
-        out.push(...(shapeDeclared ? backref(7) : decl('CPicShape')));
-        shapeDeclared = true;
+        out.push(...newObject('CPicShape'));
         out.push(...shapeBody(f.x));
       }
       out.push(...NULL_TAG, ...INT_MIN, ...INT_MIN); // end children + point

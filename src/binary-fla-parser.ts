@@ -48,6 +48,11 @@
  */
 import { OLE2File } from './ole2-reader';
 import {
+  collectFlashStrings,
+  decodeUtf16Le,
+  readFlashStringAt,
+} from './binary-flash-string';
+import {
   extractLayers,
   FOLDER_NAME,
   type BinaryLayerInfo,
@@ -167,13 +172,6 @@ const SYMBOL_TYPE_NAMES: Record<number, BinarySymbolType> = {
   2: 'movieclip',
 };
 
-const utf16le = new TextDecoder('utf-16le');
-
-/** Decode a UTF-16LE substring of `data` (byteLen bytes). */
-function decodeUtf16(data: Uint8Array, start: number, byteLen: number): string {
-  return utf16le.decode(data.subarray(start, start + byteLen));
-}
-
 /** Find the first index >= `from` where `needle` occurs in `hay`, or -1. */
 function indexOf(hay: Uint8Array, needle: Uint8Array, from: number): number {
   outer: for (let i = from; i <= hay.length - needle.length; i++) {
@@ -204,29 +202,6 @@ function parseSymbolStreamNumber(name: string): number | null {
 }
 
 /**
- * Collect every `FF FE FF <u8 len> <len×2 UTF-16LE>` Flash string in the
- * stream. These hold publish-settings keys/values, library names, folders…
- * (fla-decoder docs/FORMAT.md §2 "Length-prefixed strings").
- */
-function collectFlashStrings(data: Uint8Array): string[] {
-  const strings: string[] = [];
-  let pos = 0;
-  while (pos < data.length - 4) {
-    if (data[pos] === 0xff && data[pos + 1] === 0xfe && data[pos + 2] === 0xff) {
-      const len = data[pos + 3];
-      const end = pos + 4 + len * 2;
-      if (len > 0 && end <= data.length) {
-        strings.push(decodeUtf16(data, pos + 4, len * 2));
-        pos = end;
-        continue;
-      }
-    }
-    pos += 1;
-  }
-  return strings;
-}
-
-/**
  * Extract the symbol library table from the `Contents` stream.
  * Mirrors fla-decoder `extract_library.extract_library_table`: each library
  * record holds a `"Symbol N"` MFC CString (u8 charlen + UTF-16LE) followed,
@@ -251,7 +226,7 @@ function extractLibrary(contents: Uint8Array): BinaryLibraryEntry[] {
     // The MFC CString length (chars) is the byte immediately before the text.
     const strLen = idx > 0 ? contents[idx - 1] : 0;
     if (strLen > 0 && idx + strLen * 2 <= contents.length) {
-      const s = decodeUtf16(contents, idx, strLen * 2);
+      const s = decodeUtf16Le(contents, idx, strLen * 2);
       const m = /^Symbol (\d+)$/.exec(s);
       if (m) {
         const symNum = parseInt(m[1], 10);
@@ -260,30 +235,20 @@ function extractLibrary(contents: Uint8Array): BinaryLibraryEntry[] {
         let search = strEnd;
         const limit = Math.min(contents.length - 4, strEnd + 100);
         while (search < limit) {
-          if (
-            contents[search] === 0xff &&
-            contents[search + 1] === 0xfe &&
-            contents[search + 2] === 0xff
-          ) {
-            const ln = contents[search + 3];
-            const nameEnd = search + 4 + ln * 2;
-            if (ln > 0 && nameEnd <= contents.length) {
-              const name = decodeUtf16(contents, search + 4, ln * 2);
-              // Skip path-like strings (folders / import paths).
-              if (!name.includes('/') && !name.startsWith('.\\')) {
-                let symbolType: BinarySymbolType = 'unknown';
-                if (nameEnd + 5 <= contents.length) {
-                  const typeByte = contents[nameEnd + 4];
-                  symbolType = SYMBOL_TYPE_NAMES[typeByte] ?? 'unknown';
-                }
-                byNumber.set(symNum, {
-                  symbolNumber: symNum,
-                  name,
-                  symbolType,
-                });
-                break;
-              }
+          const str = readFlashStringAt(contents, search);
+          // Skip path-like strings (folders / import paths).
+          if (str && !str.value.includes('/') && !str.value.startsWith('.\\')) {
+            let symbolType: BinarySymbolType = 'unknown';
+            if (str.end + 5 <= contents.length) {
+              const typeByte = contents[str.end + 4];
+              symbolType = SYMBOL_TYPE_NAMES[typeByte] ?? 'unknown';
             }
+            byNumber.set(symNum, {
+              symbolNumber: symNum,
+              name: str.value,
+              symbolType,
+            });
+            break;
           }
           search += 1;
         }
@@ -325,19 +290,13 @@ function extractSounds(
     if (contents[p + 1] !== 0x4d || contents[p + 2] !== 0x00) continue;
     const nameEnd = p + 1 + len * 2;
     if (nameEnd + 4 > contents.length) continue;
-    const stream = decodeUtf16(contents, p + 1, len * 2);
+    const stream = decodeUtf16Le(contents, p + 1, len * 2);
     const m = /^Media (\d+)$/.exec(stream);
     if (!m || !ole.hasStream(stream)) continue;
-    if (
-      contents[nameEnd] !== 0xff ||
-      contents[nameEnd + 1] !== 0xfe ||
-      contents[nameEnd + 2] !== 0xff
-    ) {
-      continue;
-    }
-    const displayLen = contents[nameEnd + 3];
-    const displayEnd = nameEnd + 4 + displayLen * 2;
-    const name = decodeUtf16(contents, nameEnd + 4, displayLen * 2);
+    const display = readFlashStringAt(contents, nameEnd, { allowEmpty: true });
+    if (!display) continue;
+    const name = display.value;
+    const displayEnd = display.end;
 
     let footer = -1;
     for (let j = displayEnd; j + 8 <= contents.length && j < displayEnd + 600; j++) {

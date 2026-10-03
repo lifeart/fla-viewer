@@ -823,6 +823,13 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   The timeline walk is confidence-gated: a stream it can't decode cleanly falls back to one
   frame with all recovered content. Not decoded yet: tweens, frame labels, sounds, and per-frame
   placement matrices for instances inside movie clips (reference: eddiemoore/fla-decoder).
+- **CArchive load array** (`src/binary-carchive.ts`, shared `ByteReader`/`ArchiveReader`): it is
+  1-based. A NEWCLASS (`FF FF`) takes two slots (class, then its first object); a class
+  reference `0x8000|idx` creates a new object and takes ONE more slot; a plain `idx` is a
+  reference to an existing object and has no body. Skipping the new-object slot shifts every
+  later index (the old reader did this). Synthetic test streams must number slots the same way.
+- Flash strings (`FF FE FF <u8 len> <UTF-16LE>`, extended `FF FE FF FF <u16 len>`) go through
+  `src/binary-flash-string.ts`.
 
 ### Headless / tooling parse (issue #42)
 - `new FLAParser({ DOMParser })` takes any WHATWG-compatible `DOMParser` (e.g. linkedom in

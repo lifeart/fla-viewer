@@ -61,12 +61,8 @@
  * the whole parse, and nothing is fabricated.
  */
 
-import {
-  ArchiveReader,
-  ByteReader,
-  EndOfStreamError,
-  readShapeData,
-} from './binary-shape-decoder';
+import { ArchiveReader, ByteReader, EndOfStreamError } from './binary-carchive';
+import { readShapeData } from './binary-shape-decoder';
 
 /** One decoded keyframe: its timeline span and the byte range of its body. */
 export interface DecodedKeyframe {
@@ -163,6 +159,8 @@ function consumeChildren(
   for (;;) {
     const tag = ar.readClassTag();
     if (tag.kind === 'null') return;
+    // A reference to an already-loaded object has no body to consume.
+    if (tag.kind === 'object_ref') continue;
     if (!tag.name) {
       // A backref that did not resolve to a known class — we cannot know the
       // child's layout, so stop the loop rather than desync silently.
@@ -483,6 +481,7 @@ function consumeCPicLayer(
   for (;;) {
     const tag = ar.readClassTag();
     if (tag.kind === 'null') break;
+    if (tag.kind === 'object_ref') continue;
     if (!tag.name) {
       throw new Error('unresolved class tag in layer children');
     }
@@ -608,6 +607,7 @@ function consumeCPicPage(
   for (;;) {
     const tag = ar.readClassTag();
     if (tag.kind === 'null') break;
+    if (tag.kind === 'object_ref') continue;
     if (!tag.name) throw new Error('unresolved class tag in page children');
     if (tag.name === 'CPicLayer') {
       layers.push(consumeCPicLayer(r, ar));
