@@ -862,11 +862,11 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   ticks its parent has stayed inside the clip's run, read back on the parent's
   `TimelineClock` (`rootClock` for the main timeline, `movieClipClock` for a clip that loops
   from frame 0 or holds at its first stop(), `instanceClock` for a graphic or button while its
-  layer holds it). So a seek, a single-frame/SVG/mid-range export, or a frame after a
-  `cacheAsBitmap` frame agrees with playback, at any nesting depth. A `cacheAsBitmap` frame
-  itself still shows the cached subtree. A clip inside a looping graphic keeps playing across
-  the graphic's wrap when its run covers the whole graphic timeline (unverified against Flash,
-  which may place it anew), and starts over when the graphic jumps into its run.
+  layer holds it). So a seek or a single-frame/SVG/mid-range export agrees with playback, at
+  any nesting depth. A `cacheAsBitmap` symbol with a movie clip anywhere inside is drawn live
+  (`hasMovieClipInside`), not from its frame-0 bitmap. A clip inside a looping graphic keeps
+  playing across the graphic's wrap when its run covers the whole graphic timeline (unverified
+  against Flash, which may place it anew), and starts over when the graphic jumps into its run.
 
 ### Pre-CS5 binary FLA (issue #8)
 - Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not

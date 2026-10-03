@@ -95,6 +95,7 @@ export class FLARenderer {
   private elementOrder: 'forward' | 'reverse' = 'forward';
   private shapePathCache = new WeakMap<Shape, CachedShapePaths>();
   private symbolBitmapCache = new Map<string, { canvas: HTMLCanvasElement, bounds: { width: number, height: number, offsetX: number, offsetY: number } }>();
+  private movieClipInsideCache = new WeakMap<Symbol, boolean>();
   private followCamera: boolean = false;
   private manualCameraLayerIndex: number | undefined = undefined;
 
@@ -394,6 +395,7 @@ export class FLARenderer {
     this.shapePathCache = new WeakMap<Shape, CachedShapePaths>();
     // Clear symbol bitmap cache
     this.symbolBitmapCache.clear();
+    this.movieClipInsideCache = new WeakMap();
     // Clear MovieClip instance states
     this.movieClipStates.clear();
     this.instanceStack = [];
@@ -2439,9 +2441,10 @@ export class FLARenderer {
     // Render symbol's timeline (with 9-slice scaling if applicable)
     if (has9SliceGrid && symbol.scale9Grid) {
       this.renderSymbolWith9Slice(symbol, instance, symbol.scale9Grid, symbolFrame, depth);
-    } else if (instance.cacheAsBitmap && symbolFrame === 0) {
+    } else if (instance.cacheAsBitmap && symbolFrame === 0 && !this.hasMovieClipInside(symbol)) {
       // Use cached bitmap rendering for symbols with cacheAsBitmap enabled
-      // Only cache frame 0 to avoid excessive memory usage
+      // Only cache frame 0 to avoid excessive memory usage. Movie clips inside
+      // keep playing, so a symbol holding one is drawn live.
       this.renderSymbolFromCache(symbol, instance, depth);
     } else {
       this.renderTimeline(symbol.timeline, symbolFrame, depth + 1);
@@ -4863,6 +4866,33 @@ export class FLARenderer {
    * - Left/Right edges (4,6): Vertical scaling only
    * - Center (5): Both horizontal and vertical scaling
    */
+
+  // Whether a movie clip instance appears anywhere in the symbol's timeline,
+  // directly or inside nested graphics and buttons (memoized per symbol).
+  private hasMovieClipInside(symbol: Symbol, visiting = new Set<Symbol>()): boolean {
+    const known = this.movieClipInsideCache.get(symbol);
+    if (known !== undefined) return known;
+    if (visiting.has(symbol) || !this.doc) return false;
+    visiting.add(symbol);
+    let found = false;
+    for (const layer of symbol.timeline.layers) {
+      for (const frame of layer.frames) {
+        for (const element of frame.elements) {
+          if (element.type !== 'symbol') continue;
+          const inner = getWithNormalizedPath(this.doc.symbols, element.libraryItemName);
+          if (element.symbolType === 'movieclip' || (inner && this.hasMovieClipInside(inner, visiting))) {
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
+      if (found) break;
+    }
+    visiting.delete(symbol);
+    this.movieClipInsideCache.set(symbol, found);
+    return found;
+  }
 
   /**
    * Render a symbol using cached bitmap for improved performance.

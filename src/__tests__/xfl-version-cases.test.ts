@@ -835,14 +835,14 @@ describe('movie clip instances (no symbolType attribute)', () => {
       expect(svg).not.toContain(R);
     });
 
-    it('keeps the inner clip in step after frames drawn from a cacheAsBitmap cache', async () => {
-      // Outer frame 0 (ticks 0, 4, 8) is drawn from the cached bitmap, which never
-      // reaches the inner clip; the live frames after it must still be in step.
+    it('keeps the inner clip playing when the outer clip is cached as a bitmap', async () => {
+      // A cached bitmap of Outer's frame 0 would freeze Inner on every pass.
       const outer = `<DOMFrame index="0" duration="4"><elements>${inner}</elements></DOMFrame>`;
       const plain = await playFrames(await nested(outer), frames);
-      const cached = await playFrames(await nested(outer, 'cacheAsBitmap="true"'), frames);
-      const live = (colors: string[]) => colors.filter((_, tick) => tick % 4 !== 0);
-      expect(live(cached)).toEqual(live(plain));
+      expect(await playFrames(await nested(outer, 'cacheAsBitmap="true"'), frames)).toEqual(plain);
+      const oneFrame = `<DOMFrame index="0"><elements>${inner}</elements></DOMFrame>`;
+      expect(await playFrames(await nested(oneFrame, 'symbolType="graphic" cacheAsBitmap="true"'), frames))
+        .toEqual([R, G, B, R, G, B, R, G, B, R]);
     });
   });
 
