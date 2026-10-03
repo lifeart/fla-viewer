@@ -3,7 +3,7 @@ import JSZip from 'jszip';
 import { FLAParser, parseMotionTweenRotate } from '../fla-parser';
 import { FLARenderer } from '../renderer';
 import { readDirectoryEntry, xflFolderToZip, isXFLStub, XFL_STUB_CONTENT, type XFLFolderEntry } from '../xfl-folder';
-import type { FLADocument, Shape, SymbolInstance } from '../types';
+import type { FLADocument, Shape, SymbolInstance, TextInstance } from '../types';
 
 // Version-specific XFL cases that real Flash CS4..Animate files contain. The XML
 // below mirrors what Flash CS5/CS6 writes (attribute names and value spellings
@@ -466,3 +466,67 @@ describe('reverse graphic loop modes (Animate 2021)', () => {
     expect(await colorsFor('play once reverse', 2)).toEqual([B, G, R, R, R]);
   });
 });
+
+describe('TLF text (DOMTLFText, Flash CS5-CS6)', () => {
+  const tlf = (flow: string, attrs = 'right="5480" bottom="1389"', matrix = '<Matrix tx="-126" ty="-20"/>') => `
+    <DOMTLFText name="" ${attrs}><matrix>${matrix}</matrix>
+      <tlfFonts><TLFFont platformName="Times New Roman" psName="TimesNewRomanPSMT"/></tlfFonts>
+      <markup><tlfTextObject type="Point" editPolicy="readSelect" columnCount="1" columnGap="20" verticalAlign="top" firstBaselineOffset="auto" paddingLeft="2" paddingTop="2" paddingRight="2" paddingBottom="2" background="false" multiline="true" antiAliasType="advanced" embedFonts="true">
+        <TextFlow blockProgression="tb" lineBreak="explicit" locale="en_US" whiteSpaceCollapse="preserve" xmlns="http://ns.adobe.com/textLayout/2008">${flow}</TextFlow>
+      </tlfTextObject></markup>
+    </DOMTLFText>`;
+  const parseText = async (xml: string) => {
+    const doc = await parseXfl({ 'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0"><elements>${xml}</elements></DOMFrame></frames></DOMLayer>`) });
+    return doc.timelines[0].layers[0].frames[0].elements[0] as TextInstance;
+  };
+
+  it('reads a CS5 TLF point text as static text', async () => {
+    // As saved by Flash CS5.5 (a game's attack label).
+    const text = await parseText(tlf(`<p direction="ltr" paragraphSpaceAfter="0" textAlign="start" textIndent="0"><span color="#000000" fontFamily="Times New Roman" fontSize="72" fontStyle="normal" fontWeight="normal" kerning="auto" lineHeight="120%" textAlpha="1" trackingRight="0%">Ice Spear</span></p>`));
+    expect(text).toMatchObject({ type: 'text', textType: 'static', left: 2, width: 270 });
+    expect(text.height).toBeCloseTo(1389 / 20 - 4, 9);
+    // The box top (top="0" + paddingTop 2) is folded into the matrix.
+    expect(text.matrix).toMatchObject({ tx: -126, ty: -18 });
+    expect(text.textRuns).toHaveLength(1);
+    expect(text.textRuns[0]).toMatchObject({
+      characters: 'Ice Spear', size: 72, face: 'Times New Roman', fillColor: '#000000',
+      alignment: 'left', bold: false, italic: false,
+    });
+    expect(text.textRuns[0].lineHeight).toBeCloseTo(86.4, 9);
+  });
+
+  it('inherits formats, separates paragraphs and maps alignment and styles', async () => {
+    const text = await parseText(tlf(`
+      <div fontSize="20" color="#FF0000">
+        <p textAlign="center"><span fontWeight="bold">Hello </span><span fontStyle="italic" color="#0000FF" fontSize="inherit">world</span></p>
+        <p textAlign="end"><span textDecoration="underline" lineHeight="30" trackingRight="10%">Line<br/>two</span></p>
+      </div>`, 'left="200" top="100" right="2200" bottom="1100"', '<Matrix/>'));
+    expect(text.left).toBe(12);
+    expect(text.width).toBe(96);
+    expect(text.matrix.ty).toBe(7);
+    expect(text.textRuns.map((r) => r.characters)).toEqual(['Hello ', 'world\r', 'Line', '\n', 'two']);
+    expect(text.textRuns[0]).toMatchObject({ size: 20, fillColor: '#FF0000', bold: true, alignment: 'center' });
+    expect(text.textRuns[1]).toMatchObject({ size: 20, fillColor: '#0000FF', italic: true, alignment: 'center' });
+    expect(text.textRuns[2]).toMatchObject({ alignment: 'right', underline: true, lineHeight: 30, letterSpacing: 2 });
+    expect(text.textRuns[4]).toMatchObject({ alignment: 'right', underline: true, size: 20 });
+  });
+
+  it('draws TLF text', async () => {
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    const doc = await parseXfl({ 'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0"><elements>
+      ${tlf('<p><span color="#FF0000" fontSize="72">MMMM</span></p>', 'right="6000" bottom="2000"', '<Matrix tx="50" ty="50"/>')}
+    </elements></DOMFrame></frames></DOMLayer>`) });
+    await renderer.setDocument(doc);
+    renderer.renderFrame(0);
+    expect(hasRed(canvas)).toBe(true);
+  });
+});
+
+function hasRed(canvas: HTMLCanvasElement): boolean {
+  const data = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i] > 200 && data[i + 1] < 60 && data[i + 2] < 60) return true;
+  }
+  return false;
+}

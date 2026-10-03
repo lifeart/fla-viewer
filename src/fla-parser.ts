@@ -940,6 +940,9 @@ export class FLAParser {
         case 'DOMInputText':
           elements.push(this.parseTextInstance(child, identityMatrix));
           break;
+        case 'DOMTLFText':
+          elements.push(this.parseTLFText(child, identityMatrix));
+          break;
       }
     }
 
@@ -983,6 +986,9 @@ export class FLAParser {
         case 'DOMDynamicText':
         case 'DOMInputText':
           elements.push(this.parseTextInstance(child, composedMatrix));
+          break;
+        case 'DOMTLFText':
+          elements.push(this.parseTLFText(child, composedMatrix));
           break;
       }
     }
@@ -1267,6 +1273,110 @@ export class FLAParser {
       height,
       textRuns,
       ...(filters.length > 0 && { filters })
+    };
+  }
+
+  /**
+   * <DOMTLFText> (TLF text, Flash CS5-CS6 only; Animate CC converts it to classic
+   * text on open). The box is `left/top/right/bottom` in twips plus the
+   * <tlfTextObject> padding; the content is a Text Layout Framework <TextFlow>
+   * of paragraphs (<p>) holding <span>s, with formats inherited from ancestors.
+   * Rendered as classic static text: one run per span, paragraphs separated by
+   * a line break.
+   */
+  private parseTLFText(el: globalThis.Element, composedMatrix?: Matrix): TextInstance {
+    const matrixEl = el.querySelector(':scope > matrix > Matrix');
+    const baseMatrix = matrixEl ? this.parseMatrix(matrixEl) : (composedMatrix || this.parseMatrix(null));
+    const twips = (name: string) => (parseFloat(el.getAttribute(name) || '0') || 0) / 20;
+    const textObject = Array.from(el.getElementsByTagName('*')).find((n) => n.localName === 'tlfTextObject');
+    const padding = (side: string) => parseFloat(textObject?.getAttribute(`padding${side}`) || '0') || 0;
+
+    const left = twips('left') + padding('Left');
+    const top = twips('top') + padding('Top');
+    const width = Math.max(0, twips('right') - twips('left') - padding('Left') - padding('Right'));
+    const height = Math.max(0, twips('bottom') - twips('top') - padding('Top') - padding('Bottom'));
+    // Text is laid out from y = 0 in its own space, so fold the box top into the matrix.
+    const matrix = { ...baseMatrix, tx: baseMatrix.tx + baseMatrix.c * top, ty: baseMatrix.ty + baseMatrix.d * top };
+
+    // TLF formats cascade from TextFlow > div > p > span; "inherit" defers upward.
+    const format = (node: globalThis.Element, name: string): string | undefined => {
+      for (let n: globalThis.Element | null = node; n && n !== el; n = n.parentElement) {
+        const v = n.getAttribute(name);
+        if (v !== null && v !== 'inherit') return v;
+        if (n.localName === 'TextFlow') break;
+      }
+      return undefined;
+    };
+    const alignOf = (p: globalThis.Element): TextRun['alignment'] => {
+      const a = format(p, 'textAlign');
+      return a === 'center' ? 'center' : a === 'right' || a === 'end' ? 'right' : a === 'justify' ? 'justify' : 'left';
+    };
+
+    const textRuns: TextRun[] = [];
+    const runFor = (leaf: globalThis.Element, characters: string, alignment: TextRun['alignment']): TextRun => {
+      const size = parseFloat(format(leaf, 'fontSize') || '12') || 12;
+      const lineHeightAttr = format(leaf, 'lineHeight') || '120%';
+      const lineHeight = lineHeightAttr.endsWith('%')
+        ? size * (parseFloat(lineHeightAttr) || 120) / 100
+        : parseFloat(lineHeightAttr) || size * 1.2;
+      const tracking = format(leaf, 'trackingRight');
+      const letterSpacing = tracking
+        ? (tracking.endsWith('%') ? size * (parseFloat(tracking) || 0) / 100 : parseFloat(tracking) || 0)
+        : 0;
+      const run: TextRun = {
+        characters,
+        alignment,
+        size,
+        lineHeight,
+        face: format(leaf, 'fontFamily'),
+        fillColor: format(leaf, 'color') || '#000000',
+        bold: format(leaf, 'fontWeight') === 'bold',
+        italic: format(leaf, 'fontStyle') === 'italic',
+        ...(letterSpacing !== 0 && { letterSpacing }),
+      };
+      if (format(leaf, 'textDecoration') === 'underline') run.underline = true;
+      return run;
+    };
+
+    const paragraphs = Array.from(el.getElementsByTagName('*')).filter((n) => n.localName === 'p');
+    paragraphs.forEach((p, pIndex) => {
+      const alignment = alignOf(p);
+      // Walk the paragraph in document order: text inside <span>s becomes runs,
+      // <br/> a line break and <tab/> a tab (markup whitespace between tags is ignored).
+      const walk = (node: globalThis.Element) => {
+        for (const child of Array.from(node.childNodes)) {
+          if (child.nodeType === 3) {
+            const parent = child.parentElement;
+            if (parent && parent.localName === 'span' && child.textContent) {
+              textRuns.push(runFor(parent, child.textContent, alignment));
+            }
+          } else if (child.nodeType === 1) {
+            const element = child as globalThis.Element;
+            if (element.localName === 'br' || element.localName === 'tab') {
+              textRuns.push(runFor(element, element.localName === 'br' ? '\n' : '\t', alignment));
+            } else {
+              walk(element);
+            }
+          }
+        }
+      };
+      walk(p);
+      // A paragraph ends with a line break (the renderer breaks after a run's \r).
+      if (pIndex < paragraphs.length - 1) {
+        if (textRuns.length > 0) textRuns[textRuns.length - 1].characters += '\r';
+      }
+    });
+
+    const filters = this.parseFilters(el);
+    return {
+      type: 'text',
+      textType: 'static',
+      matrix,
+      left,
+      width,
+      height,
+      textRuns,
+      ...(filters.length > 0 && { filters }),
     };
   }
 
