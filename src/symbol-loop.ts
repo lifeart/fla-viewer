@@ -1,4 +1,4 @@
-import type { SymbolInstance, Timeline } from './types';
+import type { Frame, SymbolInstance, Timeline } from './types';
 
 /**
  * Which frame of its own timeline a graphic symbol instance shows, `frameOffset`
@@ -48,14 +48,50 @@ export function graphicSymbolFrame(
   return mod(first + step * k);
 }
 
-// A call to the clip's own stop(): bare or through `this.`, but not `mc.stop()`,
-// `sound.stop()` or gotoAndStop().
-const OWN_STOP_CALL = /(?:^|[^\w$.])(?:this\s*\.\s*)?stop\s*\(\s*\)/;
+/**
+ * The part of a frame script that runs when the frame is entered: comments and
+ * string literals are dropped, and so are function bodies (event handlers and
+ * callbacks run later, if ever).
+ */
+function frameEntryCode(script: string): string {
+  let code = '';
+  const braces: boolean[] = []; // per open brace: is it (inside) a function body?
+  let inFunction = 0;
+  for (let i = 0; i < script.length; i++) {
+    const ch = script[i];
+    const next = script[i + 1];
+    if (ch === '/' && (next === '/' || next === '*')) {
+      const end = next === '/' ? script.indexOf('\n', i) : script.indexOf('*/', i + 2);
+      i = end < 0 ? script.length : next === '/' ? end - 1 : end + 1;
+      if (!inFunction) code += ' ';
+    } else if (ch === '"' || ch === "'" || ch === '`') {
+      let j = i + 1;
+      while (j < script.length && script[j] !== ch) j += script[j] === '\\' ? 2 : 1;
+      i = j;
+      if (!inFunction) code += '""';
+    } else if (ch === '{') {
+      const opensFunction = inFunction > 0 || /(?:\bfunction\b[^{};]*|=>\s*)$/.test(code);
+      braces.push(opensFunction);
+      if (opensFunction) inFunction++;
+      else code += ch;
+    } else if (ch === '}') {
+      if (braces.pop()) inFunction--;
+      else code += ch;
+    } else if (!inFunction) {
+      code += ch;
+    }
+  }
+  return code;
+}
 
-/** True when a frame script calls the timeline's own `stop()`. */
+// A call to the clip's own stop(): bare or through `this.` (ActionScript and
+// Animate's HTML5 Canvas JavaScript), but not `mc.stop()`, `sound.stop()`,
+// gotoAndStop() or a function named stop.
+const OWN_STOP_CALL = /(?<![\w$.])(?<!\bfunction\s+)(?:this\s*\.\s*)?stop\s*\(\s*\)/;
+
+/** True when a frame script calls the timeline's own `stop()` as the frame is entered. */
 export function callsStop(script: string): boolean {
-  const code = script.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-  return OWN_STOP_CALL.test(code);
+  return OWN_STOP_CALL.test(frameEntryCode(script));
 }
 
 /**
@@ -74,4 +110,53 @@ export function movieClipStopFrames(timeline: Timeline): Set<number> {
     }
   }
   return stops;
+}
+
+/**
+ * Where a movie clip's playhead is `ticks` frames after the clip appeared:
+ * one frame per tick from frame 0, looping, and holding once it tries to leave
+ * a stop() frame (the same stepping as the renderer's advanceMovieClipPlayheads).
+ */
+export function movieClipPlayhead(
+  ticks: number,
+  totalFrames: number,
+  stopFrames: ReadonlySet<number>
+): { frame: number; stopped: boolean } {
+  const n = Math.max(1, totalFrames);
+  const t = Math.max(0, Math.floor(ticks));
+  if (n === 1) return { frame: 0, stopped: false };
+  const stops = [...stopFrames].filter((f) => f >= 0 && f < n);
+  if (stops.length === 0) return { frame: t % n, stopped: false };
+  // With a stop on the timeline, playback reaches it within one pass.
+  let frame = 0;
+  for (let i = 0; i < t; i++) {
+    if (stopFrames.has(frame)) return { frame, stopped: true };
+    frame = (frame + 1) % n;
+  }
+  return { frame, stopped: false };
+}
+
+/**
+ * First frame of the run of back-to-back keyframes on a layer that hold the same
+ * movie clip instance as `keyframe` (the same library item at the same element
+ * index). Flash keeps one instance alive across such keyframes, so its playhead
+ * has been running since then.
+ */
+export function movieClipAppearance(
+  frames: readonly Frame[],
+  keyframe: Frame,
+  elementIndex: number,
+  libraryItemName: string
+): number {
+  let k = frames.indexOf(keyframe);
+  if (k < 0) return keyframe.index;
+  while (k > 0) {
+    const prev = frames[k - 1];
+    if (prev.index + prev.duration !== frames[k].index) break;
+    const element = prev.elements[elementIndex];
+    if (!element || element.type !== 'symbol' || element.symbolType !== 'movieclip' ||
+        element.libraryItemName !== libraryItemName) break;
+    k--;
+  }
+  return frames[k].index;
 }

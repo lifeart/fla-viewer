@@ -1376,10 +1376,14 @@ export class FLAParser {
       };
       walk(p);
       // A paragraph ends with a line break (the renderer breaks after a run's \r).
-      // An empty paragraph is a blank line in the paragraph's own format.
+      // An empty paragraph is a blank line, formatted by its (empty) span if it has one.
       if (pIndex < paragraphs.length - 1) {
-        if (textRuns.length > runsBefore) textRuns[textRuns.length - 1].characters += '\r';
-        else textRuns.push(runFor(p, '\r', alignment));
+        if (textRuns.length > runsBefore) {
+          textRuns[textRuns.length - 1].characters += '\r';
+        } else {
+          const span = Array.from(p.getElementsByTagName('*')).find((n) => n.localName === 'span');
+          textRuns.push(runFor(span ?? p, '\r', alignment));
+        }
       }
     });
 
@@ -1472,11 +1476,13 @@ export class FLAParser {
 
     const hasFill = closed && fills.length > 0;
     const hasStroke = strokes.length > 0;
-    const edges: Edge[] = contours.map((commands) => ({
+    // One edge for all contours, so exporters that fill edge by edge (SVG) keep
+    // a ring's hole as part of the same nonzero path.
+    const edges: Edge[] = [{
       ...(hasFill && { fillStyle1: 1 }),
       ...(hasStroke && { strokeStyle: 1 }),
-      commands,
-    }));
+      commands: contours.flat(),
+    }];
 
     // The outline is exact, so contours are stitched without the 8px XFL gap
     // tolerance (which would join a thin ring's hole onto its outer edge).

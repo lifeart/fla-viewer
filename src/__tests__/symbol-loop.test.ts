@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { graphicSymbolFrame, callsStop, movieClipStopFrames } from '../symbol-loop';
+import { graphicSymbolFrame, callsStop, movieClipAppearance, movieClipPlayhead, movieClipStopFrames } from '../symbol-loop';
 import type { Frame, Layer, SymbolInstance, Timeline } from '../types';
 
 // Frames shown on parent frames 0..count-1 of a keyframe, for a 10-frame symbol.
@@ -74,6 +74,15 @@ describe('movie clip stop() frames', () => {
     ['stopAllSounds();', false],
     ['// stop();', false],
     ['/* stop(); */ play();', false],
+    ['trace("stop()");', false],
+    ['function stop() {}', false],
+    ['btn.addEventListener(MouseEvent.CLICK, function(e:MouseEvent):void { stop(); });', false],
+    ['this.btn.on("click", () => { this.stop(); });', false],
+    ['function onClick(e) {\n  stop();\n}', false],
+    ['navigateToURL(new URLRequest("http://example.com")); stop();', true],
+    ["var s = 'it\\'s'; stop();", true],
+    ['if (done) { stop(); }', true],
+    ['btn.onRelease = function() { play(); };\nstop();', true],
   ])('callsStop(%j) is %s', (script, expected) => {
     expect(callsStop(script)).toBe(expected);
   });
@@ -93,5 +102,50 @@ describe('movie clip stop() frames', () => {
       ],
     } as Timeline;
     expect([...movieClipStopFrames(timeline)].sort()).toEqual([2, 4]);
+  });
+});
+
+describe('movieClipPlayhead', () => {
+  const none = new Set<number>();
+  it('loops one frame per tick without stops', () => {
+    expect([0, 1, 2, 3, 7].map((t) => movieClipPlayhead(t, 3, none).frame)).toEqual([0, 1, 2, 0, 1]);
+  });
+
+  it('holds once it tries to leave a stop frame', () => {
+    const stops = new Set([1]);
+    expect([0, 1, 2, 50].map((t) => movieClipPlayhead(t, 3, stops))).toEqual([
+      { frame: 0, stopped: false },
+      { frame: 1, stopped: false },
+      { frame: 1, stopped: true },
+      { frame: 1, stopped: true },
+    ]);
+  });
+
+  it('stays on frame 0 for a one-frame clip and ignores stops past the end', () => {
+    expect(movieClipPlayhead(5, 1, new Set([0]))).toEqual({ frame: 0, stopped: false });
+    expect(movieClipPlayhead(4, 3, new Set([7]))).toEqual({ frame: 1, stopped: false });
+  });
+});
+
+describe('movieClipAppearance', () => {
+  const instance = (name: string, symbolType: SymbolInstance['symbolType'] = 'movieclip') =>
+    ({ type: 'symbol', libraryItemName: name, symbolType }) as SymbolInstance;
+  const key = (index: number, duration: number, elements: SymbolInstance[]) =>
+    ({ index, duration, elements }) as unknown as Frame;
+
+  it('goes back over back-to-back keyframes holding the same instance', () => {
+    const frames = [key(0, 2, [instance('A')]), key(2, 1, [instance('A')]), key(3, 4, [instance('A')])];
+    expect(movieClipAppearance(frames, frames[2], 0, 'A')).toBe(0);
+  });
+
+  it('stops at a gap, another symbol, another slot or a graphic', () => {
+    const gap = [key(0, 1, [instance('A')]), key(2, 1, [instance('A')])];
+    expect(movieClipAppearance(gap, gap[1], 0, 'A')).toBe(2);
+    const other = [key(0, 1, [instance('B')]), key(1, 1, [instance('A')])];
+    expect(movieClipAppearance(other, other[1], 0, 'A')).toBe(1);
+    const slot = [key(0, 1, [instance('B'), instance('A')]), key(1, 1, [instance('A')])];
+    expect(movieClipAppearance(slot, slot[1], 0, 'A')).toBe(1);
+    const graphic = [key(0, 1, [instance('A', 'graphic')]), key(1, 1, [instance('A')])];
+    expect(movieClipAppearance(graphic, graphic[1], 0, 'A')).toBe(1);
   });
 });

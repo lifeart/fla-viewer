@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import JSZip from 'jszip';
 import { FLAParser, parseMotionTweenRotate, parseSymbolType } from '../fla-parser';
 import { FLARenderer } from '../renderer';
-import { exportSpriteSheet } from '../video-exporter';
+import { exportSingleFrame, exportSpriteSheet, exportSVG } from '../video-exporter';
+import { FLAPlayer } from '../player';
 import { readDirectoryEntry, xflFolderToZip, isXFLStub, XFL_STUB_CONTENT, type XFLFolderEntry } from '../xfl-folder';
 import { ovalPrimitivePath } from '../primitive-shapes';
 import type { FLADocument, PathCommand, Shape, SymbolInstance, TextInstance } from '../types';
@@ -353,6 +354,15 @@ describe('primitive rectangles and ovals (DOMRectangleObject / DOMOvalObject)', 
     expect(colorAt(canvas, 280, 200)).toBe(WHITE);
   });
 
+  it('keeps a ring\'s hole in SVG exports (one path for both contours)', async () => {
+    const doc = await parseXfl({ 'DOMDocument.xml': layerWith(`<DOMOvalObject objectWidth="200" objectHeight="100" x="100" y="100" innerRadius="50">${redFill}</DOMOvalObject>`) });
+    expect(firstShape(doc).edges).toHaveLength(1);
+    const svg = await (await exportSVG(doc, 0)).text();
+    const paths = svg.match(/<path [^>]*fill="#FF0000"[^>]*>/g) ?? [];
+    expect(paths).toHaveLength(1);
+    expect(paths[0]?.match(/M/g)).toHaveLength(2);
+  });
+
   it('leaves the hole of an oval with an inner radius empty', async () => {
     const canvas = await render(`<DOMOvalObject objectWidth="200" objectHeight="100" x="100" y="100" innerRadius="50">${redFill}</DOMOvalObject>`);
     expect(colorAt(canvas, 200, 150)).toBe(WHITE);
@@ -553,10 +563,18 @@ describe('TLF text (DOMTLFText, Flash CS5-CS6)', () => {
     expect(text.textRuns.map((r) => r.fillColor)).toEqual(['#FF000080', '#00FF00']);
   });
 
-  it('keeps an empty first paragraph as a blank line', async () => {
-    const text = await parseText(tlf(`<p fontSize="40"><span></span></p><p><span fontSize="10">Text</span></p>`));
-    expect(text.textRuns.map((r) => r.characters)).toEqual(['\r', 'Text']);
-    expect(text.textRuns[0].size).toBe(40);
+  it('keeps an empty first paragraph as a blank line in its span\'s format', async () => {
+    const text = await parseText(tlf(`<p fontSize="40"><span></span></p><p><span fontSize="30"></span></p><p><span fontSize="10">Text</span></p>`));
+    expect(text.textRuns.map((r) => r.characters)).toEqual(['\r', '\r', 'Text']);
+    expect(text.textRuns.map((r) => r.size)).toEqual([40, 30, 10]);
+  });
+
+  it('writes textAlpha as fill-opacity in SVG exports', async () => {
+    const doc = await parseXfl({ 'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0"><elements>
+      ${tlf('<p><span color="#FF0000" textAlpha="0.5">Half</span></p>')}
+    </elements></DOMFrame></frames></DOMLayer>`) });
+    const svg = await (await exportSVG(doc, 0)).text();
+    expect(svg).toContain('fill="#FF0000" fill-opacity="0.502"');
   });
 
   it('draws TLF text', async () => {
@@ -580,6 +598,7 @@ function hasRed(canvas: HTMLCanvasElement): boolean {
 }
 
 describe('movie clip instances (no symbolType attribute)', () => {
+  const WHITE = '#FFFFFF';
   it.each([
     [null, 'movieclip'],
     ['movie clip', 'movieclip'],
@@ -656,6 +675,124 @@ describe('movie clip instances (no symbolType attribute)', () => {
   it('keeps playing past scripts that stop something else', async () => {
     const scripts = { 1: '// stop();\nsnd.stop();\ngotoAndStop(2);' };
     expect(await playOnFrame0(await clipDoc('', scripts))).toEqual([R, G, B, R]);
+  });
+
+  /** A one-layer main timeline from keyframe XML (`clip(tx)` places the Clip instance). */
+  const clip = (tx = 100) => `<DOMSymbolInstance libraryItemName="Clip"><matrix><Matrix tx="${tx}" ty="100"/></matrix></DOMSymbolInstance>`;
+  const docWith = (layers: string, scripts: Record<number, string> = {}) => parseXfl({
+    'DOMDocument.xml': domDocument(layers, ['Clip']),
+    'LIBRARY/Clip.xml': clipItem(scripts),
+  });
+
+  /** Render frames in order like the player (advance between frames); color at x=110 per frame. */
+  async function playFrames(doc: FLADocument, frames: number[], x = 110): Promise<string[]> {
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(doc);
+    return frames.map((f, i) => {
+      if (i > 0) renderer.advanceMovieClipPlayheads();
+      renderer.renderFrame(f);
+      return colorAt(canvas, x, 110);
+    });
+  }
+
+  it('keeps playing a movie clip on a one-frame timeline in the player', async () => {
+    // Full-stage frames so the player's canvas size doesn't matter.
+    const full = (color: string) => rectShape(0, 0, 550, 400, color);
+    const doc = await parseXfl({
+      'DOMDocument.xml': domDocument(`<DOMLayer name="L"><frames><DOMFrame index="0"><elements>
+        <DOMSymbolInstance libraryItemName="Full"><matrix><Matrix/></matrix></DOMSymbolInstance>
+      </elements></DOMFrame></frames></DOMLayer>`, ['Full']),
+      'LIBRARY/Full.xml': `<DOMSymbolItem xmlns="http://ns.adobe.com/xfl/2008/" name="Full">
+        <timeline><DOMTimeline name="Full"><layers><DOMLayer name="Layer 1"><frames>
+          <DOMFrame index="0"><elements>${full(R)}</elements></DOMFrame>
+          <DOMFrame index="1"><elements>${full(G)}</elements></DOMFrame>
+          <DOMFrame index="2"><elements>${full(B)}</elements></DOMFrame>
+        </frames></DOMLayer></layers></DOMTimeline></timeline>
+      </DOMSymbolItem>`,
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = 550;
+    canvas.height = 400;
+    document.body.appendChild(canvas);
+    const player = new FLAPlayer(canvas);
+    try {
+      await player.setDocument(doc);
+      const p = player as unknown as { state: { playing: boolean }; lastFrameTime: number; animate: () => void; animationId: number | null };
+      const center = () => {
+        const d = canvas.getContext('2d')!.getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1).data;
+        return '#' + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase();
+      };
+      const colors = [center()];
+      p.state.playing = true;
+      for (let i = 0; i < 3; i++) {
+        p.lastFrameTime = performance.now() - 10_000;
+        p.animate();
+        if (p.animationId !== null) cancelAnimationFrame(p.animationId);
+        p.animationId = null;
+        colors.push(center());
+      }
+      expect(colors).toEqual([R, G, B, R]);
+    } finally {
+      player.stop();
+      canvas.remove();
+    }
+  });
+
+  it('starts a movie clip over when it is placed again after leaving the stage', async () => {
+    const doc = await docWith(`<DOMLayer name="L"><frames>
+      <DOMFrame index="0"><elements>${clip()}</elements></DOMFrame>
+      <DOMFrame index="1"><elements></elements></DOMFrame>
+      <DOMFrame index="2" duration="2"><elements>${clip()}</elements></DOMFrame>
+    </frames></DOMLayer>`);
+    expect(await playFrames(doc, [0, 1, 2, 3])).toEqual([R, WHITE, R, G]);
+  });
+
+  it('gives instances on different layers their own playheads', async () => {
+    // Same clip, element 0 on two layers; the second appears one frame later.
+    const doc = await docWith(`
+      <DOMLayer name="A"><frames><DOMFrame index="0" duration="3"><elements>${clip(100)}</elements></DOMFrame></frames></DOMLayer>
+      <DOMLayer name="B"><frames>
+        <DOMFrame index="0"><elements></elements></DOMFrame>
+        <DOMFrame index="1" duration="2"><elements>${clip(300)}</elements></DOMFrame>
+      </frames></DOMLayer>`);
+    expect(await playFrames(doc, [0, 1, 2], 110)).toEqual([R, G, B]);
+    expect(await playFrames(doc, [0, 1, 2], 310)).toEqual([WHITE, R, G]);
+  });
+
+  describe('seeking and single-frame exports', () => {
+    // Three back-to-back keyframes holding the same instance: one clip instance
+    // that has been playing since frame 0.
+    const threeKeys = (scripts: Record<number, string> = {}) => docWith(`<DOMLayer name="L"><frames>
+      <DOMFrame index="0" duration="2"><elements>${clip()}</elements></DOMFrame>
+      <DOMFrame index="2"><elements>${clip()}</elements></DOMFrame>
+      <DOMFrame index="3" duration="2"><elements>${clip()}</elements></DOMFrame>
+    </frames></DOMLayer>`, scripts);
+
+    it('shows a movie clip where continuous playback would have it', async () => {
+      const doc = await threeKeys();
+      for (const [frame, color] of [[1, G], [2, B], [3, R], [4, G]] as const) {
+        expect(await playFrames(doc, [frame]), `frame ${frame}`).toEqual([color]);
+      }
+    });
+
+    it('holds at a stop() frame when seeking past it', async () => {
+      expect(await playFrames(await threeKeys({ 1: 'stop();' }), [4])).toEqual([G]);
+    });
+
+    it('agrees with the sequence in PNG and SVG single-frame exports', async () => {
+      const doc = await threeKeys();
+      const bitmap = await createImageBitmap(await exportSingleFrame(doc, 2));
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(bitmap, 0, 0);
+      expect(Array.from(ctx.getImageData(110, 110, 1, 1).data.slice(0, 3))).toEqual([0, 0, 255]);
+
+      // The SVG exporter counts from the instance's keyframe (frame 2 starts one).
+      const svg = await (await exportSVG(doc, 4)).text();
+      expect(svg).toContain('#00FF00');
+      expect(svg).not.toContain('#FF0000');
+    });
   });
 
   it('advances movie clips frame by frame in exports, across parent keyframes', async () => {

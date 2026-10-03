@@ -30,7 +30,7 @@ import type {
 } from './types';
 import { getWithNormalizedPath } from './path-utils';
 import { evaluateMotionObject } from './motion-object';
-import { graphicSymbolFrame, movieClipStopFrames } from './symbol-loop';
+import { graphicSymbolFrame, movieClipAppearance, movieClipPlayhead, movieClipStopFrames } from './symbol-loop';
 import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, invertMatrix, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
@@ -100,6 +100,15 @@ export class FLARenderer {
   private movieClipStates = new Map<string, MovieClipInstanceState>();
   private stopFramesCache = new WeakMap<Timeline, ReadonlySet<number>>();
   private currentInstancePath: string[] = []; // Stack of instance identifiers for nested symbols
+  // Movie clip states reached by the current renderFrame; the rest have left
+  // the stage and are dropped when it ends (a clip placed again starts over).
+  private touchedMovieClips = new Set<string>();
+  // Layer and keyframe of the element being drawn (for instance keys and for
+  // seeding a newly seen movie clip's playhead).
+  private currentLayer: Layer | null = null;
+  private currentKeyframe: Frame | null = null;
+  private layerIds = new WeakMap<Layer, number>();
+  private nextLayerId = 1;
 
   // Current scene index for multiple scene support
   private currentScene: number = 0;
@@ -382,17 +391,34 @@ export class FLARenderer {
     this.currentInstancePath = [];
   }
 
-  // Generate a unique key for a MovieClip instance based on its position in the hierarchy
-  private generateInstanceKey(symbolName: string, elementIndex: number): string {
-    const pathKey = this.currentInstancePath.length > 0
-      ? this.currentInstancePath.join('/') + '/'
-      : '';
-    return `${pathKey}${symbolName}@${elementIndex}`;
+  // Record the layer and keyframe whose element is about to be drawn.
+  private enterKeyframe(layer: Layer, frame: Frame): void {
+    this.currentLayer = layer;
+    this.currentKeyframe = frame;
+    this.currentKeyframeStart = frame.index;
   }
 
-  // Get or create state for a MovieClip instance
+  // An instance's place in its parent timeline: symbol, layer and element index.
+  // Joined along currentInstancePath it identifies one instance on stage.
+  private instanceSlot(symbolName: string, elementIndex: number): string {
+    let layerId = 0;
+    if (this.currentLayer) {
+      layerId = this.layerIds.get(this.currentLayer) ?? 0;
+      if (!layerId) {
+        layerId = this.nextLayerId++;
+        this.layerIds.set(this.currentLayer, layerId);
+      }
+    }
+    return `${symbolName}@${layerId}:${elementIndex}`;
+  }
+
+  // Get or create the state of the movie clip instance at `key`. A clip seen for
+  // the first time has been playing since its run of keyframes began, so after a
+  // seek (or in a one-frame export) it shows the frame continuous playback would.
   private getOrCreateMovieClipState(
     key: string,
+    instance: SymbolInstance,
+    elementIndex: number,
     totalFrames: number,
     parentFrame: number,
     timeline: Timeline
@@ -404,16 +430,20 @@ export class FLARenderer {
         stopFrames = movieClipStopFrames(timeline);
         this.stopFramesCache.set(timeline, stopFrames);
       }
-      // New instance - create initial state
+      const appeared = this.currentLayer && this.currentKeyframe
+        ? movieClipAppearance(this.currentLayer.frames, this.currentKeyframe, elementIndex, instance.libraryItemName)
+        : parentFrame;
+      const { frame, stopped } = movieClipPlayhead(parentFrame - appeared, totalFrames, stopFrames);
       state = {
-        playhead: 0,
+        playhead: frame,
         totalFrames,
-        startParentFrame: parentFrame,
-        isPlaying: true,
+        startParentFrame: appeared,
+        isPlaying: !stopped,
         stopFrames
       };
       this.movieClipStates.set(key, state);
     }
+    this.touchedMovieClips.add(key);
     return state;
   }
 
@@ -857,8 +887,14 @@ export class FLARenderer {
     ctx.fillRect(0, 0, viewport.width, viewport.height);
 
     // Render current scene's timeline
+    this.touchedMovieClips.clear();
+    this.currentInstancePath = [];
     if (doc.timelines.length > this.currentScene) {
       this.renderTimelineWithCamera(doc.timelines[this.currentScene], frameIndex, viewport);
+    }
+    // Movie clips not on stage this frame are gone; placed again, they start over.
+    for (const key of this.movieClipStates.keys()) {
+      if (!this.touchedMovieClips.has(key)) this.movieClipStates.delete(key);
     }
   }
 
@@ -1110,7 +1146,7 @@ export class FLARenderer {
       : 0;
 
     frame.elements.forEach((element, elementIndex) => {
-      this.currentKeyframeStart = frame.index;
+      this.enterKeyframe(layer, frame);
 
       // Shape tween: the interpolated morph segments renderMorphShape fills
       // are the mask geometry.
@@ -1170,10 +1206,9 @@ export class FLARenderer {
       const symbol = getWithNormalizedPath(this.doc.symbols, element.libraryItemName);
       if (!symbol) return;
 
+      const slot = this.instanceSlot(element.libraryItemName, elementIndex);
       const symbolFrame = this.getSymbolFrame(element, symbol, parentFrameIndex, elementIndex);
-      if (element.symbolType === 'movieclip') {
-        this.currentInstancePath.push(`${element.libraryItemName}@${elementIndex}`);
-      }
+      this.currentInstancePath.push(slot);
       const layers = symbol.timeline.layers;
       for (let i = 0; i < layers.length; i++) {
         const type = (layers[i].layerType as string | undefined)?.toLowerCase();
@@ -1184,9 +1219,7 @@ export class FLARenderer {
         if (!this.isLayerVisibleInFla(layers, i)) continue;
         this.addLayerToMaskPath(layers[i], symbolFrame, m, clip, depth + 1);
       }
-      if (element.symbolType === 'movieclip') {
-        this.currentInstancePath.pop();
-      }
+      this.currentInstancePath.pop();
     } else {
       // Text, bitmaps and video mask by their bounding box.
       let x = 0;
@@ -1470,9 +1503,6 @@ export class FLARenderer {
     // by detectReferenceLayers() during parsing. That logic is more accurate
     // because it considers both layer name AND visibility/outline status.
 
-    // Track keyframe start for symbol loop calculations
-    this.currentKeyframeStart = frame.index;
-
     // Check if we need to interpolate (tween)
     const nextKeyframe = this.findNextKeyframe(layer.frames, frame);
 
@@ -1496,6 +1526,8 @@ export class FLARenderer {
       if (depth === 0 && hiddenSet?.has(elementIndex)) continue;
 
       const element = frame.elements[elementIndex];
+      // Per element: drawing the previous one may have entered nested timelines.
+      this.enterKeyframe(layer, frame);
 
       if (rig) {
         this.ctx.save();
@@ -2211,12 +2243,11 @@ export class FLARenderer {
 
     // MovieClips play independently from parent timeline with their own playhead
     if (instance.symbolType === 'movieclip') {
-      // Generate unique instance key for this MovieClip
-      const instanceKey = this.generateInstanceKey(instance.libraryItemName, elementIndex);
-
-      // Get or create instance state
+      const instanceKey = [...this.currentInstancePath, this.instanceSlot(instance.libraryItemName, elementIndex)].join('/');
       const state = this.getOrCreateMovieClipState(
         instanceKey,
+        instance,
+        elementIndex,
         totalSymbolFrames,
         parentFrameIndex,
         symbol.timeline
@@ -2340,12 +2371,12 @@ export class FLARenderer {
       }
     }
 
+    const slot = this.instanceSlot(instance.libraryItemName, elementIndex);
     const symbolFrame = this.getSymbolFrame(instance, symbol, parentFrameIndex, elementIndex);
+    // Movie clips nested in this instance are keyed by the instances above them.
+    this.currentInstancePath.push(slot);
 
-    if (instance.symbolType === 'movieclip') {
-      // Push this instance onto the path for nested MovieClips
-      this.currentInstancePath.push(`${instance.libraryItemName}@${elementIndex}`);
-    } else if (instance.symbolType === 'button') {
+    if (instance.symbolType === 'button') {
       // Track button hit area for debug click detection
       if (this.debugMode && symbol.hitAreaFrame !== undefined) {
         const hitAreaPath = this.buildButtonHitAreaPath(symbol, symbol.hitAreaFrame);
@@ -2424,10 +2455,7 @@ export class FLARenderer {
       this.debugSymbolPath.pop();
     }
 
-    // Pop instance path for MovieClips (for nested MovieClip tracking)
-    if (instance.symbolType === 'movieclip') {
-      this.currentInstancePath.pop();
-    }
+    this.currentInstancePath.pop();
 
     // Clear filters if applied
     if (hasFilters) {

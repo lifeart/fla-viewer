@@ -1,7 +1,7 @@
 import type { FLADocument, SoundItem, FrameSound } from './types';
 import { isLayerVisibleInFla, getMaskLayerIndex } from './layer-utils';
 import { FLARenderer } from './renderer';
-import { graphicSymbolFrame } from './symbol-loop';
+import { graphicSymbolFrame, movieClipPlayhead, movieClipStopFrames } from './symbol-loop';
 
 export interface ExportProgress {
   currentFrame: number;
@@ -1621,7 +1621,11 @@ export async function exportSVG(
       const fontFamily = run.face || 'Arial';
       const fontWeight = run.bold ? 'bold' : 'normal';
       const fontStyle = run.italic ? 'italic' : 'normal';
-      const fill = run.fillColor;
+      // #RRGGBBAA (TLF textAlpha) as fill + fill-opacity, which more SVG tools read.
+      const rgba = /^(#[0-9a-f]{6})([0-9a-f]{2})$/i.exec(run.fillColor);
+      const fill = rgba
+        ? `${rgba[1]}" fill-opacity="${+(parseInt(rgba[2], 16) / 255).toFixed(3)}`
+        : run.fillColor;
       const anchor = run.alignment === 'center' ? 'middle' : run.alignment === 'right' ? 'end' : 'start';
 
       // Handle multi-line text
@@ -1699,11 +1703,13 @@ export async function exportSVG(
     const lastFrame = instance.lastFrame;
     const totalSymbolFrames = Math.max(1, symbol.timeline.totalFrames);
 
-    // MovieClips and Buttons play independently - use firstFrame for static rendering
-    const effectiveLoop = (instance.symbolType === 'movieclip' || instance.symbolType === 'button')
-      ? 'single frame'
-      : instance.loop;
-    const symbolFrame = graphicSymbolFrame(effectiveLoop, firstFrame, lastFrame, totalSymbolFrames, frameIndex - keyframeStart);
+    // A movie clip has played since its keyframe began (holding at a stop()
+    // frame); a button shows its up state.
+    const symbolFrame = instance.symbolType === 'movieclip'
+      ? movieClipPlayhead(frameIndex - keyframeStart, totalSymbolFrames, movieClipStopFrames(symbol.timeline)).frame
+      : instance.symbolType === 'button'
+        ? 0
+        : graphicSymbolFrame(instance.loop, firstFrame, lastFrame, totalSymbolFrames, frameIndex - keyframeStart);
 
     // Collect elements from all layers at the symbolFrame, mask-aware (mask
     // grouping + <clipPath>) just like the main timeline. Symbol timelines

@@ -2255,7 +2255,7 @@ describe('video-exporter', () => {
       expect(text).toContain('#FF0000');
     });
 
-    it('should render movieclip at firstFrame regardless of parent timeline', async () => {
+    it('should render a movieclip where playing since its keyframe would put it', async () => {
       // Create a movieclip symbol with 3 frames
       const symbols = new Map();
       symbols.set('TestClip', {
@@ -2326,13 +2326,14 @@ describe('video-exporter', () => {
         })],
       });
 
-      // MovieClips always show firstFrame in static SVG export
-      // At frame 0, 1, 2, 3, 4 - all should show red (frame 0)
+      // The clip has played one frame per parent frame since the keyframe at 0
+      // (looping its two frames), as in a sequence export.
       for (const frameIdx of [0, 1, 2, 3, 4]) {
         const blob = await exportSVG(doc, frameIdx);
         const text = await blob.text();
-        expect(text).toContain('#FF0000'); // Always red
-        expect(text).not.toContain('#00FF00');
+        const [shown, hidden] = frameIdx % 2 === 0 ? ['#FF0000', '#00FF00'] : ['#00FF00', '#FF0000'];
+        expect(text, `frame ${frameIdx}`).toContain(shown);
+        expect(text, `frame ${frameIdx}`).not.toContain(hidden);
       }
     });
 
