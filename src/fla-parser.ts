@@ -2484,10 +2484,10 @@ export class FLAParser {
     }
     const ole = new OLE2File(bytes);
     for (const sound of sounds.values()) {
-      const data = ole.readStream(sound.href);
-      // Copy into a standalone ArrayBuffer (decodeAudioData detaches it).
-      const buffer = data.slice().buffer;
       try {
+        const data = ole.readStream(sound.href);
+        // Copy into a standalone ArrayBuffer (decodeAudioData detaches it).
+        const buffer = data.slice().buffer;
         if (sound.format === 'mp3') {
           sound.audioData = await this.audioContext.decodeAudioData(buffer);
         } else {

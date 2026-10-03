@@ -314,6 +314,9 @@ function extractSounds(
   ole: OLE2File
 ): Map<number, BinarySound> {
   const sounds = new Map<number, BinarySound>();
+  // Sounds are keyed by name downstream (doc.sounds, frame.sound.name), so two
+  // records sharing a display name would collide; disambiguate with the stream.
+  const usedNames = new Set<string>();
   for (let p = 0; p + 20 < contents.length; p++) {
     const len = contents[p];
     if (len < 7 || len > 12) continue;
@@ -345,10 +348,10 @@ function extractSounds(
     if (footer < 0) continue;
     const format = contents[footer + 2];
     const sampleCount =
-      contents[footer + 4] |
+      (contents[footer + 4] |
       (contents[footer + 5] << 8) |
       (contents[footer + 6] << 16) |
-      (contents[footer + 7] << 24);
+      (contents[footer + 7] << 24)) >>> 0;
     const channels = format & 1 ? 2 : 1;
     const bitDepth = format & 2 ? 16 : 8;
     const sampleRate = SOUND_RATES[(format >> 2) & 3];
@@ -366,9 +369,12 @@ function extractSounds(
       continue;
     }
     const mediaNumber = parseInt(m[1], 10);
+    let uniqueName = name || stream;
+    if (usedNames.has(uniqueName)) uniqueName = `${uniqueName} (${stream})`;
+    usedNames.add(uniqueName);
     sounds.set(mediaNumber, {
       mediaNumber,
-      name: name || stream,
+      name: uniqueName,
       stream,
       codec: isMp3 ? 'mp3' : 'pcm',
       sampleRate,
@@ -756,15 +762,19 @@ function buildAttributedLayers(
   const allKeyframes = timeline.layers.flatMap((l) => l.keyframes);
   const inAnyKeyframe = (offset: number) =>
     allKeyframes.some((kf) => offset >= kf.bodyStart && offset < kf.bodyEnd);
+  // The binary layer record carries no reliable type byte (see
+  // binary-fla-structure), so use the UI name prefix like extractLayers.
+  const typeOf = (name: string): 'guide' | 'folder' | 'normal' =>
+    name.startsWith('Guide: ') ? 'guide' : name.startsWith('Folder ') ? 'folder' : 'normal';
+  // Orphan content goes on the first layer that is drawn: a guide or folder
+  // is a reference layer, so content hosted there would never render.
+  const orphanHost = Math.max(
+    0,
+    timeline.layers.findIndex((dl) => typeOf(dl.name) === 'normal')
+  );
 
   const layers: Layer[] = timeline.layers.map((dl, index) => {
-    // The binary layer record carries no reliable type byte (see
-    // binary-fla-structure), so use the UI name prefix like extractLayers.
-    const layerType = dl.name.startsWith('Guide: ')
-      ? 'guide'
-      : dl.name.startsWith('Folder ')
-        ? 'folder'
-        : 'normal';
+    const layerType = typeOf(dl.name);
     if (layerType === 'guide' || layerType === 'folder') {
       referenceLayers.add(index);
     }
@@ -799,17 +809,17 @@ function buildAttributedLayers(
     });
 
     // Content that fell outside EVERY layer's keyframe ranges goes on the
-    // first layer's first keyframe (never drop recovered artwork). Content
+    // first drawn layer's first keyframe (never drop recovered artwork). Content
     // owned by another layer is not an orphan here — hosting it on every layer
     // duplicated it across the whole timeline.
     const orphanShapes =
-      index === 0
+      index === orphanHost
         ? shapeBuckets.unattributed
             .filter((d) => !inAnyKeyframe(d.bodyStart))
             .map((d) => d.shape)
         : [];
     const orphanInstances =
-      index === 0
+      index === orphanHost
         ? buildSymbolInstances(
             instBuckets.unattributed.filter(
               (d) => !inAnyKeyframe(d.bodyStart)

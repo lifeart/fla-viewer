@@ -52,7 +52,7 @@ The bytes right after the first layer's record are `03 80`, a back-reference to 
 
 Each layer bucketed *all* of the stream's shapes and instances by its own keyframe byte ranges. It then put everything outside those ranges ("orphans") on its first frame, so other layers' content was copied onto it.
 
-**Change:** content only counts as an orphan when it falls outside **every** layer's keyframes, and orphans are placed once, on the first layer.
+**Change:** content only counts as an orphan when it falls outside **every** layer's keyframes, and orphans are placed once, on the first drawn layer (a guide or folder layer is skipped, since it is never rendered).
 
 ## 4. Layer stacking order
 
