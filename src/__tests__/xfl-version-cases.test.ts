@@ -392,7 +392,7 @@ describe('primitive rectangles and ovals (DOMRectangleObject / DOMOvalObject)', 
 describe('CS4+ object motion tweens (tweenType="motion object")', () => {
   // A 20x20 red box symbol moved 200px right over a 11-frame span, as Flash CS5
   // saves it: one DOMFrame for the whole span, keys inside <AnimationCore>.
-  const motionLayer = (extraBasic = '', colors = '') => `<DOMLayer name="Tween" animationType="motion object"><frames>
+  const motionLayer = (extraBasic = '', colors = '', filters = '', elementFilters = '') => `<DOMLayer name="Tween" animationType="motion object"><frames>
     <DOMFrame index="0" duration="11" tweenType="motion object" motionTweenRotate="none" motionTweenScale="false" isMotionObject="true" visibleAnimationKeyframes="2097151" keyMode="8195">
       <motionObjectXML><AnimationCore TimeScale="24000" Version="1" duration="11000"><TimeMap strength="0" type="Quadratic"/><metadata><Settings orientToPath="0" xformPtXOffsetPct="0.5" xformPtYOffsetPct="0.5" xformPtZOffsetPixels="0"/></metadata>
         <PropertyContainer id="headContainer">
@@ -408,10 +408,10 @@ describe('CS4+ object motion tweens (tweenType="motion object")', () => {
             <Property enabled="1" id="Scale_X" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,100" next="0,100" previous="0,100" roving="0" timevalue="0"/></Property>
             <Property enabled="1" id="Scale_Y" ignoreTimeMap="0" readonly="0" visible="1"><Keyframe anchor="0,100" next="0,100" previous="0,100" roving="0" timevalue="0"/></Property>
           </PropertyContainer>
-          <PropertyContainer id="Colors">${colors}</PropertyContainer><PropertyContainer id="Filters"/>
+          <PropertyContainer id="Colors">${colors}</PropertyContainer><PropertyContainer id="Filters">${filters}</PropertyContainer>
         </PropertyContainer></AnimationCore></motionObjectXML>
       <elements><DOMSymbolInstance libraryItemName="Box" name="" centerPoint3DX="60" centerPoint3DY="110">
-        <matrix><Matrix tx="50" ty="100"/></matrix><transformationPoint><Point x="10" y="10"/></transformationPoint>
+        <matrix><Matrix tx="50" ty="100"/></matrix><transformationPoint><Point x="10" y="10"/></transformationPoint>${elementFilters}
       </DOMSymbolInstance></elements>
     </DOMFrame>
   </frames></DOMLayer>`;
@@ -470,6 +470,40 @@ describe('CS4+ object motion tweens (tweenType="motion object")', () => {
     expect(g).toBeGreaterThan(110);
     expect(g).toBeLessThan(145);
     expect(b).toBe(g);
+  });
+
+  // Filter curves as Animate saves them: one <PropertyContainer id="<Kind>_Filter">
+  // per filter, constants as keyless <Property value>, colors as 0xRRGGBBAA.
+  const curve = (id: string, keys: string) =>
+    `<Property enabled="1" id="${id}" ignoreTimeMap="0" readonly="0" visible="1">${keys}</Property>`;
+  const keyAt = (t: number, v: number) => `<Keyframe anchor="0,${v}" next="0,${v}" previous="0,${v}" roving="0" timevalue="${t}"/>`;
+  const constant = (id: string, value: number) => `<Property enabled="1" id="${id}" readonly="0" value="${value}" visible="1"/>`;
+
+  it('animates a blur filter over the span', async () => {
+    const blur = `<PropertyContainer id="Blur_Filter">${curve('Blur_BlurX', keyAt(0, 10) + keyAt(10000, 0))}${curve('Blur_BlurY', keyAt(0, 10) + keyAt(10000, 0))}${constant('Blur_Quality', 3)}</PropertyContainer>`;
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(await parseXfl(files(motionLayer('', '', blur, '<filters><BlurFilter blurX="10" blurY="10" quality="3"/></filters>'))));
+    renderer.renderFrame(0);
+    expect(colorAt(canvas, 73, 110)).not.toBe('#FFFFFF'); // blurred past the box edge
+    renderer.renderFrame(10);
+    expect(colorAt(canvas, 260, 110)).toBe('#FF0000');
+    expect(colorAt(canvas, 273, 110)).toBe('#FFFFFF'); // sharp again
+  });
+
+  it('animates a drop shadow\'s color', async () => {
+    const shadow = `<PropertyContainer id="DropShadow_Filter">${curve('DropShadow_BlurX', keyAt(0, 0))}${curve('DropShadow_BlurY', keyAt(0, 0))}${curve('DropShadow_Strength', keyAt(0, 100))}${constant('DropShadow_Quality', 1)}${curve('DropShadow_Angle', keyAt(0, 90))}${curve('DropShadow_Distance', keyAt(0, 30))}${constant('DropShadow_Knockout', 0)}${constant('DropShadow_InnerShadow', 0)}${constant('DropShadow_HideObject', 0)}${curve('DropShadow_Color', '<Keyframe roving="0" timevalue="0" value="0x000000ff"/><Keyframe roving="0" timevalue="10000" value="0x0000ffff"/>')}</PropertyContainer>`;
+    const canvas = document.createElement('canvas');
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(await parseXfl(files(motionLayer('', '', shadow,
+      '<filters><DropShadowFilter angle="90" blurX="0" blurY="0" distance="30" quality="1"/></filters>'))));
+    // The shadow offset is in canvas pixels, 30 straight down.
+    const below = 110 + 30 / (canvas.width / 550);
+    renderer.renderFrame(0);
+    expect(colorAt(canvas, 60, below)).toBe('#000000');
+    renderer.renderFrame(10);
+    expect(colorAt(canvas, 260, 110)).toBe('#FF0000');
+    expect(colorAt(canvas, 260, below)).toBe('#0000FF');
   });
 });
 

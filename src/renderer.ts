@@ -1492,13 +1492,16 @@ export class FLARenderer {
 
   /**
    * An element of a CS4+ object motion tween span (`frame.motionObject`) as it
-   * stands `frameIndex - frame.index` frames into the span: matrix, and color
-   * and 3D rotation when the tween animates them. Other elements pass through.
+   * stands `frameIndex - frame.index` frames into the span: matrix, and color,
+   * 3D rotation and filters when the tween animates them. Other elements pass
+   * through.
    */
   private applyMotionObject<T extends DisplayElement>(frame: Frame, element: T, frameIndex: number): T {
     if (!frame.motionObject || !this.doc) return element;
     const tp = element.type === 'symbol' ? element.transformationPoint : undefined;
-    const state = evaluateMotionObject(frame.motionObject, frameIndex - frame.index, this.doc.frameRate, element.matrix, tp);
+    const filters = element.type === 'symbol' || element.type === 'text' ? element.filters : undefined;
+    const state = evaluateMotionObject(frame.motionObject, frameIndex - frame.index, this.doc.frameRate, element.matrix, tp, filters);
+    if (element.type === 'text') return { ...element, matrix: state.matrix, ...(state.filters && { filters: state.filters }) };
     if (element.type !== 'symbol') return { ...element, matrix: state.matrix };
     return {
       ...element,
@@ -1506,6 +1509,7 @@ export class FLARenderer {
       ...(state.colorTransform && { colorTransform: state.colorTransform }),
       ...(state.rotationX !== undefined && { rotationX: state.rotationX }),
       ...(state.rotationY !== undefined && { rotationY: state.rotationY }),
+      ...(state.filters && { filters: state.filters }),
     };
   }
 

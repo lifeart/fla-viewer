@@ -430,8 +430,10 @@ suite. What is still open:
 - [ ] **IK / bone armatures**: XFL pose layers play Flash's baked per-frame matrices (see
   "IK pose layers" below); nothing solves IK, so a span whose matrix list is missing or
   doesn't fit holds its first pose. Binary (pre-CS5) FLAs don't decode armatures.
-- [ ] **Object motion tweens**: filter curves, and Bounce/Spring/wave/custom time maps
-  (they fall back to linear)
+- [ ] **Object motion tweens**: Custom and RandomSquareWave time maps fall back to linear
+  (no saved Custom time map was found to show how its curve is stored; PSM's Random draws
+  unseeded levels), and AdjColor filter curves and the gradient/type of gradient filters are
+  not animated
 - [ ] **Variable-width strokes** (`<VariablePointWidth><WidthMarker>`) and art/pattern
   brushes draw at constant width
 
@@ -840,6 +842,25 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   `next`/`previous` as "dt,value" handles; Motion_X/Y move the transformation point, Rotation/
   Skew/Scale are absolute and rebuild the matrix (`a = sx cos(rot+skewY)`, `c = -sy sin(rot+skewX)`).
   Reference implementation: Sony PSM `UIMotion`/`AnimationUtility`.
+  - **Time maps.** `<TimeMap type strength>`, picked per property by `TimeMapIndex`, eases the
+    time between the property's first and last key. The `type` names are the Animate SDK's
+    `kEasing_*` strings (`ApplicationFCMPublicIDs.h` in pixijs-userland/animate-extension):
+    Quadratic..Quintic, DualQuadratic..DualQuintic, Bounce, BounceIn (what the Motion Editor's
+    Bounce preset saves), Spring, SineWave, SawtoothWave, SquareWave, RandomSquareWave,
+    DampedWave, Custom. `strength` is -100..100 for the first two families and the number of
+    bounces/swings/waves for the rest. `applyTimeMap` uses PSM's formulas. Spring settles at
+    70% of the change (PSM's sample spins to 513 degrees to rest at 360) and the waves can end
+    anywhere, so a property holds its eased value from its last key on; an eased time outside
+    0..1 holds the end key. RandomSquareWave and Custom stay linear.
+  - **Filter curves.** `<PropertyContainer id="Filters">` holds one `<Kind>_Filter` container
+    per filter, in the instance's filter order, with `<Kind>_<Name>` properties (SDK
+    `kTweenProperty_*`: DropShadow, Blur, Glow, Bevel, GradientGlow, GradientBevel, AdjColor).
+    BlurX/BlurY/Distance are pixels, Angle degrees, Strength percent (60 is the
+    `<DropShadowFilter strength="0.6">` of the same instance), colors are 0xRRGGBBAA keys, and
+    Quality/Knockout/InnerShadow/InnerGlow/HideObject are a keyless `<Property value="...">`.
+    `evaluateFilters` replaces the instance's next filter of each kind (or appends one) and
+    keeps the rest; `applyMotionObject` passes the result to the symbol/text filter path.
+    Gradient colors and bevel/gradient `Type` come from the instance's own filter.
 - **Primitives (CS3+).** `<DOMRectangleObject>`/`<DOMOvalObject>` have parameters and a singular
   `<fill>`/`<stroke>`, no edges; `src/primitive-shapes.ts` rebuilds the outline. x/y is the
   top-left in the element's own space; oval angles are degrees from 3 o'clock, clockwise.
