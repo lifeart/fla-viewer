@@ -2539,6 +2539,14 @@ describe('video-exporter', () => {
       expect(text).toContain('x="-50%" y="-50%" width="200%" height="200%"');
     });
 
+    it('emits no <filter> for a filter switched off in the Filters panel', async () => {
+      const doc = buildFilteredSymbolDoc([
+        { type: 'blur', blurX: 4, blurY: 4, enabled: false },
+      ]);
+      const text = await (await exportSVG(doc, 0)).text();
+      expect(text).not.toContain('<filter');
+    });
+
     it('emits a dropShadow <filter> with offset from distance/angle', async () => {
       const doc = buildFilteredSymbolDoc([
         { type: 'dropShadow', blurX: 6, blurY: 6, color: '#000000', strength: 1, alpha: 1, distance: 4, angle: 45 },

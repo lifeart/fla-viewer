@@ -22,8 +22,8 @@ import {
  * was at the child keyframe:
  *   world(t) = P(t) * inv(P(k0)) * C0                       (holding child)
  *   world(t) = P(t) * lerp(inv(P(k0))*C0, inv(P(k1))*C1)     (tweening child)
- * It is the identity whenever the parent is static across the child's span, so
- * world-space keys are never double-transformed.
+ * A holding child under a static parent is drawn as stored, so world-space
+ * keys are never double-transformed.
  */
 describe('Layer parenting: live rig composition between child keyframes', () => {
   let canvas: HTMLCanvasElement;
@@ -479,6 +479,29 @@ describe('Layer parenting: live rig composition between child keyframes', () => 
     renderer.renderFrame(2);
     expect(performance.now() - t0).toBeLessThan(2000);
     expect(isRed(colorAt(165, 65))).toBe(true);
+  });
+
+  it('a child turning under a static stretched parent turns in the parent\'s space', async () => {
+    // Parent stretched 200% x 100%, static. Child world keys are the parent
+    // times its local keys: T(100,100) and T(100,100) R90. Halfway the child is
+    // P * T(100,100) R45, whose x axis points along atan(0.5) = 26.6 degrees,
+    // not a 45 degree turn of the world keys.
+    const bar = createSymbol('Bar');
+    bar.timeline = createTimeline({ name: 'Bar', totalFrames: 1, layers: [createLayer({ frames: [createFrame({
+      elements: [createRectangleShape({ x: 0, y: -5, width: 100, height: 10, color: '#FF0000' })],
+    })] })] });
+    const child = createLayer({ name: 'Child', layerType: 'normal', parentLayerIndex: 0, frames: [
+      createFrame({ index: 0, duration: 4, tweenType: 'motion',
+        elements: [createSymbolInstance('Bar', { matrix: { a: 2, d: 1, tx: 200, ty: 100 } })] }),
+      createFrame({ index: 4, duration: 1,
+        elements: [createSymbolInstance('Bar', { matrix: { a: 0, b: 1, c: -2, d: 0, tx: 200, ty: 100 } })] }),
+    ] });
+    const doc = docOf([boneLayer([boneKey(0, 5, { a: 2, d: 1, tx: 0, ty: 0 })]), child], [bone(), bar]);
+    await renderer.setDocument(doc, true);
+    renderer.renderFrame(2);
+    // Local x = 80 along the bar: P * (100 + 80 cos45, 100 + 80 sin45).
+    expect(isRed(colorAt(200 + 160 * Math.SQRT1_2, 100 + 80 * Math.SQRT1_2))).toBe(true);
+    expect(isRed(colorAt(200 + 120 * Math.SQRT1_2, 100 + 120 * Math.SQRT1_2))).toBe(false);
   });
 
   it('a non-parented timeline renders identically to the same timeline with a static parent', async () => {

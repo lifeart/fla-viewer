@@ -3420,6 +3420,57 @@ describe('FLARenderer', () => {
       expect(lineDelta).toBeLessThan(45);
     });
 
+    describe('line heights of lines made of different runs', () => {
+      const textDoc = (textRuns: TextRun[]) => createMinimalDoc({
+        timelines: [createTimeline({
+          layers: [createLayer({
+            frames: [createFrame({
+              elements: [{
+                type: 'text',
+                matrix: createMatrix({ tx: 50, ty: 20 }),
+                left: 0,
+                width: 400,
+                height: 300,
+                textRuns,
+              }],
+            })],
+          })],
+        })],
+      });
+      const run = (characters: string, size: number, lineHeight: number, fillColor: string): TextRun =>
+        ({ characters, size, lineHeight, face: 'Arial', fillColor }) as TextRun;
+
+      // Distance from the red line's top to the blue line's top.
+      const redToBlue = async (textRuns: TextRun[]) => {
+        await renderer.setDocument(textDoc(textRuns));
+        renderer.renderFrame(0);
+        const red = colorBounds(canvas, '#FF0000');
+        const blue = colorBounds(canvas, '#0000FF');
+        expect(red.count).toBeGreaterThan(0);
+        expect(blue.count).toBeGreaterThan(0);
+        return blue.minY - red.minY;
+      };
+
+      it('spaces small lines by their own height after a large first line', async () => {
+        const body = [run('Body1\r', 12, 15, '#FF0000'), run('Body2', 12, 15, '#0000FF')];
+        const afterLargeTitle = await redToBlue([run('Title\r', 48, 60, '#000000'), ...body]);
+        const afterSmallTitle = await redToBlue([run('Title\r', 12, 15, '#000000'), ...body]);
+        // One body line apart either way, not the large title's line height.
+        expect(Math.abs(afterLargeTitle - afterSmallTitle)).toBeLessThanOrEqual(1);
+      });
+
+      it('sizes a blank line by the run of its own line break', async () => {
+        // A, a blank paragraph, then B: the blank line's height is its own.
+        const blank = (size: number, lineHeight: number) =>
+          redToBlue([run('A\r', 12, 15, '#FF0000'), run('\r', size, lineHeight, '#000000'), run('B', 12, 15, '#0000FF')]);
+        const tall = await blank(40, 50);
+        const short = await blank(12, 15);
+        // 35 units taller, drawn at the stage's scale (below 1 here).
+        expect(tall - short).toBeGreaterThan(15);
+        expect(tall - short).toBeLessThan(40);
+      });
+    });
+
     it('centers a line made of two inline runs as if it were one centered run', async () => {
       // Build a doc with a single text element; the textRuns differ per case.
       const makeDoc = (textRuns: TextRun[]) => createMinimalDoc({

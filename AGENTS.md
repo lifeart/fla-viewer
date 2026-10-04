@@ -51,7 +51,7 @@ FLA files (Adobe Animate/Flash Professional) are ZIP archives containing XML fil
     color="#FF4F4F"           <!-- Layer color in timeline UI -->
     visible="true"            <!-- Layer visibility -->
     locked="false"            <!-- Layer lock state -->
-    layerType="normal"        <!-- normal | guide | folder | mask | masked -->
+    layerType="normal"        <!-- normal | guide | folder | mask | masked | camera -->
     parentLayerIndex="2">     <!-- Parent folder index (if in folder) -->
 
     <frames>
@@ -109,6 +109,21 @@ Gotchas: `back` uses overshoot constant **1.7** (not Penner's 1.70158) and `back
 scales it by **×1.525**; `elasticInOut` period is **0.45**. CustomEase is a multi-segment
 piecewise cubic bezier (3n+1 points), not a single 4-point curve.
 
+**Classic tween matrices** are interpolated decomposed (`interpolateDecomposed` in
+`src/layer-utils.ts`): scale X/Y, skew angles and position, as the CreateJS runtime tweens
+`scaleX`, `scaleY`, `rotation`, `skewX` and `skewY`. Lerping a..d instead shrinks a turning
+instance (to nothing halfway through a half turn) and zooms a turning camera. The rotation
+(skewY) turns the short way round, or the `motionTweenRotate="clockwise"`/`"counter-clockwise"`
+way plus `motionTweenRotateTimes` whole turns; skewX turns by the same amount plus the
+short-way change in the skew between them, so a half turn can't shear the instance flat.
+An exact 180 degree turn with no direction set goes counter-clockwise. A mirrored instance
+(negative determinant at both keys) gets a negative x scale and stays mirrored, spins
+included. A tween that mirrors the instance (determinant changes sign), or runs between a
+mirrored key and one scaled flat (determinant 0), is lerped entry by entry, through zero
+width; between a flat key and an unmirrored one the flat key is decomposed with angle 0.
+Keys at the same angle up to rounding never spin a whole extra turn. These cases are
+inferred from the CreateJS runtime, not checked against Animate.
+
 ### Matrix Transform
 
 2D affine transformation matrix: `[a c tx; b d ty; 0 0 1]`
@@ -132,8 +147,10 @@ piecewise cubic bezier (3n+1 points), not a single 4-point curve.
     symbolType="graphic"           <!-- graphic | button; omitted for a movie clip -->
     loop="loop"                    <!-- loop | play once | single frame -->
     firstFrame="0"                 <!-- Starting frame for nested timeline -->
-    centerPoint3DX="100"           <!-- 3D center point for transforms -->
-    centerPoint3DY="200">
+    rotationY="-25"                <!-- CS4+ 3D: rotationX/Y/Z in degrees -->
+    centerPoint3DX="100"           <!-- 3D center point, parent coordinates -->
+    centerPoint3DY="200"
+    centerPoint3DZ="-100">         <!-- 3D depth (negative is nearer) -->
 
     <matrix><Matrix .../></matrix>
     <transformationPoint><Point x="0" y="0"/></transformationPoint>
@@ -177,6 +194,54 @@ To render content from the camera's perspective:
 1. Detect camera layer using the criteria above
 2. Get the symbol's transform matrix at current frame (with tween interpolation)
 3. Apply the **inverse** transform to all other content
+
+### Native Camera (Animate CC 2017+)
+
+Animate's own camera is a layer type, not a naming convention (`src/native-camera.ts`):
+
+```xml
+<DOMTimeline name="Scene 1" cameraLayerEnabled="true" layerDepthEnabled="true">
+  <layers>
+    <DOMLayer name="Camera" color="#0099FF" autoNamed="false" layerType="camera">
+      <frames><DOMFrame index="0" duration="20" keyMode="9728"><elements>
+        <DOMSymbolInstance libraryItemName="__Camera__" name="___camera___instance" isVisible="false">
+          <matrix><Matrix a="0.5" d="0.5" tx="275" ty="200"/></matrix>
+          <transformationPoint><Point/></transformationPoint>
+        </DOMSymbolInstance>
+      </elements></DOMFrame></frames>
+    </DOMLayer>
+    <DOMLayer name="hud" attachedToCamera="true">...</DOMLayer>
+```
+
+- `__Camera__` is a stage-sized rectangle centered on its origin, so the default camera is a
+  translation to the stage center. Every layer not `attachedToCamera` is drawn through
+  `translate(stageCenter) * inverse(cameraMatrix)`: camera scale 0.5 is 200% zoom, and the
+  view turns opposite to the instance's rotation. This is the HTML5 runtime's
+  `_applyLayerZDepth` / `AdobeAn.VirtualCamera`, checked against the published `.js` of real
+  files (eliasku/animate-tests `camera_layer`, dailybruin `lessons-in-laughter`).
+- Camera keyframes tween like any classic tween (`getCameraTransform`). The camera layer is a
+  reference layer (never drawn) and is not offered as a follow camera; while it is active the
+  ramka auto-detection above is not applied. A timeline marked `cameraLayerEnabled="false"`
+  ignores its camera layer (defensive: real files with a camera write `"true"`).
+- Main timeline only, as in the runtime. Masks clip in their own layer's view
+  (`renderMaskGroup`). Follow camera mode keeps every layer's view and depth stacking, and
+  follows the ramka where its own layer view puts it (so under a 200% native zoom a ramka
+  framing the stage shows the stage at its own size); it centers on the ramka matrix times
+  its transformation point, turned with the ramka and the camera view, but does not undo
+  their rotation. The SVG exporter uses the camera
+  keyframe's matrix without tweening.
+
+**Layer depth (Animate 2019+).** `layer.setZDepthAtFrame` is saved as `frameZDepth` on the
+layer's keyframes (absent is 0; negative is nearer). The runtime (`_applyLayerZDepth`,
+`_getProjectionMatrix`, `___GetDepth___`) draws each main-timeline layer through
+`P(z) * cameraView`, where `P(z)` scales about the stage center by `f / (f + z)` with the fixed
+`f = 528.25` (`LAYER_DEPTH_FOCAL_LENGTH`) and `z` is the layer's depth minus the camera's
+(attached layers: their own depth, no camera). So near layers grow and pan faster (parallax);
+at `z <= -f` the layer is behind the camera and not drawn. Root layers are re-stacked by depth,
+furthest first, stable for equal depths; an attached layer sorts at `2 * depth + cameraDepth`
+when the camera has a depth. Depth tweens linearly across a classic tween (the published code
+is `Tween.get(layer).to({depth: -39}, 71)` for `frameZDepth="-3"` -> `"-39"` over 71 frames).
+Checked against joao-cesar/adobe `parallax_effect` and dailybruin `lessons-in-laughter`.
 
 ### Video Instance
 
@@ -322,6 +387,11 @@ Decodes to:
   - Applies inverse transform for camera pan/zoom
   - Supports motion tween interpolation for smooth camera movements
 
+- [x] **Native Camera** (Animate CC 2017+): `layerType="camera"` pan, zoom and rotation;
+  `attachedToCamera` layers stay fixed (see "Native Camera" above)
+- [x] **Layer Depth** (Animate 2019+): `frameZDepth` perspective scale, parallax with the
+  camera, and stacking by depth
+
 - [x] **Video Instance Support**: Placeholder rendering for DOMVideoInstance
   - Parses video dimensions and position
   - Renders placeholder rectangle with play button icon
@@ -357,10 +427,9 @@ Decodes to:
   - Stores in `timeline.referenceLayers` (Set) for efficient lookup
   - Skipped during rendering to avoid visual artifacts
 
-- [x] **3D Center Point**: centerPoint3DX/Y on symbol instances
-  - Parses 3D transformation center points
-  - Applies transforms around center point
-  - Interpolates center point during tweens
+- [x] **3D Instances** (CS4+): `rotationX/Y/Z` about `centerPoint3DX/Y`, depth from
+  `centerPoint3DZ`, in the document's perspective (`viewAngle3D`, `vanishingPoint3DX/Y`),
+  linearized at the 3D center (see "3D instances" under Version-specific XFL cases)
 
 - [x] **Bitmap Items**: DOMBitmapItem parsing from media section
   - Parses bitmap dimensions and references
@@ -414,8 +483,8 @@ Decodes to:
 
 Done since this list was first written: gradient fills, 9-slice scaling, text, sound,
 frame labels and scenes, independent MovieClip playheads, zoom and pan, layer visibility
-toggles (debug panel), export (MP4, WebM, GIF, PNG, SVG, sprite sheet) and the Vitest
-suite. What is still open:
+toggles (debug panel), export (MP4, WebM, GIF, PNG, SVG, sprite sheet), variable-width
+strokes and the Vitest suite. What is still open:
 
 - [ ] **Buttons**: Up/Over/Down states and mouse handling (hit areas are only used by the
   debug panel's click-to-inspect)
@@ -427,16 +496,29 @@ suite. What is still open:
 - [ ] **Embedded video**: frame-accurate seeking and drawing video into exports (needs
   WebCodecs `VideoDecoder`); FLV pixels are not decoded
 - [ ] **Binary FLA**: tweens, frame labels, sounds (see "Pre-CS5 binary FLA" below)
-- [ ] **IK / bone armatures** (CS4-CS6): pose layers render their rest pose; Animate CC
-  converts IK to frame-by-frame on open, so only files last saved in CS4-CS6 are affected
-- [ ] **Object motion tweens**: filter curves, and Bounce/Spring/wave/custom time maps
-  (they fall back to linear)
-- [ ] **Variable-width strokes** (`<VariablePointWidth><WidthMarker>`) and art/pattern
-  brushes draw at constant width
-- [ ] **Movie clips inside graphic symbols**: seeded from the graphic's current frame only,
-  so a seek or single-frame export of a one-frame or looping graphic can show a different
-  clip frame than continuous playback (whether Flash restarts such clips when the graphic
-  loops is unverified)
+- [ ] **IK / bone armatures**: XFL pose layers play Flash's baked per-frame matrices (see
+  "IK pose layers" below); nothing solves IK, so a span whose matrix list is missing or
+  doesn't fit holds its first pose. Binary (pre-CS5) FLAs don't decode armatures.
+- [ ] **Object motion tweens**: Custom and RandomSquareWave time maps fall back to linear
+  (no saved Custom time map was found to show how its curve is stored; PSM's Random draws
+  unseeded levels), and AdjColor filter curves and the gradient/type of gradient filters are
+  not animated
+- [ ] **Art/pattern brushes** draw as plain strokes. The brushes themselves are saved in
+  `PaintBrushDefinitions.xml` (included from `<brushdefinitions>`), but no saved stroke that
+  uses one has been found, so how a stroke refers to its brush is unknown
+- [ ] **Native camera**: color effects (tint, color filter) are not applied (how they are
+  saved is unverified); the SVG exporter does not tween the camera
+- [ ] **Layer depth**: the camera's own depth is read from the camera layer's `frameZDepth`
+  (inferred; no real file with a nonzero camera depth found); eased depth tweens are linear;
+  depth inside symbols and the runtime's size-locked `layerDepth` (always 0 in the published
+  samples) are ignored; a mask group stacks at the mask layer's depth (unverified)
+- [ ] **3D instances**: drawn with an affine approximation of the perspective (no keystone:
+  the far side is as tall as the near side); the SVG exporter, masks and layer-parenting rigs
+  use the plain 2D matrix; `matrix3D` is not read (see "3D instances" below); a 3D instance
+  nested in a `cacheAsBitmap` or 9-slice symbol projects from the wrong stage position; a 3D
+  instance inside another is projected twice, its depth not turned by the parent's rotation;
+  an object tween that animates `Rotation_Z` on a 3D instance turns its matrix and the 3D
+  rotation also applies the saved `rotationZ` (unverified against Flash)
 
 `TODO.md` has the detailed feature-by-feature status against JPEXS; `review.md` is an
 older code review checklist.
@@ -452,15 +534,20 @@ older code review checklist.
 | DOMDocument | `width`, `height` | Canvas dimensions |
 | DOMDocument | `frameRate` | Playback speed |
 | DOMDocument | `backgroundColor` | Canvas background |
+| DOMDocument | `viewAngle3D`, `vanishingPoint3DX`, `vanishingPoint3DY` | 3D perspective (`src/transform-3d.ts`) |
 | DOMLayer | `name`, `color`, `visible`, `locked` | Layer metadata |
 | DOMLayer | `layerType` | normal/guide/folder detection, reference layer filtering |
 | DOMLayer | `outline` | Camera layer detection |
 | DOMLayer | `parentLayerIndex` | Folder hierarchy |
+| DOMLayer | `layerType="camera"`, `attachedToCamera` | Native camera (`src/native-camera.ts`) |
+| DOMTimeline | `cameraLayerEnabled` | Native camera on/off |
+| DOMFrame | `frameZDepth` | Layer depth (`src/native-camera.ts`) |
 | DOMFrame | `index`, `duration`, `keyMode` | Frame timing |
 | DOMFrame | `tweenType`, `acceleration` | Motion tween |
 | DOMSymbolInstance | `libraryItemName`, `symbolType` | Symbol reference |
 | DOMSymbolInstance | `loop`, `firstFrame` | Playback mode |
 | DOMSymbolInstance | `centerPoint3DX`, `centerPoint3DY` | 3D transform center |
+| DOMSymbolInstance | `rotationX`, `rotationY`, `rotationZ`, `centerPoint3DZ` | 3D rotation and depth |
 | Matrix | `a`, `b`, `c`, `d`, `tx`, `ty` | 2D transforms |
 | Point | `x`, `y` | Coordinates |
 | Edge | `fillStyle0`, `fillStyle1`, `strokeStyle` | Style indices |
@@ -471,6 +558,7 @@ older code review checklist.
 | LinearGradient | GradientEntry children | Gradient colors |
 | StrokeStyle | `index` | Style reference |
 | SolidStroke | `weight`, `caps`, `joints` | Stroke properties |
+| WidthMarker | `position`, `left`, `right`, `type` | Variable-width stroke profile |
 | SolidStroke/fill | `SolidColor` | Stroke color |
 | DOMBitmapItem | `name`, `href`, `frameRight`, `frameBottom` | Bitmap metadata |
 | DOMVideoInstance | `libraryItemName`, `frameRight`, `frameBottom` | Video placeholder |
@@ -516,6 +604,7 @@ interface Timeline {
   layers: Layer[];
   totalFrames: number;
   cameraLayerIndex?: number;      // Index of detected camera layer
+  nativeCameraLayerIndex?: number; // Animate's own camera layer (layerType="camera")
   referenceLayers: Set<number>;   // Indices of non-renderable layers (guide/folder/camera)
 }
 ```
@@ -547,11 +636,15 @@ Edge contributions are collected per fill style, then sorted into connected chai
 | `src/edge-decoder.ts` | XFL edge path format decoder (quadratic and cubic) |
 | `src/shape-utils.ts` | Shape repair and path helpers |
 | `src/primitive-shapes.ts` | Outlines for rectangle/oval primitive shapes |
+| `src/variable-width-stroke.ts` | Outlines for variable-width strokes (width profiles) |
 | `src/motion-object.ts` | CS4+ object motion tweens (`<AnimationCore>`) |
+| `src/ik-pose.ts` | IK pose spans (Bone tool armatures): baked per-frame matrices |
 | `src/symbol-loop.ts` | Graphic symbol loop modes (frame an instance shows) |
 | `src/xfl-folder.ts` | Uncompressed XFL folders |
 | `src/path-utils.ts` | Library path normalization |
 | `src/layer-utils.ts` | Layer visibility cascade, mask membership, rig parent lookup (shared by renderer and exporter) |
+| `src/native-camera.ts` | Animate's native camera and layer depth: per-layer stage views and stacking (shared by renderer and SVG exporter) |
+| `src/transform-3d.ts` | CS4+ 3D instances: rotation, document perspective, linearized projection |
 | `src/renderer.ts` | Canvas 2D rendering engine, edge sorting, path building, masks, rig transforms |
 | `src/player.ts` | Timeline playback, scenes, audio sync, zoom/pan |
 | `src/video-exporter.ts` | MP4/WebM (WebCodecs), GIF, PNG sequence, PNG/SVG frame, sprite sheet export |
@@ -789,8 +882,11 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   shows "offset issues" and people bake every frame before archiving). The renderer
   (`getRigCorrection` in `src/renderer.ts`) composes, per child keyframe span [k0,k1):
   holding child `world(t) = P(t)·inv(P(k0))·C0`; tweening child
-  `world(t) = P(t)·lerp(inv(P(k0))·C0, inv(P(k1))·C1)`. This is exact at child keys and the
-  identity when the parent is static over the span, so it never double-transforms.
+  `world(t) = P(t)·lerp(inv(P(k0))·C0, inv(P(k1))·C1)`. This is exact at child keys, and a
+  holding child under a static parent is drawn as stored, so it never double-transforms.
+  A tweening child is interpolated in the parent's space even under a static parent, unless
+  the parent only turns, scales evenly and moves (`isSimilarity`), where it makes no
+  difference: under a stretched parent a turning child stays a turned copy of itself.
   Only normal→normal links count (`getRigParentIndex` in `src/layer-utils.ts`; folder/mask/
   guide links are ignored), and only when the parent frame holds exactly ONE symbol instance;
   otherwise it falls back to stored matrices. Shape-tween child spans are not composed.
@@ -802,7 +898,8 @@ Hard-won notes from issues #8/#10/#11/#12. Treat the cited reference as ground t
   Known gaps: Animate's rig parent is per-keyframe (JSFL `setRigParentAtFrame`), but the parser
   only reads layer-level `parentLayerIndex`; the SVG exporter does not compose (it also does
   not interpolate tweens); a parent drawn with a 3D transform (rotationX/Y/Z, z) is rigged by
-  its 2D `matrix` only.
+  its 2D `matrix` only; a 9-slice child drawn through the rig path sizes its corners from its
+  matrix in the parent's space, so a stretching parent stretches them.
 
 ### Masks (issue #47)
 - `renderMaskGroup` builds ONE `Path2D` from the mask layer's **fill area** and clips once.
@@ -842,6 +939,34 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   `next`/`previous` as "dt,value" handles; Motion_X/Y move the transformation point, Rotation/
   Skew/Scale are absolute and rebuild the matrix (`a = sx cos(rot+skewY)`, `c = -sy sin(rot+skewX)`).
   Reference implementation: Sony PSM `UIMotion`/`AnimationUtility`.
+  - **Time maps.** `<TimeMap type strength>`, picked per property by `TimeMapIndex`, eases the
+    time between the property's first and last key. The `type` names are the Animate SDK's
+    `kEasing_*` strings (`ApplicationFCMPublicIDs.h` in pixijs-userland/animate-extension):
+    Quadratic..Quintic, DualQuadratic..DualQuintic, Bounce, BounceIn (what the Motion Editor's
+    Bounce preset saves), Spring, SineWave, SawtoothWave, SquareWave, RandomSquareWave,
+    DampedWave, Custom. `strength` is -100..100 for the first two families and the number of
+    bounces/swings/waves for the rest. `applyTimeMap` uses PSM's formulas. Spring settles at
+    70% of the change (PSM's sample spins to 513 degrees to rest at 360) and the waves can end
+    anywhere, so a property holds its eased value from its last key on; an eased time outside
+    0..1 holds the end key. RandomSquareWave and Custom stay linear.
+  - **Filter curves.** `<PropertyContainer id="Filters">` holds one `<Kind>_Filter` container
+    per filter, in the instance's filter order, with `<Kind>_<Name>` properties (SDK
+    `kTweenProperty_*`: DropShadow, Blur, Glow, Bevel, GradientGlow, GradientBevel, AdjColor).
+    BlurX/BlurY/Distance are pixels, Angle degrees, Strength percent (60 is the
+    `<DropShadowFilter strength="0.6">` of the same instance), colors are 0xRRGGBBAA keys, and
+    Quality/Knockout/InnerShadow/InnerGlow/HideObject are a keyless `<Property value="...">`.
+    `evaluateFilters` replaces the instance's next filter of each kind (or appends one) and
+    keeps the rest; `applyMotionObject` passes the result to the symbol/text filter path.
+    Gradient colors and bevel/gradient `Type` come from the instance's own filter.
+    A static filter's `strength` attribute is the same ratio (`0.6` = 60%, default 1), not
+    0..255. Omitted attributes are Animate's defaults (`parseFilters`, matching flacomdoc's
+    XFL reader): blur 5, distance 5, angle 45, quality 1, and a `<GlowFilter>` is red. A
+    filter saved with `isEnabled="false"` (switched off in the Filters panel) is kept with
+    `enabled: false`, so the object tween's filter containers still pair with the list by
+    position, and is not drawn (`applyFilters`, SVG `createFilterDef`).
+    The canvas renderer draws strength as shadow opacity (capped at 1), never as blur width,
+    like the SVG exporter's flood opacity. Shadow offsets and blur are canvas pixels, not
+    scaled with the stage.
 - **Primitives (CS3+).** `<DOMRectangleObject>`/`<DOMOvalObject>` have parameters and a singular
   `<fill>`/`<stroke>`, no edges; `src/primitive-shapes.ts` rebuilds the outline. x/y is the
   top-left in the element's own space; oval angles are degrees from 3 o'clock, clockwise.
@@ -852,6 +977,64 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
 - **Reverse loops (Animate 2021).** `loop="loop reverse"`/`"play once reverse"`;
   `graphicSymbolFrame` (`src/symbol-loop.ts`) is shared by the renderer and the SVG exporter.
 - **TLF text (CS5-CS6).** `<DOMTLFText>` is read as static text from its `<TextFlow>` spans.
+- **IK pose layers (Bone tool).** Layer `animationType="IK pose"`; each span is one
+  `<DOMFrame tweenType="IK pose" isIKPose="true">` whose elements hold the armature's first
+  pose, an `<IKTree>`, and a `<betweenFrameMatrixList>` with one `<Matrix>` per element per
+  frame, element-major (every frame of element 0, then element 1, in `<elements>` order).
+  Element e at frame f of the span draws `list[e*duration + f] * matrix` (applied in the
+  parent's space; the first entry is the identity): `Frame.ikPoseMatrices`, applied by
+  `applyIKPose` (`src/ik-pose.ts`) in the renderer (draw, masks, rig) and the SVG exporter.
+  Checked on a CS6 save with four animated armatures: the result matches each IK node's
+  per-frame `xArray`/`yArray` (tx/ty in twips) and `angleArray` (radians) within 1.4 px and
+  0.001 rad, and at every pose the parent-to-child transformation-point distance matches the
+  bone vector of the node's `<State x y>`, so joints stay attached. Shape armatures bake one
+  keyframe per frame into an `"ik container"` symbol placed as a play-once graphic, so they
+  already played (flacomdoc 0023, a CS5 save). Animate 20.5 still saves pose layers, so not
+  only CS4-CS6 files have them. Tests: `src/__tests__/ik-pose.test.ts`.
+- **Variable-width strokes (Animate CC).** A width profile is
+  `<SolidStroke><VariablePointWidth><WidthMarker position left right [type="corner"]/>`:
+  `position` runs 0..1, `left`/`right` are half-widths as fractions of `weight` (0.5 + 0.5 =
+  the full weight). Parsed by `parseWidthProfile`; `src/variable-width-stroke.ts` builds a
+  filled outline for the renderer and the SVG exporter. A path is a run of records in one
+  `<Edge>` that join end to start, and `position` is the fraction of its length. This was
+  matched against Animate's own raster in a published CreateJS atlas (brotochola/willian).
+  Still inferred: the curve between markers (Catmull-Rom, secant at `corner` markers). Also
+  unverified: which side is `left`; it is drawn on the left of the path's direction, y down,
+  but every real profile seen is symmetric; and how a stroke split over several `<Edge>`
+  elements (where it crosses a fill boundary) or saved with reversed records maps the profile:
+  each piece gets the whole profile here. Shape tweens keep a constant width. A zero-length
+  record (a click with the brush) draws as a dot shaped by the caps, and a path shorter than
+  2px keeps its caps even when it ends at its start (the edge decoder closes such a path).
+- **Native camera (Animate CC 2017+).** `layerType="camera"` holding one `__Camera__` instance,
+  plus `attachedToCamera` on layers; see "Native Camera" above. It is not a ramka layer, though
+  it is usually named "Camera". Layer depth (Animate 2019+) is `frameZDepth` on keyframes.
+  Tests: `src/__tests__/native-camera.test.ts`.
+- **3D instances (CS4+).** The saved 2D `matrix` of a 3D instance is NOT what Flash shows: in
+  real files (Animate CC 2017 UI menus, rotationY -25/27/-332) it is a bare translation, and
+  Flash publishes the instance as a projected Matrix3D (`fl.motion.AnimatorFactory3D`,
+  `is3D = true`, seen in decompiled SWFs). `src/transform-3d.ts` rotates it by
+  R = Rz * Ry * Rx (`fl.motion.Animator3D` order, `MatrixTransformer3D` axis matrices; a
+  single-axis R equals the 3x3 part of the saved `matrix3D`) about `centerPoint3DX/Y` (parent
+  coordinates; matrix * transformationPoint unless the center was moved), at depth
+  `centerPoint3DZ` (equal to the `matrix3D` z translation / 20 in a real CS5 file; a `z`
+  attribute is also read, though no real file has one), then projects toward
+  `vanishingPoint3DX/Y` (default: stage center) with focal length
+  `(width / 2) / tan(viewAngle3D / 2)` (AS3 PerspectiveProjection; default 55 degrees; 4 of 5
+  real documents checked carry the angle that keeps it at 528.27). Canvas 2D is affine, so the
+  projection is linearized at the 3D center (`projectedInstanceMatrix`): exact there, first
+  order elsewhere. The renderer keeps the frame's stage base transform (`stageBaseInverse`) to
+  map the parent to stage space; it is taken after a ramka or follow-camera transform, which
+  only frame the view, while Animate's native camera and layer depth are part of the stage.
+  Every matrix change (classic and object tweens, layer-parenting rigs, IK poses) takes the 3D
+  center along with the point of the instance it is on (`withInstanceMatrix`: new matrix
+  times the inverse of the old), so a moved center turns with the instance; a center within
+  1px of the transformation point, or one on a matrix scaled to nothing, moves with the
+  transformation point. Malformed rotations and
+  centers are dropped at parse time, and a projection that is not finite falls back to the
+  2D matrix. `matrix3D` itself is not read: its translation (twips) fits no simple
+  model (x/z equal `center - R * matrixTranslation` in the menus, y is off in some, and none of
+  the unrotated CS5 instances fit), and in a CS4 multi-axis file its rotation matches no Euler
+  order of the saved rotationX/Y/Z. Tests: `src/__tests__/transform-3d.test.ts`.
 - **Movie clips have no `symbolType`.** Animate writes it only for `graphic`/`button`
   (instances and library items); a missing value is a movie clip (`parseSymbolType`). Movie
   clips run their own playheads (`advanceMovieClipPlayheads`, called by the player on every
@@ -862,12 +1045,15 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   level). A state is dropped at the end of a `renderFrame` that didn't reach it, and replaced
   when the instance's run of back-to-back keyframes (`movieClipRun`) changes, e.g. when the
   timeline loops back over a gap; either way a clip placed again starts over. A new state is
-  seeded to where continuous playback would be (`movieClipTicks` + `movieClipPlayhead`): ticks
-  since the run began, measured on the parent's frames, or inside another movie clip on that
-  clip's own elapsed ticks (it loops from frame 0 or holds at its first stop()). So a seek, a
-  single-frame/SVG/mid-range export, or a frame after a `cacheAsBitmap` frame agrees with
-  playback. A `cacheAsBitmap` frame itself still shows the cached subtree. A clip inside a
-  graphic symbol is seeded from the graphic's current frame only (see Remaining TODOs).
+  seeded to where continuous playback would be (`movieClipTicks` + `movieClipPlayhead`): the
+  ticks its parent has stayed inside the clip's run, read back on the parent's
+  `TimelineClock` (`rootClock` for the main timeline, `movieClipClock` for a clip that loops
+  from frame 0 or holds at its first stop(), `instanceClock` for a graphic or button while its
+  layer holds it). So a seek or a single-frame/SVG/mid-range export agrees with playback, at
+  any nesting depth. A `cacheAsBitmap` symbol with a movie clip anywhere inside is drawn live
+  (`hasMovieClipInside`), not from its frame-0 bitmap. A clip inside a looping graphic keeps
+  playing across the graphic's wrap when its run covers the whole graphic timeline (unverified
+  against Flash, which may place it anew), and starts over when the graphic jumps into its run.
 
 ### Pre-CS5 binary FLA (issue #8)
 - Binary FLAs are **OLE2 / MS Compound File Binary** (magic `D0 CF 11 E0 A1 B1 1A E1`), not
