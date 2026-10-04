@@ -5809,7 +5809,9 @@ describe('FLARenderer', () => {
       await renderer.setDocument(doc);
 
       // Loaded from the app's own files, never from Google Fonts
-      expect(document.fonts.check('16px "Press Start 2P"', 'Pixel Text')).toBe(true);
+      const faces = await document.fonts.load('16px "Press Start 2P"', 'Pixel Text');
+      expect(faces.length).toBeGreaterThan(0);
+      expect(faces.every(face => face.status === 'loaded')).toBe(true);
       expect(document.querySelector('link[href*="fonts.googleapis.com"]')).toBeNull();
 
       renderer.renderFrame(0);

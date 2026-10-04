@@ -97,6 +97,54 @@ describe('setupServiceWorker', () => {
     expect(container.querySelector('.pwa-notice')!.textContent).toContain('new version');
   });
 
+  it('reloads once the new version takes control after this tab asked for it', () => {
+    const sw = fakeRegister();
+    const reload = vi.fn();
+    setupServiceWorker(sw.register, container, reload);
+    sw.callbacks().onNeedRefresh!();
+    buttons(container)[0].click();
+    expect(reload).not.toHaveBeenCalled();
+    sw.callbacks().onNeedReload!();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reload under the user when another tab activated the update', () => {
+    const sw = fakeRegister();
+    const reload = vi.fn();
+    setupServiceWorker(sw.register, container, reload);
+    sw.callbacks().onNeedRefresh!();
+    buttons(container)[1].click(); // Later
+
+    sw.callbacks().onNeedReload!();
+    expect(reload).not.toHaveBeenCalled();
+    expect(container.querySelector('.pwa-notice')!.textContent).toContain('updated in another tab');
+
+    const [reloadButton, later] = buttons(container);
+    later.click();
+    expect(container.querySelector('.pwa-notice')).toBeNull();
+    expect(reload).not.toHaveBeenCalled();
+
+    sw.callbacks().onNeedReload!();
+    buttons(container)[0].click();
+    expect(reloadButton.isConnected).toBe(false);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('checks for a new version when the tab becomes visible again', () => {
+    const sw = fakeRegister();
+    setupServiceWorker(sw.register, container);
+    const update = vi.fn(async () => {});
+    sw.callbacks().onRegisteredSW!('sw.js', { update } as unknown as ServiceWorkerRegistration);
+
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(update).not.toHaveBeenCalled();
+
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+
   it('warns, without a notice, when registration fails', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const sw = fakeRegister();

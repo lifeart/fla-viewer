@@ -119,11 +119,13 @@ describe('offline support (production build)', () => {
   });
 
   it('draws text in the bundled font offline', async () => {
+    // load() resolves to the faces it loaded; an empty list would mean no @font-face is registered
     const loaded = await page.evaluate(async () => {
-      await document.fonts.load('16px "Press Start 2P"', 'Hello Привет');
-      return document.fonts.check('16px "Press Start 2P"', 'Hello Привет');
+      const faces = await document.fonts.load('16px "Press Start 2P"', 'Hello Привет');
+      return faces.map(face => face.status);
     });
-    expect(loaded).toBe(true);
+    expect(loaded.length).toBeGreaterThanOrEqual(2);
+    expect(loaded.every(status => status === 'loaded')).toBe(true);
   });
 
   it('is installable: the manifest and its icons are cached', async () => {

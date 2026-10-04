@@ -59,7 +59,7 @@ The Download button only appears when the browser supports WebCodecs (`VideoEnco
 
 ## Offline
 
-After the first visit the viewer works without a network: a service worker caches the whole app, including the export libraries and fonts, and the browser can install it as an app. When a new version is deployed, a notice offers to reload; until then the open tab keeps the version it started with. Fonts used by FLA text are shipped with the app (Press Start 2P, from `@fontsource`), never loaded from a font CDN.
+After the first visit the viewer works without a network: a service worker caches the whole app, including the export libraries and fonts, and the browser can install it as an app. When a new version is deployed, a notice offers to reload; until then open tabs keep the version they started with. Bookmark the address with its trailing slash (`/fla-viewer/`): without it the URL is outside the cached app and only works online. Fonts used by FLA text are shipped with the app (Press Start 2P, from `@fontsource`), never loaded from a font CDN.
 
 ## Controls
 

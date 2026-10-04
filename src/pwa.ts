@@ -4,7 +4,9 @@
 /** The subset of vite-plugin-pwa's `registerSW` this module uses. */
 export type RegisterSW = (options: {
   onNeedRefresh?: () => void;
+  onNeedReload?: () => void;
   onOfflineReady?: () => void;
+  onRegisteredSW?: (swUrl: string, registration: ServiceWorkerRegistration | undefined) => void;
   onRegisterError?: (error: unknown) => void;
 }) => (reloadPage?: boolean) => Promise<void>;
 
@@ -15,9 +17,17 @@ const OFFLINE_READY_MS = 4000;
  * app is first cached for offline use, and whenever a new version is waiting.
  * A waiting version only takes over when the user clicks Reload, so a session
  * in progress keeps its own build (and the export chunks it may still load).
+ * When Reload is clicked in another tab, this tab is not reloaded under the
+ * user (that would drop a loaded file or a running export); it says so instead.
+ * A tab left open checks for a new version whenever it becomes visible again.
  */
-export function setupServiceWorker(registerSW: RegisterSW, container: HTMLElement = document.body): void {
+export function setupServiceWorker(
+  registerSW: RegisterSW,
+  container: HTMLElement = document.body,
+  reload: () => void = () => location.reload(),
+): void {
   let notice: HTMLElement | null = null;
+  let reloadRequested = false;
   let hideTimer: ReturnType<typeof setTimeout> | undefined;
 
   const close = () => {
@@ -47,9 +57,28 @@ export function setupServiceWorker(registerSW: RegisterSW, container: HTMLElemen
   const updateSW = registerSW({
     onNeedRefresh() {
       show('A new version of FLA Viewer is available.', [
-        { label: 'Reload', onClick: () => { void updateSW(true); } },
+        { label: 'Reload', onClick: () => { reloadRequested = true; void updateSW(true); } },
         { label: 'Later', onClick: close },
       ]);
+    },
+    // The new version took control: this tab asked for it, or another tab did
+    onNeedReload() {
+      if (reloadRequested) {
+        reload();
+        return;
+      }
+      show('FLA Viewer was updated in another tab. Reload to use the new version (exporting offline may need it).', [
+        { label: 'Reload', onClick: reload },
+        { label: 'Later', onClick: close },
+      ]);
+    },
+    onRegisteredSW(_swUrl, registration) {
+      if (!registration) return;
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && navigator.onLine) {
+          registration.update().catch(() => {});
+        }
+      });
     },
     onOfflineReady() {
       show('FLA Viewer is ready to work offline.', [{ label: 'OK', onClick: close }]);

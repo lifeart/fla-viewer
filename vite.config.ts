@@ -15,7 +15,6 @@ export default defineConfig({
     VitePWA({
       registerType: 'prompt',
       injectRegister: false,
-      includeAssets: ['favicon.svg'],
       manifest: {
         name: 'FLA Viewer',
         short_name: 'FLA Viewer',

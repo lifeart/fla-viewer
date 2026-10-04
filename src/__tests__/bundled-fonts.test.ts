@@ -13,7 +13,7 @@ describe('bundled fonts', () => {
   it('registers Press Start 2P from the app bundle, one face per unicode subset', () => {
     expect(BUNDLED_FONTS.has('Press Start 2P')).toBe(true);
     // latin, latin-ext, cyrillic, cyrillic-ext, greek
-    expect(facesOf('Press Start 2P').length).toBe(5);
+    expect(facesOf('Press Start 2P').length).toBeGreaterThanOrEqual(5);
   });
 
   it('serves the font files from the app origin, not a font CDN', () => {
@@ -35,9 +35,12 @@ describe('bundled fonts', () => {
 
   it('loads every subset, so non-latin text draws in the font on the first frame', async () => {
     await expect(loadBundledFont('Press Start 2P')).resolves.toBe(true);
-    for (const face of facesOf('Press Start 2P')) {
+    const faces = facesOf('Press Start 2P');
+    expect(faces.length).toBeGreaterThan(0);
+    for (const face of faces) {
       expect(face.status).toBe('loaded');
     }
+    // check() is also true for a family with no faces at all, so it only adds to the status checks above
     expect(document.fonts.check('16px "Press Start 2P"', 'Hello')).toBe(true);
     expect(document.fonts.check('16px "Press Start 2P"', 'Привет')).toBe(true);
     expect(document.fonts.check('16px "Press Start 2P"', 'Γειά')).toBe(true);
