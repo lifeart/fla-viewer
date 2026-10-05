@@ -669,6 +669,9 @@ Edge contributions are collected per fill style, then sorted into connected chai
 - Two Vitest projects: `browser` (everything) and `node` (`*.node.test.ts`). `offline.node.test.ts` builds
   with the Pages base path, serves it, closes the server and checks the app still runs from the service
   worker cache and never contacts another origin.
+  `update.node.test.ts` serves a build like GitHub Pages (`max-age=600`), deploys a second build and
+  checks that cached tabs are offered it, switch on Reload (other tabs are told, not reloaded) and get it
+  on the next visit after "Later" once every tab is closed.
 - **Offline-first.** The app must make no runtime requests to other origins: no font CDNs, script CDNs or
   remote WASM. Ship assets through the bundle (npm packages or `public/`) so the service worker precaches
   them. Fonts go in `src/bundled-fonts.ts`. Lazily imported chunks are precached too; keep
