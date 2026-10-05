@@ -57,6 +57,10 @@ Open Adobe Animate / Flash `.fla` files in the browser. Parsing, playback and ex
 
 The Download button only appears when the browser supports WebCodecs (`VideoEncoder` and `AudioEncoder`) and the document has more than one frame.
 
+## Offline
+
+After the first visit the viewer works without a network: a service worker caches the whole app, including the export libraries and fonts, and the browser can install it as an app. When a new version is deployed, a notice offers to reload; until then open tabs keep the version they started with. Bookmark the address with its trailing slash (`/fla-viewer/`): without it the URL is outside the cached app and only works online. Fonts used by FLA text are shipped with the app (Press Start 2P, from `@fontsource`), never loaded from a font CDN.
+
 ## Controls
 
 | Input | Action |
@@ -109,7 +113,7 @@ npm run preview        # serve the build
 
 ### Tests
 
-Tests use Vitest in browser mode with Playwright Chromium, because the renderer needs a real Canvas.
+Tests use Vitest in browser mode with Playwright Chromium, because the renderer needs a real Canvas. Files named `*.node.test.ts` run in Node instead: `offline.node.test.ts` builds the app, serves it, loads it in Chromium, stops the server and checks the app still loads, plays the sample and loads every chunk from the service worker cache.
 
 ```bash
 npx playwright install chromium   # once

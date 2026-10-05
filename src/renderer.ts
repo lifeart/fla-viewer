@@ -39,6 +39,7 @@ import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, interpolateD
 import { variableWidthStrokePolygons } from './variable-width-stroke';
 import { layerZDepthAt, sortByStageDepth, stageLayerViews, type StageCamera, type StageLayerViews } from './native-camera';
 import { documentPerspective, projectedInstanceMatrix, rotation3D, withInstanceMatrix } from './transform-3d';
+import { BUNDLED_FONTS, loadBundledFont } from './bundled-fonts';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
 let DEBUG = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === 'true';
@@ -643,10 +644,9 @@ export class FLARenderer {
     // Load all fonts in parallel
     const loadPromises: Promise<void>[] = [];
     for (const fontName of fontsToLoad) {
-      const googleFontId = this.googleFonts[fontName];
-      if (googleFontId && !this.loadedFonts.has(fontName)) {
+      if (BUNDLED_FONTS.has(fontName) && !this.loadedFonts.has(fontName)) {
         loadPromises.push(
-          this.loadGoogleFont(fontName, googleFontId)
+          loadBundledFont(fontName)
             .then(() => {
               this.loadedFonts.add(fontName);
               if (DEBUG) console.log(`Font loaded: ${fontName}`);
@@ -3272,11 +3272,6 @@ export class FLARenderer {
   private loadedFonts = new Set<string>();
   private loadingFonts = new Map<string, Promise<void>>();
 
-  // Google Fonts that can be loaded dynamically
-  private googleFonts: Record<string, string> = {
-    'Press Start 2P': 'Press+Start+2P',
-  };
-
   // Map FLA font names to web-compatible font names
   private mapFontName(flaFontName: string): string {
     // Common font name mappings from FLA to web fonts
@@ -3315,21 +3310,18 @@ export class FLARenderer {
     return `"${flaFontName}"`;
   }
 
-  // Dynamically load a font if it's a Google Font
+  // Load a font the app ships (see bundled-fonts.ts)
   private ensureFontLoaded(fontName: string): void {
     // Skip if already loaded or loading
     if (this.loadedFonts.has(fontName) || this.loadingFonts.has(fontName)) {
       return;
     }
 
-    // Check if it's a Google Font we can load
-    const googleFontId = this.googleFonts[fontName];
-    if (!googleFontId) {
-      return; // Not a known Google Font, skip
+    if (!BUNDLED_FONTS.has(fontName)) {
+      return; // Not a font the app ships; the browser falls back
     }
 
-    // Start loading the font
-    const loadPromise = this.loadGoogleFont(fontName, googleFontId);
+    const loadPromise = loadBundledFont(fontName).then(() => {});
     this.loadingFonts.set(fontName, loadPromise);
 
     loadPromise.then(() => {
@@ -3341,23 +3333,6 @@ export class FLARenderer {
     }).catch((err) => {
       console.warn(`Failed to load font ${fontName}:`, err);
       this.loadingFonts.delete(fontName);
-    });
-  }
-
-  // Load a Google Font dynamically
-  private async loadGoogleFont(fontName: string, googleFontId: string): Promise<void> {
-    const url = `https://fonts.googleapis.com/css2?family=${googleFontId}&display=swap`;
-
-    // Create and inject stylesheet link
-    const link = document.createElement('link');
-    link.rel = 'stylesheet';
-    link.href = url;
-    document.head.appendChild(link);
-
-    // Wait for font to be ready
-    return document.fonts.ready.then(() => {
-      // Check if the font is actually available
-      return document.fonts.load(`16px "${fontName}"`).then(() => {});
     });
   }
 

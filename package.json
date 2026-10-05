@@ -21,6 +21,7 @@
   "license": "ISC",
   "description": "Web-based FLA file viewer and player",
   "dependencies": {
+    "@fontsource/press-start-2p": "^5.3.0",
     "gifenc": "^1.0.3",
     "jszip": "^3.10.1",
     "mp4-muxer": "^5.2.2",
@@ -38,6 +39,7 @@
     "happy-dom": "20.8.9",
     "jsdom": "^27.4.0",
     "playwright": "^1.57.0",
+    "vite-plugin-pwa": "^2.0.0",
     "vitest": "4.1.11"
   },
   "overrides": {

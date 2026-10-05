@@ -5,6 +5,8 @@ import { generateSampleFLA } from './sample-generator';
 import { readDirectoryEntry, type XFLFolderEntry } from './xfl-folder';
 import { setEdgeDecoderDebug, setImplicitMoveToAfterClose, setEdgeSplittingOnStyleChange } from './edge-decoder';
 import type { PlayerState, FLADocument, DisplayElement, Symbol } from './types';
+import { registerSW } from 'virtual:pwa-register';
+import { setupServiceWorker } from './pwa';
 
 // View pan distance in CSS pixels per button press / arrow key press
 const PAN_STEP = 20;
@@ -1440,4 +1442,5 @@ export class FLAViewerApp {
 // Initialize app when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
   new FLAViewerApp();
+  setupServiceWorker(registerSW);
 });

@@ -5780,9 +5780,8 @@ describe('FLARenderer', () => {
   });
 
   describe('text rendering with fonts', () => {
-    it('should preload Google fonts when text uses mapped font', async () => {
-      // Create document with text using a font that maps to a Google font
-      // PressStart2P-Regular maps to 'Press Start 2P' which is in googleFonts
+    it('should preload bundled fonts when text uses mapped font', async () => {
+      // PressStart2P-Regular maps to 'Press Start 2P', which the app ships (bundled-fonts.ts)
       const doc = createMinimalDoc({
         timelines: [createTimeline({
           layers: [createLayer({
@@ -5808,6 +5807,12 @@ describe('FLARenderer', () => {
 
       // setDocument triggers font preloading
       await renderer.setDocument(doc);
+
+      // Loaded from the app's own files, never from Google Fonts
+      const faces = await document.fonts.load('16px "Press Start 2P"', 'Pixel Text');
+      expect(faces.length).toBeGreaterThan(0);
+      expect(faces.every(face => face.status === 'loaded')).toBe(true);
+      expect(document.querySelector('link[href*="fonts.googleapis.com"]')).toBeNull();
 
       renderer.renderFrame(0);
 
