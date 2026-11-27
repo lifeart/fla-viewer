@@ -1,6 +1,7 @@
 // Core FLA document types
 
 import type { MotionObjectTween } from './motion-object';
+import type { EmbeddedVideoStream } from './embedded-video';
 
 export interface FLADocument {
   width: number;
@@ -54,6 +55,9 @@ export interface VideoItem {
   // Object URL of an embedded native video stream (e.g. MP4 wrapped in the .dat)
   // that the browser can decode directly. Set by the parser, drawn by the renderer.
   videoUrl?: string;
+  // Encoded frames of an embedded FLV video (Sorenson H.263 from a `.dat` or an
+  // FLV). The renderer decodes them in software, one video frame per timeline frame.
+  embeddedVideo?: EmbeddedVideoStream;
 }
 
 // Simplified FLV data stored in VideoItem (full ParsedFLV is in flv-parser.ts)

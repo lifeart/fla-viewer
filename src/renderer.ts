@@ -6,6 +6,7 @@ import type {
   DisplayElement,
   SymbolInstance,
   VideoInstance,
+  VideoItem,
   BitmapInstance,
   TextInstance,
   TextRun,
@@ -38,6 +39,8 @@ import {
 import { isLayerVisibleInFla, getMaskLayerIndex, getRigParentIndex, interpolateDecomposed, invertMatrix, isSimilarity, multiplyMatrices, matricesNearlyEqual } from './layer-utils';
 import { variableWidthStrokePolygons } from './variable-width-stroke';
 import { layerZDepthAt, sortByStageDepth, stageLayerViews, type StageCamera, type StageLayerViews } from './native-camera';
+import { EmbeddedVideoDecoder } from './embedded-video';
+import { sorensonPictureToRGBA } from './sorenson-h263';
 import { documentPerspective, projectedInstanceMatrix, rotation3D, withInstanceMatrix } from './transform-3d';
 
 // Debug flag - enabled via ?debug=true URL parameter or setRendererDebug(true)
@@ -78,6 +81,15 @@ interface CachedShapePaths {
   strokePaths: Map<number, Path2D>;
   strokeOutlines: Map<number, Path2D>; // variable-width strokes, filled (nonzero) instead of stroked
   combinedPath: Path2D;
+}
+
+/** A decoder and frame canvas for one embedded FLV video (see drawEmbeddedVideo). */
+interface EmbeddedVideoView {
+  decoder: EmbeddedVideoDecoder;
+  canvas: HTMLCanvasElement;
+  image: ImageData | null;
+  shownFrame: number;
+  lastUsed: number;
 }
 
 export class FLARenderer {
@@ -134,6 +146,12 @@ export class FLARenderer {
   // whether the timeline is currently playing and a hook to request a redraw
   // when a video frame becomes available while paused.
   private videoElements = new Map<string, HTMLVideoElement>();
+  // Software-decoded embedded FLV video (Sorenson H.263): per video item, a few
+  // decoders with a frame canvas each. Instances of one video showing different
+  // frames each keep stepping forward on their own decoder instead of making a
+  // shared one seek back on every render.
+  private embeddedVideos = new Map<VideoItem, EmbeddedVideoView[]>();
+  private embeddedVideoClock = 0;
   private playing = false;
   private onNeedsRedraw: (() => void) | null = null;
 
@@ -2144,7 +2162,7 @@ export class FLARenderer {
     } else if (element.type === 'shape') {
       this.renderShape(element, depth);
     } else if (element.type === 'video') {
-      this.renderVideoInstance(element, depth);
+      this.renderVideoInstance(element, depth, parentFrameIndex);
     } else if (element.type === 'bitmap') {
       this.renderBitmapInstance(element, depth);
     } else if (element.type === 'text') {
@@ -2583,8 +2601,91 @@ export class FLARenderer {
     return el;
   }
 
+  /**
+   * Which frame of its video a video instance shows at `frameIndex`. Like Flash,
+   * embedded video plays one video frame per timeline frame, counted from where
+   * the instance first appears: the current keyframe, extended back over
+   * directly preceding keyframes on the layer that hold the same video.
+   */
+  private videoFrameOffset(libraryItemName: string, frameIndex: number): number {
+    let start = this.currentKeyframeStart;
+    const frames = this.currentLayer?.frames;
+    if (frames) {
+      let i = frames.indexOf(this.currentKeyframe!);
+      while (i > 0) {
+        const prev = frames[i - 1];
+        if (prev.index + prev.duration !== start) break;
+        if (!prev.elements.some((e) => e.type === 'video' && e.libraryItemName === libraryItemName)) break;
+        start = prev.index;
+        i--;
+      }
+    }
+    return Math.max(0, frameIndex - start);
+  }
+
+  /**
+   * The view to draw `target` from: one already showing it, else the one just
+   * behind it (a short step forward), else a new one (up to 4), else the least
+   * recently used.
+   */
+  private embeddedVideoView(videoItem: VideoItem, target: number): EmbeddedVideoView {
+    let views = this.embeddedVideos.get(videoItem);
+    if (!views) {
+      views = [];
+      this.embeddedVideos.set(videoItem, views);
+    }
+    let best: EmbeddedVideoView | undefined = views.find((v) => v.shownFrame === target);
+    if (!best) {
+      for (const v of views) {
+        if (v.shownFrame < target && (!best || v.shownFrame > best.shownFrame)) best = v;
+      }
+      // A step of more than a few frames may as well start a view of its own.
+      if (best && target - best.shownFrame > 8 && views.length < 4) best = undefined;
+    }
+    if (!best && views.length < 4) {
+      best = {
+        decoder: new EmbeddedVideoDecoder(videoItem.embeddedVideo!),
+        canvas: document.createElement('canvas'),
+        image: null,
+        shownFrame: -1,
+        lastUsed: 0,
+      };
+      views.push(best);
+    }
+    if (!best) best = views.reduce((a, b) => (a.lastUsed <= b.lastUsed ? a : b));
+    best.lastUsed = ++this.embeddedVideoClock;
+    return best;
+  }
+
+  /** Draw the current frame of a software-decoded embedded video. False if none is available. */
+  private drawEmbeddedVideo(videoItem: VideoItem, video: VideoInstance, frameIndex: number): boolean {
+    const stream = videoItem.embeddedVideo;
+    if (!stream || stream.frames.length === 0 || typeof document === 'undefined') return false;
+    const target = Math.min(this.videoFrameOffset(video.libraryItemName, frameIndex), stream.frames.length - 1);
+    const entry = this.embeddedVideoView(videoItem, target);
+    if (target !== entry.shownFrame) {
+      const pic = entry.decoder.getFrame(target);
+      if (pic) {
+        const frameCtx = entry.canvas.getContext('2d');
+        if (!frameCtx) return false;
+        if (!entry.image || entry.image.width !== pic.width || entry.image.height !== pic.height) {
+          entry.canvas.width = pic.width;
+          entry.canvas.height = pic.height;
+          entry.image = frameCtx.createImageData(pic.width, pic.height);
+        }
+        sorensonPictureToRGBA(pic, entry.image.data);
+        frameCtx.putImageData(entry.image, 0, 0);
+      }
+      entry.shownFrame = target;
+    }
+    if (!entry.image) return false;
+    this.ctx.drawImage(entry.canvas, 0, 0, video.width, video.height);
+    return true;
+  }
+
   /** Pause, detach, and drop all cached video elements (called on new document). */
   private releaseVideoElements(): void {
+    this.embeddedVideos.clear();
     for (const el of this.videoElements.values()) {
       el.pause();
       el.removeAttribute('src');
@@ -2593,7 +2694,7 @@ export class FLARenderer {
     this.videoElements.clear();
   }
 
-  private renderVideoInstance(video: VideoInstance, depth: number = 0): void {
+  private renderVideoInstance(video: VideoInstance, depth: number = 0, frameIndex: number = 0): void {
     const ctx = this.ctx;
     ctx.save();
 
@@ -2616,6 +2717,10 @@ export class FLARenderer {
 
     // If this video has a decodable embedded stream, draw real frames.
     const videoItem = this.doc?.videos.get(video.libraryItemName);
+    if (videoItem?.embeddedVideo && this.drawEmbeddedVideo(videoItem, video, frameIndex)) {
+      ctx.restore();
+      return;
+    }
     if (videoItem?.videoUrl) {
       const el = this.getVideoElement(videoItem.videoUrl);
       // Keep playback in step with the timeline: play while the timeline plays,

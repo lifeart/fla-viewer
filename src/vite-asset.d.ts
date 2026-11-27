@@ -12,6 +12,16 @@ declare module '*.fla.gz?url' {
   export default url;
 }
 
+// Sorenson Spark FLV clips and their reference YUV frames.
+declare module '*.flv?url' {
+  const url: string;
+  export default url;
+}
+declare module '*.yuv?url' {
+  const url: string;
+  export default url;
+}
+
 // MP3 fixture (e.g. a real sound stream used to test audio decoding).
 declare module '*.mp3?url' {
   const url: string;
