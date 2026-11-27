@@ -13,6 +13,9 @@ import basicYuvUrl from './fixtures/sorenson-basic.yuv?url';
 // motion: 48x32, I + 5 P with half-pel motion vectors, DQUANT and escaped coefficients.
 import motionFlvUrl from './fixtures/sorenson-motion.flv?url';
 import motionYuvUrl from './fixtures/sorenson-motion.yuv?url';
+// edge: 40x24 scrolling, so motion vectors point past the unaligned right/bottom edge.
+import edgeFlvUrl from './fixtures/sorenson-edge.flv?url';
+import edgeYuvUrl from './fixtures/sorenson-edge.yuv?url';
 
 async function fetchBytes(url: string): Promise<Uint8Array> {
   return new Uint8Array(await (await fetch(url)).arrayBuffer());
@@ -113,6 +116,7 @@ describe('Sorenson Spark H.263 decoder', () => {
   it.each([
     ['basic', basicFlvUrl, basicYuvUrl, 8],
     ['motion', motionFlvUrl, motionYuvUrl, 6],
+    ['edge', edgeFlvUrl, edgeYuvUrl, 8],
   ])('matches ffmpeg on the %s clip', async (_name, flvUrl, yuvUrl, frameCount) => {
     const frames = await loadClip(flvUrl);
     const yuv = await fetchBytes(yuvUrl);
@@ -174,6 +178,19 @@ describe('Sorenson Spark H.263 decoder', () => {
   it('rejects data that is not a Sorenson picture', () => {
     expect(() => new SorensonH263Decoder().decode(new Uint8Array([0x03, 0x02, 0x00, 0x00]))).toThrow();
   });
+
+  it('conceals a truncated picture and keeps decoding the pictures after it', async () => {
+    const frames = await loadClip(motionFlvUrl);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const decoder = new SorensonH263Decoder();
+    decoder.decode(frames[0]);
+    const broken = decoder.decode(frames[1].subarray(0, Math.floor(frames[1].length / 3)));
+    expect(broken.damaged).toBe(true);
+    // The following P pictures still decode.
+    for (let i = 2; i < frames.length; i++) {
+      expect(decoder.decode(frames[i]).damaged).toBeUndefined();
+    }
+  });
 });
 
 describe('embedded video .dat', () => {
@@ -229,6 +246,20 @@ describe('embedded video .dat', () => {
     // Past the end holds the last frame.
     expect(Array.from(random.getFrame(99)!.y)).toEqual(expected[7]);
   });
+
+  it('holds the previous frame over a frame whose header is unreadable', async () => {
+    const frames = await loadClip(basicFlvUrl);
+    const sequential = new SorensonH263Decoder();
+    const expected = frames.map((f) => Array.from(sequential.decode(f).y));
+    const damaged = frames.slice();
+    damaged[2] = new Uint8Array([0xff, 0xff, 0xff, 0xff]);
+    const random = new EmbeddedVideoDecoder({ codecId: 2, width: 40, height: 24, frames: damaged });
+    expect(Array.from(random.getFrame(1)!.y)).toEqual(expected[1]);
+    expect(Array.from(random.getFrame(2)!.y)).toEqual(expected[1]);
+    // Frame 3 predicts from the missing frame 2, so it decodes (from frame 1) without throwing.
+    expect(random.getFrame(3)).not.toBeNull();
+    expect(Array.from(random.getFrame(4)!.y)).toEqual(expected[4]); // next I picture is exact
+  });
 });
 
 describe('embedded FLV video in a FLA (issue #57)', () => {
@@ -281,6 +312,46 @@ describe('embedded FLV video in a FLA (issue #57)', () => {
       let max = 0;
       for (let i = 0; i < actual.length; i++) max = Math.max(max, Math.abs(actual[i] - expected[frameIndex][i]));
       expect(max, `timeline frame ${frameIndex}`).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it('draws two instances of one video at different frames', async () => {
+    const frames = await loadClip(basicFlvUrl);
+    // Layer "A" shows the video from frame 0, layer "B" from frame 3, side by side.
+    const instance = (tx: number) =>
+      `<DOMVideoInstance libraryItemName="clip.flv" frameRight="800" frameBottom="480"><matrix><Matrix tx="${tx}"/></matrix></DOMVideoInstance>`;
+    const zip = new JSZip();
+    zip.file('DOMDocument.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<DOMDocument width="80" height="24" frameRate="12">
+  <media><DOMVideoItem name="clip.flv" videoDataHRef="v.dat" videoType="h263 media"/></media>
+  <timelines><DOMTimeline name="Scene 1"><layers>
+    <DOMLayer name="A"><frames><DOMFrame index="0" duration="8"><elements>${instance(0)}</elements></DOMFrame></frames></DOMLayer>
+    <DOMLayer name="B"><frames>
+      <DOMFrame index="0" duration="3"><elements/></DOMFrame>
+      <DOMFrame index="3" duration="5"><elements>${instance(40)}</elements></DOMFrame>
+    </frames></DOMLayer>
+  </layers></DOMTimeline></timelines>
+</DOMDocument>`);
+    zip.file('bin/v.dat', buildDat(frames, { width: 40, height: 24 }));
+    const doc = await new FLAParser().parse(new File([await zip.generateAsync({ type: 'blob' })], 'two.fla'));
+    const canvas = document.createElement('canvas');
+    canvas.width = 80;
+    canvas.height = 24;
+    const renderer = new FLARenderer(canvas);
+    await renderer.setDocument(doc, true);
+    const decoder = new SorensonH263Decoder();
+    const expected = frames.map((f) => sorensonPictureToRGBA(decoder.decode(f)));
+    const ctx = canvas.getContext('2d')!;
+    const maxDiff = (x: number, videoFrame: number) => {
+      const actual = ctx.getImageData(x, 0, 40, 24).data;
+      let max = 0;
+      for (let i = 0; i < actual.length; i++) max = Math.max(max, Math.abs(actual[i] - expected[videoFrame][i]));
+      return max;
+    };
+    for (let t = 3; t < 8; t++) {
+      renderer.renderFrame(t);
+      expect(maxDiff(0, t), `A at ${t}`).toBeLessThanOrEqual(2);
+      expect(maxDiff(40, t - 3), `B at ${t}`).toBeLessThanOrEqual(2);
     }
   });
 

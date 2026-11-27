@@ -132,10 +132,26 @@ export class EmbeddedVideoDecoder {
   private referenceIndex = -1;
   private lastIndex = -1;
   private lastPicture: SorensonPicture | null = null;
-  private warned = false;
 
   constructor(private readonly stream: EmbeddedVideoStream) {
     this.types = stream.frames.map((f) => readSorensonHeader(f)?.type ?? null);
+  }
+
+  /** Decode picture `i`; damage inside a picture is concealed by the decoder. */
+  private decodeAt(i: number): SorensonPicture | null {
+    try {
+      return this.decoder.decode(this.stream.frames[i]);
+    } catch (e) {
+      // Header passed readSorensonHeader, so this is unexpected; don't retry it.
+      this.types[i] = null;
+      console.warn(`Embedded video frame ${i} failed to decode:`, e);
+      return null;
+    }
+  }
+
+  /** Index of the frame last returned by getFrame, or -1. */
+  get currentIndex(): number {
+    return this.lastIndex;
   }
 
   get frameCount(): number {
@@ -149,6 +165,12 @@ export class EmbeddedVideoDecoder {
     const target = Math.max(0, Math.min(n - 1, Math.floor(index)));
     if (target === this.lastIndex) return this.lastPicture;
 
+    // An unreadable picture header can't be decoded or used as a reference: hold
+    // the previous picture.
+    if (this.types[target] === null) {
+      this.lastIndex = target;
+      return this.lastPicture;
+    }
     // Nearest I picture at or before the target.
     let keyIndex = target;
     while (keyIndex > 0 && this.types[keyIndex] !== 'I') keyIndex--;
@@ -157,26 +179,18 @@ export class EmbeddedVideoDecoder {
     if (this.referenceIndex >= keyIndex && this.referenceIndex < target) start = this.referenceIndex + 1;
     if (start === keyIndex) this.decoder.reset();
 
-    try {
-      for (let i = start; i < target; i++) {
-        if (this.types[i] === 'D') continue; // never referenced
-        this.decoder.decode(this.stream.frames[i]);
-        this.referenceIndex = i;
-      }
-      const pic = this.decoder.decode(this.stream.frames[target]);
-      if (pic.header.type !== 'D') this.referenceIndex = target;
-      this.lastIndex = target;
-      this.lastPicture = pic;
-      return pic;
-    } catch (e) {
-      if (!this.warned) {
-        this.warned = true;
-        console.warn(`Embedded video frame ${target} failed to decode:`, e);
-      }
-      // The reference may be half-updated; force a restart next time.
-      this.referenceIndex = -1;
-      this.lastIndex = target;
-      return this.lastPicture;
+    for (let i = start; i < target; i++) {
+      const type = this.types[i];
+      if (type === 'D' || type === null) continue; // never a reference
+      this.decodeAt(i);
+      this.referenceIndex = i;
     }
+    const pic = this.decodeAt(target);
+    if (pic) {
+      if (pic.header.type !== 'D') this.referenceIndex = target;
+      this.lastPicture = pic;
+    }
+    this.lastIndex = target;
+    return this.lastPicture;
   }
 }

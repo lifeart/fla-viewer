@@ -35,6 +35,8 @@ export interface SorensonPicture {
   y: Uint8Array;
   cb: Uint8Array;
   cr: Uint8Array;
+  /** Set when the bitstream broke off mid-picture and the rest was concealed. */
+  damaged?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,8 +146,9 @@ for (let u = 0; u < 8; u++) {
 }
 
 /** In-place 8x8 inverse DCT of dequantized coefficients into a residual (rounded, clamped to ±256). */
+const IDCT_TMP = new Float64Array(64);
 function idct(block: Float64Array, out: Int16Array): void {
-  const tmp = new Float64Array(64);
+  const tmp = IDCT_TMP;
   // Rows: tmp[y][x] = Σu block[y][u] * BASIS[u][x]
   for (let y = 0; y < 8; y++) {
     for (let x = 0; x < 8; x++) {
@@ -170,6 +173,7 @@ function idct(block: Float64Array, out: Int16Array): void {
 // Picture header
 
 const START_CODE = 1; // 17 bits: 0000 0000 0000 0000 1
+const MAX_SIZE = 4096; // Flash video is far smaller; guards against garbage headers
 
 function readHeader(r: BitReader): SorensonPictureHeader {
   if (r.bits(17) !== START_CODE) throw new Error('H.263: missing picture start code');
@@ -189,6 +193,7 @@ function readHeader(r: BitReader): SorensonPictureHeader {
     default: throw new Error('H.263: reserved picture size');
   }
   if (width === 0 || height === 0) throw new Error('H.263: empty picture size');
+  if (width > MAX_SIZE || height > MAX_SIZE) throw new Error(`H.263: picture too large (${width}x${height})`);
   const typeCode = r.bits(2);
   if (typeCode === 3) throw new Error('H.263: reserved picture type');
   const type: SorensonPictureType = typeCode === 0 ? 'I' : typeCode === 1 ? 'P' : 'D';
@@ -232,7 +237,7 @@ function chromaMv(v: number): number {
 interface Plane {
   data: Uint8Array;
   stride: number;
-  width: number; // visible width (MC reads are clamped to it)
+  width: number; // motion-compensated reads are clamped to width x height
   height: number;
 }
 
@@ -246,20 +251,30 @@ function predictBlock(ref: Plane, x: number, y: number, mvx: number, mvy: number
   const maxY = ref.height - 1;
   const src = ref.data;
   const stride = ref.stride;
-  const at = (px: number, py: number): number =>
-    src[(py < 0 ? 0 : py > maxY ? maxY : py) * stride + (px < 0 ? 0 : px > maxX ? maxX : px)];
+  const out = dst.data;
   for (let j = 0; j < 8; j++) {
+    const v0 = sy + j;
+    const v1 = v0 + hy;
+    const r0 = (v0 < 0 ? 0 : v0 > maxY ? maxY : v0) * stride;
+    const r1 = (v1 < 0 ? 0 : v1 > maxY ? maxY : v1) * stride;
+    const o = (y + j) * dst.stride + x;
     for (let i = 0; i < 8; i++) {
-      const u = sx + i;
-      const v = sy + j;
+      const u0 = sx + i;
+      const u1 = u0 + hx;
+      const c0 = u0 < 0 ? 0 : u0 > maxX ? maxX : u0;
+      const c1 = u1 < 0 ? 0 : u1 > maxX ? maxX : u1;
       let p: number;
-      if (!hx && !hy) p = at(u, v);
-      else if (hx && !hy) p = (at(u, v) + at(u + 1, v) + 1) >> 1;
-      else if (!hx && hy) p = (at(u, v) + at(u, v + 1) + 1) >> 1;
-      else p = (at(u, v) + at(u + 1, v) + at(u, v + 1) + at(u + 1, v + 1) + 2) >> 2;
-      dst.data[(y + j) * dst.stride + x + i] = p;
+      if (!hx && !hy) p = src[r0 + c0];
+      else if (!hy) p = (src[r0 + c0] + src[r0 + c1] + 1) >> 1;
+      else if (!hx) p = (src[r0 + c0] + src[r1 + c0] + 1) >> 1;
+      else p = (src[r0 + c0] + src[r0 + c1] + src[r1 + c0] + src[r1 + c1] + 2) >> 2;
+      out[o + i] = p;
     }
   }
+}
+
+function fillBlock(plane: Plane, x: number, y: number, size: number, value: number): void {
+  for (let j = 0; j < size; j++) plane.data.fill(value, (y + j) * plane.stride + x, (y + j) * plane.stride + x + size);
 }
 
 function addResidual(plane: Plane, x: number, y: number, residual: Int16Array, intra: boolean): void {
@@ -275,12 +290,17 @@ function addResidual(plane: Plane, x: number, y: number, residual: Int16Array, i
 export class SorensonH263Decoder {
   /** Last I or P picture; disposable pictures never replace it. */
   private reference: SorensonPicture | null = null;
+  private warnedDamage = false;
 
   reset(): void {
     this.reference = null;
   }
 
-  /** Decode one frame (the payload of an FLV video tag, without the tag's codec byte). */
+  /**
+   * Decode one frame (the payload of an FLV video tag, without the tag's codec
+   * byte). Throws only if the picture header is unreadable; damage after it is
+   * concealed (see `SorensonPicture.damaged`).
+   */
   decode(data: Uint8Array): SorensonPicture {
     const r = new BitReader(data);
     const header = readHeader(r);
@@ -295,12 +315,10 @@ export class SorensonH263Decoder {
       cb: new Uint8Array(chromaStride * mbh * 8),
       cr: new Uint8Array(chromaStride * mbh * 8),
     };
-    const chromaW = Math.ceil(width / 2);
-    const chromaH = Math.ceil(height / 2);
     const planes: Plane[] = [
-      { data: pic.y, stride: lumaStride, width, height },
-      { data: pic.cb, stride: chromaStride, width: chromaW, height: chromaH },
-      { data: pic.cr, stride: chromaStride, width: chromaW, height: chromaH },
+      { data: pic.y, stride: lumaStride, width: lumaStride, height: mbh * 16 },
+      { data: pic.cb, stride: chromaStride, width: chromaStride, height: mbh * 8 },
+      { data: pic.cr, stride: chromaStride, width: chromaStride, height: mbh * 8 },
     ];
 
     let ref = this.reference;
@@ -314,10 +332,12 @@ export class SorensonH263Decoder {
         cr: new Uint8Array(pic.cr.length).fill(128),
       };
     }
+    // Edge pixels repeat past the macroblock-padded picture, not the visible
+    // size: that is what Flash's (and ffmpeg's) encoder predicts from.
     const refPlanes: Plane[] | null = ref && header.type !== 'I' ? [
-      { data: ref.y, stride: lumaStride, width, height },
-      { data: ref.cb, stride: chromaStride, width: chromaW, height: chromaH },
-      { data: ref.cr, stride: chromaStride, width: chromaW, height: chromaH },
+      { data: ref.y, stride: lumaStride, width: lumaStride, height: mbh * 16 },
+      { data: ref.cb, stride: chromaStride, width: chromaStride, height: mbh * 8 },
+      { data: ref.cr, stride: chromaStride, width: chromaStride, height: mbh * 8 },
     ] : null;
 
     const mvx = new Int16Array(mbw * mbh);
@@ -327,103 +347,128 @@ export class SorensonH263Decoder {
     let quant = header.quantizer;
     const escape11 = header.version === 1;
 
-    for (let mb = 0; mb < mbw * mbh; mb++) {
-      const col = mb % mbw;
-      const row = (mb / mbw) | 0;
-      const lx = col * 16;
-      const ly = row * 16;
+    let mb = 0;
+    try {
+      for (; mb < mbw * mbh; mb++) {
+        const col = mb % mbw;
+        const row = (mb / mbw) | 0;
+        const lx = col * 16;
+        const ly = row * 16;
 
-      let mcbpc: Mcbpc;
-      if (header.type === 'I') {
-        do mcbpc = readVlc(r, MCBPC_I_TREE, 'MCBPC'); while (mcbpc.type === MB_STUFFING);
-      } else {
-        let skipped = false;
-        for (;;) {
-          if (r.bit() === 1) { skipped = true; break; } // COD: not coded
-          mcbpc = readVlc(r, MCBPC_P_TREE, 'MCBPC');
-          if (mcbpc.type !== MB_STUFFING) break;
-        }
-        if (skipped) {
-          // Copy from the reference at zero motion; the MV predictor sees (0, 0).
-          for (let b = 0; b < 4; b++) predictBlock(refPlanes![0], lx + (b & 1) * 8, ly + (b >> 1) * 8, 0, 0, planes[0]);
-          predictBlock(refPlanes![1], lx / 2, ly / 2, 0, 0, planes[1]);
-          predictBlock(refPlanes![2], lx / 2, ly / 2, 0, 0, planes[2]);
-          continue;
-        }
-      }
-      mcbpc = mcbpc!;
-      if (mcbpc.type > MB_INTER_Q) throw new Error('H.263: four-vector macroblocks are not supported');
-      const intra = mcbpc.type === MB_INTRA || mcbpc.type === MB_INTRA_Q;
-      let cbpy = readVlc(r, CBPY_TREE, 'CBPY');
-      if (!intra) cbpy ^= 0b1111;
-      if (mcbpc.type === MB_INTRA_Q || mcbpc.type === MB_INTER_Q) {
-        quant = Math.min(31, Math.max(1, quant + DQUANT[r.bits(2)]));
-      }
-
-      if (!intra) {
-        // Median prediction from left, above and above-right (H.263 6.1.1).
-        const leftX = col > 0 ? mvx[mb - 1] : 0;
-        const leftY = col > 0 ? mvy[mb - 1] : 0;
-        let px = leftX;
-        let py = leftY;
-        if (row > 0) {
-          const up = mb - mbw;
-          const urX = col < mbw - 1 ? mvx[up + 1] : 0;
-          const urY = col < mbw - 1 ? mvy[up + 1] : 0;
-          px = median(leftX, mvx[up], urX);
-          py = median(leftY, mvy[up], urY);
-        }
-        mvx[mb] = wrapMv(px + readVlc(r, MVD_TREE, 'MVD'));
-        mvy[mb] = wrapMv(py + readVlc(r, MVD_TREE, 'MVD'));
-        for (let b = 0; b < 4; b++) {
-          predictBlock(refPlanes![0], lx + (b & 1) * 8, ly + (b >> 1) * 8, mvx[mb], mvy[mb], planes[0]);
-        }
-        const cx = chromaMv(mvx[mb]);
-        const cy = chromaMv(mvy[mb]);
-        predictBlock(refPlanes![1], lx / 2, ly / 2, cx, cy, planes[1]);
-        predictBlock(refPlanes![2], lx / 2, ly / 2, cx, cy, planes[2]);
-      }
-
-      for (let b = 0; b < 6; b++) {
-        const coded = b < 4 ? (cbpy & (8 >> b)) !== 0 : b === 4 ? mcbpc.cb : mcbpc.cr;
-        if (!intra && !coded) continue;
-        coeffs.fill(0);
-        let k = 0;
-        if (intra) {
-          const dc = r.bits(8);
-          if (dc === 0 || dc === 128) throw new Error('H.263: invalid INTRADC');
-          coeffs[0] = dc === 255 ? 1024 : dc * 8;
-          k = 1;
-        }
-        if (coded) {
+        let mcbpc: Mcbpc;
+        if (header.type === 'I') {
+          do mcbpc = readVlc(r, MCBPC_I_TREE, 'MCBPC'); while (mcbpc.type === MB_STUFFING);
+        } else {
+          let skipped = false;
           for (;;) {
-            const t = readVlc(r, TCOEF_TREE, 'TCOEF');
-            let last: boolean;
-            let run: number;
-            let level: number;
-            if (t.escape) {
-              const width = escape11 ? (r.bit() ? 11 : 7) : 8;
-              last = r.bit() === 1;
-              run = r.bits(6);
-              level = r.signedBits(width);
-              if (level === 0 || (!escape11 && level === -128)) throw new Error('H.263: invalid escaped coefficient');
-            } else {
-              last = t.last;
-              run = t.run;
-              level = r.bit() ? -t.level : t.level;
-            }
-            k += run;
-            if (k > 63) throw new Error('H.263: coefficient index out of range');
-            const mag = quant * (2 * Math.abs(level) + 1) - (quant % 2 === 0 ? 1 : 0);
-            const v = level < 0 ? -mag : mag;
-            coeffs[ZIGZAG[k]] = v < -2048 ? -2048 : v > 2047 ? 2047 : v;
-            k++;
-            if (last) break;
+            if (r.bit() === 1) { skipped = true; break; } // COD: not coded
+            mcbpc = readVlc(r, MCBPC_P_TREE, 'MCBPC');
+            if (mcbpc.type !== MB_STUFFING) break;
+          }
+          if (skipped) {
+            // Copy from the reference at zero motion; the MV predictor sees (0, 0).
+            for (let b = 0; b < 4; b++) predictBlock(refPlanes![0], lx + (b & 1) * 8, ly + (b >> 1) * 8, 0, 0, planes[0]);
+            predictBlock(refPlanes![1], lx / 2, ly / 2, 0, 0, planes[1]);
+            predictBlock(refPlanes![2], lx / 2, ly / 2, 0, 0, planes[2]);
+            continue;
           }
         }
-        idct(coeffs, residual);
-        if (b < 4) addResidual(planes[0], lx + (b & 1) * 8, ly + (b >> 1) * 8, residual, intra);
-        else addResidual(planes[b === 4 ? 1 : 2], lx / 2, ly / 2, residual, intra);
+        mcbpc = mcbpc!;
+        if (mcbpc.type > MB_INTER_Q) throw new Error('H.263: four-vector macroblocks are not supported');
+        const intra = mcbpc.type === MB_INTRA || mcbpc.type === MB_INTRA_Q;
+        let cbpy = readVlc(r, CBPY_TREE, 'CBPY');
+        if (!intra) cbpy ^= 0b1111;
+        if (mcbpc.type === MB_INTRA_Q || mcbpc.type === MB_INTER_Q) {
+          quant = Math.min(31, Math.max(1, quant + DQUANT[r.bits(2)]));
+        }
+
+        if (!intra) {
+          // Median prediction from left, above and above-right (H.263 6.1.1).
+          const leftX = col > 0 ? mvx[mb - 1] : 0;
+          const leftY = col > 0 ? mvy[mb - 1] : 0;
+          let px = leftX;
+          let py = leftY;
+          if (row > 0) {
+            const up = mb - mbw;
+            const urX = col < mbw - 1 ? mvx[up + 1] : 0;
+            const urY = col < mbw - 1 ? mvy[up + 1] : 0;
+            px = median(leftX, mvx[up], urX);
+            py = median(leftY, mvy[up], urY);
+          }
+          mvx[mb] = wrapMv(px + readVlc(r, MVD_TREE, 'MVD'));
+          mvy[mb] = wrapMv(py + readVlc(r, MVD_TREE, 'MVD'));
+          for (let b = 0; b < 4; b++) {
+            predictBlock(refPlanes![0], lx + (b & 1) * 8, ly + (b >> 1) * 8, mvx[mb], mvy[mb], planes[0]);
+          }
+          const cx = chromaMv(mvx[mb]);
+          const cy = chromaMv(mvy[mb]);
+          predictBlock(refPlanes![1], lx / 2, ly / 2, cx, cy, planes[1]);
+          predictBlock(refPlanes![2], lx / 2, ly / 2, cx, cy, planes[2]);
+        }
+
+        for (let b = 0; b < 6; b++) {
+          const coded = b < 4 ? (cbpy & (8 >> b)) !== 0 : b === 4 ? mcbpc.cb : mcbpc.cr;
+          if (!intra && !coded) continue;
+          coeffs.fill(0);
+          let k = 0;
+          if (intra) {
+            // 0 and 128 are forbidden; read them leniently like ffmpeg (128 = 255 = 1024).
+            const dc = r.bits(8);
+            coeffs[0] = dc === 255 ? 1024 : dc * 8;
+            k = 1;
+          }
+          if (coded) {
+            for (;;) {
+              const t = readVlc(r, TCOEF_TREE, 'TCOEF');
+              let last: boolean;
+              let run: number;
+              let level: number;
+              if (t.escape) {
+                const width = escape11 ? (r.bit() ? 11 : 7) : 8;
+                last = r.bit() === 1;
+                run = r.bits(6);
+                level = r.signedBits(width);
+                if (level === 0 || (!escape11 && level === -128)) throw new Error('H.263: invalid escaped coefficient');
+              } else {
+                last = t.last;
+                run = t.run;
+                level = r.bit() ? -t.level : t.level;
+              }
+              k += run;
+              if (k > 63) throw new Error('H.263: coefficient index out of range');
+              const mag = quant * (2 * Math.abs(level) + 1) - (quant % 2 === 0 ? 1 : 0);
+              const v = level < 0 ? -mag : mag;
+              coeffs[ZIGZAG[k]] = v < -2048 ? -2048 : v > 2047 ? 2047 : v;
+              k++;
+              if (last) break;
+            }
+          }
+          idct(coeffs, residual);
+          if (b < 4) addResidual(planes[0], lx + (b & 1) * 8, ly + (b >> 1) * 8, residual, intra);
+          else addResidual(planes[b === 4 ? 1 : 2], lx / 2, ly / 2, residual, intra);
+        }
+      }
+    } catch (e) {
+      // Damaged or truncated picture: keep what decoded and fill the rest from
+      // the reference (as skipped macroblocks), so the stream carries on instead
+      // of failing every later picture that depends on this one.
+      pic.damaged = true;
+      if (!this.warnedDamage) {
+        this.warnedDamage = true;
+        console.warn('Sorenson H.263: damaged picture, concealing the rest of it:', e);
+      }
+      for (; mb < mbw * mbh; mb++) {
+        const lx = (mb % mbw) * 16;
+        const ly = ((mb / mbw) | 0) * 16;
+        if (refPlanes) {
+          for (let b = 0; b < 4; b++) predictBlock(refPlanes[0], lx + (b & 1) * 8, ly + (b >> 1) * 8, 0, 0, planes[0]);
+          predictBlock(refPlanes[1], lx / 2, ly / 2, 0, 0, planes[1]);
+          predictBlock(refPlanes[2], lx / 2, ly / 2, 0, 0, planes[2]);
+        } else {
+          fillBlock(planes[0], lx, ly, 16, 128);
+          fillBlock(planes[1], lx / 2, ly / 2, 8, 128);
+          fillBlock(planes[2], lx / 2, ly / 2, 8, 128);
+        }
       }
     }
 

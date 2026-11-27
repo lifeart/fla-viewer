@@ -83,6 +83,15 @@ interface CachedShapePaths {
   combinedPath: Path2D;
 }
 
+/** A decoder and frame canvas for one embedded FLV video (see drawEmbeddedVideo). */
+interface EmbeddedVideoView {
+  decoder: EmbeddedVideoDecoder;
+  canvas: HTMLCanvasElement;
+  image: ImageData | null;
+  shownFrame: number;
+  lastUsed: number;
+}
+
 export class FLARenderer {
   private ctx: CanvasRenderingContext2D;
   private doc: FLADocument | null = null;
@@ -137,14 +146,12 @@ export class FLARenderer {
   // whether the timeline is currently playing and a hook to request a redraw
   // when a video frame becomes available while paused.
   private videoElements = new Map<string, HTMLVideoElement>();
-  // Software-decoded embedded FLV video (Sorenson H.263): one decoder and
-  // frame canvas per video item, holding the last frame drawn into it.
-  private embeddedVideos = new Map<VideoItem, {
-    decoder: EmbeddedVideoDecoder;
-    canvas: HTMLCanvasElement;
-    image: ImageData | null;
-    shownFrame: number;
-  }>();
+  // Software-decoded embedded FLV video (Sorenson H.263): per video item, a few
+  // decoders with a frame canvas each. Instances of one video showing different
+  // frames each keep stepping forward on their own decoder instead of making a
+  // shared one seek back on every render.
+  private embeddedVideos = new Map<VideoItem, EmbeddedVideoView[]>();
+  private embeddedVideoClock = 0;
   private playing = false;
   private onNeedsRedraw: (() => void) | null = null;
 
@@ -2616,21 +2623,46 @@ export class FLARenderer {
     return Math.max(0, frameIndex - start);
   }
 
-  /** Draw the current frame of a software-decoded embedded video. False if none is available. */
-  private drawEmbeddedVideo(videoItem: VideoItem, video: VideoInstance, frameIndex: number): boolean {
-    const stream = videoItem.embeddedVideo;
-    if (!stream || typeof document === 'undefined') return false;
-    let entry = this.embeddedVideos.get(videoItem);
-    if (!entry) {
-      entry = {
-        decoder: new EmbeddedVideoDecoder(stream),
+  /**
+   * The view to draw `target` from: one already showing it, else the one just
+   * behind it (a short step forward), else a new one (up to 4), else the least
+   * recently used.
+   */
+  private embeddedVideoView(videoItem: VideoItem, target: number): EmbeddedVideoView {
+    let views = this.embeddedVideos.get(videoItem);
+    if (!views) {
+      views = [];
+      this.embeddedVideos.set(videoItem, views);
+    }
+    let best: EmbeddedVideoView | undefined = views.find((v) => v.shownFrame === target);
+    if (!best) {
+      for (const v of views) {
+        if (v.shownFrame < target && (!best || v.shownFrame > best.shownFrame)) best = v;
+      }
+      // A step of more than a few frames may as well start a view of its own.
+      if (best && target - best.shownFrame > 8 && views.length < 4) best = undefined;
+    }
+    if (!best && views.length < 4) {
+      best = {
+        decoder: new EmbeddedVideoDecoder(videoItem.embeddedVideo!),
         canvas: document.createElement('canvas'),
         image: null,
         shownFrame: -1,
+        lastUsed: 0,
       };
-      this.embeddedVideos.set(videoItem, entry);
+      views.push(best);
     }
-    const target = Math.min(this.videoFrameOffset(video.libraryItemName, frameIndex), entry.decoder.frameCount - 1);
+    if (!best) best = views.reduce((a, b) => (a.lastUsed <= b.lastUsed ? a : b));
+    best.lastUsed = ++this.embeddedVideoClock;
+    return best;
+  }
+
+  /** Draw the current frame of a software-decoded embedded video. False if none is available. */
+  private drawEmbeddedVideo(videoItem: VideoItem, video: VideoInstance, frameIndex: number): boolean {
+    const stream = videoItem.embeddedVideo;
+    if (!stream || stream.frames.length === 0 || typeof document === 'undefined') return false;
+    const target = Math.min(this.videoFrameOffset(video.libraryItemName, frameIndex), stream.frames.length - 1);
+    const entry = this.embeddedVideoView(videoItem, target);
     if (target !== entry.shownFrame) {
       const pic = entry.decoder.getFrame(target);
       if (pic) {
