@@ -122,7 +122,7 @@ FORMAT_SPEEX = 11
 
 ## Video Playback (Low Priority)
 
-Currently implemented: FLV container parsing, placeholder rendering
+Currently implemented: FLV container parsing, Sorenson Spark (H.263) decoding, placeholder rendering for other codecs
 
 ### Implemented Features
 
@@ -132,12 +132,12 @@ Currently implemented: FLV container parsing, placeholder rendering
 | **Metadata Extraction** | ✅ | Duration, dimensions, framerate, codecs from FLV metadata |
 | **Keyframe Detection** | ✅ | Extract keyframes for seeking support |
 | **Codec Identification** | ✅ | Detect H.263, VP6, AVC, MP3, AAC, etc. |
+| **H.263 Codec** | ✅ | Sorenson Spark decoding (`src/sorenson-h263.ts`), from FLV files and embedded `.dat` video (issue #57) |
 
 ### Missing Features (Require Codec Decoders)
 
 | Feature | JPEXS Reference | Description |
 |---------|-----------------|-------------|
-| **H.263 Codec** | FLV video tags | Sorenson Spark video decoding |
 | **VP6 Codec** | FLV video tags | On2 VP6 video decoding |
 | **Audio Sync** | FLV audio tags | Synchronize embedded audio with video |
 

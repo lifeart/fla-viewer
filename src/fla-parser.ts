@@ -45,7 +45,8 @@ import {
   parseFLV,
   getVideoCodecName,
   getAudioCodecName,
-  getKeyframes
+  getKeyframes,
+  VIDEO_CODEC_H263
 } from './flv-parser';
 import { isOLE2, OLE2File } from './ole2-reader';
 import { parseBinaryFLA } from './binary-fla-parser';
@@ -53,6 +54,7 @@ import { getMaskLayerIndex } from './layer-utils';
 import { isXFLStub, xflFolderToZip, type XFLFolderEntry } from './xfl-folder';
 import { rectanglePrimitivePath, ovalPrimitivePath } from './primitive-shapes';
 import { parseAnimationCore } from './motion-object';
+import { embeddedVideoFromFLV, parseEmbeddedVideoDat } from './embedded-video';
 
 export type { XFLFolderEntry } from './xfl-folder';
 
@@ -3141,6 +3143,34 @@ export class FLAParser {
     return null;
   }
 
+  /**
+   * Attach the frames of an embedded FLV video `.dat` (src/embedded-video.ts).
+   * Returns false if the data isn't one. Codecs other than Sorenson H.263 are
+   * recognised but can't be decoded, so they warn and keep the placeholder.
+   */
+  private attachEmbeddedVideo(videoItem: VideoItem, bytes: Uint8Array): boolean {
+    const stream = parseEmbeddedVideoDat(bytes);
+    if (!stream) return false;
+    if (stream.codecId !== VIDEO_CODEC_H263) {
+      console.warn(
+        `Embedded video ${videoItem.href} uses ${getVideoCodecName(stream.codecId)}, ` +
+        `which can't be decoded yet; showing placeholder.`
+      );
+      return true;
+    }
+    if (stream.frames.length === 0) {
+      console.warn(`Embedded video ${videoItem.href} has no frames; showing placeholder.`);
+      return true;
+    }
+    videoItem.embeddedVideo = stream;
+    if (!videoItem.width) videoItem.width = stream.width;
+    if (!videoItem.height) videoItem.height = stream.height;
+    if (DEBUG) {
+      console.log(`Embedded H.263 video: ${videoItem.name}, ${stream.frames.length} frames`);
+    }
+    return true;
+  }
+
   private async loadVideoFLV(videoItem: VideoItem): Promise<void> {
     // Try to load from bin/ folder first (common for embedded video)
     let data = await this.findFileData(videoItem.href, 'bin');
@@ -3172,6 +3202,8 @@ export class FLAParser {
         if (DEBUG) {
           console.log(`Embedded video ready: ${videoItem.name} (${native.mime}, ${native.bytes.length} bytes)`);
         }
+      } else if (!native && this.attachEmbeddedVideo(videoItem, bytes)) {
+        // Embedded FLV video (Sorenson H.263), decoded in software by the renderer.
       } else {
         // Don't swallow this silently — an unrecognized embedded format is why a
         // video renders as the gray placeholder, and that should be visible.
@@ -3203,6 +3235,9 @@ export class FLAParser {
         audioSampleRate: parsed.audioTags.length > 0 ? parsed.audioTags[0].sampleRate : undefined,
         audioChannels: parsed.audioTags.length > 0 ? (parsed.audioTags[0].stereo ? 2 : 1) : undefined
       };
+
+      const stream = embeddedVideoFromFLV(parsed);
+      if (stream) videoItem.embeddedVideo = stream;
 
       // Update duration from FLV if not set in XML
       if (!videoItem.duration && parsed.duration > 0) {

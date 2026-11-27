@@ -42,7 +42,7 @@ Open Adobe Animate / Flash `.fla` files in the browser. Parsing, playback and ex
 **Media**
 - Bitmaps: PNG, JPEG, GIF and Adobe `.dat` lossless bitmaps (32-bit and 8-bit palette), with recovery for damaged data
 - Sound: MP3, ADPCM, PCM (8/16/24/32-bit), stream and event sync, in/out points, loops, volume
-- Embedded video: native MP4 / WebM plays (muted) on the timeline; FLV shows a placeholder with its metadata
+- Embedded video: native MP4 / WebM plays (muted) on the timeline; FLV video in Sorenson Spark (H.263) is decoded in software, frame by frame with the timeline. VP6 shows a placeholder with its metadata
 
 **Export** (Download button)
 
@@ -89,7 +89,7 @@ Add `?embed=true` to hide the header:
 ## Limitations
 
 - ActionScript is not executed. Buttons don't respond to the mouse (their hit areas show in the debug panel).
-- Embedded video isn't drawn into exports, and seeking it is best-effort. FLV video is not decoded.
+- Embedded MP4 / WebM video isn't drawn into exports, and seeking it is best-effort. Sorenson Spark FLV video is drawn into raster exports. VP6 video, FLV audio and Sorenson's deblocking filter are not decoded.
 - Fonts are not embedded. Fonts that exist on Google Fonts are fetched from there (a network request); others fall back to system fonts.
 - Some filter options are approximated with Canvas and SVG filters.
 - Parsing runs on the main thread, so large files block the UI while loading.
@@ -137,6 +137,8 @@ src/
 ├── video-exporter.ts        MP4 / WebM / GIF / PNG / SVG / sprite sheet export
 ├── adpcm-decoder.ts         ADPCM audio decoder
 ├── flv-parser.ts            FLV metadata parser
+├── embedded-video.ts        Embedded FLV video .dat parsing, frame seeking
+├── sorenson-h263.ts         Sorenson Spark (H.263) video decoder
 ├── ole2-reader.ts           OLE2 compound file reader (binary FLA)
 ├── binary-fla-parser.ts     Binary FLA entry point
 ├── binary-fla-structure.ts  Binary FLA layer structure

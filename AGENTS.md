@@ -493,8 +493,8 @@ strokes and the Vitest suite. What is still open:
 - [ ] **Symbol caching**: only `cacheAsBitmap` instances are cached; static symbols are redrawn
 - [ ] **Timeline UI**: keyframe markers, layer thumbnails, onion skinning
 - [ ] **Error reporting**: parse failures are logged to the console, not shown to the user
-- [ ] **Embedded video**: frame-accurate seeking and drawing video into exports (needs
-  WebCodecs `VideoDecoder`); FLV pixels are not decoded
+- [ ] **Embedded video**: frame-accurate seeking and drawing native MP4/WebM into exports (needs
+  WebCodecs `VideoDecoder`); VP6 FLV video is not decoded (Sorenson H.263 is, see issue #57)
 - [ ] **Binary FLA**: tweens, frame labels, sounds (see "Pre-CS5 binary FLA" below)
 - [ ] **IK / bone armatures**: XFL pose layers play Flash's baked per-frame matrices (see
   "IK pose layers" below); nothing solves IK, so a span whose matrix list is missing or
@@ -650,6 +650,8 @@ Edge contributions are collected per fill style, then sorted into connected chai
 | `src/video-exporter.ts` | MP4/WebM (WebCodecs), GIF, PNG sequence, PNG/SVG frame, sprite sheet export |
 | `src/adpcm-decoder.ts` | SWF ADPCM audio decoder |
 | `src/flv-parser.ts` | FLV metadata parser |
+| `src/embedded-video.ts` | Embedded FLV video `.dat` parser, frame seeking |
+| `src/sorenson-h263.ts` | Sorenson Spark (H.263) decoder; VLC tables in `src/h263-tables.ts` |
 | `src/ole2-reader.ts` | OLE2 / Compound File Binary reader |
 | `src/binary-fla-parser.ts` | Pre-CS5 binary FLA entry point |
 | `src/binary-fla-structure.ts`, `src/binary-shape-decoder.ts`, `src/binary-instance-decoder.ts`, `src/binary-timeline-decoder.ts` | Binary FLA layers, shapes, instances, keyframes |
@@ -1112,6 +1114,21 @@ public XFL projects). Tests: `src/__tests__/xfl-version-cases.test.ts`.
   the placeholder. **Deferred:** deterministic per-frame seeking (HTMLVideoElement seeks are
   async) and the **export path** (`video-exporter.ts` still emits a `#333` rect) — both need
   WebCodecs `VideoDecoder` for frame-accurate extraction.
+
+### Embedded FLV video `.dat` (issue #57)
+- A video embedded from an FLV is stored in `bin/M <n> <ts>.dat` as `03 <codec id>` + a fixed
+  header (u32 width @29, height @33, f64 duration @37), a frame index from byte 75 (flag byte,
+  then per frame `u32 offset, u32 size, 8 flag bytes, u8 more`), `u32` total size, then the raw
+  frame payloads (FLV video tag bodies without the codec byte). Layout matches JPEXS'
+  `MovieBinDataGenerator`. `parseEmbeddedVideoDat` reads it, searches for the index if the header
+  length differs, and falls back to splitting on H.263 picture start codes.
+- Codec 2 (Sorenson Spark) frames go on `VideoItem.embeddedVideo` and are decoded in software by
+  `SorensonH263Decoder` (checked against ffmpeg's decode, within ±2 levels of IDCT rounding).
+  FLV files with H.263 tags take the same path. Codecs 4/5 (VP6) warn and keep the placeholder.
+- The renderer shows video frame = timeline frame − the frame where the instance first appears
+  (the keyframe, extended back over adjacent keyframes holding the same video), clamped to the
+  last frame. `EmbeddedVideoDecoder` seeks by decoding forward from the nearest I picture.
+- Not done: the Sorenson deblocking filter (flag ignored), FLV audio in the `.dat`.
 
 ### Video export (CI)
 - The exporter checks `AudioEncoder.isConfigSupported` and **degrades to video-only** (with a
